@@ -7,7 +7,9 @@
 
 ## 简介
 
-LLMCraft 是一个最小可行产品 (MVP)，展示两个 AI Agent 在即时战略游戏中对战的场景。每个玩家通过 Prompt 控制 AI，AI 生成代码来指挥单位移动、攻击和生产。
+LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 AI 生成代码来指挥单位移动、攻击和生产，并决出胜负。
+
+目前还处于原型验证阶段，游戏设计也完全没有定型。
 
 ## 技术栈
 
@@ -165,17 +167,6 @@ llmcraft/
 ├── pnpm-workspace.yaml  # pnpm workspace 定义
 └── README.md            # 本文件
 ```
-
-## 开发计划
-
-- [x] MVP 核心游戏逻辑
-- [x] AI 沙箱和 OpenAI 集成
-- [x] WebSocket 实时通信
-- [x] Canvas 可视化
-- [ ] 回放系统
-- [ ] 更多单位和建筑类型
-- [ ] 地图编辑器
-- [ ] 多人在线对战
 
 ## 贡献
 

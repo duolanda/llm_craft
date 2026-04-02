@@ -46,9 +46,29 @@ export class UnitManager {
     return Array.from(this.units.values()).filter((u) => u.exists);
   }
 
+  /**
+   * Check if there is a unit at the given position
+   */
+  hasUnitAt(x: number, y: number, excludeUnitId?: string): boolean {
+    for (const unit of this.units.values()) {
+      if (unit.exists && unit.x === x && unit.y === y) {
+        if (excludeUnitId && unit.id === excludeUnitId) {
+          continue;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
   moveUnit(unit: Unit, targetX: number, targetY: number): ResultCode {
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // Check collision: cannot move to a position occupied by another unit
+    if (this.hasUnitAt(targetX, targetY, unit.id)) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
     unit.x = targetX;

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { GameCanvas } from "./components/GameCanvas";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
+import { StatsPanel } from "./components/StatsPanel";
+import { LegendPanel } from "./components/LegendPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 
 function App() {
@@ -19,77 +21,92 @@ function App() {
   };
 
   return (
-    <div style={{
-      background: "#0f0f1a",
-      minHeight: "100vh",
-      color: "#e0e0e0",
-      padding: "16px",
-      fontFamily: "system-ui, -apple-system, sans-serif",
-    }}>
-      <div style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: "16px",
-      }}>
-        <h1 style={{ margin: 0 }}>LLMCraft MVP</h1>
-        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-          <span style={{
-            padding: "4px 8px",
-            borderRadius: "4px",
-            background: connected ? "#27ae60" : "#c0392b",
-            fontSize: "12px",
-          }}>
-            {connected ? "已连接" : "未连接"}
-          </span>
-          <button
-            onClick={isPlaying ? handleStop : handleStart}
-            disabled={!connected}
-            style={{
-              padding: "8px 16px",
-              background: isPlaying ? "#c0392b" : "#27ae60",
-              border: "none",
-              borderRadius: "4px",
-              color: "white",
-              cursor: connected ? "pointer" : "not-allowed",
-              opacity: connected ? 1 : 0.5,
-            }}
-          >
-            {isPlaying ? "停止" : "开始"}
-          </button>
-        </div>
-      </div>
+    <>
+      <div className="noise-overlay" />
+      <div className="app-shell">
+        <header className="app-header">
+          <div className="brand">
+            <h1>LLMCraft</h1>
+            <span className="brand-badge">MVP BUILD</span>
+          </div>
+          <div className="controls">
+            <span className={`connection-pill ${connected ? "connected" : ""}`}>
+              {connected ? "ONLINE" : "OFFLINE"}
+            </span>
+            <button
+              onClick={isPlaying ? handleStop : handleStart}
+              disabled={!connected}
+              className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+            >
+              {isPlaying ? "终止模拟" : "启动模拟"}
+            </button>
+          </div>
+        </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: "16px" }}>
-        <div>
-          <GameCanvas state={state} />
-          <div style={{ marginTop: "8px" }}>
-            <GameLog state={state} />
+        <div className="dashboard">
+          <div className="stats-col">
+            <div className="hud-panel" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+              <div className="hud-panel-bottom-corners" />
+              <div className="panel-header">
+                <span className="panel-header-accent accent-amber">战场数据</span>
+              </div>
+              <StatsPanel state={state} />
+            </div>
+
+            <div className="hud-panel" style={{ marginTop: 12, display: "flex", flexDirection: "column" }}>
+              <div className="hud-panel-bottom-corners" />
+              <div className="panel-header">
+                <span className="panel-header-accent accent-red">战术图例</span>
+              </div>
+              <LegendPanel />
+            </div>
+          </div>
+
+          <div className="tactical-col">
+            <div className="hud-panel viewport">
+              <div className="hud-panel-bottom-corners" />
+              <div className="scanlines" />
+              <div className="viewport-data-lines">
+                <span className="data-line dl-tl" />
+                <span className="data-line dl-tr" />
+                <span className="data-line dl-bl" />
+                <span className="data-line dl-br" />
+              </div>
+              <GameCanvas state={state} />
+            </div>
+
+            <div className="hud-panel">
+              <div className="hud-panel-bottom-corners" />
+              <div className="panel-header">
+                <span className="panel-header-accent accent-amber">战术日志</span>
+              </div>
+              <GameLog state={state} />
+            </div>
+          </div>
+
+          <div className="terminal-col">
+            <div className="hud-panel" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+              <div className="hud-panel-bottom-corners" />
+              <div className="panel-header">
+                <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
+              </div>
+              <AIOutputPanel snapshots={snapshots} />
+            </div>
           </div>
         </div>
-        <div style={{ minHeight: "500px" }}>
-          <AIOutputPanel snapshots={snapshots} />
-        </div>
-      </div>
 
-      {state?.winner && (
-        <div style={{
-          position: "fixed",
-          top: "50%",
-          left: "50%",
-          transform: "translate(-50%, -50%)",
-          background: "#1a1a2e",
-          padding: "32px",
-          borderRadius: "8px",
-          border: "2px solid #ffd700",
-          fontSize: "24px",
-          textAlign: "center",
-          zIndex: 1000,
-        }}>
-          胜利者: {state.winner === "player_1" ? "红方" : "蓝方"}
-        </div>
-      )}
-    </div>
+        {state?.winner && (
+          <div className="winner-overlay">
+            <div className="winner-card">
+              <div className="winner-label">Simulation Complete</div>
+              <div className={`winner-name ${state.winner === "player_1" ? "red" : "cyan"}`}>
+                {state.winner === "player_1" ? "红方获胜" : "蓝方获胜"}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

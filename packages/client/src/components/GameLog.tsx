@@ -6,22 +6,16 @@ interface GameLogProps {
 
 export function GameLog({ state }: GameLogProps) {
   return (
-    <div
-      style={{
-        background: "#1a1a2e",
-        padding: "8px",
-        borderRadius: "4px",
-        height: "100px",
-        overflow: "auto",
-        fontSize: "12px",
-        fontFamily: "monospace",
-      }}
-    >
+    <div className="log-terminal">
       {state?.logs.slice(-20).map((log, i) => (
-        <div key={i} style={{ color: "#aaa", lineHeight: "1.5" }}>
-          [{log.tick}] {log.message}
+        <div key={i} className="log-entry">
+          <span className="log-tick">[{log.tick}]</span>
+          <span className="log-msg">{log.message}</span>
         </div>
       ))}
+      {!state?.logs.length && (
+        <div className="empty-state">暂无日志数据</div>
+      )}
     </div>
   );
 }

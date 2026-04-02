@@ -9,6 +9,7 @@ export const RESULT_CODES = {
   ERR_INVALID_TARGET: -3,
   ERR_NOT_ENOUGH_ENERGY: -4,
   ERR_BUSY: -5,
+  ERR_POSITION_OCCUPIED: -6,
 } as const;
 
 export type ResultCode = typeof RESULT_CODES[keyof typeof RESULT_CODES];

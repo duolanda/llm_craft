@@ -251,4 +251,41 @@ describe("Game", () => {
     expect(unitManager.getUnit(unit.id)).toBeDefined();
     expect(unitManager.getUnit(unit.id)?.exists).toBe(false);
   });
+
+  it("should detect unit collision when moving", () => {
+    const unitManager = game.getUnitManager();
+    const unit1 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const unit2 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 6, "player_2");
+
+    // Try to move unit1 to unit2's position
+    const result = unitManager.moveUnit(unit1, 6, 6);
+    expect(result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+    expect(unit1.x).toBe(5); // Position should not change
+    expect(unit1.y).toBe(5);
+  });
+
+  it("should allow moving to own previous position", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+
+    // Move to new position
+    const result1 = unitManager.moveUnit(unit, 6, 6);
+    expect(result1).toBe(RESULT_CODES.OK);
+
+    // Create another unit at the original position
+    const unit2 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_2");
+
+    // Try to move back to original position (now occupied)
+    const result2 = unitManager.moveUnit(unit, 5, 5);
+    expect(result2).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+  });
+
+  it("should hasUnitAt return correct result", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+
+    expect(unitManager.hasUnitAt(5, 5)).toBe(true);
+    expect(unitManager.hasUnitAt(5, 5, unit.id)).toBe(false); // Exclude self
+    expect(unitManager.hasUnitAt(6, 6)).toBe(false);
+  });
 });

@@ -10,14 +10,14 @@ const CANVAS_WIDTH = MAP_WIDTH * TILE_SIZE;
 const CANVAS_HEIGHT = MAP_HEIGHT * TILE_SIZE;
 
 const COLORS = {
-  empty: "#1a1a2e",
-  obstacle: "#4a4a6a",
-  resource: "#ffd700",
-  player1: "#ff6b6b",
-  player2: "#4ecdc4",
-  hq: "#9b59b6",
-  generator: "#f39c12",
-  barracks: "#3498db",
+  empty: "#0d1014",
+  obstacle: "#2a3440",
+  resource: "#ffb300",
+  player1: "#ff2a4a",
+  player2: "#00e5ff",
+  hq: "#c45fff",
+  generator: "#ff9800",
+  barracks: "#2979ff",
 };
 
 export function GameCanvas({ state }: GameCanvasProps) {
@@ -31,15 +31,54 @@ export function GameCanvas({ state }: GameCanvasProps) {
     if (!ctx) return;
 
     // 清除背景
-    ctx.fillStyle = "#0f0f1a";
+    ctx.fillStyle = "#080a0c";
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // 绘制 subtle 网格
+    ctx.strokeStyle = "rgba(42, 52, 64, 0.35)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= MAP_WIDTH; x++) {
+      ctx.beginPath();
+      ctx.moveTo(x * TILE_SIZE, 0);
+      ctx.lineTo(x * TILE_SIZE, CANVAS_HEIGHT);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= MAP_HEIGHT; y++) {
+      ctx.beginPath();
+      ctx.moveTo(0, y * TILE_SIZE);
+      ctx.lineTo(CANVAS_WIDTH, y * TILE_SIZE);
+      ctx.stroke();
+    }
 
     // 绘制地块
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
         const tile = state.tiles[y]?.[x];
-        ctx.fillStyle = COLORS[tile?.type as keyof typeof COLORS] || COLORS.empty;
-        ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE - 1, TILE_SIZE - 1);
+        if (tile?.type === "resource") {
+          ctx.fillStyle = COLORS.resource;
+          ctx.beginPath();
+          ctx.arc(
+            x * TILE_SIZE + TILE_SIZE / 2,
+            y * TILE_SIZE + TILE_SIZE / 2,
+            TILE_SIZE / 4,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+          // 微光晕
+          ctx.shadowColor = COLORS.resource;
+          ctx.shadowBlur = 8;
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+        } else if (tile?.type === "obstacle") {
+          ctx.fillStyle = COLORS.obstacle;
+          ctx.fillRect(
+            x * TILE_SIZE + 1,
+            y * TILE_SIZE + 1,
+            TILE_SIZE - 2,
+            TILE_SIZE - 2
+          );
+        }
       }
     }
 
@@ -48,24 +87,23 @@ export function GameCanvas({ state }: GameCanvasProps) {
       const color = player.id === "player_1" ? COLORS.player1 : COLORS.player2;
       for (const building of player.buildings) {
         if (!building.exists) continue;
-        ctx.fillStyle = COLORS[building.type as keyof typeof COLORS] || color;
-        ctx.fillRect(
-          building.x * TILE_SIZE + 2,
-          building.y * TILE_SIZE + 2,
-          TILE_SIZE - 5,
-          TILE_SIZE - 5
-        );
+        const bx = building.x * TILE_SIZE;
+        const by = building.y * TILE_SIZE;
+        const typeColor = COLORS[building.type as keyof typeof COLORS] || color;
+        ctx.fillStyle = typeColor;
+        ctx.fillRect(bx + 3, by + 3, TILE_SIZE - 7, TILE_SIZE - 7);
+
+        // 建筑边框（玩家色）
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(bx + 3, by + 3, TILE_SIZE - 7, TILE_SIZE - 7);
+
         // 血条背景
-        ctx.fillStyle = "#333";
-        ctx.fillRect(building.x * TILE_SIZE, building.y * TILE_SIZE - 6, TILE_SIZE, 4);
+        ctx.fillStyle = "#1a2028";
+        ctx.fillRect(bx + 2, by - 7, TILE_SIZE - 4, 5);
         // 血条
         ctx.fillStyle = color;
-        ctx.fillRect(
-          building.x * TILE_SIZE,
-          building.y * TILE_SIZE - 6,
-          TILE_SIZE * (building.hp / building.maxHp),
-          4
-        );
+        ctx.fillRect(bx + 2, by - 7, (TILE_SIZE - 4) * (building.hp / building.maxHp), 5);
       }
     }
 
@@ -74,27 +112,24 @@ export function GameCanvas({ state }: GameCanvasProps) {
       const color = player.id === "player_1" ? COLORS.player1 : COLORS.player2;
       for (const unit of player.units) {
         if (!unit.exists) continue;
+        const ux = unit.x * TILE_SIZE;
+        const uy = unit.y * TILE_SIZE;
         ctx.fillStyle = color;
         ctx.beginPath();
-        ctx.arc(
-          unit.x * TILE_SIZE + TILE_SIZE / 2,
-          unit.y * TILE_SIZE + TILE_SIZE / 2,
-          TILE_SIZE / 3,
-          0,
-          Math.PI * 2
-        );
+        ctx.arc(ux + TILE_SIZE / 2, uy + TILE_SIZE / 2, TILE_SIZE / 3 - 1, 0, Math.PI * 2);
         ctx.fill();
+
+        // 单位边框（白色微描边增加对比）
+        ctx.strokeStyle = "rgba(255,255,255,0.25)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
         // 血条背景
-        ctx.fillStyle = "#333";
-        ctx.fillRect(unit.x * TILE_SIZE, unit.y * TILE_SIZE - 4, TILE_SIZE, 3);
+        ctx.fillStyle = "#1a2028";
+        ctx.fillRect(ux + 4, uy - 5, TILE_SIZE - 8, 4);
         // 血条
         ctx.fillStyle = color;
-        ctx.fillRect(
-          unit.x * TILE_SIZE,
-          unit.y * TILE_SIZE - 4,
-          TILE_SIZE * (unit.hp / unit.maxHp),
-          3
-        );
+        ctx.fillRect(ux + 4, uy - 5, (TILE_SIZE - 8) * (unit.hp / unit.maxHp), 4);
       }
     }
   }, [state]);
@@ -104,7 +139,6 @@ export function GameCanvas({ state }: GameCanvasProps) {
       ref={canvasRef}
       width={CANVAS_WIDTH}
       height={CANVAS_HEIGHT}
-      style={{ border: "2px solid #333", display: "block" }}
     />
   );
 }

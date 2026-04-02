@@ -126,7 +126,13 @@ export class Game {
               command.position.x,
               command.position.y
             );
-            if (result !== RESULT_CODES.OK) {
+            if (result === RESULT_CODES.ERR_POSITION_OCCUPIED) {
+              this.addLog(
+                "move_blocked",
+                `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y}): position occupied`,
+                { command, result }
+              );
+            } else if (result !== RESULT_CODES.OK) {
               this.addLog(
                 "command_failed",
                 `Move command failed for unit ${command.unitId}`,

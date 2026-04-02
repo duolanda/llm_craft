@@ -5,3 +5,4 @@ dist
 .env
 logs/*.json
 .playwright-mcp/
+.claude/

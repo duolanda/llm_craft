@@ -1,0 +1,17 @@
+{
+  "name": "llmcraft",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
+    "dev:server": "pnpm --filter @llmcraft/server dev",
+    "dev:client": "pnpm --filter @llmcraft/client dev",
+    "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build",
+    "build:shared": "pnpm --filter @llmcraft/shared build",
+    "test": "pnpm --filter @llmcraft/server test"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  }
+}

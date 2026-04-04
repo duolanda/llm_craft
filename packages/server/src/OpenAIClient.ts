@@ -1,6 +1,6 @@
 import OpenAI from "openai";
+import { AIStatePackage } from "@llmcraft/shared";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
-import { AIStatePackage } from "./AISandbox";
 
 export interface OpenAIClientConfig {
   apiKey: string;

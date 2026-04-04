@@ -57,6 +57,9 @@ export class APIBridge {
     const myUnits = state.my.units.map(wrapUnit);
     const myBuildings = state.my.buildings.map(wrapBuilding);
 
+    // Combine enemy units and buildings for the enemies array
+    const allEnemies = [...state.visibleEnemies, ...state.enemyBuildings];
+
     return {
       game: {
         tick: state.tick,
@@ -71,8 +74,18 @@ export class APIBridge {
         soldiers: myUnits.filter((u: any) => u.type === "soldier"),
         scouts: myUnits.filter((u: any) => u.type === "scout"),
       },
-      enemies: state.visibleEnemies,
-      map: { width: 20, height: 20 },
+      enemies: allEnemies,
+      enemyBuildings: state.enemyBuildings,
+      map: {
+        width: state.map.width,
+        height: state.map.height,
+        tiles: state.map.tiles,
+        // Helper: get tile at specific position
+        getTile: (x: number, y: number) => {
+          return state.map.tiles.find((t: any) => t.x === x && t.y === y) || { x, y, type: "empty" };
+        },
+      },
+      unitStats: state.unitStats,
       utils: {
         getRange: (a: Position, b: Position) => Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)),
         inRange: (a: Position, b: Position, range: number) => Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)) <= range,

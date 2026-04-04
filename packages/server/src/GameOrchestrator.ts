@@ -1,5 +1,6 @@
+import { AIStatePackage } from "@llmcraft/shared";
 import { Game } from "./Game";
-import { AISandbox, AIStatePackage } from "./AISandbox";
+import { AISandbox } from "./AISandbox";
 import { OpenAIClient, OpenAIClientConfig } from "./OpenAIClient";
 import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
 

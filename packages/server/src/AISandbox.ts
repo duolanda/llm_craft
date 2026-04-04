@@ -1,19 +1,6 @@
 import { VM } from "vm2";
-import { Command } from "@llmcraft/shared";
+import { Command, AIStatePackage } from "@llmcraft/shared";
 import { APIBridge } from "./APIBridge";
-
-export interface AIStatePackage {
-  tick: number;
-  my: {
-    resources: { energy: number; energyPerTick: number; };
-    units: any[];
-    buildings: any[];
-  };
-  visibleEnemies: any[];
-  map: { width: number; height: number; visibleTiles: any[]; };
-  eventsSinceLastCall: any[];
-  gameTimeRemaining: number;
-}
 
 export class AISandbox {
   private playerId: string;
@@ -36,7 +23,9 @@ export class AISandbox {
           game: api.game,
           me: api.me,
           enemies: api.enemies,
+          enemyBuildings: api.enemyBuildings,
           map: api.map,
+          unitStats: api.unitStats,
           utils: api.utils,
           console: { log: () => {} } // 禁用 console.log
         }

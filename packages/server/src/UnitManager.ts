@@ -2,12 +2,20 @@ import {
   Unit,
   UnitType,
   UnitState,
+  TileType,
+  TILE_TYPES,
   UNIT_TYPES,
   UNIT_STATES,
   UNIT_STATS,
   RESULT_CODES,
   ResultCode,
+  MAP_WIDTH,
+  MAP_HEIGHT,
 } from "@llmcraft/shared";
+
+function getDistance(x1: number, y1: number, x2: number, y2: number): number {
+  return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+}
 
 export class UnitManager {
   private units: Map<string, Unit> = new Map();
@@ -61,9 +69,31 @@ export class UnitManager {
     return false;
   }
 
-  moveUnit(unit: Unit, targetX: number, targetY: number): ResultCode {
+  moveUnit(
+    unit: Unit,
+    targetX: number,
+    targetY: number,
+    tiles?: TileType[][]
+  ): ResultCode {
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // Check integer coordinates - must be whole numbers
+    if (!Number.isInteger(targetX) || !Number.isInteger(targetY)) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // Check map bounds
+    if (targetX < 0 || targetX >= MAP_WIDTH || targetY < 0 || targetY >= MAP_HEIGHT) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // Check speed limit: cannot move farther than unit's speed per tick
+    const distance = getDistance(unit.x, unit.y, targetX, targetY);
+    const maxSpeed = UNIT_STATS[unit.type].speed;
+    if (distance > maxSpeed) {
+      return RESULT_CODES.ERR_EXCEEDS_SPEED;
     }
 
     // Check collision: cannot move to a position occupied by another unit
@@ -71,9 +101,16 @@ export class UnitManager {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
+    // Check obstacle collision if tiles provided
+    if (tiles && tiles[targetY][targetX] === TILE_TYPES.OBSTACLE) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    }
+
     unit.x = targetX;
     unit.y = targetY;
     unit.state = UNIT_STATES.MOVING;
+    // Record move intent for visualization
+    unit.intent = { type: 'move', targetX, targetY };
 
     return RESULT_CODES.OK;
   }
@@ -98,6 +135,8 @@ export class UnitManager {
     const damage = UNIT_STATS[attacker.type].attack;
     target.hp -= damage;
     attacker.state = UNIT_STATES.ATTACKING;
+    // Record attack intent for visualization
+    attacker.intent = { type: 'attack', targetId: target.id, targetX: target.x, targetY: target.y };
 
     if (target.hp <= 0) {
       target.hp = 0;
@@ -113,6 +152,8 @@ export class UnitManager {
     }
 
     unit.state = UNIT_STATES.IDLE;
+    // Record hold intent for visualization
+    unit.intent = { type: 'hold' };
     return RESULT_CODES.OK;
   }
 

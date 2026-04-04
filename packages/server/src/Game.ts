@@ -124,7 +124,8 @@ export class Game {
             const result = this.unitManager.moveUnit(
               unit,
               command.position.x,
-              command.position.y
+              command.position.y,
+              this.tiles
             );
             if (result === RESULT_CODES.ERR_POSITION_OCCUPIED) {
               this.addLog(

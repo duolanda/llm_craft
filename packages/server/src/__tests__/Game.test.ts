@@ -199,19 +199,42 @@ describe("Game", () => {
     const unitManager = game.getUnitManager();
     const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
 
-    const result = unitManager.moveUnit(unit, 6, 6);
+    // Move 1 cell horizontally (distance=1, within speed=1 limit)
+    const result = unitManager.moveUnit(unit, 6, 5);
     expect(result).toBe(RESULT_CODES.OK);
     expect(unit.x).toBe(6);
-    expect(unit.y).toBe(6);
+    expect(unit.y).toBe(5);
     expect(unit.state).toBe(UNIT_STATES.MOVING);
+  });
+
+  it("should reject move exceeding speed limit", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+
+    // Diagonal move (distance=~1.414, exceeds speed=1 limit)
+    const result = unitManager.moveUnit(unit, 6, 6);
+    expect(result).toBe(RESULT_CODES.ERR_EXCEEDS_SPEED);
+    expect(unit.x).toBe(5); // Position should not change
+    expect(unit.y).toBe(5);
+  });
+
+  it("should allow scout to move 2 cells", () => {
+    const unitManager = game.getUnitManager();
+    const scout = unitManager.createUnit(UNIT_TYPES.SCOUT, 5, 5, "player_1");
+
+    // Scout has speed=2, can move 2 cells
+    const result = unitManager.moveUnit(scout, 7, 5);
+    expect(result).toBe(RESULT_CODES.OK);
+    expect(scout.x).toBe(7);
+    expect(scout.y).toBe(5);
   });
 
   it("should hold position correctly", () => {
     const unitManager = game.getUnitManager();
     const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
 
-    // First move the unit
-    unitManager.moveUnit(unit, 6, 6);
+    // First move the unit (horizontal move within speed limit)
+    unitManager.moveUnit(unit, 6, 5);
     expect(unit.state).toBe(UNIT_STATES.MOVING);
 
     // Then hold position
@@ -255,10 +278,10 @@ describe("Game", () => {
   it("should detect unit collision when moving", () => {
     const unitManager = game.getUnitManager();
     const unit1 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
-    const unit2 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 6, "player_2");
+    const unit2 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
 
-    // Try to move unit1 to unit2's position
-    const result = unitManager.moveUnit(unit1, 6, 6);
+    // Try to move unit1 to unit2's position (horizontal move, within speed limit)
+    const result = unitManager.moveUnit(unit1, 6, 5);
     expect(result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
     expect(unit1.x).toBe(5); // Position should not change
     expect(unit1.y).toBe(5);
@@ -268,14 +291,14 @@ describe("Game", () => {
     const unitManager = game.getUnitManager();
     const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
 
-    // Move to new position
-    const result1 = unitManager.moveUnit(unit, 6, 6);
+    // Move to new position (horizontal move within speed limit)
+    const result1 = unitManager.moveUnit(unit, 6, 5);
     expect(result1).toBe(RESULT_CODES.OK);
 
     // Create another unit at the original position
     const unit2 = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_2");
 
-    // Try to move back to original position (now occupied)
+    // Try to move back to original position (now occupied, within speed limit)
     const result2 = unitManager.moveUnit(unit, 5, 5);
     expect(result2).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
   });
@@ -287,5 +310,50 @@ describe("Game", () => {
     expect(unitManager.hasUnitAt(5, 5)).toBe(true);
     expect(unitManager.hasUnitAt(5, 5, unit.id)).toBe(false); // Exclude self
     expect(unitManager.hasUnitAt(6, 6)).toBe(false);
+  });
+
+  it("should reject move to obstacle", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 4, 5, "player_1");
+
+    // Create a mock tiles map with obstacle at (5,5)
+    const tiles = Array(20)
+      .fill(null)
+      .map(() => Array(20).fill("empty"));
+    tiles[5][5] = "obstacle";
+
+    // Try to move to obstacle position
+    const result = unitManager.moveUnit(unit, 5, 5, tiles as any);
+    expect(result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+    expect(unit.x).toBe(4); // Position should not change
+    expect(unit.y).toBe(5);
+  });
+
+  it("should reject move out of bounds", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 0, 0, "player_1");
+
+    // Try to move to negative coordinate
+    const result1 = unitManager.moveUnit(unit, -1, 0);
+    expect(result1).toBe(RESULT_CODES.ERR_INVALID_TARGET);
+
+    // Try to move beyond map width
+    const result2 = unitManager.moveUnit(unit, 20, 0);
+    expect(result2).toBe(RESULT_CODES.ERR_INVALID_TARGET);
+
+    // Position should not change
+    expect(unit.x).toBe(0);
+    expect(unit.y).toBe(0);
+  });
+
+  it("should reject move to non-integer coordinates", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+
+    // Try to move to decimal coordinate
+    const result = unitManager.moveUnit(unit, 5.5, 5.5);
+    expect(result).toBe(RESULT_CODES.ERR_INVALID_TARGET);
+    expect(unit.x).toBe(5); // Position should not change
+    expect(unit.y).toBe(5);
   });
 });

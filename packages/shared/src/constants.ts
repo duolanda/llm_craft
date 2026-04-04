@@ -10,6 +10,7 @@ export const RESULT_CODES = {
   ERR_NOT_ENOUGH_ENERGY: -4,
   ERR_BUSY: -5,
   ERR_POSITION_OCCUPIED: -6,
+  ERR_EXCEEDS_SPEED: -7,
 } as const;
 
 export type ResultCode = typeof RESULT_CODES[keyof typeof RESULT_CODES];

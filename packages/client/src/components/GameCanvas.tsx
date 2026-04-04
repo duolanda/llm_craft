@@ -114,10 +114,36 @@ export function GameCanvas({ state }: GameCanvasProps) {
         if (!unit.exists) continue;
         const ux = unit.x * TILE_SIZE;
         const uy = unit.y * TILE_SIZE;
+        const cx = ux + TILE_SIZE / 2;
+        const cy = uy + TILE_SIZE / 2;
         ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(ux + TILE_SIZE / 2, uy + TILE_SIZE / 2, TILE_SIZE / 3 - 1, 0, Math.PI * 2);
-        ctx.fill();
+
+        // 根据单位类型使用不同形状
+        if (unit.type === "soldier") {
+          // 士兵: 大圆（战斗单位）
+          ctx.beginPath();
+          ctx.arc(cx, cy, TILE_SIZE / 3 - 1, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (unit.type === "worker") {
+          // 工人: 小圆（采集单位）
+          ctx.beginPath();
+          ctx.arc(cx, cy, TILE_SIZE / 4 - 1, 0, Math.PI * 2);
+          ctx.fill();
+          // 工人中心点标记
+          ctx.fillStyle = "rgba(255,255,255,0.4)";
+          ctx.beginPath();
+          ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (unit.type === "scout") {
+          // 侦察兵: 菱形（高速侦察）
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - TILE_SIZE / 3 + 2);
+          ctx.lineTo(cx + TILE_SIZE / 3 - 2, cy);
+          ctx.lineTo(cx, cy + TILE_SIZE / 3 - 2);
+          ctx.lineTo(cx - TILE_SIZE / 3 + 2, cy);
+          ctx.closePath();
+          ctx.fill();
+        }
 
         // 单位边框（白色微描边增加对比）
         ctx.strokeStyle = "rgba(255,255,255,0.25)";
@@ -130,6 +156,73 @@ export function GameCanvas({ state }: GameCanvasProps) {
         // 血条
         ctx.fillStyle = color;
         ctx.fillRect(ux + 4, uy - 5, (TILE_SIZE - 8) * (unit.hp / unit.maxHp), 4);
+
+        // 绘制意图
+        if (unit.intent) {
+          ctx.globalAlpha = 0.6;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]);
+
+          if (unit.intent.type === 'move' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
+            // 移动意图：虚线连接到目标位置
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(
+              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
+            );
+            ctx.stroke();
+
+            // 目标位置标记
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(
+              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2,
+              4, 0, Math.PI * 2
+            );
+            ctx.fill();
+          } else if (unit.intent.type === 'attack' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
+            // 攻击意图：虚线连接到攻击目标
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(
+              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
+            );
+            ctx.stroke();
+
+            // 攻击目标标记（X形）
+            const tx = unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
+            const ty = unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(tx - 6, ty - 6);
+            ctx.lineTo(tx + 6, ty + 6);
+            ctx.moveTo(tx + 6, ty - 6);
+            ctx.lineTo(tx - 6, ty + 6);
+            ctx.stroke();
+          } else if (unit.intent.type === 'hold') {
+            // 待命意图：显示盾牌标记
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 8);
+            ctx.lineTo(cx - 6, cy - 4);
+            ctx.lineTo(cx - 6, cy + 2);
+            ctx.quadraticCurveTo(cx, cy + 8, cx + 6, cy + 2);
+            ctx.lineTo(cx + 6, cy - 4);
+            ctx.closePath();
+            ctx.stroke();
+          }
+
+          ctx.globalAlpha = 1;
+          ctx.setLineDash([]);
+        }
       }
     }
   }, [state]);

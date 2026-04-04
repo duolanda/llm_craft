@@ -21,6 +21,13 @@ export interface Unit extends GameObject {
   my: boolean;
   playerId: string;
   attackRange: number; // worker=0, soldier=1, scout=0
+  // 意图显示
+  intent?: {
+    type: 'move' | 'attack' | 'hold';
+    targetX?: number;
+    targetY?: number;
+    targetId?: string;
+  };
 }
 
 export interface Building extends GameObject {
@@ -82,6 +89,15 @@ export interface GameSnapshot {
   aiOutputs: Record<string, string>;
 }
 
+// 单位属性信息
+export interface UnitStats {
+  hp: number;
+  speed: number;
+  attack: number;
+  cost: number;
+  attackRange: number;
+}
+
 // AI State Package for AI Sandbox
 export interface AIStatePackage {
   tick: number;
@@ -96,12 +112,22 @@ export interface AIStatePackage {
     x: number;
     y: number;
     hp: number;
+    maxHp: number;
+  }>;
+  enemyBuildings: Array<{
+    id: string;
+    type: string;
+    x: number;
+    y: number;
+    hp: number;
+    maxHp: number;
   }>;
   map: {
     width: number;
     height: number;
-    visibleTiles: Tile[];
+    tiles: Tile[]; // 所有地块信息（MVP：全图可见）
   };
+  unitStats: Record<UnitType, UnitStats>; // 单位属性表
   eventsSinceLastCall: GameLog[];
   gameTimeRemaining: number;
 }

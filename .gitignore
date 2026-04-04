@@ -7,3 +7,4 @@ logs/*.json
 .playwright-mcp/
 .claude/
 .vscode/
+*.tsbuildinfo

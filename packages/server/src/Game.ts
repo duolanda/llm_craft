@@ -312,6 +312,10 @@ export class Game {
       message,
       data,
     });
+    // 限制日志数量，防止内存泄漏
+    if (this.logs.length > 1000) {
+      this.logs = this.logs.slice(-500);
+    }
   }
 
   private saveSnapshot(): void {
@@ -320,6 +324,10 @@ export class Game {
       state: this.getState(),
       aiOutputs: { ...this.aiOutputs },
     });
+    // 限制快照数量，防止内存泄漏（保留最近 1000 个 tick）
+    if (this.snapshots.length > 1000) {
+      this.snapshots = this.snapshots.slice(-500);
+    }
   }
 
   getWinner(): string | null {

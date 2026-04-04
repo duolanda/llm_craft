@@ -12,6 +12,7 @@ export class GameOrchestrator {
   private openai2: OpenAIClient;
   private lastAITick = { player_1: -100, player_2: -100 };
   private aiInterval = 5; // AI 每 5 个 tick 思考一次
+  private isRunningAI = { player_1: false, player_2: false }; // 防止并发调用
 
   constructor(config: OpenAIClientConfig) {
     this.game = new Game();
@@ -26,14 +27,18 @@ export class GameOrchestrator {
   }
 
   async runAI(playerId: string): Promise<void> {
-    const state = this.game.getState();
-    const packageBuilder = AIStatePackageBuilder;
-    const aiPackage = packageBuilder.build(playerId, state);
-
-    const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
-    const openai = playerId === "player_1" ? this.openai1 : this.openai2;
+    // 防止并发调用
+    if (this.isRunningAI[playerId as keyof typeof this.isRunningAI]) return;
+    this.isRunningAI[playerId as keyof typeof this.isRunningAI] = true;
 
     try {
+      const state = this.game.getState();
+      const packageBuilder = AIStatePackageBuilder;
+      const aiPackage = packageBuilder.build(playerId, state);
+
+      const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
+      const openai = playerId === "player_1" ? this.openai1 : this.openai2;
+
       const code = await openai.generateCode(aiPackage);
       this.game.setAIOutput(playerId, code);
 
@@ -43,6 +48,8 @@ export class GameOrchestrator {
       }
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
+    } finally {
+      this.isRunningAI[playerId as keyof typeof this.isRunningAI] = false;
     }
   }
 

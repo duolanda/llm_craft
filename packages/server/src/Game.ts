@@ -8,6 +8,7 @@ import {
   GameState,
   Tile,
   TileType,
+  TILE_TYPES,
   UNIT_TYPES,
   BUILDING_TYPES,
   UNIT_STATES,
@@ -268,17 +269,20 @@ export class Game {
         const spawnBuilding = barracks || hq;
 
         if (spawnBuilding) {
-          // Spawn unit near the building
-          this.unitManager.createUnit(
-            unitType,
-            spawnBuilding.x + 1,
-            spawnBuilding.y,
-            playerId
-          );
-          this.addLog("unit_spawned", `Unit ${unitType} spawned for ${playerId}`, {
-            playerId,
-            unitType,
-          });
+          // Find an empty position near the building
+          const spawnPos = this.findEmptySpawnPosition(spawnBuilding.x, spawnBuilding.y);
+          if (spawnPos) {
+            this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
+            this.addLog("unit_spawned", `Unit ${unitType} spawned for ${playerId}`, {
+              playerId,
+              unitType,
+            });
+          } else {
+            this.addLog("spawn_failed", `No empty position to spawn ${unitType} for ${playerId}`, {
+              playerId,
+              unitType,
+            });
+          }
         }
       }
     }
@@ -352,6 +356,38 @@ export class Game {
 
   setAIOutput(playerId: string, output: string): void {
     this.aiOutputs[playerId] = output;
+  }
+
+  /**
+   * Find an empty position near the given coordinates for spawning a unit
+   * Searches in expanding circles around the center point
+   */
+  private findEmptySpawnPosition(centerX: number, centerY: number): { x: number; y: number } | null {
+    // Check positions in expanding distance from center
+    for (let distance = 1; distance <= 3; distance++) {
+      // Check all positions at current distance
+      for (let dx = -distance; dx <= distance; dx++) {
+        for (let dy = -distance; dy <= distance; dy++) {
+          // Only check positions at exactly this Manhattan distance
+          if (Math.abs(dx) + Math.abs(dy) !== distance) continue;
+
+          const x = centerX + dx;
+          const y = centerY + dy;
+
+          // Check bounds
+          if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+
+          // Check if position is not an obstacle
+          if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) continue;
+
+          // Check if position is not occupied by another unit
+          if (!this.unitManager.hasUnitAt(x, y)) {
+            return { x, y };
+          }
+        }
+      }
+    }
+    return null; // No empty position found
   }
 
   getSnapshots(): GameSnapshot[] {

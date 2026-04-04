@@ -121,16 +121,17 @@ export class Game {
         if (command.unitId && command.position) {
           const unit = this.unitManager.getUnit(command.unitId);
           if (unit && unit.playerId === command.playerId) {
-            const result = this.unitManager.moveUnit(
+            // 使用寻路移动：设置目标，让系统每 tick 自动沿路径移动
+            const result = this.unitManager.setMoveTarget(
               unit,
               command.position.x,
               command.position.y,
               this.tiles
             );
-            if (result === RESULT_CODES.ERR_POSITION_OCCUPIED) {
+            if (result === RESULT_CODES.ERR_INVALID_TARGET) {
               this.addLog(
                 "move_blocked",
-                `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y}): position occupied`,
+                `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y}): target invalid or unreachable`,
                 { command, result }
               );
             } else if (result !== RESULT_CODES.OK) {
@@ -168,6 +169,8 @@ export class Game {
           const unit = this.unitManager.getUnit(command.unitId);
           if (unit && unit.playerId === command.playerId) {
             this.unitManager.holdPosition(unit);
+            // 清除寻路路径
+            this.unitManager.clearPath(unit);
           }
         }
         break;
@@ -248,6 +251,11 @@ export class Game {
 
     // Process commands
     this.processCommands();
+
+    // Process unit path movement (自动寻路移动)
+    for (const unit of this.unitManager.getAllUnits()) {
+      this.unitManager.processPathMovement(unit, this.tiles);
+    }
 
     // Process building production queues
     const completedUnits = this.buildingManager.processProductionQueues();

@@ -12,6 +12,7 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
 } from "@llmcraft/shared";
+import { PathFinder } from "./PathFinder";
 
 function getDistance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
@@ -164,5 +165,134 @@ export class UnitManager {
       return true;
     }
     return false;
+  }
+
+  /**
+   * 设置单位的移动目标，自动计算路径
+   * AI 调用此方法指定目标，系统会自动每 tick 沿路径移动
+   */
+  setMoveTarget(
+    unit: Unit,
+    targetX: number,
+    targetY: number,
+    tiles: TileType[][]
+  ): ResultCode {
+    if (!unit.exists) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // 检查目标点是否合法
+    if (
+      targetX < 0 ||
+      targetX >= MAP_WIDTH ||
+      targetY < 0 ||
+      targetY >= MAP_HEIGHT
+    ) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (tiles[targetY][targetX] === TILE_TYPES.OBSTACLE) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // 计算路径
+    const occupiedPositions = this.getOccupiedPositions(unit.id);
+    const path = PathFinder.findPath(
+      unit.x,
+      unit.y,
+      targetX,
+      targetY,
+      tiles,
+      occupiedPositions
+    );
+
+    if (path.length === 0 && (unit.x !== targetX || unit.y !== targetY)) {
+      // 不可达但不是因为已经在目标点
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    // 保存路径和目标
+    unit.path = path;
+    unit.pathTarget = { x: targetX, y: targetY };
+    unit.intent = { type: 'move', targetX, targetY };
+
+    return RESULT_CODES.OK;
+  }
+
+  /**
+   * 处理单位沿路径移动（每 tick 调用）
+   * 按照单位速度移动相应步数
+   */
+  processPathMovement(unit: Unit, tiles: TileType[][]): ResultCode {
+    if (!unit.exists || !unit.path || unit.path.length === 0) {
+      return RESULT_CODES.OK;
+    }
+
+    const maxSpeed = UNIT_STATS[unit.type].speed;
+    let stepsTaken = 0;
+
+    while (stepsTaken < maxSpeed && unit.path.length > 0) {
+      const nextStep = unit.path[0];
+
+      // 检查这一步是否仍然可行（可能被其他单位占据了）
+      if (this.hasUnitAt(nextStep.x, nextStep.y, unit.id)) {
+        // 路径被阻挡，需要重新寻路
+        const occupiedPositions = this.getOccupiedPositions(unit.id);
+        const newPath = PathFinder.findPath(
+          unit.x,
+          unit.y,
+          unit.pathTarget!.x,
+          unit.pathTarget!.y,
+          tiles,
+          occupiedPositions
+        );
+
+        if (newPath.length === 0) {
+          // 无法到达，清除路径
+          unit.path = undefined;
+          unit.pathTarget = undefined;
+          return RESULT_CODES.ERR_POSITION_OCCUPIED;
+        }
+
+        unit.path = newPath;
+        continue;
+      }
+
+      // 执行移动
+      unit.x = nextStep.x;
+      unit.y = nextStep.y;
+      unit.state = UNIT_STATES.MOVING;
+      unit.path.shift();
+      stepsTaken++;
+    }
+
+    // 路径走完
+    if (unit.path.length === 0) {
+      unit.path = undefined;
+      unit.pathTarget = undefined;
+    }
+
+    return RESULT_CODES.OK;
+  }
+
+  /**
+   * 清除单位的路径
+   */
+  clearPath(unit: Unit): void {
+    unit.path = undefined;
+    unit.pathTarget = undefined;
+  }
+
+  /**
+   * 获取被占据的位置集合（用于寻路避障）
+   */
+  private getOccupiedPositions(excludeUnitId?: string): Set<string> {
+    const positions = new Set<string>();
+    for (const unit of this.units.values()) {
+      if (unit.exists && unit.id !== excludeUnitId) {
+        positions.add(`${unit.x},${unit.y}`);
+      }
+    }
+    return positions;
   }
 }

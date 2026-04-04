@@ -28,6 +28,10 @@ export interface Unit extends GameObject {
     targetY?: number;
     targetId?: string;
   };
+  // 寻路路径缓存
+  path?: Array<{ x: number; y: number }>;
+  // 寻路目标
+  pathTarget?: { x: number; y: number };
 }
 
 export interface Building extends GameObject {

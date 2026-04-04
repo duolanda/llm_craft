@@ -86,10 +86,9 @@ const nearestResource = utils.findClosestByRange(me.hq, resources);
 ## 单位方法
 
 unit.moveTo({x, y}): void
-- 移动距离不能超过单位速度（worker/soldier=1, scout=2）
-- 超出速度限制会移动失败
-- 不能移动到障碍物上
-- 不能移出地图边界
+- 自动寻路到目标位置，会自动绕过障碍物
+- AI 只需指定目标，系统每 tick 自动沿路径移动
+- 移动速度：worker/soldier=1格/tick, scout=2格/tick
 
 unit.attack(targetId): void
 - 需要目标在 attackRange 范围内
@@ -109,8 +108,11 @@ building.spawnUnit("worker" | "soldier" | "scout"): void
 
 ## 代码示例
 
-// 移动所有士兵到中间
-me.soldiers.forEach(s => s.moveTo({x: 10, y: 10}));
+// 移动所有士兵到敌方HQ附近（自动寻路绕过障碍）
+const enemyHQ = enemyBuildings.find(b => b.type === "hq");
+if (enemyHQ) {
+  me.soldiers.forEach(s => s.moveTo({x: enemyHQ.x, y: enemyHQ.y}));
+}
 
 // 有能量就生产士兵
 if (me.resources.energy > 150) {

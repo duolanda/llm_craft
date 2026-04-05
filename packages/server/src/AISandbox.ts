@@ -7,9 +7,11 @@ export interface AISandboxResult {
   errorMessage?: string;
 }
 
+export const AI_SANDBOX_TIMEOUT_MS = 200;
+
 export class AISandbox {
   private playerId: string;
-  private executionTimeoutMs = 200;
+  private executionTimeoutMs = AI_SANDBOX_TIMEOUT_MS;
 
   constructor(playerId: string) {
     this.playerId = playerId;
@@ -20,9 +22,10 @@ export class AISandbox {
 
     return await new Promise<AISandboxResult>((resolve) => {
       const child = fork(modulePath, [], {
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
         execArgv,
       });
+      let stderrOutput = "";
 
       let settled = false;
       const finish = (result: AISandboxResult) => {
@@ -36,6 +39,11 @@ export class AISandbox {
         }
         resolve(result);
       };
+
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk) => {
+        stderrOutput += chunk;
+      });
 
       const timeout = setTimeout(() => {
         finish({
@@ -55,17 +63,22 @@ export class AISandbox {
         console.error(`AI ${this.playerId} 沙箱进程错误:`, error);
         finish({
           commands: [],
-          errorMessage: error.message,
+          errorMessage: stderrOutput.trim()
+            ? `${error.message}\n${stderrOutput.trim()}`
+            : error.message,
         });
       });
 
       child.once("exit", (code, signal) => {
         if (!settled) {
+          const detail = stderrOutput.trim();
           finish({
             commands: [],
             errorMessage: signal
               ? `Sandbox exited with signal ${signal}`
-              : `Sandbox exited before returning a result (code ${code ?? "unknown"})`,
+              : detail
+                ? `Sandbox exited before returning a result (code ${code ?? "unknown"})\n${detail}`
+                : `Sandbox exited before returning a result (code ${code ?? "unknown"})`,
           });
         }
       });

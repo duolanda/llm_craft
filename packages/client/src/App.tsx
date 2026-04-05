@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GameCanvas } from "./components/GameCanvas";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
@@ -9,6 +9,38 @@ import { useWebSocket } from "./hooks/useWebSocket";
 function App() {
   const { state, snapshots, connected, lastSavedRecordPath, send } = useWebSocket("ws://localhost:3001");
   const [isPlaying, setIsPlaying] = useState(false);
+  const [winnerOverlayDismissed, setWinnerOverlayDismissed] = useState(false);
+  const lastAutoSavedWinnerRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (state?.winner) {
+      setWinnerOverlayDismissed(false);
+      setIsPlaying(false);
+      if (lastAutoSavedWinnerRef.current !== state.winner) {
+        send({ type: "save_record" });
+        lastAutoSavedWinnerRef.current = state.winner;
+      }
+    } else {
+      lastAutoSavedWinnerRef.current = null;
+    }
+  }, [send, state?.winner]);
+
+  useEffect(() => {
+    if (!state?.winner || winnerOverlayDismissed) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWinnerOverlayDismissed(true);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [state?.winner, winnerOverlayDismissed]);
 
   const handleStart = () => {
     send({ type: "start" });
@@ -112,12 +144,22 @@ function App() {
           </div>
         </div>
 
-        {state?.winner && (
-          <div className="winner-overlay">
-            <div className="winner-card">
+        {state?.winner && !winnerOverlayDismissed && (
+          <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>
+            <div className="winner-card" onClick={(event) => event.stopPropagation()}>
               <div className="winner-label">Simulation Complete</div>
               <div className={`winner-name ${state.winner === "player_1" ? "red" : "cyan"}`}>
                 {state.winner === "player_1" ? "红方获胜" : "蓝方获胜"}
+              </div>
+              {lastSavedRecordPath && (
+                <div className="winner-save-path">
+                  对局记录已自动保存到: {lastSavedRecordPath}
+                </div>
+              )}
+              <div className="winner-actions">
+                <button className="hud-btn hud-btn-ghost" onClick={() => setWinnerOverlayDismissed(true)}>
+                  关闭覆盖层
+                </button>
               </div>
             </div>
           </div>

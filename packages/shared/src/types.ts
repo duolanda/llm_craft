@@ -28,11 +28,14 @@ export interface Unit extends GameObject {
     targetX?: number;
     targetY?: number;
     targetId?: string;
+    targetPriority?: string[];
   };
   // 寻路路径缓存
   path?: Array<{ x: number; y: number }>;
   // 寻路目标
   pathTarget?: { x: number; y: number };
+  // 防止同一 tick 重复攻击
+  lastAttackTick?: number;
 }
 
 export interface Building extends GameObject {

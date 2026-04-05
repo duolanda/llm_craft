@@ -196,13 +196,10 @@ export class Game {
         if (command.unitId && command.targetId) {
           const attacker = this.unitManager.getUnit(command.unitId);
           if (attacker && attacker.playerId === command.playerId) {
-            const unitTarget = this.unitManager.getUnit(command.targetId);
-            const buildingTarget = this.buildingManager.getBuilding(command.targetId);
-            const result: ResultCode = unitTarget
-              ? this.unitManager.attackUnit(attacker, unitTarget)
-              : buildingTarget
-                ? this.attackBuilding(attacker, buildingTarget)
-                : RESULT_CODES.ERR_INVALID_TARGET;
+            const result = this.executeAttackIntent(attacker, command.playerId, {
+              type: "attack",
+              targetId: command.targetId,
+            });
 
             if (result !== RESULT_CODES.OK) {
               this.recordCommandFeedback(
@@ -230,16 +227,10 @@ export class Game {
         if (command.unitId) {
           const attacker = this.unitManager.getUnit(command.unitId);
           if (attacker && attacker.playerId === command.playerId) {
-            const prioritizedTarget = this.findPrioritizedAttackTarget(
-              attacker,
-              command.playerId,
-              command.targetPriority
-            );
-            const result = prioritizedTarget
-              ? prioritizedTarget.kind === "unit"
-                ? this.unitManager.attackUnit(attacker, prioritizedTarget.target)
-                : this.attackBuilding(attacker, prioritizedTarget.target)
-              : RESULT_CODES.ERR_NOT_IN_RANGE;
+            const result = this.executeAttackIntent(attacker, command.playerId, {
+              type: "attack",
+              targetPriority: command.targetPriority,
+            });
 
             if (result !== RESULT_CODES.OK) {
               this.recordCommandFeedback(
@@ -446,8 +437,73 @@ export class Game {
     this.buildingManager.takeDamage(target, damage);
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
+    attacker.lastAttackTick = this.tick;
 
     return RESULT_CODES.OK;
+  }
+
+  private executeAttackIntent(
+    attacker: Unit,
+    playerId: string,
+    intent: Unit["intent"]
+  ): ResultCode {
+    if (!attacker.exists || !intent || intent.type !== "attack") {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    let result: ResultCode;
+
+    if (intent.targetId) {
+      const unitTarget = this.unitManager.getUnit(intent.targetId);
+      const buildingTarget = this.buildingManager.getBuilding(intent.targetId);
+      result = unitTarget
+        ? this.unitManager.attackUnit(attacker, unitTarget)
+        : buildingTarget
+          ? this.attackBuilding(attacker, buildingTarget)
+          : RESULT_CODES.ERR_INVALID_TARGET;
+    } else {
+      const prioritizedTarget = this.findPrioritizedAttackTarget(attacker, playerId, intent.targetPriority);
+      result = prioritizedTarget
+        ? prioritizedTarget.kind === "unit"
+          ? this.unitManager.attackUnit(attacker, prioritizedTarget.target)
+          : this.attackBuilding(attacker, prioritizedTarget.target)
+        : RESULT_CODES.ERR_NOT_IN_RANGE;
+    }
+
+    if (result === RESULT_CODES.OK) {
+      this.unitManager.clearPath(attacker);
+      const resolvedIntent = attacker.intent;
+      attacker.intent = {
+        type: "attack",
+        targetId: intent.targetId,
+        targetPriority: intent.targetPriority,
+        targetX: resolvedIntent?.targetX,
+        targetY: resolvedIntent?.targetY,
+      };
+      attacker.lastAttackTick = this.tick;
+    }
+
+    return result;
+  }
+
+  private processAttackIntents(): void {
+    for (const unit of this.unitManager.getAllUnits()) {
+      if (!unit.exists || unit.intent?.type !== "attack") {
+        continue;
+      }
+
+      if (unit.lastAttackTick === this.tick) {
+        continue;
+      }
+
+      const result = this.executeAttackIntent(unit, unit.playerId, unit.intent);
+      if (result === RESULT_CODES.ERR_INVALID_TARGET && unit.intent.targetId) {
+        unit.intent = { type: "hold" };
+        unit.state = UNIT_STATES.IDLE;
+      } else if (result !== RESULT_CODES.OK && unit.intent.targetId) {
+        unit.state = UNIT_STATES.IDLE;
+      }
+    }
   }
 
   private findPrioritizedAttackTarget(
@@ -536,6 +592,9 @@ export class Game {
 
       // Process worker economy loop: gather on resource tiles, then deliver near HQ
       this.processWorkerEconomy();
+
+      // Sustain attack intents every tick so units keep attacking in range.
+      this.processAttackIntents();
 
       // Process building production queues
       const completedUnits = this.buildingManager.processProductionQueues();

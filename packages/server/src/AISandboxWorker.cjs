@@ -1,4 +1,5 @@
 const vm = require("node:vm");
+const { AI_SANDBOX_TIMEOUT_MS } = require("./AISandbox.constants.cjs");
 
 let commandCounter = 0;
 const DEFAULT_ATTACK_PRIORITY = ["hq", "soldier", "worker", "barracks"];
@@ -144,7 +145,7 @@ process.on("message", (payload) => {
   try {
     const context = vm.createContext(api);
     const script = new vm.Script(String(code));
-    script.runInContext(context, { timeout: 50 });
+    script.runInContext(context, { timeout: AI_SANDBOX_TIMEOUT_MS });
     process.send?.({ commands });
   } catch (error) {
     process.send?.({

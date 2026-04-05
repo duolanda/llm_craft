@@ -191,6 +191,7 @@ describe("Game", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 6, "player_2");
+    const expectedDamage = UNIT_STATS.soldier.attack;
 
     game.queueCommand({
       id: "diag_attack_unit",
@@ -203,7 +204,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect(game.getCommandResults().at(-1)?.success).toBe(true);
-    expect(target.hp).toBeLessThan(target.maxHp);
+    expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
   it("allows soldiers to attack diagonally adjacent buildings", () => {
@@ -211,6 +212,7 @@ describe("Game", () => {
     const buildingManager = game.getBuildingManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = buildingManager.createBuilding(BUILDING_TYPES.BARRACKS, 6, 6, "player_2");
+    const expectedDamage = UNIT_STATS.soldier.attack;
 
     game.queueCommand({
       id: "diag_attack_building",
@@ -223,7 +225,58 @@ describe("Game", () => {
     game.processCommands();
 
     expect(game.getCommandResults().at(-1)?.success).toBe(true);
-    expect(target.hp).toBeLessThan(target.maxHp);
+    expect(target.hp).toBe(target.maxHp - expectedDamage);
+  });
+
+  it("keeps attacking every tick after a successful attack command", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
+    const expectedDamage = UNIT_STATS.soldier.attack;
+
+    game.queueCommand({
+      id: "sustain_attack",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: target.id,
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    expect(target.hp).toBe(target.maxHp - expectedDamage);
+
+    game.tickUpdate();
+    game.stop();
+
+    expect(target.hp).toBe(target.maxHp - expectedDamage * 2);
+  });
+
+  it("keeps re-evaluating attack_in_range on later ticks", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const enemyWorker = unitManager.createUnit(UNIT_TYPES.WORKER, 4, 5, "player_2");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
+    const expectedDamage = UNIT_STATS.soldier.attack;
+
+    game.queueCommand({
+      id: "sustain_attack_in_range",
+      type: "attack_in_range",
+      unitId: attacker.id,
+      targetPriority: [BUILDING_TYPES.HQ, UNIT_TYPES.WORKER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage);
+
+    game.tickUpdate();
+    game.stop();
+
+    expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage * 2);
+    expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
   });
 
   it("attack_in_range prioritizes requested targets at execution time", () => {

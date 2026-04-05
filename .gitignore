@@ -9,3 +9,4 @@ logs/*.json
 .claude/
 .vscode/
 *.tsbuildinfo
+packages/server/logs/records/

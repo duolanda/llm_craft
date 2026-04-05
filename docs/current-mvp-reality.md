@@ -11,7 +11,7 @@
 - 前端: React + Vite + Canvas
 - 后端: Node.js + TypeScript
 - AI 请求方式: OpenAI Chat Completions，多轮连续对话
-- AI 执行环境: `vm2`
+- AI 执行环境: 子进程 + Node `vm`
 - 游戏 Tick: 500ms
 - AI 思考频率: 默认每 5 tick 触发一次
 - AI 对话窗口: 每个玩家保留最近 20 次 AI 调用的 `user / assistant` 往返

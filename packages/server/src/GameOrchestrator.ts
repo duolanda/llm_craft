@@ -12,16 +12,17 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Game } from "./Game";
 import { AISandbox } from "./AISandbox";
-import { OpenAIClient, OpenAIClientConfig } from "./OpenAIClient";
 import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
+import { createLLMProvider } from "./createLLMProvider";
+import { LLMProvider, LLMProviderConfig } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
 export class GameOrchestrator {
   private game: Game;
   private ai1: AISandbox;
   private ai2: AISandbox;
-  private openai1: OpenAIClient;
-  private openai2: OpenAIClient;
+  private llm1: LLMProvider;
+  private llm2: LLMProvider;
   private lastAITick = { player_1: -100, player_2: -100 };
   private aiInterval = 5; // AI 每 5 个 tick 思考一次
   private isRunningAI = { player_1: false, player_2: false }; // 防止并发调用
@@ -33,12 +34,12 @@ export class GameOrchestrator {
   private aiTurns: AITurnRecord[] = [];
   private aiWindowSize = 20;
 
-  constructor(config: OpenAIClientConfig) {
+  constructor(config: LLMProviderConfig) {
     this.game = new Game();
     this.ai1 = new AISandbox("player_1");
     this.ai2 = new AISandbox("player_2");
-    this.openai1 = new OpenAIClient(config);
-    this.openai2 = new OpenAIClient(config);
+    this.llm1 = createLLMProvider(config);
+    this.llm2 = createLLMProvider(config);
   }
 
   getGame(): Game {
@@ -56,14 +57,14 @@ export class GameOrchestrator {
       const aiPackage = packageBuilder.build(playerId, state, this.game);
 
       const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
-      const openai = playerId === "player_1" ? this.openai1 : this.openai2;
-      const shouldResetConversation = openai.shouldResetConversation();
+      const llm = playerId === "player_1" ? this.llm1 : this.llm2;
+      const shouldResetConversation = llm.shouldResetConversation();
       const promptPayload = packageBuilder.buildPromptPayload(
         aiPackage,
         this.lastAIState[playerId],
         shouldResetConversation
       );
-      const { code, requestMessages } = await openai.generateCode(
+      const { code, requestMessages } = await llm.generateCode(
         promptPayload,
         shouldResetConversation
       );
@@ -90,8 +91,8 @@ export class GameOrchestrator {
         response: code,
         commands,
         errorMessage,
-        model: openai.getModel(),
-        baseURL: openai.getBaseURL(),
+        model: llm.getModel(),
+        baseURL: llm.getBaseURL(),
         createdAt: new Date().toISOString(),
       });
       this.lastAIState[playerId] = aiPackage;
@@ -169,13 +170,13 @@ export class GameOrchestrator {
         players: [
           {
             playerId: "player_1",
-            model: this.openai1.getModel(),
-            baseURL: this.openai1.getBaseURL(),
+            model: this.llm1.getModel(),
+            baseURL: this.llm1.getBaseURL(),
           },
           {
             playerId: "player_2",
-            model: this.openai2.getModel(),
-            baseURL: this.openai2.getBaseURL(),
+            model: this.llm2.getModel(),
+            baseURL: this.llm2.getBaseURL(),
           },
         ],
       },

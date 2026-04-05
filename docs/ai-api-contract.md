@@ -143,7 +143,7 @@ interface AIStatePackage {
 
 ## 3. 沙箱全局对象
 
-AI 代码在 `vm2` 中运行。
+AI 代码在子进程中的 Node `vm` 上下文里运行。
 
 当前仅保证以下全局对象存在：
 

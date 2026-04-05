@@ -8,10 +8,12 @@
     "dev:client": "pnpm --filter @llmcraft/client dev",
     "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build",
     "build:shared": "pnpm --filter @llmcraft/shared build",
-    "test": "pnpm --filter @llmcraft/server test"
+    "test": "pnpm --filter @llmcraft/server test",
+    "typecheck": "pnpm --filter @llmcraft/shared typecheck && pnpm --filter @llmcraft/server typecheck && pnpm --filter @llmcraft/client typecheck",
+    "verify": "pnpm typecheck && pnpm --filter @llmcraft/server test && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.9.0"
   }
 }

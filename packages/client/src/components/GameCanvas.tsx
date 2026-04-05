@@ -228,6 +228,19 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.moveTo(tx + 6, ty - 6);
             ctx.lineTo(tx - 6, ty + 6);
             ctx.stroke();
+
+            if (unit.intent.targetId) {
+              ctx.fillStyle = "rgba(8, 10, 12, 0.88)";
+              ctx.fillRect(tx + 8, ty - 14, 64, 16);
+              ctx.strokeStyle = "rgba(255, 42, 74, 0.6)";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(tx + 8, ty - 14, 64, 16);
+              ctx.fillStyle = "#ff6b7d";
+              ctx.font = "10px monospace";
+              ctx.textAlign = "left";
+              ctx.textBaseline = "middle";
+              ctx.fillText(unit.intent.targetId, tx + 12, ty - 6);
+            }
           } else if (unit.intent.type === 'hold') {
             // 待命意图：显示盾牌标记
             ctx.strokeStyle = color;

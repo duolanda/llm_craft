@@ -25,6 +25,19 @@ import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
 import { BuildingManager } from "./BuildingManager";
 
+type AttackIntent = {
+  type: "attack";
+  targetId?: string;
+  targetX?: number;
+  targetY?: number;
+  targetPriority?: string[];
+};
+
+type RuntimeUnit = Unit & {
+  intent?: Unit["intent"] | AttackIntent;
+  lastAttackTick?: number;
+};
+
 export class Game {
   private tick = 0;
   private unitManager = new UnitManager();
@@ -225,7 +238,7 @@ export class Game {
 
       case "attack_in_range": {
         if (command.unitId) {
-          const attacker = this.unitManager.getUnit(command.unitId);
+          const attacker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
           if (attacker && attacker.playerId === command.playerId) {
             const result = this.executeAttackIntent(attacker, command.playerId, {
               type: "attack",
@@ -419,7 +432,7 @@ export class Game {
     }
   }
 
-  private attackBuilding(attacker: Unit, target: Building): ResultCode {
+  private attackBuilding(attacker: RuntimeUnit, target: Building): ResultCode {
     if (!attacker.exists || !target.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -443,9 +456,9 @@ export class Game {
   }
 
   private executeAttackIntent(
-    attacker: Unit,
+    attacker: RuntimeUnit,
     playerId: string,
-    intent: Unit["intent"]
+    intent: AttackIntent | Unit["intent"]
   ): ResultCode {
     if (!attacker.exists || !intent || intent.type !== "attack") {
       return RESULT_CODES.ERR_INVALID_TARGET;
@@ -492,16 +505,18 @@ export class Game {
         continue;
       }
 
-      if (unit.lastAttackTick === this.tick) {
+      const runtimeUnit = unit as RuntimeUnit;
+
+      if (runtimeUnit.lastAttackTick === this.tick) {
         continue;
       }
 
-      const result = this.executeAttackIntent(unit, unit.playerId, unit.intent);
-      if (result === RESULT_CODES.ERR_INVALID_TARGET && unit.intent.targetId) {
-        unit.intent = { type: "hold" };
-        unit.state = UNIT_STATES.IDLE;
-      } else if (result !== RESULT_CODES.OK && unit.intent.targetId) {
-        unit.state = UNIT_STATES.IDLE;
+      const result = this.executeAttackIntent(runtimeUnit, runtimeUnit.playerId, runtimeUnit.intent);
+      if (result === RESULT_CODES.ERR_INVALID_TARGET && runtimeUnit.intent?.targetId) {
+        runtimeUnit.intent = { type: "hold" };
+        runtimeUnit.state = UNIT_STATES.IDLE;
+      } else if (result !== RESULT_CODES.OK && runtimeUnit.intent?.targetId) {
+        runtimeUnit.state = UNIT_STATES.IDLE;
       }
     }
   }

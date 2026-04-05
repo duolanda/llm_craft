@@ -3,9 +3,11 @@ import { GameState, GameSnapshot } from "@llmcraft/shared";
 
 interface WSMessage {
   type: string;
-  state: GameState;
+  state: GameState | null;
   snapshots: GameSnapshot[];
   filePath?: string;
+  liveEnabled?: boolean;
+  message?: string;
 }
 
 export function useWebSocket(url: string) {
@@ -13,6 +15,8 @@ export function useWebSocket(url: string) {
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
+  const [liveEnabled, setLiveEnabled] = useState(false);
+  const [serverMessage, setServerMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const send = useCallback((data: any) => {
@@ -36,6 +40,9 @@ export function useWebSocket(url: string) {
         if (data.type === "state") {
           setState(data.state);
           setSnapshots(data.snapshots);
+          setLiveEnabled(Boolean(data.liveEnabled));
+        } else if (data.type === "error" && data.message) {
+          setServerMessage(data.message);
         } else if (data.type === "record_saved" && data.filePath) {
           setLastSavedRecordPath(data.filePath);
         }
@@ -58,5 +65,5 @@ export function useWebSocket(url: string) {
     };
   }, [url]);
 
-  return { state, snapshots, connected, lastSavedRecordPath, send };
+  return { state, snapshots, connected, lastSavedRecordPath, liveEnabled, serverMessage, send };
 }

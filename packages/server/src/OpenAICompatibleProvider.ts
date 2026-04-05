@@ -1,21 +1,16 @@
 import OpenAI from "openai";
 import { AIPromptPayload } from "@llmcraft/shared";
+import { LLMProvider, LLMProviderConfig } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
-export interface OpenAIClientConfig {
-  apiKey: string;
-  model?: string;
-  baseURL?: string;
-}
-
-export class OpenAIClient {
+export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
   private baseURL?: string;
   private history: Array<{ role: "user" | "assistant"; content: string }> = [];
   private maxTurns = 20;
 
-  constructor(config: OpenAIClientConfig) {
+  constructor(config: LLMProviderConfig) {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,

@@ -1,6 +1,6 @@
-import { VM } from "vm2";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Command, AIStatePackage } from "@llmcraft/shared";
-import { APIBridge } from "./APIBridge";
 
 export interface AISandboxResult {
   commands: Command[];
@@ -9,45 +9,80 @@ export interface AISandboxResult {
 
 export class AISandbox {
   private playerId: string;
-  private bridge: APIBridge;
+  private executionTimeoutMs = 200;
 
   constructor(playerId: string) {
     this.playerId = playerId;
-    this.bridge = new APIBridge(playerId);
   }
 
   async executeCode(code: string, state: AIStatePackage): Promise<AISandboxResult> {
-    this.bridge.clearCommands();
-    const api = this.bridge.createAPI(state);
+    const { modulePath, execArgv } = this.resolveWorkerModule();
 
-    try {
-      // 使用 vm2 创建隔离环境
-      const vm = new VM({
-        timeout: 50, // 50ms 超时
-        sandbox: {
-          game: api.game,
-          me: api.me,
-          enemies: api.enemies,
-          enemyBuildings: api.enemyBuildings,
-          aiFeedbackSinceLastCall: api.aiFeedbackSinceLastCall,
-          map: api.map,
-          unitStats: api.unitStats,
-          buildingStats: api.buildingStats,
-          economy: api.economy,
-          utils: api.utils,
-          console: { log: () => {} } // 禁用 console.log
+    return await new Promise<AISandboxResult>((resolve) => {
+      const child = fork(modulePath, [], {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        execArgv,
+      });
+
+      let settled = false;
+      const finish = (result: AISandboxResult) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        if (!child.killed) {
+          child.kill();
+        }
+        resolve(result);
+      };
+
+      const timeout = setTimeout(() => {
+        finish({
+          commands: [],
+          errorMessage: `Sandbox timed out after ${this.executionTimeoutMs}ms`,
+        });
+      }, this.executionTimeoutMs);
+
+      child.once("message", (message: any) => {
+        finish({
+          commands: Array.isArray(message?.commands) ? message.commands : [],
+          errorMessage: typeof message?.errorMessage === "string" ? message.errorMessage : undefined,
+        });
+      });
+
+      child.once("error", (error) => {
+        console.error(`AI ${this.playerId} 沙箱进程错误:`, error);
+        finish({
+          commands: [],
+          errorMessage: error.message,
+        });
+      });
+
+      child.once("exit", (code, signal) => {
+        if (!settled) {
+          finish({
+            commands: [],
+            errorMessage: signal
+              ? `Sandbox exited with signal ${signal}`
+              : `Sandbox exited before returning a result (code ${code ?? "unknown"})`,
+          });
         }
       });
 
-      vm.run(code);
-    } catch (e) {
-      console.error(`AI ${this.playerId} 代码执行错误:`, e);
-      return {
-        commands: this.bridge.getCommands(),
-        errorMessage: e instanceof Error ? e.message : String(e),
-      };
-    }
+      child.send({
+        code,
+        state,
+        playerId: this.playerId,
+      });
+    });
+  }
 
-    return { commands: this.bridge.getCommands() };
+  private resolveWorkerModule(): { modulePath: string; execArgv: string[] } {
+    const sourceWorker = fileURLToPath(new URL("./AISandboxWorker.cjs", import.meta.url));
+    return {
+      modulePath: sourceWorker,
+      execArgv: [],
+    };
   }
 }

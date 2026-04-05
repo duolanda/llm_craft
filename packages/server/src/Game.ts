@@ -848,7 +848,14 @@ export class Game {
     command: Command,
     result: ResultCode,
     code: string,
-    meta?: { x?: number; y?: number; targetId?: string; hint?: string }
+    meta?: {
+      x?: number;
+      y?: number;
+      requestedX?: number;
+      requestedY?: number;
+      targetId?: string;
+      hint?: string;
+    }
   ): void {
     const log = this.addLog(type, message, {
       command,

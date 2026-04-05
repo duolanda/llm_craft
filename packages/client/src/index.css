@@ -603,6 +603,33 @@ body {
 .winner-name.red { color: var(--accent-red); text-shadow: 0 0 30px var(--accent-red-glow); }
 .winner-name.cyan { color: var(--accent-cyan); text-shadow: 0 0 30px var(--accent-cyan-glow); }
 
+.winner-save-path {
+  margin-top: 16px;
+  max-width: 520px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.winner-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.hud-btn-ghost {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.12);
+  color: var(--text-secondary);
+}
+
+.hud-btn-ghost:hover:not(:disabled) {
+  border-color: rgba(255,255,255,0.24);
+  color: var(--text-primary);
+}
+
 /* Empty / waiting states */
 .empty-state {
   display: flex;

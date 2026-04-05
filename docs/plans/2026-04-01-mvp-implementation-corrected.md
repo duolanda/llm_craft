@@ -335,3 +335,7 @@ Task 4 (AI沙箱) ──→ Task 5 (WebSocket) │
 | isolated-vm 在 Windows 编译失败 | 降级到 `vm2` 或直接使用 `new Function` + 严格白名单 |
 | OpenAI API 延迟高 | 增加超时到 100ms，添加重试逻辑 |
 | 前端 Canvas 性能差 | 降级到 DOM 渲染或优化绘制逻辑 |
+# 文档状态说明
+
+> 这是历史实现计划文档，不代表当前已实现规则。
+> 当前有效规则与接口以 [current-mvp-reality.md](/E:/Projects/llm_craft/docs/current-mvp-reality.md) 和 [ai-api-contract.md](/E:/Projects/llm_craft/docs/ai-api-contract.md) 为准。

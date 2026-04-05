@@ -12,7 +12,6 @@ export interface GameObject {
   exists: boolean;
 }
 
-// 修正: 添加attackRange属性
 export interface Unit extends GameObject {
   type: UnitType;
   hp: number;
@@ -20,10 +19,12 @@ export interface Unit extends GameObject {
   state: UnitState;
   my: boolean;
   playerId: string;
-  attackRange: number; // worker=0, soldier=1, scout=0
+  attackRange: number;
+  carryingCredits: number;
+  carryCapacity: number;
   // 意图显示
   intent?: {
-    type: 'move' | 'attack' | 'hold';
+    type: 'move' | 'attack' | 'hold' | 'gather' | 'deposit';
     targetX?: number;
     targetY?: number;
     targetId?: string;
@@ -44,8 +45,7 @@ export interface Building extends GameObject {
 }
 
 export interface Resources {
-  energy: number;
-  energyPerTick: number;
+  credits: number;
 }
 
 export interface Player {
@@ -91,6 +91,7 @@ export interface Command {
   targetId?: string;
   position?: Position;
   unitType?: UnitType;
+  buildingType?: BuildingType;
   playerId: string;
 }
 
@@ -100,7 +101,14 @@ export interface GameSnapshot {
   aiOutputs: Record<string, string>;
 }
 
-// 单位属性信息
+export interface CommandResult {
+  tick: number;
+  command: Command;
+  result: ResultCode;
+  success: boolean;
+  message: string;
+}
+
 export interface UnitStats {
   hp: number;
   speed: number;
@@ -109,7 +117,11 @@ export interface UnitStats {
   attackRange: number;
 }
 
-// AI State Package for AI Sandbox
+export interface BuildingStats {
+  hp: number;
+  cost: number;
+}
+
 export interface AIStatePackage {
   tick: number;
   my: {
@@ -139,7 +151,156 @@ export interface AIStatePackage {
     tiles: Tile[]; // 所有地块信息（MVP：全图可见）
   };
   unitStats: Record<UnitType, UnitStats>; // 单位属性表
+  buildingStats: Record<BuildingType, BuildingStats>;
+  economy: {
+    workerCarryCapacity: number;
+    workerGatherRate: number;
+    hqDeliveryRange: number;
+  };
   eventsSinceLastCall: GameLog[];
   aiFeedbackSinceLastCall: AIFeedback[];
   gameTimeRemaining: number;
+}
+
+export interface AIPromptPayload {
+  mode: "full" | "delta";
+  tick: number;
+  tickIntervalMs: number;
+  summary: string;
+  state: AIStatePackage | null;
+  delta: {
+    creditsChanged?: number;
+    myUnitChanges: Array<{
+      id: string;
+      type: UnitType;
+      change: "created" | "removed" | "moved" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+      state?: UnitState;
+      carryingCredits?: number;
+      carryCapacity?: number;
+    }>;
+    myBuildingChanges: Array<{
+      id: string;
+      type: BuildingType;
+      change: "created" | "removed" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    enemyUnitChanges: Array<{
+      id: string;
+      type: string;
+      change: "created" | "removed" | "moved" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    enemyBuildingChanges: Array<{
+      id: string;
+      type: string;
+      change: "created" | "removed" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    events: GameLog[];
+    aiFeedback: AIFeedback[];
+  } | null;
+}
+
+export interface AITurnRecord {
+  playerId: string;
+  tick: number;
+  requestMessages: Array<{
+    role: "system" | "user" | "assistant";
+    content: string;
+  }>;
+  promptPayload: AIPromptPayload;
+  response: string;
+  commands: Command[];
+  errorMessage?: string;
+  model: string;
+  baseURL?: string;
+  createdAt: string;
+}
+
+export interface SavedAITurnRecord {
+  playerId: string;
+  tick: number;
+  windowMessageCount: number;
+  promptPayload: AIPromptPayload;
+  response: string;
+  commands: Command[];
+  errorMessage?: string;
+  model: string;
+  baseURL?: string;
+  createdAt: string;
+}
+
+export interface TickDeltaRecord {
+  tick: number;
+  players: Array<{
+    playerId: string;
+    credits?: number;
+    units: Array<{
+      id: string;
+      type: UnitType;
+      change: "created" | "removed" | "moved" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+      state?: UnitState;
+      attackRange?: number;
+      carryingCredits?: number;
+      carryCapacity?: number;
+    }>;
+    buildings: Array<{
+      id: string;
+      type: BuildingType;
+      change: "created" | "removed" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+      productionQueue?: UnitType[];
+    }>;
+  }>;
+  newLogs: GameLog[];
+  aiOutputs: Record<string, string>;
+  winner?: string | null;
+}
+
+export interface GameRecord {
+  metadata: {
+    startedAt: string;
+    savedAt: string;
+    endedAt?: string;
+    status: "running" | "stopped" | "finished";
+    winner: string | null;
+    aiIntervalTicks: number;
+    aiContextWindowTurns: number;
+    map: {
+      width: number;
+      height: number;
+    };
+    recordFormat: "compact-v2";
+    systemPrompt: string;
+    players: Array<{
+      playerId: string;
+      model: string;
+      baseURL?: string;
+    }>;
+  };
+  initialState: GameState;
+  finalState: GameState;
+  tickDeltas: TickDeltaRecord[];
+  commandResults: CommandResult[];
+  aiTurns: SavedAITurnRecord[];
 }

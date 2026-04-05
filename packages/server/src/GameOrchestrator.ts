@@ -1,8 +1,20 @@
-import { AIStatePackage } from "@llmcraft/shared";
+import {
+  AIStatePackage,
+  AITurnRecord,
+  GameRecord,
+  GameState,
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  SavedAITurnRecord,
+  TickDeltaRecord,
+} from "@llmcraft/shared";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { Game } from "./Game";
 import { AISandbox } from "./AISandbox";
 import { OpenAIClient, OpenAIClientConfig } from "./OpenAIClient";
 import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
+import { SYSTEM_PROMPT } from "./SystemPrompt";
 
 export class GameOrchestrator {
   private game: Game;
@@ -16,6 +28,10 @@ export class GameOrchestrator {
   private isPolling = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private runSession = 0;
+  private startedAt = new Date().toISOString();
+  private lastAIState: Record<string, AIStatePackage | null> = { player_1: null, player_2: null };
+  private aiTurns: AITurnRecord[] = [];
+  private aiWindowSize = 20;
 
   constructor(config: OpenAIClientConfig) {
     this.game = new Game();
@@ -41,8 +57,16 @@ export class GameOrchestrator {
 
       const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
       const openai = playerId === "player_1" ? this.openai1 : this.openai2;
-
-      const code = await openai.generateCode(aiPackage);
+      const shouldResetConversation = openai.shouldResetConversation();
+      const promptPayload = packageBuilder.buildPromptPayload(
+        aiPackage,
+        this.lastAIState[playerId],
+        shouldResetConversation
+      );
+      const { code, requestMessages } = await openai.generateCode(
+        promptPayload,
+        shouldResetConversation
+      );
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
@@ -58,6 +82,22 @@ export class GameOrchestrator {
       for (const cmd of commands) {
         this.game.queueCommand(cmd);
       }
+      this.aiTurns.push({
+        playerId,
+        tick: state.tick,
+        requestMessages,
+        promptPayload,
+        response: code,
+        commands,
+        errorMessage,
+        model: openai.getModel(),
+        baseURL: openai.getBaseURL(),
+        createdAt: new Date().toISOString(),
+      });
+      if (this.aiTurns.length > 500) {
+        this.aiTurns = this.aiTurns.slice(-250);
+      }
+      this.lastAIState[playerId] = aiPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
       this.game.addAIFeedback(
@@ -109,5 +149,217 @@ export class GameOrchestrator {
       this.pollTimeout = null;
     }
     this.game.stop();
+  }
+
+  async saveRecord(): Promise<string> {
+    const snapshots = this.game.getSnapshots();
+    const initialState = snapshots[0]?.state || this.game.getState();
+    const record: GameRecord = {
+      metadata: {
+        startedAt: this.startedAt,
+        savedAt: new Date().toISOString(),
+        endedAt: this.game.getWinner() || !this.game.isGameRunning() ? new Date().toISOString() : undefined,
+        status: this.game.getWinner() ? "finished" : this.game.isGameRunning() ? "running" : "stopped",
+        winner: this.game.getWinner(),
+        aiIntervalTicks: this.aiInterval,
+        aiContextWindowTurns: this.aiWindowSize,
+        map: {
+          width: MAP_WIDTH,
+          height: MAP_HEIGHT,
+        },
+        recordFormat: "compact-v2",
+        systemPrompt: SYSTEM_PROMPT,
+        players: [
+          {
+            playerId: "player_1",
+            model: this.openai1.getModel(),
+            baseURL: this.openai1.getBaseURL(),
+          },
+          {
+            playerId: "player_2",
+            model: this.openai2.getModel(),
+            baseURL: this.openai2.getBaseURL(),
+          },
+        ],
+      },
+      initialState,
+      finalState: this.game.getState(),
+      tickDeltas: this.buildTickDeltas(snapshots),
+      commandResults: this.game.getCommandResults(),
+      aiTurns: this.buildSavedAITurns(),
+    };
+
+    const recordsDir = path.resolve(process.cwd(), "logs", "records");
+    await fs.mkdir(recordsDir, { recursive: true });
+    const fileName = `match-${record.metadata.savedAt.replace(/[:.]/g, "-")}.json`;
+    const filePath = path.join(recordsDir, fileName);
+    await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
+    return filePath;
+  }
+
+  private buildSavedAITurns(): SavedAITurnRecord[] {
+    return this.aiTurns.map((turn) => ({
+      playerId: turn.playerId,
+      tick: turn.tick,
+      windowMessageCount: turn.requestMessages.length,
+      promptPayload: turn.promptPayload,
+      response: turn.response,
+      commands: turn.commands,
+      errorMessage: turn.errorMessage,
+      model: turn.model,
+      baseURL: turn.baseURL,
+      createdAt: turn.createdAt,
+    }));
+  }
+
+  private buildTickDeltas(snapshots: Array<{ tick: number; state: GameState; aiOutputs: Record<string, string> }>): TickDeltaRecord[] {
+    if (snapshots.length <= 1) {
+      return [];
+    }
+
+    const deltas: TickDeltaRecord[] = [];
+    for (let i = 1; i < snapshots.length; i++) {
+      const previous = snapshots[i - 1];
+      const current = snapshots[i];
+      deltas.push({
+        tick: current.tick,
+        players: current.state.players.map((player, playerIndex) => {
+          const previousPlayer = previous.state.players[playerIndex];
+          return {
+            playerId: player.id,
+            credits:
+              player.resources.credits !== previousPlayer.resources.credits
+                ? player.resources.credits
+                : undefined,
+            units: this.diffUnits(previousPlayer.units, player.units),
+            buildings: this.diffBuildings(previousPlayer.buildings, player.buildings),
+          };
+        }),
+        newLogs:
+          current.state.logs.length >= previous.state.logs.length
+            ? current.state.logs.slice(previous.state.logs.length)
+            : current.state.logs,
+        aiOutputs: this.diffAIOutputs(previous.aiOutputs, current.aiOutputs),
+        winner: current.state.winner !== previous.state.winner ? current.state.winner : undefined,
+      });
+    }
+
+    return deltas;
+  }
+
+  private diffUnits(previousUnits: GameState["players"][number]["units"], currentUnits: GameState["players"][number]["units"]) {
+    const previousMap = new Map(previousUnits.map((unit) => [unit.id, unit]));
+    const currentMap = new Map(currentUnits.map((unit) => [unit.id, unit]));
+    const changes: TickDeltaRecord["players"][number]["units"] = [];
+
+    for (const unit of currentUnits) {
+      const previousUnit = previousMap.get(unit.id);
+      if (!previousUnit) {
+        changes.push({
+          id: unit.id,
+          type: unit.type,
+          change: "created",
+          x: unit.x,
+          y: unit.y,
+          hp: unit.hp,
+          maxHp: unit.maxHp,
+          state: unit.state,
+          attackRange: unit.attackRange,
+        });
+        continue;
+      }
+
+      const moved = previousUnit.x !== unit.x || previousUnit.y !== unit.y;
+      const damaged = previousUnit.hp !== unit.hp;
+      const updated = previousUnit.state !== unit.state;
+
+      if (moved || damaged || updated) {
+        changes.push({
+          id: unit.id,
+          type: unit.type,
+          change: moved ? "moved" : damaged ? "damaged" : "updated",
+          x: unit.x,
+          y: unit.y,
+          hp: unit.hp,
+          maxHp: unit.maxHp,
+          state: unit.state,
+          attackRange: unit.attackRange,
+        });
+      }
+    }
+
+    for (const unit of previousUnits) {
+      if (!currentMap.has(unit.id)) {
+        changes.push({
+          id: unit.id,
+          type: unit.type,
+          change: "removed",
+        });
+      }
+    }
+
+    return changes;
+  }
+
+  private diffBuildings(previousBuildings: GameState["players"][number]["buildings"], currentBuildings: GameState["players"][number]["buildings"]) {
+    const previousMap = new Map(previousBuildings.map((building) => [building.id, building]));
+    const currentMap = new Map(currentBuildings.map((building) => [building.id, building]));
+    const changes: TickDeltaRecord["players"][number]["buildings"] = [];
+
+    for (const building of currentBuildings) {
+      const previousBuilding = previousMap.get(building.id);
+      if (!previousBuilding) {
+        changes.push({
+          id: building.id,
+          type: building.type,
+          change: "created",
+          x: building.x,
+          y: building.y,
+          hp: building.hp,
+          maxHp: building.maxHp,
+          productionQueue: building.productionQueue,
+        });
+        continue;
+      }
+
+      const damaged = previousBuilding.hp !== building.hp;
+      const updated =
+        JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue);
+
+      if (damaged || updated) {
+        changes.push({
+          id: building.id,
+          type: building.type,
+          change: damaged ? "damaged" : "updated",
+          x: building.x,
+          y: building.y,
+          hp: building.hp,
+          maxHp: building.maxHp,
+          productionQueue: building.productionQueue,
+        });
+      }
+    }
+
+    for (const building of previousBuildings) {
+      if (!currentMap.has(building.id)) {
+        changes.push({
+          id: building.id,
+          type: building.type,
+          change: "removed",
+        });
+      }
+    }
+
+    return changes;
+  }
+
+  private diffAIOutputs(previousOutputs: Record<string, string>, currentOutputs: Record<string, string>) {
+    const diff: Record<string, string> = {};
+    for (const key of Object.keys(currentOutputs)) {
+      if (currentOutputs[key] !== previousOutputs[key]) {
+        diff[key] = currentOutputs[key];
+      }
+    }
+    return diff;
   }
 }

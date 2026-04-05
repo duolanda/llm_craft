@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { AIStatePackage } from "@llmcraft/shared";
+import { AIPromptPayload } from "@llmcraft/shared";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
 export interface OpenAIClientConfig {
@@ -11,6 +11,9 @@ export interface OpenAIClientConfig {
 export class OpenAIClient {
   private client: OpenAI;
   private model: string;
+  private baseURL?: string;
+  private history: Array<{ role: "user" | "assistant"; content: string }> = [];
+  private maxTurns = 20;
 
   constructor(config: OpenAIClientConfig) {
     this.client = new OpenAI({
@@ -18,28 +21,59 @@ export class OpenAIClient {
       baseURL: config.baseURL,
     });
     this.model = config.model || "gpt-4o-mini";
+    this.baseURL = config.baseURL;
   }
 
-  async generateCode(state: AIStatePackage): Promise<string> {
-    const userPrompt = JSON.stringify(state, null, 2);
+  shouldResetConversation(): boolean {
+    return this.history.length / 2 >= this.maxTurns;
+  }
+
+  async generateCode(
+    payload: AIPromptPayload,
+    resetConversation = false
+  ): Promise<{
+    code: string;
+    requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  }> {
+    if (resetConversation) {
+      this.history = [];
+    }
+
+    const userPrompt = JSON.stringify(payload, null, 2);
+    const requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...this.history,
+      { role: "user", content: userPrompt },
+    ];
 
     try {
       const response = await this.client.chat.completions.create({
         model: this.model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userPrompt },
-        ],
+        messages: requestMessages,
         temperature: 0.7,
         max_tokens: 1024,
       });
 
       const code = response.choices[0]?.message?.content || "";
-      return this.cleanCode(code);
+      const cleanedCode = this.cleanCode(code);
+      this.history.push({ role: "user", content: userPrompt });
+      this.history.push({ role: "assistant", content: cleanedCode });
+      if (this.history.length > this.maxTurns * 2) {
+        this.history = this.history.slice(-(this.maxTurns * 2));
+      }
+      return { code: cleanedCode, requestMessages };
     } catch (e) {
       console.error("OpenAI API 错误:", e);
-      return "// AI 生成失败";
+      return { code: "// AI 生成失败", requestMessages };
     }
+  }
+
+  getModel(): string {
+    return this.model;
+  }
+
+  getBaseURL(): string | undefined {
+    return this.baseURL;
   }
 
   private cleanCode(code: string): string {

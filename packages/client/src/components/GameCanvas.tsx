@@ -16,7 +16,6 @@ const COLORS = {
   player1: "#ff2a4a",
   player2: "#00e5ff",
   hq: "#c45fff",
-  generator: "#ff9800",
   barracks: "#2979ff",
 };
 
@@ -120,28 +119,27 @@ export function GameCanvas({ state }: GameCanvasProps) {
 
         // 根据单位类型使用不同形状
         if (unit.type === "soldier") {
-          // 士兵: 大圆（战斗单位）
+          // 士兵: 带刺八边形
+          const outer = TILE_SIZE / 3 - 1;
+          const inner = TILE_SIZE / 4 - 2;
           ctx.beginPath();
-          ctx.arc(cx, cy, TILE_SIZE / 3 - 1, 0, Math.PI * 2);
+          for (let i = 0; i < 8; i++) {
+            const angle = -Math.PI / 2 + (Math.PI / 4) * i;
+            const radius = i % 2 === 0 ? outer : inner;
+            const px = cx + Math.cos(angle) * radius;
+            const py = cy + Math.sin(angle) * radius;
+            if (i === 0) {
+              ctx.moveTo(px, py);
+            } else {
+              ctx.lineTo(px, py);
+            }
+          }
+          ctx.closePath();
           ctx.fill();
         } else if (unit.type === "worker") {
-          // 工人: 小圆（采集单位）
+          // 工人: 纯圆形
           ctx.beginPath();
           ctx.arc(cx, cy, TILE_SIZE / 4 - 1, 0, Math.PI * 2);
-          ctx.fill();
-          // 工人中心点标记
-          ctx.fillStyle = "rgba(255,255,255,0.4)";
-          ctx.beginPath();
-          ctx.arc(cx, cy, 2, 0, Math.PI * 2);
-          ctx.fill();
-        } else if (unit.type === "scout") {
-          // 侦察兵: 菱形（高速侦察）
-          ctx.beginPath();
-          ctx.moveTo(cx, cy - TILE_SIZE / 3 + 2);
-          ctx.lineTo(cx + TILE_SIZE / 3 - 2, cy);
-          ctx.lineTo(cx, cy + TILE_SIZE / 3 - 2);
-          ctx.lineTo(cx - TILE_SIZE / 3 + 2, cy);
-          ctx.closePath();
           ctx.fill();
         }
 
@@ -156,6 +154,31 @@ export function GameCanvas({ state }: GameCanvasProps) {
         // 血条
         ctx.fillStyle = color;
         ctx.fillRect(ux + 4, uy - 5, (TILE_SIZE - 8) * (unit.hp / unit.maxHp), 4);
+
+        // 工人载货标记
+        if (unit.type === "worker" && unit.carryingCredits > 0) {
+          const badgeWidth = 20;
+          const badgeHeight = 12;
+          const badgeX = cx - badgeWidth / 2;
+          const badgeY = uy + TILE_SIZE - 2;
+          const carryRatio = Math.max(0, Math.min(1, unit.carryingCredits / unit.carryCapacity));
+
+          ctx.fillStyle = "rgba(8, 10, 12, 0.9)";
+          ctx.fillRect(badgeX, badgeY, badgeWidth, badgeHeight);
+
+          ctx.fillStyle = "rgba(255, 179, 0, 0.25)";
+          ctx.fillRect(badgeX + 1, badgeY + 1, (badgeWidth - 2) * carryRatio, badgeHeight - 2);
+
+          ctx.strokeStyle = "rgba(255, 179, 0, 0.8)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(badgeX, badgeY, badgeWidth, badgeHeight);
+
+          ctx.fillStyle = "#ffd54f";
+          ctx.font = "10px monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(unit.carryingCredits), cx, badgeY + badgeHeight / 2 + 0.5);
+        }
 
         // 绘制意图
         if (unit.intent) {

@@ -3,6 +3,7 @@ import {
   UnitType,
   UnitState,
   TileType,
+  ECONOMY_RULES,
   TILE_TYPES,
   UNIT_TYPES,
   UNIT_STATES,
@@ -36,6 +37,8 @@ export class UnitManager {
       playerId,
       exists: true,
       attackRange: stats.attackRange,
+      carryingCredits: 0,
+      carryCapacity: ECONOMY_RULES.WORKER_CARRY_CAPACITY,
     };
     this.units.set(unit.id, unit);
     return unit;

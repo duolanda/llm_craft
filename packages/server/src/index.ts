@@ -57,6 +57,13 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "stop") {
         console.log("收到停止命令");
         orchestrator.stop();
+      } else if (msg.type === "save_record") {
+        void orchestrator.saveRecord().then((filePath) => {
+          ws.send(JSON.stringify({
+            type: "record_saved",
+            filePath,
+          }));
+        });
       }
     } catch (e) {
       console.error("消息错误:", e);

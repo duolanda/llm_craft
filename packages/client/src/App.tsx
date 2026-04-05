@@ -7,7 +7,7 @@ import { LegendPanel } from "./components/LegendPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 
 function App() {
-  const { state, snapshots, connected, send } = useWebSocket("ws://localhost:3001");
+  const { state, snapshots, connected, lastSavedRecordPath, send } = useWebSocket("ws://localhost:3001");
   const [isPlaying, setIsPlaying] = useState(false);
 
   const handleStart = () => {
@@ -18,6 +18,10 @@ function App() {
   const handleStop = () => {
     send({ type: "stop" });
     setIsPlaying(false);
+  };
+
+  const handleSaveRecord = () => {
+    send({ type: "save_record" });
   };
 
   return (
@@ -40,8 +44,21 @@ function App() {
             >
               {isPlaying ? "终止模拟" : "启动模拟"}
             </button>
+            <button
+              onClick={handleSaveRecord}
+              disabled={!connected || !state}
+              className="hud-btn"
+            >
+              保存记录
+            </button>
           </div>
         </header>
+
+        {lastSavedRecordPath && (
+          <div style={{ marginBottom: 12, color: "var(--text-secondary)", fontSize: 12 }}>
+            记录已保存到: {lastSavedRecordPath}
+          </div>
+        )}
 
         <div className="dashboard">
           <div className="stats-col">

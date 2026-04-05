@@ -33,4 +33,42 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.enemies[0]).toHaveProperty("id");
     expect(aiState.enemies[0]).toHaveProperty("type");
   });
+
+  it("builds a delta prompt payload after the first full payload", () => {
+    const game = new Game();
+    const fullState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const fullPayload = AIStatePackageBuilder.buildPromptPayload(fullState, null, true);
+
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: game.getState().players[0].units[0].id,
+      buildingType: "barracks",
+      position: { x: 4, y: 10 },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const nextState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const deltaPayload = AIStatePackageBuilder.buildPromptPayload(nextState, fullState, false);
+
+    expect(fullPayload.mode).toBe("full");
+    expect(deltaPayload.mode).toBe("delta");
+    expect(deltaPayload.delta?.creditsChanged).toBe(-120);
+    expect(deltaPayload.delta?.myBuildingChanges.some((change) => change.change === "created")).toBe(true);
+  });
+
+  it("includes economy rules, building stats and worker cargo state", () => {
+    const game = new Game();
+    const worker = game.getState().players[0].units[0];
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+    runtimeWorker.carryingCredits = 30;
+
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+
+    expect(aiState.buildingStats.barracks.cost).toBe(120);
+    expect(aiState.economy.workerGatherRate).toBe(10);
+    expect(aiState.my.units[0]).toHaveProperty("carryingCredits", 30);
+    expect(aiState.my.units[0]).toHaveProperty("carryCapacity", 100);
+  });
 });

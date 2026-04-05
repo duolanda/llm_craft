@@ -6,27 +6,95 @@
 
 它回答两个问题：
 
-- 每轮模型会收到什么 JSON
+- 每轮模型会收到什么消息
 - 生成的 JavaScript 在沙箱里能访问什么全局对象和方法
 
 不包含战术建议，不包含设计愿景，不包含未来计划。
 
 ## 1. 输入结构
 
-每轮模型收到：
+每次模型调用都会收到：
 
 - `system prompt`
-- `JSON.stringify(AIStatePackage, null, 2)`
+- 最近 20 次 AI 对话窗口内的历史 `user / assistant` 消息
+- 当前这一轮新的 `user` 消息
 
-当前 `AIStatePackage` 结构：
+当前新的 `user` 消息内容是：
+
+```ts
+JSON.stringify(AIPromptPayload, null, 2)
+```
+
+当前 `AIPromptPayload` 结构：
+
+```ts
+interface AIPromptPayload {
+  mode: "full" | "delta";
+  tick: number;
+  tickIntervalMs: number;
+  summary: string;
+  state: AIStatePackage | null;
+  delta: {
+    creditsChanged?: number;
+    myUnitChanges: Array<{
+      id: string;
+      type: "worker" | "soldier";
+      change: "created" | "removed" | "moved" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+      state?: string;
+    }>;
+    myBuildingChanges: Array<{
+      id: string;
+      type: "hq" | "barracks";
+      change: "created" | "removed" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    enemyUnitChanges: Array<{
+      id: string;
+      type: string;
+      change: "created" | "removed" | "moved" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    enemyBuildingChanges: Array<{
+      id: string;
+      type: string;
+      change: "created" | "removed" | "damaged" | "updated";
+      x?: number;
+      y?: number;
+      hp?: number;
+      maxHp?: number;
+    }>;
+    events: GameLog[];
+    aiFeedback: AIFeedback[];
+  } | null;
+}
+```
+
+说明：
+
+- `mode = "full"` 时，`state` 为完整基线状态，`delta = null`
+- `mode = "delta"` 时，`state = null`，变化写在 `delta`
+- 当窗口滚动需要裁剪旧消息时，服务端会重新发一次 `mode = "full"` 的完整基线
+
+## 2. `AIStatePackage`
+
+完整基线状态的结构如下：
 
 ```ts
 interface AIStatePackage {
   tick: number;
   my: {
     resources: {
-      energy: number;
-      energyPerTick: number;
+      credits: number;
     };
     units: Unit[];
     buildings: Building[];
@@ -59,7 +127,6 @@ interface AIStatePackage {
   unitStats: {
     worker: UnitStats;
     soldier: UnitStats;
-    scout: UnitStats;
   };
   eventsSinceLastCall: GameLog[];
   aiFeedbackSinceLastCall: AIFeedback[];
@@ -72,9 +139,9 @@ interface AIStatePackage {
 - `enemies` 在输入 JSON 中只包含敌方单位
 - `enemyBuildings` 单独包含敌方建筑
 - `map.tiles` 当前只包含非空地块，也就是障碍物和资源点
-- `eventsSinceLastCall` 和 `aiFeedbackSinceLastCall` 当前是最近切片，不是严格增量流
+- `eventsSinceLastCall` 和 `aiFeedbackSinceLastCall` 是最近切片，不是严格一次性消费队列
 
-## 2. 沙箱全局对象
+## 3. 沙箱全局对象
 
 AI 代码在 `vm2` 中运行。
 
@@ -91,9 +158,9 @@ AI 代码在 `vm2` 中运行。
 
 不要假设存在其他全局变量。
 
-## 3. 全局对象定义
+## 4. 全局对象定义
 
-### 3.1 `game`
+### 4.1 `game`
 
 ```ts
 const game: {
@@ -102,20 +169,18 @@ const game: {
 };
 ```
 
-### 3.2 `me`
+### 4.2 `me`
 
 ```ts
 const me: {
   units: WrappedUnit[];
   buildings: WrappedBuilding[];
   resources: {
-    energy: number;
-    energyPerTick: number;
+    credits: number;
   };
   hq: WrappedBuilding | null;
   workers: WrappedUnit[];
   soldiers: WrappedUnit[];
-  scouts: WrappedUnit[];
 };
 ```
 
@@ -125,15 +190,22 @@ const me: {
 unit.moveTo(pos: { x: number; y: number }): void;
 unit.attack(targetId: string): void;
 unit.holdPosition(): void;
+unit.build(buildingType: "barracks", pos: { x: number; y: number }): void;
 ```
 
 `WrappedBuilding` 在普通建筑字段基础上，额外提供：
 
 ```ts
-building.spawnUnit(unitType: "worker" | "soldier" | "scout"): void;
+building.spawnUnit(unitType: "worker" | "soldier"): void;
 ```
 
-### 3.3 `enemies`
+规则说明：
+
+- `hq` 只能 `spawnUnit("worker")`
+- `barracks` 只能 `spawnUnit("soldier")`
+- `worker.build("barracks", ...)` 是当前唯一可建造的建筑命令
+
+### 4.3 `enemies`
 
 ```ts
 const enemies: Array<{
@@ -149,10 +221,10 @@ const enemies: Array<{
 说明：
 
 - 沙箱里的 `enemies` 是“敌方单位 + 敌方建筑”的合并列表
-- 也就是说，沙箱 `enemies` 和输入 JSON `enemies` 不是同一个语义层次
+- 输入 JSON 的 `enemies` 和沙箱里的 `enemies` 不是同一个语义层次
 - 如果只要敌方单位，需要按 `type` 自己筛选
 
-### 3.4 `enemyBuildings`
+### 4.4 `enemyBuildings`
 
 ```ts
 const enemyBuildings: Array<{
@@ -165,7 +237,7 @@ const enemyBuildings: Array<{
 }>;
 ```
 
-### 3.5 `aiFeedbackSinceLastCall`
+### 4.5 `aiFeedbackSinceLastCall`
 
 ```ts
 const aiFeedbackSinceLastCall: Array<{
@@ -176,7 +248,7 @@ const aiFeedbackSinceLastCall: Array<{
 }>;
 ```
 
-### 3.6 `map`
+### 4.6 `map`
 
 ```ts
 const map: {
@@ -200,7 +272,7 @@ const map: {
 - `map.tiles` 只包含非空地块
 - `map.getTile(x, y)` 对空地返回 `{ x, y, type: "empty" }`
 
-### 3.7 `unitStats`
+### 4.7 `unitStats`
 
 ```ts
 const unitStats: {
@@ -218,17 +290,10 @@ const unitStats: {
     cost: number;
     attackRange: number;
   };
-  scout: {
-    hp: number;
-    speed: number;
-    attack: number;
-    cost: number;
-    attackRange: number;
-  };
 };
 ```
 
-### 3.8 `utils`
+### 4.8 `utils`
 
 ```ts
 const utils: {
@@ -238,25 +303,35 @@ const utils: {
 };
 ```
 
-## 4. 当前保证的行为
+## 5. 当前保证的行为
 
 - `unit.moveTo(...)` 会下发移动命令，实际移动由游戏系统逐 tick 执行
 - `unit.attack(...)` 会下发攻击命令，目标需要在攻击范围内
 - `unit.holdPosition()` 会下发待命命令
-- `building.spawnUnit(...)` 会下发产兵命令
+- `unit.build("barracks", ...)` 会下发建造兵营命令
+- `building.spawnUnit(...)` 会下发产兵命令，但必须满足建筑类型权限
 - 沙箱运行时错误会被捕获并作为该轮 AI 失败返回，不应导致服务端进程退出
 
-## 5. 当前不保证的行为
+## 6. 当前不保证的行为
 
 - 不保证严格战争迷雾
 - 不保证 `eventsSinceLastCall` / `aiFeedbackSinceLastCall` 是严格单次消费
 - 不保证输入 JSON 和沙箱全局对象完全同构
 - 不保证存在未在本文列出的兼容变量名
 
-## 6. 最小示例
+## 7. 最小示例
 
 ```js
+const barracks = me.buildings.find(b => b.type === "barracks");
 const enemyHQ = enemyBuildings.find(b => b.type === "hq");
+
+if (!barracks && me.workers[0] && me.resources.credits >= unitStats.worker.cost + 120) {
+  me.workers[0].build("barracks", { x: me.hq.x + 2, y: me.hq.y });
+}
+
+if (barracks && me.resources.credits >= unitStats.soldier.cost) {
+  barracks.spawnUnit("soldier");
+}
 
 if (enemyHQ) {
   me.soldiers.forEach(s => {

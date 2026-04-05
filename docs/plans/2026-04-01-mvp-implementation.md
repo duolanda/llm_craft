@@ -1848,3 +1848,7 @@ cd packages/client && npm run dev
 **2. Parallel Session（独立会话）** - 打开新会话用 executing-plans，批量执行带检查点
 
 选哪个？
+# 文档状态说明
+
+> 这是历史实现计划文档，不代表当前已实现规则。
+> 当前有效规则与接口以 [current-mvp-reality.md](/E:/Projects/llm_craft/docs/current-mvp-reality.md) 和 [ai-api-contract.md](/E:/Projects/llm_craft/docs/ai-api-contract.md) 为准。

@@ -514,3 +514,7 @@ AI 返回代码字符串
 ---
 
 > **下一步**：建议先做一个极简 proof-of-concept——把地图缩到 10×10，只有 HQ + Soldier，让两个 GPT-4o-mini 跑起来打一局，看看 AI 自发生成的战术五花八门到什么程度，再决定深化哪些系统。
+# 文档状态说明
+
+> 这是历史设计稿，不是当前实现规范。
+> 当前有效规则与接口以 [current-mvp-reality.md](/E:/Projects/llm_craft/docs/current-mvp-reality.md) 和 [ai-api-contract.md](/E:/Projects/llm_craft/docs/ai-api-contract.md) 为准。

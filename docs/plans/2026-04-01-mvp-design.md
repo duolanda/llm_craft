@@ -229,3 +229,7 @@ idleSoldiers.forEach(s => {
   }
 });
 ```
+# 文档状态说明
+
+> 这是历史方案文档，不代表当前已实现规则。
+> 当前有效规则与接口以 [current-mvp-reality.md](/E:/Projects/llm_craft/docs/current-mvp-reality.md) 和 [ai-api-contract.md](/E:/Projects/llm_craft/docs/ai-api-contract.md) 为准。

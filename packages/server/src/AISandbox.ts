@@ -32,6 +32,8 @@ export class AISandbox {
           aiFeedbackSinceLastCall: api.aiFeedbackSinceLastCall,
           map: api.map,
           unitStats: api.unitStats,
+          buildingStats: api.buildingStats,
+          economy: api.economy,
           utils: api.utils,
           console: { log: () => {} } // 禁用 console.log
         }

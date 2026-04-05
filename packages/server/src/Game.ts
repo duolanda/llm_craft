@@ -6,14 +6,17 @@ import {
   Command,
   GameSnapshot,
   GameState,
+  CommandResult,
   Tile,
   TileType,
+  ResultCode,
   TILE_TYPES,
   UNIT_TYPES,
   UNIT_STATS,
   BUILDING_TYPES,
   UNIT_STATES,
   RESULT_CODES,
+  ECONOMY_RULES,
   TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
@@ -30,6 +33,7 @@ export class Game {
   private players: Player[] = [];
   private logs: GameLog[] = [];
   private commandQueue: Command[] = [];
+  private commandResults: CommandResult[] = [];
   private snapshots: GameSnapshot[] = [];
   private aiOutputs: Record<string, string> = {};
   private aiFeedback: Record<string, GameLog[]> = { player_1: [], player_2: [] };
@@ -51,13 +55,13 @@ export class Game {
         id: "player_1",
         units: [],
         buildings: [],
-        resources: { energy: 200, energyPerTick: 0 },
+        resources: { credits: 200 },
       },
       {
         id: "player_2",
         units: [],
         buildings: [],
-        resources: { energy: 200, energyPerTick: 0 },
+        resources: { credits: 200 },
       },
     ];
 
@@ -65,14 +69,12 @@ export class Game {
     this.buildingManager.createBuilding(BUILDING_TYPES.HQ, 2, 10, "player_1");
     this.buildingManager.createBuilding(BUILDING_TYPES.HQ, 17, 10, "player_2");
 
-    // 4. Place initial units: 2 workers + 1 soldier for each player
+    // 4. Place initial units: 2 workers for each player
     this.unitManager.createUnit(UNIT_TYPES.WORKER, 3, 9, "player_1");
     this.unitManager.createUnit(UNIT_TYPES.WORKER, 3, 11, "player_1");
-    this.unitManager.createUnit(UNIT_TYPES.SOLDIER, 4, 10, "player_1");
 
     this.unitManager.createUnit(UNIT_TYPES.WORKER, 16, 9, "player_2");
     this.unitManager.createUnit(UNIT_TYPES.WORKER, 16, 11, "player_2");
-    this.unitManager.createUnit(UNIT_TYPES.SOLDIER, 15, 10, "player_2");
 
     this.addLog("game_start", "Game initialized successfully");
     this.saveSnapshot();
@@ -121,6 +123,7 @@ export class Game {
           error: error instanceof Error ? error.message : String(error),
         });
         this.recordAIRelevantLog(log);
+        this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Command processing crashed");
         console.error("命令处理异常:", error, command);
       }
     }
@@ -135,7 +138,7 @@ export class Game {
           if (unit && unit.playerId === command.playerId) {
             const blockedPositions = this.buildingManager.getOccupiedPositions();
             // 使用寻路移动：设置目标，让系统每 tick 自动沿路径移动
-            const result = this.unitManager.setMoveTarget(
+            const result: ResultCode = this.unitManager.setMoveTarget(
               unit,
               command.position.x,
               command.position.y,
@@ -157,6 +160,7 @@ export class Game {
               );
               this.recordAIRelevantLog(log);
             }
+            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Move command processed");
           }
         }
         break;
@@ -168,7 +172,7 @@ export class Game {
           if (attacker && attacker.playerId === command.playerId) {
             const unitTarget = this.unitManager.getUnit(command.targetId);
             const buildingTarget = this.buildingManager.getBuilding(command.targetId);
-            const result = unitTarget
+            const result: ResultCode = unitTarget
               ? this.unitManager.attackUnit(attacker, unitTarget)
               : buildingTarget
                 ? this.attackBuilding(attacker, buildingTarget)
@@ -182,6 +186,7 @@ export class Game {
               );
               this.recordAIRelevantLog(log);
             }
+            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Attack command processed");
           }
         }
         break;
@@ -194,6 +199,7 @@ export class Game {
             this.unitManager.holdPosition(unit);
             // 清除寻路路径
             this.unitManager.clearPath(unit);
+            this.recordCommandResult(command, RESULT_CODES.OK, true, "Hold command processed");
           }
         }
         break;
@@ -206,19 +212,92 @@ export class Game {
             const player = this.players.find((p) => p.id === command.playerId);
             if (player) {
               const unitCost = this.getUnitCost(command.unitType);
-              if (player.resources.energy >= unitCost) {
-                player.resources.energy -= unitCost;
+              if (!this.buildingManager.canProduce(building, command.unitType)) {
+                const result = RESULT_CODES.ERR_INVALID_BUILDING;
+                const log = this.addLog(
+                  "command_failed",
+                  `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
+                  { command, result }
+                );
+                this.recordAIRelevantLog(log);
+                this.recordCommandResult(command, result, false, "Building cannot produce this unit type");
+              } else if (player.resources.credits >= unitCost) {
+                player.resources.credits -= unitCost;
                 this.buildingManager.spawnUnit(building, command.unitType);
+                this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
                 const log = this.addLog(
                   "command_failed",
-                  `Spawn command failed: insufficient energy`,
+                  `Spawn command failed: insufficient credits`,
                   { command }
                 );
                 this.recordAIRelevantLog(log);
+                this.recordCommandResult(
+                  command,
+                  RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                  false,
+                  "Insufficient credits"
+                );
               }
             }
           }
+        }
+        break;
+      }
+
+      case "build": {
+        if (command.unitId && command.position && command.buildingType) {
+          const unit = this.unitManager.getUnit(command.unitId);
+          const player = this.players.find((p) => p.id === command.playerId);
+
+          if (!unit || !player || unit.playerId !== command.playerId || unit.type !== UNIT_TYPES.WORKER) {
+            this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Only a friendly worker can build");
+            break;
+          }
+
+          if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
+            this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_BUILDING, false, "Only barracks can be built in MVP");
+            break;
+          }
+
+          const buildingCost = this.getBuildingCost(command.buildingType);
+          if (player.resources.credits < buildingCost) {
+            const log = this.addLog("command_failed", "Build command failed: insufficient credits", {
+              command,
+              result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+            });
+            this.recordAIRelevantLog(log);
+            this.recordCommandResult(
+              command,
+              RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+              false,
+              "Insufficient credits"
+            );
+            break;
+          }
+
+          const result = this.validateBuildPosition(command.position.x, command.position.y);
+          if (result !== RESULT_CODES.OK) {
+            const log = this.addLog("command_failed", "Build command failed: invalid build position", {
+              command,
+              result,
+            });
+            this.recordAIRelevantLog(log);
+            this.recordCommandResult(command, result, false, "Invalid build position");
+            break;
+          }
+
+          player.resources.credits -= buildingCost;
+          this.buildingManager.createBuilding(
+            command.buildingType,
+            command.position.x,
+            command.position.y,
+            command.playerId
+          );
+          this.addLog("building_constructed", `Barracks constructed for ${command.playerId}`, {
+            command,
+          });
+          this.recordCommandResult(command, RESULT_CODES.OK, true, "Building constructed");
         }
         break;
       }
@@ -231,14 +310,21 @@ export class Game {
         return 50;
       case UNIT_TYPES.SOLDIER:
         return 80;
-      case UNIT_TYPES.SCOUT:
-        return 30;
       default:
         return 0;
     }
   }
 
-  private attackBuilding(attacker: Unit, target: Building): number {
+  private getBuildingCost(buildingType: string): number {
+    switch (buildingType) {
+      case BUILDING_TYPES.BARRACKS:
+        return 120;
+      default:
+        return 0;
+    }
+  }
+
+  private attackBuilding(attacker: Unit, target: Building): ResultCode {
     if (!attacker.exists || !target.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -260,14 +346,6 @@ export class Game {
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
 
     return RESULT_CODES.OK;
-  }
-
-  updateResources(): void {
-    for (const player of this.players) {
-      const energyProduction = this.buildingManager.getEnergyProduction(player.id);
-      player.resources.energyPerTick = energyProduction;
-      player.resources.energy += energyProduction;
-    }
   }
 
   checkWinCondition(): boolean {
@@ -307,6 +385,9 @@ export class Game {
         this.unitManager.processPathMovement(unit, this.tiles, blockedPositions);
       }
 
+      // Process worker economy loop: gather on resource tiles, then deliver near HQ
+      this.processWorkerEconomy();
+
       // Process building production queues
       const completedUnits = this.buildingManager.processProductionQueues();
       for (const [playerId, unitTypes] of completedUnits) {
@@ -335,9 +416,6 @@ export class Game {
           }
         }
       }
-
-      // Update resources
-      this.updateResources();
 
       // Check win condition
       this.checkWinCondition();
@@ -454,6 +532,73 @@ export class Game {
     return [...(this.aiFeedback[playerId] || [])];
   }
 
+  private processWorkerEconomy(): void {
+    for (const player of this.players) {
+      const hq = this.buildingManager
+        .getBuildingsByPlayer(player.id)
+        .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+
+      if (!hq) {
+        continue;
+      }
+
+      for (const unit of this.unitManager.getUnitsByPlayer(player.id)) {
+        if (unit.type !== UNIT_TYPES.WORKER || !unit.exists) {
+          continue;
+        }
+
+        const onResourceTile = this.tiles[unit.y]?.[unit.x] === TILE_TYPES.RESOURCE;
+        const isNearFriendlyHQ = this.isWithinDeliveryRange(unit, hq);
+        let economyActionTaken = false;
+
+        if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
+          const gatheredCredits = Math.min(
+            ECONOMY_RULES.WORKER_GATHER_RATE,
+            unit.carryCapacity - unit.carryingCredits
+          );
+
+          if (gatheredCredits > 0) {
+            unit.carryingCredits += gatheredCredits;
+            unit.state = UNIT_STATES.GATHERING;
+            unit.intent = { type: "gather", targetX: unit.x, targetY: unit.y };
+            this.addLog("resource_gathered", `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
+              playerId: player.id,
+              unitId: unit.id,
+              amount: gatheredCredits,
+              carryingCredits: unit.carryingCredits,
+            });
+            economyActionTaken = true;
+          }
+        }
+
+        if (isNearFriendlyHQ && !onResourceTile && unit.carryingCredits > 0) {
+          const deliveredCredits = unit.carryingCredits;
+          player.resources.credits += deliveredCredits;
+          unit.carryingCredits = 0;
+          unit.state = UNIT_STATES.IDLE;
+          unit.intent = { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
+          this.addLog("credits_delivered", `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
+            playerId: player.id,
+            unitId: unit.id,
+            buildingId: hq.id,
+            amount: deliveredCredits,
+            credits: player.resources.credits,
+          });
+          economyActionTaken = true;
+        }
+
+        if (
+          !economyActionTaken &&
+          !unit.path?.length &&
+          unit.state === UNIT_STATES.GATHERING &&
+          (!onResourceTile || unit.carryingCredits >= unit.carryCapacity)
+        ) {
+          unit.state = UNIT_STATES.IDLE;
+        }
+      }
+    }
+  }
+
   /**
    * Find an empty position near the given coordinates for spawning a unit
    * Searches in expanding circles around the center point
@@ -490,6 +635,10 @@ export class Game {
     return this.snapshots;
   }
 
+  getCommandResults(): CommandResult[] {
+    return [...this.commandResults];
+  }
+
   // For testing purposes
   getUnitManager(): UnitManager {
     return this.unitManager;
@@ -497,5 +646,51 @@ export class Game {
 
   getBuildingManager(): BuildingManager {
     return this.buildingManager;
+  }
+
+  private isWithinDeliveryRange(unit: Unit, hq: Building): boolean {
+    return (
+      Math.abs(unit.x - hq.x) <= ECONOMY_RULES.HQ_DELIVERY_RANGE &&
+      Math.abs(unit.y - hq.y) <= ECONOMY_RULES.HQ_DELIVERY_RANGE
+    );
+  }
+
+  private validateBuildPosition(x: number, y: number): ResultCode {
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    }
+
+    if (this.unitManager.hasUnitAt(x, y) || this.buildingManager.hasBuildingAt(x, y)) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    }
+
+    return RESULT_CODES.OK;
+  }
+
+  private recordCommandResult(
+    command: Command,
+    result: ResultCode,
+    success: boolean,
+    message: string
+  ): void {
+    this.commandResults.push({
+      tick: this.tick,
+      command,
+      result,
+      success,
+      message,
+    });
+
+    if (this.commandResults.length > 2000) {
+      this.commandResults = this.commandResults.slice(-1000);
+    }
   }
 }

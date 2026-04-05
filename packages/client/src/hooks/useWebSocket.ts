@@ -5,12 +5,14 @@ interface WSMessage {
   type: string;
   state: GameState;
   snapshots: GameSnapshot[];
+  filePath?: string;
 }
 
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
   const [connected, setConnected] = useState(false);
+  const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const send = useCallback((data: any) => {
@@ -34,6 +36,8 @@ export function useWebSocket(url: string) {
         if (data.type === "state") {
           setState(data.state);
           setSnapshots(data.snapshots);
+        } else if (data.type === "record_saved" && data.filePath) {
+          setLastSavedRecordPath(data.filePath);
         }
       } catch (e) {
         console.error("解析错误:", e);
@@ -54,5 +58,5 @@ export function useWebSocket(url: string) {
     };
   }, [url]);
 
-  return { state, snapshots, connected, send };
+  return { state, snapshots, connected, lastSavedRecordPath, send };
 }

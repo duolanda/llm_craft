@@ -12,7 +12,8 @@ export function LegendPanel() {
       <div className="legend-section">
         <div className="legend-title">单位 / 建筑</div>
         <div className="legend-row">
-          <LegendItem shape="circle" color="#aaa" label="单位" />
+          <LegendItem shape="circle" color="#aaa" label="Worker 圆形" />
+          <LegendItem shape="diamond" color="#aaa" label="Soldier 刺角八边形" />
           <LegendItem shape="square" color="#aaa" label="建筑" />
         </div>
       </div>
@@ -21,7 +22,6 @@ export function LegendPanel() {
         <div className="legend-title">建筑类型</div>
         <div className="legend-row">
           <LegendItem shape="square" color="#c45fff" label="HQ 指挥中心" />
-          <LegendItem shape="square" color="#ff9800" label="发电站" />
           <LegendItem shape="square" color="#2979ff" label="兵营" />
         </div>
       </div>
@@ -42,7 +42,7 @@ function LegendItem({
   color,
   label,
 }: {
-  shape: "circle" | "square" | "dot" | "bar";
+  shape: "circle" | "square" | "dot" | "bar" | "diamond";
   color: string;
   label: string;
 }) {
@@ -54,6 +54,7 @@ function LegendItem({
     border: shape === "square" ? `1.5px solid ${color}` : undefined,
     boxShadow: `0 0 6px ${color}66`,
     flexShrink: 0,
+    transform: shape === "diamond" ? "rotate(45deg)" : undefined,
   };
 
   return (

@@ -75,6 +75,18 @@ export class BuildingManager {
     return true;
   }
 
+  canProduce(building: Building, unitType: UnitType): boolean {
+    if (building.type === BUILDING_TYPES.HQ) {
+      return unitType === "worker";
+    }
+
+    if (building.type === BUILDING_TYPES.BARRACKS) {
+      return unitType === "soldier";
+    }
+
+    return false;
+  }
+
   takeDamage(building: Building, damage: number): boolean {
     if (!building.exists) {
       return false;
@@ -89,19 +101,6 @@ export class BuildingManager {
     }
 
     return false; // Building still alive
-  }
-
-  getEnergyProduction(playerId: string): number {
-    const playerBuildings = this.getBuildingsByPlayer(playerId);
-    let totalEnergy = 0;
-
-    for (const building of playerBuildings) {
-      if (building.type === BUILDING_TYPES.GENERATOR) {
-        totalEnergy += BUILDING_STATS[BUILDING_TYPES.GENERATOR].energyPerTick || 0;
-      }
-    }
-
-    return totalEnergy;
   }
 
   processProductionQueues(): Map<string, UnitType[]> {

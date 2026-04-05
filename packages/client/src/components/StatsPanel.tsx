@@ -7,13 +7,11 @@ interface StatsPanelProps {
 const UNIT_COLORS: Record<string, string> = {
   worker: "#ffb300",
   soldier: "#ff2a4a",
-  scout: "#00e5ff",
 };
 
 const UNIT_LABELS: Record<string, string> = {
   worker: "工人",
   soldier: "士兵",
-  scout: "侦察",
 };
 
 export function StatsPanel({ state }: StatsPanelProps) {
@@ -34,7 +32,6 @@ export function StatsPanel({ state }: StatsPanelProps) {
     return {
       worker: units.filter((u) => u.type === "worker").length,
       soldier: units.filter((u) => u.type === "soldier").length,
-      scout: units.filter((u) => u.type === "scout").length,
       total: units.length,
     };
   };
@@ -43,7 +40,6 @@ export function StatsPanel({ state }: StatsPanelProps) {
     const buildings = player.buildings.filter((b) => b.exists);
     return {
       hq: buildings.filter((b) => b.type === "hq").length,
-      generator: buildings.filter((b) => b.type === "generator").length,
       barracks: buildings.filter((b) => b.type === "barracks").length,
       total: buildings.length,
     };
@@ -84,7 +80,6 @@ export function StatsPanel({ state }: StatsPanelProps) {
         <div className="unit-legend-bar">
           <UnitLegend type="worker" />
           <UnitLegend type="soldier" />
-          <UnitLegend type="scout" />
         </div>
         <div className="stat-row" style={{ justifyContent: "center", gap: "12px", marginTop: 4 }}>
           <UnitChips counts={p1Units} align="end" />
@@ -105,28 +100,19 @@ export function StatsPanel({ state }: StatsPanelProps) {
           <span style={{ color: "var(--accent-cyan)" }}>◈</span> 建筑设施
         </div>
         <BuildingRow label="HQ" p1={p1Buildings.hq} p2={p2Buildings.hq} />
-        <BuildingRow label="发电" p1={p1Buildings.generator} p2={p2Buildings.generator} />
         <BuildingRow label="兵营" p1={p1Buildings.barracks} p2={p2Buildings.barracks} />
       </div>
 
       <div className="stat-block">
         <div className="stat-block-title">
-          <span style={{ color: "var(--accent-green)" }}>◈</span> 能量储备
+          <span style={{ color: "var(--accent-green)" }}>◈</span> Credits
         </div>
         <div className="stat-row">
           <span style={{ color: "var(--text-secondary)" }}>当前</span>
           <span className="stat-value-pair">
-            <span className="stat-p1">{Math.floor(player1.resources.energy)}</span>
+            <span className="stat-p1">{Math.floor(player1.resources.credits)}</span>
             <span className="stat-vs">｜</span>
-            <span className="stat-p2">{Math.floor(player2.resources.energy)}</span>
-          </span>
-        </div>
-        <div className="stat-row">
-          <span style={{ color: "var(--text-secondary)" }}>产能/tick</span>
-          <span className="stat-value-pair">
-            <span className="stat-p1">{player1.resources.energyPerTick}</span>
-            <span className="stat-vs">｜</span>
-            <span className="stat-p2">{player2.resources.energyPerTick}</span>
+            <span className="stat-p2">{Math.floor(player2.resources.credits)}</span>
           </span>
         </div>
       </div>
@@ -144,12 +130,11 @@ function UnitLegend({ type }: { type: string }) {
   );
 }
 
-function UnitChips({ counts, align }: { counts: { worker: number; soldier: number; scout: number }; align: "start" | "end" }) {
+function UnitChips({ counts, align }: { counts: { worker: number; soldier: number }; align: "start" | "end" }) {
   return (
     <div className="unit-chips" style={{ justifyContent: align === "end" ? "flex-end" : "flex-start" }}>
       <Chip type="worker" count={counts.worker} />
       <Chip type="soldier" count={counts.soldier} />
-      <Chip type="scout" count={counts.scout} />
     </div>
   );
 }

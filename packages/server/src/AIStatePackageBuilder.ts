@@ -1,18 +1,27 @@
-import { GameState, AIStatePackage, UNIT_STATS, TILE_TYPES } from "@llmcraft/shared";
+import {
+  AIStatePackage,
+  AIPromptPayload,
+  AIFeedback,
+  Building,
+  BUILDING_STATS,
+  ECONOMY_RULES,
+  GameState,
+  GameLog,
+  TILE_TYPES,
+  UNIT_STATS,
+  Unit,
+} from "@llmcraft/shared";
 import { Game } from "./Game";
+
+type VisibleEnemy = AIStatePackage["enemies"][number];
+type VisibleEnemyBuilding = AIStatePackage["enemyBuildings"][number];
 
 export class AIStatePackageBuilder {
   static build(playerId: string, state: GameState, game?: Game): AIStatePackage {
-    const player = state.players.find(p => p.id === playerId)!;
-    const enemy = state.players.find(p => p.id !== playerId)!;
-    const aiFeedback = (game?.getAIFeedback(playerId) || []).slice(-10).map((log) => ({
-      tick: log.tick,
-      phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
-      severity: (log.data?.severity || "warning") as "error" | "warning",
-      message: log.message,
-    }));
+    const player = state.players.find((p) => p.id === playerId)!;
+    const enemy = state.players.find((p) => p.id !== playerId)!;
+    const aiFeedback = this.buildFeedback(game?.getAIFeedback(playerId) || []);
 
-    // 扁平化地图数据：只传送非空地块（减少数据量）
     const tiles = [];
     for (let y = 0; y < state.tiles.length; y++) {
       for (let x = 0; x < state.tiles[y].length; x++) {
@@ -26,25 +35,155 @@ export class AIStatePackageBuilder {
     return {
       tick: state.tick,
       my: {
-        resources: player.resources,
-        units: player.units.filter(u => u.exists).map(u => ({ ...u, my: true })),
-        buildings: player.buildings.filter(b => b.exists).map(b => ({ ...b, my: true })),
+        resources: { ...player.resources },
+        units: player.units.filter((u) => u.exists).map((u) => ({ ...u, my: true })),
+        buildings: player.buildings.filter((b) => b.exists).map((b) => ({ ...b, my: true })),
       },
       enemies: enemy.units
-        .filter(u => u.exists)
-        .map(u => ({ id: u.id, type: u.type, x: u.x, y: u.y, hp: u.hp, maxHp: u.maxHp })),
+        .filter((u) => u.exists)
+        .map((u) => ({ id: u.id, type: u.type, x: u.x, y: u.y, hp: u.hp, maxHp: u.maxHp })),
       enemyBuildings: enemy.buildings
-        .filter(b => b.exists)
-        .map(b => ({ id: b.id, type: b.type, x: b.x, y: b.y, hp: b.hp, maxHp: b.maxHp })),
+        .filter((b) => b.exists)
+        .map((b) => ({ id: b.id, type: b.type, x: b.x, y: b.y, hp: b.hp, maxHp: b.maxHp })),
       map: {
-        width: 20,
-        height: 20,
-        tiles, // 所有非空地块（障碍物、资源）
+        width: state.tiles[0]?.length || 0,
+        height: state.tiles.length,
+        tiles,
       },
-      unitStats: UNIT_STATS, // 单位属性表
+      unitStats: UNIT_STATS,
+      buildingStats: BUILDING_STATS,
+      economy: {
+        workerCarryCapacity: ECONOMY_RULES.WORKER_CARRY_CAPACITY,
+        workerGatherRate: ECONOMY_RULES.WORKER_GATHER_RATE,
+        hqDeliveryRange: ECONOMY_RULES.HQ_DELIVERY_RANGE,
+      },
       eventsSinceLastCall: state.logs.slice(-10),
       aiFeedbackSinceLastCall: aiFeedback,
-      gameTimeRemaining: 600 - state.tick / 2,
+      gameTimeRemaining: Math.max(0, 600 - state.tick / 2),
     };
+  }
+
+  static buildPromptPayload(
+    current: AIStatePackage,
+    previous: AIStatePackage | null,
+    forceFull: boolean
+  ): AIPromptPayload {
+    if (forceFull || !previous) {
+      return {
+        mode: "full",
+        tick: current.tick,
+        tickIntervalMs: 500,
+        summary:
+          "这是完整基线状态。你正在每个 tick 实时下达指令，只需要处理当前局面，不要试图一次性写完全部战术。",
+        state: current,
+        delta: null,
+      };
+    }
+
+    const creditsChanged = current.my.resources.credits - previous.my.resources.credits;
+    const myUnitChanges = this.diffMyUnits(previous.my.units, current.my.units);
+    const myBuildingChanges = this.diffMyBuildings(previous.my.buildings, current.my.buildings);
+    const enemyUnitChanges = this.diffEnemyUnits(previous.enemies, current.enemies);
+    const enemyBuildingChanges = this.diffEnemyBuildings(previous.enemyBuildings, current.enemyBuildings);
+
+    return {
+      mode: "delta",
+      tick: current.tick,
+      tickIntervalMs: 500,
+      summary:
+        "这是自上一轮 AI 调用后的增量状态。你在持续对话中实时发指令，只需根据变化做下一步，不要重写一整套长期脚本。",
+      state: null,
+      delta: {
+        creditsChanged: creditsChanged === 0 ? undefined : creditsChanged,
+        myUnitChanges,
+        myBuildingChanges,
+        enemyUnitChanges,
+        enemyBuildingChanges,
+        events: current.eventsSinceLastCall,
+        aiFeedback: current.aiFeedbackSinceLastCall,
+      },
+    };
+  }
+
+  private static buildFeedback(logs: GameLog[]): AIFeedback[] {
+    return logs.slice(-10).map((log) => ({
+      tick: log.tick,
+      phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
+      severity: (log.data?.severity || "warning") as "error" | "warning",
+      message: log.message,
+    }));
+  }
+
+  private static diffMyUnits(previous: Unit[], current: Unit[]) {
+    return this.diffObjects(previous, current, true);
+  }
+
+  private static diffMyBuildings(previous: Building[], current: Building[]) {
+    return this.diffObjects(previous, current, false);
+  }
+
+  private static diffEnemyUnits(previous: VisibleEnemy[], current: VisibleEnemy[]) {
+    return this.diffObjects(previous, current, true);
+  }
+
+  private static diffEnemyBuildings(previous: VisibleEnemyBuilding[], current: VisibleEnemyBuilding[]) {
+    return this.diffObjects(previous, current, false);
+  }
+
+  private static diffObjects(previous: any[], current: any[], movable: boolean) {
+    const previousMap = new Map(previous.map((item) => [item.id, item]));
+    const currentMap = new Map(current.map((item) => [item.id, item]));
+    const changes: any[] = [];
+
+    for (const item of current) {
+      const oldItem = previousMap.get(item.id);
+      if (!oldItem) {
+        changes.push({
+          id: item.id,
+          type: item.type,
+          change: "created",
+          x: item.x,
+          y: item.y,
+          hp: item.hp,
+          maxHp: item.maxHp,
+          state: item.state,
+          carryingCredits: item.carryingCredits,
+          carryCapacity: item.carryCapacity,
+        });
+        continue;
+      }
+
+      const moved = movable && (oldItem.x !== item.x || oldItem.y !== item.y);
+      const damaged = oldItem.hp !== item.hp;
+      const stateChanged = movable && oldItem.state !== item.state;
+      const carryingChanged = movable && oldItem.carryingCredits !== item.carryingCredits;
+
+      if (moved || damaged || stateChanged || carryingChanged) {
+        changes.push({
+          id: item.id,
+          type: item.type,
+          change: moved ? "moved" : damaged ? "damaged" : "updated",
+          x: item.x,
+          y: item.y,
+          hp: item.hp,
+          maxHp: item.maxHp,
+          state: item.state,
+          carryingCredits: item.carryingCredits,
+          carryCapacity: item.carryCapacity,
+        });
+      }
+    }
+
+    for (const item of previous) {
+      if (!currentMap.has(item.id)) {
+        changes.push({
+          id: item.id,
+          type: item.type,
+          change: "removed",
+        });
+      }
+    }
+
+    return changes;
   }
 }

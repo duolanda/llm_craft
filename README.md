@@ -7,7 +7,7 @@
 
 ## 简介
 
-LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 AI 生成代码来指挥单位移动、攻击和生产，并决出胜负。
+LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 AI 生成代码来指挥单位移动、攻击、建造和生产，并决出胜负。
 
 目前还处于原型验证阶段，游戏设计也完全没有定型。
 
@@ -113,24 +113,23 @@ pnpm --filter @llmcraft/client build
 |-----|----|------|-----|------|---------|
 | Worker | 50 | 1 | 5 | 50 | 0 (不能攻击) |
 | Soldier | 100 | 1 | 15 | 80 | 1 (近战) |
-| Scout | 30 | 2 | 5 | 30 | 0 (不能攻击) |
 
 ### 建筑
 
 | 类型 | HP | 造价 | 功能 |
 |-----|----|------|-----|
 | HQ | 1000 | - | 核心建筑，被摧毁则失败 |
-| Generator | 200 | 100 | 每 tick 生产 5 能量 |
-| Barracks | 300 | 150 | 生产士兵 |
+| Barracks | 300 | 120 | 生产士兵 |
 
 ### 游戏流程
 
-1. 双方各有一个 HQ、2 个 Worker、1 个 Soldier
+1. 双方各有一个 HQ、2 个 Worker、200 credits
 2. 每 500ms 执行一个游戏 tick
 3. AI 每 5 ticks 思考一次，生成代码
 4. AI 代码在沙箱中执行，产生命令
 5. 命令加入队列，在下一 tick 执行
-6. 一方 HQ 被摧毁则游戏结束
+6. Worker 可以建造 Barracks，Barracks 建好后才能生产 Soldier
+7. 一方 HQ 被摧毁则游戏结束
 
 ### AI API
 
@@ -140,10 +139,15 @@ AI 可以通过全局对象控制游戏：
 // 移动单位
 me.soldiers.forEach(s => s.moveTo({x: 10, y: 10}));
 
-// 生产单位
-if (me.resources.energy > 150) {
-  const barracks = me.buildings.find(b => b.type === "barracks");
-  if (barracks) barracks.spawnUnit("soldier");
+// 建造兵营
+if (!me.buildings.find(b => b.type === "barracks") && me.workers[0] && me.resources.credits >= 120) {
+  me.workers[0].build("barracks", {x: me.hq.x + 2, y: me.hq.y});
+}
+
+// 生产士兵
+const barracks = me.buildings.find(b => b.type === "barracks");
+if (barracks && me.resources.credits >= 80) {
+  barracks.spawnUnit("soldier");
 }
 
 // 攻击敌人
@@ -161,7 +165,7 @@ llmcraft/
 │   ├── shared/          # 共享类型和常量
 │   ├── server/          # Node.js 游戏服务器
 │   └── client/          # React 前端
-├── logs/                # 游戏回放日志
+├── logs/                # 对局记录与调试日志
 ├── docs/                # 设计文档
 ├── package.json         # pnpm workspace 配置
 ├── pnpm-workspace.yaml  # pnpm workspace 定义
@@ -171,6 +175,12 @@ llmcraft/
 ## 贡献
 
 欢迎提交 Issue 和 PR！
+
+## 文档说明
+
+- 当前有效的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
+- 当前真实 MVP 行为见 [docs/current-mvp-reality.md](./docs/current-mvp-reality.md)
+- `docs/plans/` 和较早的设计稿包含历史方案，不一定代表当前实现
 
 ## License
 

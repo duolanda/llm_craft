@@ -44,6 +44,16 @@ export class APIBridge {
           playerId: self.playerId,
         });
       },
+      build: (buildingType: string, pos: Position) => {
+        self.commands.push({
+          id: self.generateId(),
+          type: "build",
+          unitId: unit.id,
+          buildingType: buildingType as any,
+          position: pos,
+          playerId: self.playerId,
+        });
+      },
     });
 
     const wrapBuilding = (building: any) => ({
@@ -62,9 +72,6 @@ export class APIBridge {
     const myUnits = state.my.units.map(wrapUnit);
     const myBuildings = state.my.buildings.map(wrapBuilding);
 
-    // Combine enemy units and buildings for the enemies array
-    const allEnemies = [...state.enemies, ...state.enemyBuildings];
-
     return {
       game: {
         tick: state.tick,
@@ -77,9 +84,8 @@ export class APIBridge {
         hq: myBuildings.find((b: any) => b.type === "hq") || null,
         workers: myUnits.filter((u: any) => u.type === "worker"),
         soldiers: myUnits.filter((u: any) => u.type === "soldier"),
-        scouts: myUnits.filter((u: any) => u.type === "scout"),
       },
-      enemies: allEnemies,
+      enemies: state.enemies,
       enemyBuildings: state.enemyBuildings,
       aiFeedbackSinceLastCall: state.aiFeedbackSinceLastCall,
       map: {
@@ -92,6 +98,8 @@ export class APIBridge {
         },
       },
       unitStats: state.unitStats,
+      buildingStats: state.buildingStats,
+      economy: state.economy,
       utils: {
         getRange: (a: Position, b: Position) => Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)),
         inRange: (a: Position, b: Position, range: number) => Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2)) <= range,

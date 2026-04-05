@@ -47,6 +47,25 @@ export class BuildingManager {
     return Array.from(this.buildings.values()).filter((b) => b.exists);
   }
 
+  hasBuildingAt(x: number, y: number, excludeBuildingId?: string): boolean {
+    for (const building of this.buildings.values()) {
+      if (!building.exists) continue;
+      if (excludeBuildingId && building.id === excludeBuildingId) continue;
+      if (building.x === x && building.y === y) return true;
+    }
+    return false;
+  }
+
+  getOccupiedPositions(excludeBuildingId?: string): Set<string> {
+    const positions = new Set<string>();
+    for (const building of this.buildings.values()) {
+      if (!building.exists) continue;
+      if (excludeBuildingId && building.id === excludeBuildingId) continue;
+      positions.add(`${building.x},${building.y}`);
+    }
+    return positions;
+  }
+
   spawnUnit(building: Building, unitType: UnitType): boolean {
     if (!building.exists) {
       return false;

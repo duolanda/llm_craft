@@ -74,7 +74,8 @@ export class UnitManager {
     unit: Unit,
     targetX: number,
     targetY: number,
-    tiles?: TileType[][]
+    tiles?: TileType[][],
+    blockedPositions?: Set<string>
   ): ResultCode {
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
@@ -99,6 +100,10 @@ export class UnitManager {
 
     // Check collision: cannot move to a position occupied by another unit
     if (this.hasUnitAt(targetX, targetY, unit.id)) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    }
+
+    if (blockedPositions?.has(`${targetX},${targetY}`)) {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
@@ -175,9 +180,14 @@ export class UnitManager {
     unit: Unit,
     targetX: number,
     targetY: number,
-    tiles: TileType[][]
+    tiles: TileType[][],
+    blockedPositions?: Set<string>
   ): ResultCode {
     if (!unit.exists) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (!Number.isInteger(targetX) || !Number.isInteger(targetY)) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
@@ -195,8 +205,12 @@ export class UnitManager {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
+    if (blockedPositions?.has(`${targetX},${targetY}`)) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
     // 计算路径
-    const occupiedPositions = this.getOccupiedPositions(unit.id);
+    const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
     const path = PathFinder.findPath(
       unit.x,
       unit.y,
@@ -223,7 +237,7 @@ export class UnitManager {
    * 处理单位沿路径移动（每 tick 调用）
    * 按照单位速度移动相应步数
    */
-  processPathMovement(unit: Unit, tiles: TileType[][]): ResultCode {
+  processPathMovement(unit: Unit, tiles: TileType[][], blockedPositions?: Set<string>): ResultCode {
     if (!unit.exists || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
     }
@@ -235,9 +249,12 @@ export class UnitManager {
       const nextStep = unit.path[0];
 
       // 检查这一步是否仍然可行（可能被其他单位占据了）
-      if (this.hasUnitAt(nextStep.x, nextStep.y, unit.id)) {
+      if (
+        this.hasUnitAt(nextStep.x, nextStep.y, unit.id) ||
+        blockedPositions?.has(`${nextStep.x},${nextStep.y}`)
+      ) {
         // 路径被阻挡，需要重新寻路
-        const occupiedPositions = this.getOccupiedPositions(unit.id);
+        const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
         const newPath = PathFinder.findPath(
           unit.x,
           unit.y,
@@ -286,12 +303,15 @@ export class UnitManager {
   /**
    * 获取被占据的位置集合（用于寻路避障）
    */
-  private getOccupiedPositions(excludeUnitId?: string): Set<string> {
+  private getOccupiedPositions(excludeUnitId?: string, blockedPositions?: Set<string>): Set<string> {
     const positions = new Set<string>();
     for (const unit of this.units.values()) {
       if (unit.exists && unit.id !== excludeUnitId) {
         positions.add(`${unit.x},${unit.y}`);
       }
+    }
+    for (const position of blockedPositions || []) {
+      positions.add(position);
     }
     return positions;
   }

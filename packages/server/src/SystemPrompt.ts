@@ -58,11 +58,18 @@ interface UnitStats {
     soldier: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 };
     scout: { hp: 30, speed: 2, attack: 5, cost: 30, attackRange: 0 };
   }
-- utils: {
-    getRange(a, b): number;
-    inRange(a, b, range): boolean;
-    findClosestByRange(from, targets): any;
-  }
+  - utils: {
+      getRange(a, b): number;
+      inRange(a, b, range): boolean;
+      findClosestByRange(from, targets): any;
+    }
+  - aiFeedbackSinceLastCall: Array<{
+      tick: number;
+      phase: "generation" | "execution" | "command";
+      severity: "error" | "warning";
+      message: string;
+    }>
+    // 你上一轮代码的报错、命令被拒绝等反馈
 
 ## 单位属性查询
 
@@ -99,6 +106,14 @@ unit.holdPosition(): void
 
 building.spawnUnit("worker" | "soldier" | "scout"): void
 
+## 代码执行约束
+
+- 你输出的是“直接执行的 JavaScript 脚本”，不是函数体
+- 不要写顶层 return
+- 不要写顶层 await
+- 如果某个条件不满足，请使用 if (...) { ... } 包裹后续逻辑，而不是写顶层 return
+- 不要假设存在未在上文列出的全局变量
+
 ## 战术建议
 
 1. 士兵(attackRange=1)适合近战，工人不能攻击
@@ -111,7 +126,7 @@ building.spawnUnit("worker" | "soldier" | "scout"): void
 // 移动所有士兵到敌方HQ附近（自动寻路绕过障碍）
 const enemyHQ = enemyBuildings.find(b => b.type === "hq");
 if (enemyHQ) {
-  me.soldiers.forEach(s => s.moveTo({x: enemyHQ.x, y: enemyHQ.y}));
+  me.soldiers.forEach(s => s.moveTo({x: enemyHQ.x - 1, y: enemyHQ.y}));
 }
 
 // 有能量就生产士兵
@@ -139,6 +154,14 @@ me.scouts.forEach((scout, i) => {
   const target = resources[i % resources.length];
   if (target) scout.moveTo({x: target.x, y: target.y});
 });
+
+// 如果上一轮报错，优先修复再继续。不要写: if (...) return;
+if (aiFeedbackSinceLastCall.length > 0) {
+  const lastIssue = aiFeedbackSinceLastCall[aiFeedbackSinceLastCall.length - 1];
+  // 根据报错调整代码，不要重复调用不存在的变量或非法参数
+} else {
+  // 正常执行你的战术逻辑
+}
 
 只回复可执行的 JavaScript 代码。不要解释。
 不要 markdown 格式。只写代码。

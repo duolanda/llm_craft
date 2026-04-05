@@ -1,9 +1,16 @@
-import { GameState, Player, AIStatePackage, UNIT_STATS, TILE_TYPES } from "@llmcraft/shared";
+import { GameState, AIStatePackage, UNIT_STATS, TILE_TYPES } from "@llmcraft/shared";
+import { Game } from "./Game";
 
 export class AIStatePackageBuilder {
-  static build(playerId: string, state: GameState): AIStatePackage {
+  static build(playerId: string, state: GameState, game?: Game): AIStatePackage {
     const player = state.players.find(p => p.id === playerId)!;
     const enemy = state.players.find(p => p.id !== playerId)!;
+    const aiFeedback = (game?.getAIFeedback(playerId) || []).slice(-10).map((log) => ({
+      tick: log.tick,
+      phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
+      severity: (log.data?.severity || "warning") as "error" | "warning",
+      message: log.message,
+    }));
 
     // 扁平化地图数据：只传送非空地块（减少数据量）
     const tiles = [];
@@ -23,7 +30,7 @@ export class AIStatePackageBuilder {
         units: player.units.filter(u => u.exists).map(u => ({ ...u, my: true })),
         buildings: player.buildings.filter(b => b.exists).map(b => ({ ...b, my: true })),
       },
-      visibleEnemies: enemy.units
+      enemies: enemy.units
         .filter(u => u.exists)
         .map(u => ({ id: u.id, type: u.type, x: u.x, y: u.y, hp: u.hp, maxHp: u.maxHp })),
       enemyBuildings: enemy.buildings
@@ -36,6 +43,7 @@ export class AIStatePackageBuilder {
       },
       unitStats: UNIT_STATS, // 单位属性表
       eventsSinceLastCall: state.logs.slice(-10),
+      aiFeedbackSinceLastCall: aiFeedback,
       gameTimeRemaining: 600 - state.tick / 2,
     };
   }

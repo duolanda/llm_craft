@@ -76,6 +76,13 @@ export interface GameLog {
   data?: any;
 }
 
+export interface AIFeedback {
+  tick: number;
+  phase: "generation" | "execution" | "command";
+  severity: "error" | "warning";
+  message: string;
+}
+
 export interface Command {
   id: string;
   type: string;
@@ -110,7 +117,7 @@ export interface AIStatePackage {
     units: Unit[];
     buildings: Building[];
   };
-  visibleEnemies: Array<{
+  enemies: Array<{
     id: string;
     type: string;
     x: number;
@@ -133,5 +140,6 @@ export interface AIStatePackage {
   };
   unitStats: Record<UnitType, UnitStats>; // 单位属性表
   eventsSinceLastCall: GameLog[];
+  aiFeedbackSinceLastCall: AIFeedback[];
   gameTimeRemaining: number;
 }

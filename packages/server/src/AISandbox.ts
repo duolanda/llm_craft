@@ -2,6 +2,11 @@ import { VM } from "vm2";
 import { Command, AIStatePackage } from "@llmcraft/shared";
 import { APIBridge } from "./APIBridge";
 
+export interface AISandboxResult {
+  commands: Command[];
+  errorMessage?: string;
+}
+
 export class AISandbox {
   private playerId: string;
   private bridge: APIBridge;
@@ -11,7 +16,7 @@ export class AISandbox {
     this.bridge = new APIBridge(playerId);
   }
 
-  async executeCode(code: string, state: AIStatePackage): Promise<Command[]> {
+  async executeCode(code: string, state: AIStatePackage): Promise<AISandboxResult> {
     this.bridge.clearCommands();
     const api = this.bridge.createAPI(state);
 
@@ -24,6 +29,7 @@ export class AISandbox {
           me: api.me,
           enemies: api.enemies,
           enemyBuildings: api.enemyBuildings,
+          aiFeedbackSinceLastCall: api.aiFeedbackSinceLastCall,
           map: api.map,
           unitStats: api.unitStats,
           utils: api.utils,
@@ -34,8 +40,12 @@ export class AISandbox {
       vm.run(code);
     } catch (e) {
       console.error(`AI ${this.playerId} 代码执行错误:`, e);
+      return {
+        commands: this.bridge.getCommands(),
+        errorMessage: e instanceof Error ? e.message : String(e),
+      };
     }
 
-    return this.bridge.getCommands();
+    return { commands: this.bridge.getCommands() };
   }
 }

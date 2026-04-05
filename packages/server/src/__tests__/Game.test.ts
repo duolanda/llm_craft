@@ -80,6 +80,54 @@ describe("Game", () => {
     expect(target.hp).toBeLessThan(target.maxHp);
   });
 
+  it("should allow attacking enemy buildings in range", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 16, 10, "player_1");
+    const enemyHq = buildingManager.getBuildingsByPlayer("player_2")
+      .find((b) => b.type === BUILDING_TYPES.HQ);
+
+    expect(enemyHq).toBeDefined();
+
+    game.queueCommand({
+      id: "cmd_attack_building",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: enemyHq!.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(enemyHq!.hp).toBe(enemyHq!.maxHp - 15);
+  });
+
+  it("should declare winner when an HQ is destroyed by attack commands", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const enemyHq = buildingManager.getBuildingsByPlayer("player_2")
+      .find((b) => b.type === BUILDING_TYPES.HQ);
+
+    expect(enemyHq).toBeDefined();
+
+    for (let i = 0; i < 67; i++) {
+      const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 16, 10, "player_1");
+      game.queueCommand({
+        id: `cmd_attack_hq_${i}`,
+        type: "attack",
+        unitId: attacker.id,
+        targetId: enemyHq!.id,
+        playerId: "player_1",
+      });
+    }
+
+    game.processCommands();
+    game.checkWinCondition();
+
+    expect(enemyHq!.exists).toBe(false);
+    expect(game.getWinner()).toBe("player_1");
+  });
+
   it("should reject attack on same team", () => {
     const unitManager = game.getUnitManager();
 
@@ -355,5 +403,56 @@ describe("Game", () => {
     expect(result).toBe(RESULT_CODES.ERR_INVALID_TARGET);
     expect(unit.x).toBe(5); // Position should not change
     expect(unit.y).toBe(5);
+  });
+
+  it("should reject pathfinding targets with non-integer coordinates", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const tiles = game.getState().tiles.map((row) => row.map((tile) => tile.type));
+
+    const result = unitManager.setMoveTarget(unit, 2.5, 3.5, tiles as any);
+
+    expect(result).toBe(RESULT_CODES.ERR_INVALID_TARGET);
+    expect(unit.path).toBeUndefined();
+  });
+
+  it("should not crash when processing malformed move commands", () => {
+    const unitManager = game.getUnitManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+
+    game.queueCommand({
+      id: "cmd_bad_move",
+      type: "move",
+      unitId: unit.id,
+      position: { x: 2.2928932188134525, y: 3 },
+      playerId: "player_1",
+    });
+
+    expect(() => game.processCommands()).not.toThrow();
+    expect(unit.path).toBeUndefined();
+  });
+
+  it("should reject moving onto a building tile", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const unit = unitManager.createUnit(UNIT_TYPES.SOLDIER, 16, 9, "player_1");
+    const enemyHq = buildingManager.getBuildingsByPlayer("player_2")
+      .find((b) => b.type === BUILDING_TYPES.HQ);
+
+    expect(enemyHq).toBeDefined();
+
+    game.queueCommand({
+      id: "cmd_move_to_hq",
+      type: "move",
+      unitId: unit.id,
+      position: { x: enemyHq!.x, y: enemyHq!.y },
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(unit.path).toBeUndefined();
+    expect(unit.x).toBe(16);
+    expect(unit.y).toBe(9);
   });
 });

@@ -3,9 +3,14 @@ import { Unit, Building, Command, Position, Player, AIStatePackage } from "@llmc
 export class APIBridge {
   private commands: Command[] = [];
   private playerId: string;
+  private static counter = 0;
 
   constructor(playerId: string) {
     this.playerId = playerId;
+  }
+
+  private generateId(): string {
+    return `cmd_${Date.now()}_${++APIBridge.counter}`;
   }
 
   createAPI(state: AIStatePackage) {
@@ -15,7 +20,7 @@ export class APIBridge {
       ...unit,
       moveTo: (pos: Position) => {
         self.commands.push({
-          id: `cmd_${Date.now()}_${Math.random()}`,
+          id: self.generateId(),
           type: "move",
           unitId: unit.id,
           position: pos,
@@ -24,7 +29,7 @@ export class APIBridge {
       },
       attack: (targetId: string) => {
         self.commands.push({
-          id: `cmd_${Date.now()}_${Math.random()}`,
+          id: self.generateId(),
           type: "attack",
           unitId: unit.id,
           targetId,
@@ -33,7 +38,7 @@ export class APIBridge {
       },
       holdPosition: () => {
         self.commands.push({
-          id: `cmd_${Date.now()}_${Math.random()}`,
+          id: self.generateId(),
           type: "hold",
           unitId: unit.id,
           playerId: self.playerId,
@@ -45,7 +50,7 @@ export class APIBridge {
       ...building,
       spawnUnit: (unitType: string) => {
         self.commands.push({
-          id: `cmd_${Date.now()}_${Math.random()}`,
+          id: self.generateId(),
           type: "spawn",
           buildingId: building.id,
           unitType: unitType as any,
@@ -58,7 +63,7 @@ export class APIBridge {
     const myBuildings = state.my.buildings.map(wrapBuilding);
 
     // Combine enemy units and buildings for the enemies array
-    const allEnemies = [...state.visibleEnemies, ...state.enemyBuildings];
+    const allEnemies = [...state.enemies, ...state.enemyBuildings];
 
     return {
       game: {
@@ -76,6 +81,7 @@ export class APIBridge {
       },
       enemies: allEnemies,
       enemyBuildings: state.enemyBuildings,
+      aiFeedbackSinceLastCall: state.aiFeedbackSinceLastCall,
       map: {
         width: state.map.width,
         height: state.map.height,

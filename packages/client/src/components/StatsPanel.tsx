@@ -45,10 +45,21 @@ export function StatsPanel({ state }: StatsPanelProps) {
     };
   };
 
+  const getHQHealth = (player: (typeof state.players)[0]) => {
+    const hq = player.buildings.find((b) => b.type === "hq");
+    if (!hq) {
+      return "0/0";
+    }
+
+    return `${Math.max(0, Math.floor(hq.hp))}/${Math.floor(hq.maxHp)}`;
+  };
+
   const p1Units = getUnitCounts(player1);
   const p2Units = getUnitCounts(player2);
   const p1Buildings = getBuildingCounts(player1);
   const p2Buildings = getBuildingCounts(player2);
+  const p1HQHealth = getHQHealth(player1);
+  const p2HQHealth = getHQHealth(player2);
 
   const formatTime = (tick: number) => {
     const seconds = Math.floor((tick * 500) / 1000);
@@ -100,6 +111,7 @@ export function StatsPanel({ state }: StatsPanelProps) {
           <span style={{ color: "var(--accent-cyan)" }}>◈</span> 建筑设施
         </div>
         <BuildingRow label="HQ" p1={p1Buildings.hq} p2={p2Buildings.hq} />
+        <BuildingRow label="HP" p1={p1HQHealth} p2={p2HQHealth} />
         <BuildingRow label="兵营" p1={p1Buildings.barracks} p2={p2Buildings.barracks} />
       </div>
 
@@ -149,7 +161,7 @@ function Chip({ type, count }: { type: string; count: number }) {
   );
 }
 
-function BuildingRow({ label, p1, p2 }: { label: string; p1: number; p2: number }) {
+function BuildingRow({ label, p1, p2 }: { label: string; p1: number | string; p2: number | string }) {
   return (
     <div className="stat-row">
       <span style={{ color: "var(--text-secondary)" }}>{label}</span>

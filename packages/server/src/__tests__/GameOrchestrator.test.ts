@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GameOrchestrator } from "../GameOrchestrator";
 
@@ -42,5 +43,25 @@ describe("GameOrchestrator", () => {
     await vi.runOnlyPendingTimersAsync();
 
     expect(runAISpy.mock.calls.length).toBe(callCountBeforeStop);
+  });
+
+  it("saveRecord preserves the true initial snapshot after long runs", async () => {
+    const orchestrator = new GameOrchestrator({ apiKey: "test-key", model: "test-model" });
+    const game = orchestrator.getGame();
+
+    game.start();
+    for (let i = 0; i < 1001; i++) {
+      game.tickUpdate();
+    }
+    game.stop();
+
+    const recordPath = await orchestrator.saveRecord();
+    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+
+    expect(record.initialState.tick).toBe(0);
+    expect(record.finalState.tick).toBe(1001);
+    expect(record.tickDeltas.length).toBe(1001);
+
+    await fs.unlink(recordPath);
   });
 });

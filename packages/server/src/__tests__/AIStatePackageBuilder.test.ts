@@ -5,13 +5,18 @@ import { Game } from "../Game";
 describe("AIStatePackageBuilder", () => {
   it("should include AI feedback for the requesting player", () => {
     const game = new Game();
-    game.addAIFeedback("player_1", "execution", "error", "ReferenceError: foo is not defined");
+    game.addAIFeedback("player_1", "execution", "error", "ReferenceError: foo is not defined", {
+      code: "execution_error",
+      meta: { hint: "Check variable names." },
+    });
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
     expect(aiState.aiFeedbackSinceLastCall[0].phase).toBe("execution");
+    expect(aiState.aiFeedbackSinceLastCall[0].code).toBe("execution_error");
+    expect(aiState.aiFeedbackSinceLastCall[0].meta?.hint).toBe("Check variable names.");
   });
 
   it("should not leak another player's AI feedback", () => {

@@ -81,6 +81,15 @@ export interface AIFeedback {
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  code?: string;
+  meta?: {
+    x?: number;
+    y?: number;
+    requestedX?: number;
+    requestedY?: number;
+    targetId?: string;
+    hint?: string;
+  };
 }
 
 export interface Command {
@@ -89,6 +98,7 @@ export interface Command {
   unitId?: string;
   buildingId?: string;
   targetId?: string;
+  targetPriority?: string[];
   position?: Position;
   unitType?: UnitType;
   buildingType?: BuildingType;

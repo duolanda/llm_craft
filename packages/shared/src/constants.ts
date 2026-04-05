@@ -48,7 +48,7 @@ export const TILE_TYPES = {
 export type TileType = typeof TILE_TYPES[keyof typeof TILE_TYPES];
 
 export const UNIT_STATS: Record<UnitType, { hp: number; speed: number; attack: number; cost: number; attackRange: number }> = {
-  [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 5, cost: 50, attackRange: 0 },
+  [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0 },
   [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 },
 };
 

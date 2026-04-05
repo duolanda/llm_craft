@@ -26,6 +26,7 @@
 - `Barracks` 只能生产 `Soldier`
 - `Worker` 可以瞬间建造 `Barracks`
 - 建造会扣资源，并做位置合法校验
+- `Barracks` 不能紧贴己方 `HQ` 建造，至少留出 1 格缓冲
 - 胜负条件仍然是摧毁敌方 HQ
 
 ## 3. 模型每轮实际收到什么
@@ -63,7 +64,7 @@
 - `map.tiles`: 当前只传非空地块，也就是障碍物和资源点
 - `unitStats`: 单位静态属性表
 - `eventsSinceLastCall`: 最近日志切片
-- `aiFeedbackSinceLastCall`: 最近 AI 错误/命令拒绝反馈切片
+- `aiFeedbackSinceLastCall`: 最近 AI 错误/命令反馈切片，包含短结构 `code + meta + hint`
 - `gameTimeRemaining`: 剩余时间
 
 ### 3.3 当前发送给模型的完整基线大致长什么样
@@ -193,6 +194,7 @@ me = {
 ```js
 unit.moveTo({ x, y })
 unit.attack(targetId)
+unit.attackInRange(targetPriority?)
 unit.holdPosition()
 unit.build("barracks", { x, y })
 ```
@@ -208,8 +210,16 @@ building.spawnUnit("worker" | "soldier")
 - 遍历我方单位和建筑
 - 读取单位位置、血量、状态、攻击范围
 - 让单位移动、攻击、待命
+- 让单位在执行时按优先级自动攻击当前射程内的对象
 - 让 Worker 建兵营
 - 让建筑产兵
+- 直接把 `moveTo` 指到建筑格或拥堵格，系统会自动尝试改到附近可达格
+
+补充说明：
+
+- `unit.attack(targetId)` 是指定具体目标 ID
+- `unit.attackInRange(targetPriority?)` 是到执行时再按优先级挑当前射程内目标
+- `unit.attackInRange()` 默认优先级是 `["hq", "soldier", "worker", "barracks"]`
 
 当前不能做的事：
 
@@ -229,8 +239,9 @@ enemies = [
 
 注意：
 
-- 沙箱里的 `enemies` 仍然是“敌方单位 + 敌方建筑”的合并列表
-- 其中类型现在只会出现 `worker`、`soldier`、`hq`、`barracks`
+- 沙箱里的 `enemies` 当前只包含敌方单位
+- 敌方建筑单独放在 `enemyBuildings`
+- 其中类型现在只会出现 `worker`、`soldier`
 
 如果只想要敌方单位，需要自己筛：
 
@@ -257,7 +268,16 @@ aiFeedbackSinceLastCall = [
     tick: number,
     phase: "generation" | "execution" | "command",
     severity: "error" | "warning",
-    message: string
+    message: string,
+    code?: string,
+    meta?: {
+      x?: number,
+      y?: number,
+      requestedX?: number,
+      requestedY?: number,
+      targetId?: string,
+      hint?: string
+    }
   }
 ]
 ```
@@ -330,8 +350,9 @@ utils = {
 保存内容包括：
 
 - 对局元数据：开始时间、保存时间、双方模型、Base URL、AI 调用间隔、窗口大小
+- `initialState`
 - `finalState`
-- `snapshots`
+- `tickDeltas`
 - `commandResults`
 - `aiTurns`
 
@@ -346,6 +367,11 @@ utils = {
 
 当前前端支持在暂停或运行中点击“保存记录”，把当前对局写到 `logs/records/`。
 
+补充说明：
+
+- 当前保存记录不再依赖滚动快照窗口，长局也会保留真正的开局状态
+- 快照在保存时会深拷贝，避免早期 tick 被后续状态污染
+
 ## 9. 当前规则的真实实现
 
 ### 9.1 胜负条件
@@ -356,6 +382,7 @@ utils = {
 
 - Worker / Soldier: 每 tick 最多移动 1 格
 - `moveTo` 是给目标点，系统自动寻路
+- 如果目标格不可站，系统会自动改到附近最近的可达格
 - 障碍物不可通行
 - 单位碰撞会阻挡移动
 - 非整数坐标会被拒绝
@@ -364,6 +391,8 @@ utils = {
 
 - Soldier 可以攻击单位和建筑
 - Worker 当前 `attackRange = 0`
+- 当前攻击范围按 8 邻域计算
+- 对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
 - 目标不在攻击范围内，命令失败
 - 攻击同队目标会失败
 

@@ -100,17 +100,17 @@ export class Game {
       }
     }
 
-    return {
+    return this.cloneValue({
       tick: this.tick,
       players: this.players,
       tiles,
       winner: this.winner,
       logs: this.logs,
-    };
+    });
   }
 
   queueCommand(command: Command): void {
-    this.commandQueue.push(command);
+    this.commandQueue.push(this.normalizeCommand(command));
   }
 
   processCommands(): void {
@@ -145,20 +145,46 @@ export class Game {
               this.tiles,
               blockedPositions
             );
-            if (result === RESULT_CODES.ERR_INVALID_TARGET) {
-              const log = this.addLog(
+            if (result === RESULT_CODES.OK) {
+              const resolvedTarget = unit.pathTarget;
+              if (
+                resolvedTarget &&
+                (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
+              ) {
+                this.recordCommandFeedback(
+                  "move_adjusted",
+                  `Unit ${command.unitId} rerouted to (${resolvedTarget.x}, ${resolvedTarget.y})`,
+                  command,
+                  result,
+                  "move_adjusted",
+                  {
+                    x: resolvedTarget.x,
+                    y: resolvedTarget.y,
+                    requestedX: command.position.x,
+                    requestedY: command.position.y,
+                    hint: "Target tile was blocked, so a nearby reachable tile was chosen.",
+                  }
+                );
+              }
+            } else {
+              const failure = this.describeMoveFailure(unit.id, command.position.x, command.position.y) ?? {
+                code: "move_unreachable",
+                hint: "No reachable nearby tile found.",
+              };
+              this.recordCommandFeedback(
                 "move_blocked",
-                `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y}): target invalid or unreachable`,
-                { command, result }
+                `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y})`,
+                command,
+                result,
+                failure.code,
+                {
+                  x: command.position.x,
+                  y: command.position.y,
+                  requestedX: command.position.x,
+                  requestedY: command.position.y,
+                  hint: failure.hint,
+                }
               );
-              this.recordAIRelevantLog(log);
-            } else if (result !== RESULT_CODES.OK) {
-              const log = this.addLog(
-                "command_failed",
-                `Move command failed for unit ${command.unitId}`,
-                { command, result }
-              );
-              this.recordAIRelevantLog(log);
             }
             this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Move command processed");
           }
@@ -179,14 +205,55 @@ export class Game {
                 : RESULT_CODES.ERR_INVALID_TARGET;
 
             if (result !== RESULT_CODES.OK) {
-              const log = this.addLog(
+              this.recordCommandFeedback(
                 "command_failed",
                 `Attack command failed for unit ${command.unitId}`,
-                { command, result }
+                command,
+                result,
+                result === RESULT_CODES.ERR_NOT_IN_RANGE ? "attack_out_of_range" : "attack_invalid_target",
+                {
+                  targetId: command.targetId,
+                  hint:
+                    result === RESULT_CODES.ERR_NOT_IN_RANGE
+                      ? "Move to a tile adjacent to the target before attacking."
+                      : "Check that the target still exists and belongs to the enemy.",
+                }
               );
-              this.recordAIRelevantLog(log);
             }
             this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Attack command processed");
+          }
+        }
+        break;
+      }
+
+      case "attack_in_range": {
+        if (command.unitId) {
+          const attacker = this.unitManager.getUnit(command.unitId);
+          if (attacker && attacker.playerId === command.playerId) {
+            const prioritizedTarget = this.findPrioritizedAttackTarget(
+              attacker,
+              command.playerId,
+              command.targetPriority
+            );
+            const result = prioritizedTarget
+              ? prioritizedTarget.kind === "unit"
+                ? this.unitManager.attackUnit(attacker, prioritizedTarget.target)
+                : this.attackBuilding(attacker, prioritizedTarget.target)
+              : RESULT_CODES.ERR_NOT_IN_RANGE;
+
+            if (result !== RESULT_CODES.OK) {
+              this.recordCommandFeedback(
+                "command_failed",
+                `Attack-in-range command failed for unit ${command.unitId}`,
+                command,
+                result,
+                "attack_in_range_no_target",
+                {
+                  hint: "No enemy matching the requested priority was in range at execution time.",
+                }
+              );
+            }
+            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Attack-in-range command processed");
           }
         }
         break;
@@ -214,24 +281,36 @@ export class Game {
               const unitCost = this.getUnitCost(command.unitType);
               if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
-                const log = this.addLog(
+                this.recordCommandFeedback(
                   "command_failed",
                   `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
-                  { command, result }
+                  command,
+                  result,
+                  "spawn_invalid_building",
+                  {
+                    targetId: building.id,
+                    hint: building.type === BUILDING_TYPES.HQ
+                      ? "HQ can only spawn workers. Build a barracks to produce soldiers."
+                      : "Check that the unit type matches the building.",
+                  }
                 );
-                this.recordAIRelevantLog(log);
                 this.recordCommandResult(command, result, false, "Building cannot produce this unit type");
               } else if (player.resources.credits >= unitCost) {
                 player.resources.credits -= unitCost;
                 this.buildingManager.spawnUnit(building, command.unitType);
                 this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
-                const log = this.addLog(
+                this.recordCommandFeedback(
                   "command_failed",
-                  `Spawn command failed: insufficient credits`,
-                  { command }
+                  "Spawn command failed: insufficient credits",
+                  command,
+                  RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                  "insufficient_credits",
+                  {
+                    targetId: building.id,
+                    hint: `Need ${unitCost} credits before spawning ${command.unitType}.`,
+                  }
                 );
-                this.recordAIRelevantLog(log);
                 this.recordCommandResult(
                   command,
                   RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
@@ -256,17 +335,34 @@ export class Game {
           }
 
           if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
+            this.recordCommandFeedback(
+              "command_failed",
+              "Build command failed: only barracks can be built in MVP",
+              command,
+              RESULT_CODES.ERR_INVALID_BUILDING,
+              "build_invalid_building",
+              {
+                hint: "Only barracks are buildable in the current MVP.",
+              }
+            );
             this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_BUILDING, false, "Only barracks can be built in MVP");
             break;
           }
 
           const buildingCost = this.getBuildingCost(command.buildingType);
           if (player.resources.credits < buildingCost) {
-            const log = this.addLog("command_failed", "Build command failed: insufficient credits", {
+            this.recordCommandFeedback(
+              "command_failed",
+              "Build command failed: insufficient credits",
               command,
-              result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-            });
-            this.recordAIRelevantLog(log);
+              RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+              "insufficient_credits",
+              {
+                x: command.position.x,
+                y: command.position.y,
+                hint: `Need ${buildingCost} credits before building a barracks.`,
+              }
+            );
             this.recordCommandResult(
               command,
               RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
@@ -276,13 +372,21 @@ export class Game {
             break;
           }
 
-          const result = this.validateBuildPosition(command.position.x, command.position.y);
+          const result = this.validateBuildPosition(command.playerId, command.position.x, command.position.y);
           if (result !== RESULT_CODES.OK) {
-            const log = this.addLog("command_failed", "Build command failed: invalid build position", {
+            const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
+            this.recordCommandFeedback(
+              "command_failed",
+              "Build command failed: invalid build position",
               command,
               result,
-            });
-            this.recordAIRelevantLog(log);
+              buildFailure.code,
+              {
+                x: command.position.x,
+                y: command.position.y,
+                hint: buildFailure.hint,
+              }
+            );
             this.recordCommandResult(command, result, false, "Invalid build position");
             break;
           }
@@ -333,9 +437,7 @@ export class Game {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    const distance = Math.sqrt(
-      Math.pow(attacker.x - target.x, 2) + Math.pow(attacker.y - target.y, 2)
-    );
+    const distance = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
     if (distance > attacker.attackRange) {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
@@ -346,6 +448,53 @@ export class Game {
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
 
     return RESULT_CODES.OK;
+  }
+
+  private findPrioritizedAttackTarget(
+    attacker: Unit,
+    playerId: string,
+    targetPriority?: string[]
+  ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
+    const priority = (targetPriority && targetPriority.length > 0
+      ? targetPriority
+      : ["hq", "soldier", "worker", "barracks"]
+    ).map((value) => String(value).toLowerCase());
+
+    const enemyUnits = this.unitManager
+      .getAllUnits()
+      .filter((unit) => unit.exists && unit.playerId !== playerId)
+      .filter((unit) => Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <= attacker.attackRange);
+    const enemyBuildings = this.buildingManager
+      .getAllBuildings()
+      .filter((building) => building.exists && building.playerId !== playerId)
+      .filter(
+        (building) =>
+          Math.max(Math.abs(attacker.x - building.x), Math.abs(attacker.y - building.y)) <= attacker.attackRange
+      );
+
+    const fallbackUnits = enemyUnits.sort((a, b) => a.id.localeCompare(b.id));
+    const fallbackBuildings = enemyBuildings.sort((a, b) => a.id.localeCompare(b.id));
+
+    for (const requestedType of priority) {
+      const unitTarget = fallbackUnits.find((unit) => unit.type === requestedType);
+      if (unitTarget) {
+        return { kind: "unit", target: unitTarget };
+      }
+
+      const buildingTarget = fallbackBuildings.find((building) => building.type === requestedType);
+      if (buildingTarget) {
+        return { kind: "building", target: buildingTarget };
+      }
+    }
+
+    if (fallbackBuildings.length > 0) {
+      return { kind: "building", target: fallbackBuildings[0] };
+    }
+    if (fallbackUnits.length > 0) {
+      return { kind: "unit", target: fallbackUnits[0] };
+    }
+
+    return null;
   }
 
   checkWinCondition(): boolean {
@@ -481,12 +630,8 @@ export class Game {
     this.snapshots.push({
       tick: this.tick,
       state: this.getState(),
-      aiOutputs: { ...this.aiOutputs },
+      aiOutputs: this.cloneValue(this.aiOutputs),
     });
-    // 限制快照数量，防止内存泄漏（保留最近 1000 个 tick）
-    if (this.snapshots.length > 1000) {
-      this.snapshots = this.snapshots.slice(-500);
-    }
   }
 
   getWinner(): string | null {
@@ -632,11 +777,11 @@ export class Game {
   }
 
   getSnapshots(): GameSnapshot[] {
-    return this.snapshots;
+    return this.cloneValue(this.snapshots);
   }
 
   getCommandResults(): CommandResult[] {
-    return [...this.commandResults];
+    return this.cloneValue(this.commandResults);
   }
 
   // For testing purposes
@@ -655,7 +800,7 @@ export class Game {
     );
   }
 
-  private validateBuildPosition(x: number, y: number): ResultCode {
+  private validateBuildPosition(playerId: string, x: number, y: number): ResultCode {
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -669,6 +814,13 @@ export class Game {
     }
 
     if (this.unitManager.hasUnitAt(x, y) || this.buildingManager.hasBuildingAt(x, y)) {
+      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    }
+
+    const hq = this.buildingManager
+      .getBuildingsByPlayer(playerId)
+      .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+    if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
@@ -688,9 +840,100 @@ export class Game {
       success,
       message,
     });
+  }
 
-    if (this.commandResults.length > 2000) {
-      this.commandResults = this.commandResults.slice(-1000);
+  private recordCommandFeedback(
+    type: string,
+    message: string,
+    command: Command,
+    result: ResultCode,
+    code: string,
+    meta?: { x?: number; y?: number; targetId?: string; hint?: string }
+  ): void {
+    const log = this.addLog(type, message, {
+      command,
+      result,
+      playerId: command.playerId,
+      phase: "command",
+      severity: "warning",
+      code,
+      meta,
+    });
+    this.recordAIRelevantLog(log);
+  }
+
+  private describeMoveFailure(unitId: string, x: number, y: number): { code: string; hint: string } | null {
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      return { code: "move_bad_target", hint: "Use integer map coordinates." };
     }
+
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return { code: "move_bad_target", hint: "Choose a tile inside the map bounds." };
+    }
+
+    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
+      return { code: "move_blocked_tile", hint: "That tile is an obstacle. Pick a nearby empty tile." };
+    }
+
+    if (this.buildingManager.hasBuildingAt(x, y)) {
+      return { code: "move_blocked_tile", hint: "Buildings occupy their tile. Move to an adjacent empty tile instead." };
+    }
+
+    if (this.unitManager.hasUnitAt(x, y, unitId)) {
+      return { code: "move_blocked_tile", hint: "Another unit is already on that tile. Pick a different nearby tile." };
+    }
+
+    return { code: "move_unreachable", hint: "No reachable nearby tile found." };
+  }
+
+  private describeBuildFailure(playerId: string, x: number, y: number): { code: string; hint: string } {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return { code: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
+    }
+
+    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
+      return { code: "build_blocked_tile", hint: "That tile is blocked by terrain." };
+    }
+
+    if (this.buildingManager.hasBuildingAt(x, y) || this.unitManager.hasUnitAt(x, y)) {
+      return { code: "build_blocked_tile", hint: "That tile is already occupied." };
+    }
+
+    const hq = this.buildingManager
+      .getBuildingsByPlayer(playerId)
+      .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+    if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
+      return { code: "build_too_close_to_hq", hint: "Leave at least one empty tile around HQ before placing barracks." };
+    }
+
+    return { code: "build_bad_target", hint: "Choose another empty tile." };
+  }
+
+  private cloneValue<T>(value: T): T {
+    return typeof structuredClone === "function"
+      ? structuredClone(value)
+      : JSON.parse(JSON.stringify(value));
+  }
+
+  private normalizeCommand(command: Command): Command {
+    return {
+      id: String(command.id),
+      type: String(command.type),
+      unitId: command.unitId ? String(command.unitId) : undefined,
+      buildingId: command.buildingId ? String(command.buildingId) : undefined,
+      targetId: command.targetId ? String(command.targetId) : undefined,
+      targetPriority: Array.isArray(command.targetPriority)
+        ? command.targetPriority.map((value) => String(value))
+        : undefined,
+      position: command.position
+        ? {
+            x: Number(command.position.x),
+            y: Number(command.position.y),
+          }
+        : undefined,
+      unitType: command.unitType,
+      buildingType: command.buildingType,
+      playerId: String(command.playerId),
+    };
   }
 }

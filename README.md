@@ -111,7 +111,7 @@ pnpm --filter @llmcraft/client build
 
 | 类型 | HP | 速度 | 攻击 | 造价 | 攻击范围 |
 |-----|----|------|-----|------|---------|
-| Worker | 50 | 1 | 5 | 50 | 0 (不能攻击) |
+| Worker | 50 | 1 | 0 | 50 | 0 (不能攻击) |
 | Soldier | 100 | 1 | 15 | 80 | 1 (近战) |
 
 ### 建筑
@@ -129,7 +129,8 @@ pnpm --filter @llmcraft/client build
 4. AI 代码在沙箱中执行，产生命令
 5. 命令加入队列，在下一 tick 执行
 6. Worker 可以建造 Barracks，Barracks 建好后才能生产 Soldier
-7. 一方 HQ 被摧毁则游戏结束
+7. Barracks 不能紧贴己方 HQ 建造，至少要留出 1 格缓冲
+8. 一方 HQ 被摧毁则游戏结束
 
 ### AI API
 
@@ -137,11 +138,11 @@ AI 可以通过全局对象控制游戏：
 
 ```javascript
 // 移动单位
-me.soldiers.forEach(s => s.moveTo({x: 10, y: 10}));
+me.soldiers.forEach(s => s.moveTo({ x: 17, y: 10 }));
 
 // 建造兵营
 if (!me.buildings.find(b => b.type === "barracks") && me.workers[0] && me.resources.credits >= 120) {
-  me.workers[0].build("barracks", {x: me.hq.x + 2, y: me.hq.y});
+  me.workers[0].build("barracks", { x: me.hq.x + 2, y: me.hq.y });
 }
 
 // 生产士兵
@@ -155,7 +156,18 @@ const nearestEnemy = utils.findClosestByRange(soldier, enemies);
 if (nearestEnemy && utils.inRange(soldier, nearestEnemy, 1)) {
   soldier.attack(nearestEnemy.id);
 }
+
+// 或在执行时按优先级自动选择当前射程内目标
+soldier.attackInRange(["hq", "soldier", "worker", "barracks"]);
 ```
+
+补充说明：
+
+- `moveTo({ x, y })` 是意图型移动。如果目标格不可站，系统会自动改到附近最近的可达格
+- `attackRange` 当前按 8 邻域计算；`Soldier` 的 `attackRange = 1` 覆盖上下左右和四个斜角相邻格
+- `attackInRange([...])` 会在命令真正执行时重新扫描射程内目标，适合减少 AI 回包延迟带来的目标过期
+- 最近一轮命令修正或失败原因会通过 `aiFeedbackSinceLastCall` 返回，包含精简的 `code + meta + hint`
+- 更完整的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
 
 ## 项目结构
 
@@ -180,6 +192,7 @@ llmcraft/
 
 - 当前有效的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
 - 当前真实 MVP 行为见 [docs/current-mvp-reality.md](./docs/current-mvp-reality.md)
+- 当前保存的对局记录格式为 `initialState / finalState / tickDeltas / commandResults / aiTurns`
 - `docs/plans/` 和较早的设计稿包含历史方案，不一定代表当前实现
 
 ## License

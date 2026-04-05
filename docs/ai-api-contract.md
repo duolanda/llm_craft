@@ -189,6 +189,7 @@ const me: {
 ```ts
 unit.moveTo(pos: { x: number; y: number }): void;
 unit.attack(targetId: string): void;
+unit.attackInRange(targetPriority?: string[]): void;
 unit.holdPosition(): void;
 unit.build(buildingType: "barracks", pos: { x: number; y: number }): void;
 ```
@@ -245,6 +246,15 @@ const aiFeedbackSinceLastCall: Array<{
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  code?: string;
+  meta?: {
+    x?: number;
+    y?: number;
+    requestedX?: number;
+    requestedY?: number;
+    targetId?: string;
+    hint?: string;
+  };
 }>;
 ```
 
@@ -306,11 +316,22 @@ const utils: {
 ## 5. 当前保证的行为
 
 - `unit.moveTo(...)` 会下发移动命令，实际移动由游戏系统逐 tick 执行
+- 如果 `moveTo` 的目标格不可站，系统会自动改到附近最近的可达格
+- 当 `moveTo` 被自动改点时，`aiFeedbackSinceLastCall` 会出现 `code = "move_adjusted"`，并在 `meta.x / meta.y` 返回实际目标格
 - `unit.attack(...)` 会下发攻击命令，目标需要在攻击范围内
+- `unit.attackInRange(targetPriority?)` 会在命令真正执行时，按优先级重新选择当前射程内目标
+- `unit.attackInRange()` 的默认优先级是 `["hq", "soldier", "worker", "barracks"]`
+- `unit.attackInRange(["hq", "soldier", "worker"])` 适合在 AI 返回延迟较大时减少目标过期
+- 当前攻击范围按 8 邻域计算；对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
 - `unit.holdPosition()` 会下发待命命令
 - `unit.build("barracks", ...)` 会下发建造兵营命令
 - `building.spawnUnit(...)` 会下发产兵命令，但必须满足建筑类型权限
 - 沙箱运行时错误会被捕获并作为该轮 AI 失败返回，不应导致服务端进程退出
+
+补充规则：
+
+- `barracks` 不能紧贴己方 `HQ` 建造，至少要留出 1 格缓冲
+- 当前命令失败反馈会尽量给出短结构：`code + meta + hint`
 
 ## 6. 当前不保证的行为
 
@@ -335,12 +356,16 @@ if (barracks && me.resources.credits >= unitStats.soldier.cost) {
 
 if (enemyHQ) {
   me.soldiers.forEach(s => {
-    const target = utils.findClosestByRange(s, enemies);
-    if (target && utils.inRange(s, target, s.attackRange)) {
-      s.attack(target.id);
+    const inRange = Math.max(Math.abs(s.x - enemyHQ.x), Math.abs(s.y - enemyHQ.y)) <= s.attackRange;
+    if (inRange) {
+      s.attackInRange(["hq", "soldier", "worker", "barracks"]);
     } else {
-      s.moveTo({ x: enemyHQ.x - 1, y: enemyHQ.y });
+      s.moveTo({ x: enemyHQ.x, y: enemyHQ.y });
     }
   });
 }
 ```
+
+说明：
+
+- 上面示例里的 `moveTo({ x: enemyHQ.x, y: enemyHQ.y })` 是允许的；如果目标是建筑格，系统会自动吸附到附近可站格

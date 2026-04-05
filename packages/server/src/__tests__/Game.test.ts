@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
-import { BUILDING_TYPES, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, RESULT_CODES, UNIT_STATS, UNIT_TYPES } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
@@ -102,6 +102,27 @@ describe("Game", () => {
     expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
   });
 
+  it("rejects building a barracks adjacent to HQ", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+
+    game.queueCommand({
+      id: "build_next_to_hq",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: { x: 3, y: 10 },
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+    expect(game.getAIFeedback("player_1").at(-1)?.data?.code).toBe("build_too_close_to_hq");
+  });
+
   it("requires barracks before soldiers can be queued", () => {
     const player1 = game.getState().players[0];
     const hq = player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)!;
@@ -156,13 +177,119 @@ describe("Game", () => {
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
   });
 
-  it("keeps worker attack range at zero and soldier attack range at one", () => {
+  it("keeps worker unable to attack and soldier attack range at one", () => {
     const unitManager = game.getUnitManager();
     const worker = unitManager.createUnit(UNIT_TYPES.WORKER, 5, 5, "player_1");
     const soldier = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_1");
 
+    expect(UNIT_STATS.worker.attack).toBe(0);
     expect(worker.attackRange).toBe(0);
     expect(soldier.attackRange).toBe(1);
+  });
+
+  it("allows soldiers to attack diagonally adjacent targets", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 6, "player_2");
+
+    game.queueCommand({
+      id: "diag_attack_unit",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: target.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    expect(target.hp).toBeLessThan(target.maxHp);
+  });
+
+  it("allows soldiers to attack diagonally adjacent buildings", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = buildingManager.createBuilding(BUILDING_TYPES.BARRACKS, 6, 6, "player_2");
+
+    game.queueCommand({
+      id: "diag_attack_building",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: target.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    expect(target.hp).toBeLessThan(target.maxHp);
+  });
+
+  it("attack_in_range prioritizes requested targets at execution time", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const enemyWorker = unitManager.createUnit(UNIT_TYPES.WORKER, 4, 5, "player_2");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
+
+    game.queueCommand({
+      id: "attack_in_range_priority",
+      type: "attack_in_range",
+      unitId: attacker.id,
+      targetPriority: [BUILDING_TYPES.HQ, UNIT_TYPES.WORKER],
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
+    expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
+  });
+
+  it("attack_in_range fails cleanly when nothing is in range", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    unitManager.createUnit(UNIT_TYPES.WORKER, 8, 8, "player_2");
+
+    game.queueCommand({
+      id: "attack_in_range_miss",
+      type: "attack_in_range",
+      unitId: attacker.id,
+      targetPriority: [UNIT_TYPES.WORKER],
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect(game.getAIFeedback("player_1").at(-1)?.data?.code).toBe("attack_in_range_no_target");
+  });
+
+  it("adjusts move targets to a nearby reachable tile when the requested tile is blocked", () => {
+    const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+
+    game.queueCommand({
+      id: "move_to_enemy_hq_tile",
+      type: "move",
+      unitId: worker.id,
+      position: { x: 17, y: 10 },
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    const result = game.getCommandResults().at(-1)!;
+    const feedback = game.getAIFeedback("player_1").at(-1)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+
+    expect(result.success).toBe(true);
+    expect(runtimeWorker.pathTarget).toBeDefined();
+    expect(runtimeWorker.pathTarget).not.toEqual({ x: 17, y: 10 });
+    expect(feedback.data?.code).toBe("move_adjusted");
+    expect(feedback.data?.meta?.requestedX).toBe(17);
+    expect(feedback.data?.meta?.requestedY).toBe(10);
   });
 
   it("records command results for saved game records", () => {
@@ -209,5 +336,38 @@ describe("Game", () => {
     expect(game.getState().players[0].resources.credits).toBe(210);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.state).toBe("idle");
+  });
+
+  it("keeps snapshot history without mutating earlier snapshots", () => {
+    game.start();
+    game.tickUpdate();
+    const snapshots = game.getSnapshots();
+    const initialSnapshot = snapshots[0];
+
+    const workerId = initialSnapshot.state.players[0].units[0].id;
+    const runtimeWorker = game.getUnitManager().getUnit(workerId)!;
+    runtimeWorker.x = 9;
+    runtimeWorker.y = 9;
+
+    game.tickUpdate();
+    game.stop();
+
+    const updatedSnapshots = game.getSnapshots();
+    expect(updatedSnapshots.length).toBe(3);
+    expect(initialSnapshot.tick).toBe(0);
+    expect(initialSnapshot.state.players[0].units[0].x).toBe(3);
+    expect(initialSnapshot.state.players[0].units[0].y).toBe(9);
+    expect(updatedSnapshots[0].state.players[0].units[0].x).toBe(3);
+    expect(updatedSnapshots[2].state.players[0].units[0].x).toBe(9);
+  });
+
+  it("keeps more than 1000 snapshots for recording", () => {
+    game.start();
+    for (let i = 0; i < 1001; i++) {
+      game.tickUpdate();
+    }
+    game.stop();
+
+    expect(game.getSnapshots().length).toBe(1002);
   });
 });

@@ -94,9 +94,6 @@ export class GameOrchestrator {
         baseURL: openai.getBaseURL(),
         createdAt: new Date().toISOString(),
       });
-      if (this.aiTurns.length > 500) {
-        this.aiTurns = this.aiTurns.slice(-250);
-      }
       this.lastAIState[playerId] = aiPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);

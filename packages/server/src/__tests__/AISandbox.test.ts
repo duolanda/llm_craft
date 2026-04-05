@@ -61,4 +61,42 @@ describe("AISandbox", () => {
     expect(result.commands).toHaveLength(1);
     expect(result.commands[0].type).toBe("hold");
   });
+
+  it("should return plain command payloads that can be recorded safely", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const result = await sandbox.executeCode(
+      "me.workers[0].moveTo({ x: enemyBuildings[0].x, y: enemyBuildings[0].y });",
+      aiState
+    );
+
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.commands).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(result.commands[0]))).toMatchObject({
+      type: "move",
+      position: { x: 17, y: 10 },
+      playerId: "player_1",
+    });
+  });
+
+  it("should expose attackInRange and keep priority payloads serializable", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const result = await sandbox.executeCode(
+      "me.workers[0].attackInRange(['hq', 'worker']);",
+      aiState
+    );
+
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.commands).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(result.commands[0]))).toMatchObject({
+      type: "attack_in_range",
+      targetPriority: ["hq", "worker"],
+      playerId: "player_1",
+    });
+  });
 });

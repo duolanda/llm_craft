@@ -69,7 +69,7 @@ map: {
   getTile(x, y): { x: number; y: number; type: "empty" | "obstacle" | "resource" };
 }
 unitStats: {
-  worker: { hp: 50, speed: 1, attack: 5, cost: 50, attackRange: 0 };
+  worker: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0 };
   soldier: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 };
 }
 aiFeedbackSinceLastCall: Array<{
@@ -77,12 +77,15 @@ aiFeedbackSinceLastCall: Array<{
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  code?: string;
+  meta?: { x?: number; y?: number; requestedX?: number; requestedY?: number; targetId?: string; hint?: string; };
 }>
 
 ## 可用方法
 
 unit.moveTo({ x, y })
 unit.attack(targetId)
+unit.attackInRange(targetPriority?)
 unit.holdPosition()
 unit.build("barracks", { x, y })
 building.spawnUnit("worker" | "soldier")
@@ -98,10 +101,15 @@ building.spawnUnit("worker" | "soldier")
 - HQ 本身会占格，通常应把 Worker 移动到 HQ 相邻空地，而不是 HQ 坐标本身
 - enemies 里只有敌方单位；敌方建筑只在 enemyBuildings 里
 - attack(targetId) 不会自动追击或自动靠近；只有目标已在攻击范围内时才会成功
+- attackInRange(targetPriority?) 会在命令执行时，按优先级选择当前射程内的敌方目标并攻击；适合减少目标过期
+- attackInRange(["hq", "soldier", "worker", "barracks"]) 表示优先打 HQ，其次士兵、工人、兵营
+- 当前攻击范围按 8 邻域计算；对 attackRange = 1 的 Soldier 来说，上下左右和四个斜角相邻格都算射程内
 - 如果目标不在射程内，先 moveTo 到目标附近空地，再在后续 tick attack
 - 不要对所有远处目标盲目连续 attack，否则只会反复得到不在射程内的失败
-- 不要把单位移动到己方或敌方建筑所在格，建筑格被占用，移动会失败
+- moveTo({ x, y }) 如果目标格不可站，系统会自动改到附近可达格；看 aiFeedbackSinceLastCall 里的 move_adjusted / meta 获取实际落点
+- aiFeedbackSinceLastCall 里的 code / meta 会告诉你失败原因；优先按 hint 修正目标格或命令形式
 - Barracks cost = 120，Worker cost = 50，Soldier cost = 80
+- Barracks 不能紧贴 HQ 建造，至少留出 1 格缓冲
 - credits 不够时，不要重复提交会失败的 build/spawn
 
 ## 最小示例
@@ -110,7 +118,7 @@ building.spawnUnit("worker" | "soldier")
 const worker = me.workers[0];
 const hq = me.hq;
 if (worker && hq && me.resources.credits >= buildingStats.barracks.cost) {
-  worker.build("barracks", { x: hq.x + 1, y: hq.y });
+  worker.build("barracks", { x: hq.x + 2, y: hq.y });
 }
 
 // 2) 正确地让满载工人回 HQ 旁边交付
@@ -125,8 +133,8 @@ const enemyHQ = enemyBuildings.find(b => b.type === "hq");
 if (soldier && enemyHQ) {
   const dx = Math.abs(soldier.x - enemyHQ.x);
   const dy = Math.abs(soldier.y - enemyHQ.y);
-  if (dx + dy <= soldier.attackRange) {
-    soldier.attack(enemyHQ.id);
+  if (Math.max(dx, dy) <= soldier.attackRange) {
+    soldier.attackInRange(["hq", "soldier", "worker", "barracks"]);
   } else {
     soldier.moveTo({ x: enemyHQ.x + 1, y: enemyHQ.y });
   }

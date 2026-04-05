@@ -4,6 +4,7 @@ export class APIBridge {
   private commands: Command[] = [];
   private playerId: string;
   private static counter = 0;
+  private static readonly DEFAULT_ATTACK_PRIORITY = ["hq", "soldier", "worker", "barracks"];
 
   constructor(playerId: string) {
     this.playerId = playerId;
@@ -33,6 +34,18 @@ export class APIBridge {
           type: "attack",
           unitId: unit.id,
           targetId,
+          playerId: self.playerId,
+        });
+      },
+      attackInRange: (targetPriority?: string[]) => {
+        self.commands.push({
+          id: self.generateId(),
+          type: "attack_in_range",
+          unitId: unit.id,
+          targetPriority:
+            targetPriority && targetPriority.length > 0
+              ? targetPriority.map((value) => String(value))
+              : [...APIBridge.DEFAULT_ATTACK_PRIORITY],
           playerId: self.playerId,
         });
       },

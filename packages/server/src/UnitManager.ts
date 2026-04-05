@@ -19,6 +19,10 @@ function getDistance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
 }
 
+function getChebyshevDistance(x1: number, y1: number, x2: number, y2: number): number {
+  return Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1));
+}
+
 export class UnitManager {
   private units: Map<string, Unit> = new Map();
   private idCounter = 0;
@@ -134,9 +138,7 @@ export class UnitManager {
     }
 
     // Critical: Check attack range
-    const distance = Math.sqrt(
-      Math.pow(attacker.x - target.x, 2) + Math.pow(attacker.y - target.y, 2)
-    );
+    const distance = getChebyshevDistance(attacker.x, attacker.y, target.x, target.y);
     if (distance > attacker.attackRange) {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
@@ -204,34 +206,25 @@ export class UnitManager {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    if (tiles[targetY][targetX] === TILE_TYPES.OBSTACLE) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    if (blockedPositions?.has(`${targetX},${targetY}`)) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    // 计算路径
     const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
+    const resolvedTarget = this.resolveMoveTarget(unit, targetX, targetY, tiles, occupiedPositions);
+    if (!resolvedTarget) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
     const path = PathFinder.findPath(
       unit.x,
       unit.y,
-      targetX,
-      targetY,
+      resolvedTarget.x,
+      resolvedTarget.y,
       tiles,
       occupiedPositions
     );
 
-    if (path.length === 0 && (unit.x !== targetX || unit.y !== targetY)) {
-      // 不可达但不是因为已经在目标点
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
     // 保存路径和目标
     unit.path = path;
-    unit.pathTarget = { x: targetX, y: targetY };
-    unit.intent = { type: 'move', targetX, targetY };
+    unit.pathTarget = { x: resolvedTarget.x, y: resolvedTarget.y };
+    unit.intent = { type: 'move', targetX: resolvedTarget.x, targetY: resolvedTarget.y };
 
     return RESULT_CODES.OK;
   }
@@ -317,5 +310,60 @@ export class UnitManager {
       positions.add(position);
     }
     return positions;
+  }
+
+  private resolveMoveTarget(
+    unit: Unit,
+    requestedX: number,
+    requestedY: number,
+    tiles: TileType[][],
+    occupiedPositions: Set<string>
+  ): { x: number; y: number } | null {
+    const candidates: Array<{ x: number; y: number; radius: number; pathLength: number; unitDistance: number }> = [];
+
+    for (let radius = 0; radius <= MAP_WIDTH + MAP_HEIGHT; radius++) {
+      for (let y = Math.max(0, requestedY - radius); y <= Math.min(MAP_HEIGHT - 1, requestedY + radius); y++) {
+        for (let x = Math.max(0, requestedX - radius); x <= Math.min(MAP_WIDTH - 1, requestedX + radius); x++) {
+          if (Math.abs(x - requestedX) + Math.abs(y - requestedY) !== radius) {
+            continue;
+          }
+
+          if (tiles[y][x] === TILE_TYPES.OBSTACLE) {
+            continue;
+          }
+
+          if (occupiedPositions.has(`${x},${y}`)) {
+            continue;
+          }
+
+          const path = PathFinder.findPath(unit.x, unit.y, x, y, tiles, occupiedPositions);
+          if (path.length === 0 && (unit.x !== x || unit.y !== y)) {
+            continue;
+          }
+
+          candidates.push({
+            x,
+            y,
+            radius,
+            pathLength: path.length,
+            unitDistance: Math.abs(unit.x - x) + Math.abs(unit.y - y),
+          });
+        }
+      }
+
+      if (candidates.length > 0) {
+        candidates.sort((a, b) =>
+          a.radius - b.radius ||
+          a.pathLength - b.pathLength ||
+          a.unitDistance - b.unitDistance ||
+          a.y - b.y ||
+          a.x - b.x
+        );
+
+        return { x: candidates[0].x, y: candidates[0].y };
+      }
+    }
+
+    return null;
   }
 }

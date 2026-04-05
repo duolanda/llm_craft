@@ -111,6 +111,8 @@ export class AIStatePackageBuilder {
       phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
       severity: (log.data?.severity || "warning") as "error" | "warning",
       message: log.message,
+      code: log.data?.code,
+      meta: log.data?.meta,
     }));
   }
 

@@ -61,6 +61,13 @@ PORT=3001
 
 支持任意兼容 OpenAI API 格式的服务（Azure、本地模型、第三方代理等）。
 
+如果不配置 `OPENAI_API_KEY`，则只能查看历史对局回放
+此时后端会以“回放模式”启动：
+
+- 实时对局功能不可用
+- 仍可读取 `logs/records/` 下的历史记录
+- 前端仍可进入“对局回放”并加载服务端记录或本地 JSON
+
 ### 运行
 
 ```bash
@@ -99,6 +106,34 @@ pnpm build:shared
 pnpm --filter @llmcraft/server build
 pnpm --filter @llmcraft/client build
 ```
+
+## 对局回放
+
+前端已支持基于保存记录的回放。
+
+使用方式：
+
+1. 启动前后端
+2. 打开前端页面，切换到“对局回放”
+3. 从服务端记录列表选择一份 `match-*.json`，或直接导入本地 JSON
+4. 使用播放 / 暂停 / 进度条 / 倍速控制查看过程
+
+当前回放会尽量还原：
+
+- 每个 tick 的单位、建筑、资源和日志变化
+- 当时的 AI 输出
+- 单位的移动目标点
+- 单位的攻击目标或攻击落点
+
+服务端提供的回放接口：
+
+- `GET /api/replay/records`：列出 `logs/records/` 中的记录
+- `GET /api/replay/records/:fileName`：读取单个记录 JSON
+
+说明：
+
+- 回放是基于 `initialState + tickDeltas + commandResults + aiTurns` 的重建，不是重新跑一遍引擎
+- 视觉过程和战局分析是可靠的，但极少数瞬时内部状态不保证 100% 还原
 
 ## 游戏机制
 
@@ -193,6 +228,7 @@ llmcraft/
 - 当前有效的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
 - 当前真实 MVP 行为见 [docs/current-mvp-reality.md](./docs/current-mvp-reality.md)
 - 当前保存的对局记录格式为 `initialState / finalState / tickDeltas / commandResults / aiTurns`
+- 当前前端已支持读取保存记录并做逐 tick 回放
 - `docs/plans/` 和较早的设计稿包含历史方案，不一定代表当前实现
 
 ## License

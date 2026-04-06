@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
-import { BUILDING_TYPES, RESULT_CODES, UNIT_STATS, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
@@ -12,6 +12,7 @@ describe("Game", () => {
   it("initializes each player with one HQ, two workers and credits", () => {
     const state = game.getState();
     const [player1, player2] = state.players;
+    const centerY = Math.floor(MAP_HEIGHT / 2);
 
     expect(player1.buildings.filter((b) => b.type === BUILDING_TYPES.HQ)).toHaveLength(1);
     expect(player2.buildings.filter((b) => b.type === BUILDING_TYPES.HQ)).toHaveLength(1);
@@ -19,6 +20,24 @@ describe("Game", () => {
     expect(player2.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(2);
     expect(player1.units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(0);
     expect(player1.resources.credits).toBe(200);
+    expect(player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: 2, y: centerY });
+    expect(player2.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: MAP_WIDTH - 3, y: centerY });
+  });
+
+  it("keeps resource tiles outside the HQ delivery ring", () => {
+    const state = game.getState();
+
+    for (const player of state.players) {
+      const hq = player.buildings.find((b) => b.type === BUILDING_TYPES.HQ)!;
+      for (let y = hq.y - 1; y <= hq.y + 1; y++) {
+        for (let x = hq.x - 1; x <= hq.x + 1; x++) {
+          if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+            continue;
+          }
+          expect(state.tiles[y][x].type).not.toBe(TILE_TYPES.RESOURCE);
+        }
+      }
+    }
   });
 
   it("allows HQ to spawn workers and deducts credits", () => {
@@ -327,7 +346,7 @@ describe("Game", () => {
       id: "move_to_enemy_hq_tile",
       type: "move",
       unitId: worker.id,
-      position: { x: 17, y: 10 },
+      position: { x: 18, y: 10 },
       playerId: "player_1",
     });
 
@@ -339,9 +358,9 @@ describe("Game", () => {
 
     expect(result.success).toBe(true);
     expect(runtimeWorker.pathTarget).toBeDefined();
-    expect(runtimeWorker.pathTarget).not.toEqual({ x: 17, y: 10 });
+    expect(runtimeWorker.pathTarget).not.toEqual({ x: 18, y: 10 });
     expect(feedback.data?.code).toBe("move_adjusted");
-    expect(feedback.data?.meta?.requestedX).toBe(17);
+    expect(feedback.data?.meta?.requestedX).toBe(18);
     expect(feedback.data?.meta?.requestedY).toBe(10);
   });
 
@@ -371,7 +390,7 @@ describe("Game", () => {
     const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
 
     runtimeWorker.x = 2;
-    runtimeWorker.y = 8;
+    runtimeWorker.y = 7;
 
     game.start();
     game.tickUpdate();

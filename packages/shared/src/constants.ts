@@ -1,6 +1,6 @@
 export const TICK_INTERVAL_MS = 500;
-export const MAP_WIDTH = 20;
-export const MAP_HEIGHT = 20;
+export const MAP_WIDTH = 21;
+export const MAP_HEIGHT = 21;
 
 export const RESULT_CODES = {
   OK: 0,

@@ -3,6 +3,9 @@ import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
 export class MapGenerator {
   static generate(): TileType[][] {
     const tiles: TileType[][] = [];
+    const centerX = Math.floor(MAP_WIDTH / 2);
+    const centerY = Math.floor(MAP_HEIGHT / 2);
+    const edgeInset = 2;
 
     // Initialize empty map
     for (let y = 0; y < MAP_HEIGHT; y++) {
@@ -12,32 +15,32 @@ export class MapGenerator {
       }
     }
 
-    // Place obstacles at four corners: (5,5), (14,5), (5,14), (14,14)
+    // Place obstacles at four corners
     const cornerObstacles = [
       { x: 5, y: 5 },
-      { x: 14, y: 5 },
-      { x: 5, y: 14 },
-      { x: 14, y: 14 },
+      { x: MAP_WIDTH - 6, y: 5 },
+      { x: 5, y: MAP_HEIGHT - 6 },
+      { x: MAP_WIDTH - 6, y: MAP_HEIGHT - 6 },
     ];
     for (const pos of cornerObstacles) {
       tiles[pos.y][pos.x] = TILE_TYPES.OBSTACLE;
     }
 
-    // Place central cross obstacles: (10, 8-11)
-    for (let y = 8; y <= 11; y++) {
-      tiles[y][10] = TILE_TYPES.OBSTACLE;
+    // Place central vertical obstacles
+    for (let y = centerY - 2; y <= centerY + 2; y++) {
+      tiles[y][centerX] = TILE_TYPES.OBSTACLE;
     }
 
     // Place resource points at edges
     const resourcePoints = [
-      { x: 2, y: 8 },
-      { x: 2, y: 11 },
-      { x: 17, y: 8 },
-      { x: 17, y: 11 },
-      { x: 8, y: 2 },
-      { x: 11, y: 2 },
-      { x: 8, y: 17 },
-      { x: 11, y: 17 },
+      { x: edgeInset, y: centerY - 3 },
+      { x: edgeInset, y: centerY + 3 },
+      { x: MAP_WIDTH - edgeInset - 1, y: centerY - 3 },
+      { x: MAP_WIDTH - edgeInset - 1, y: centerY + 3 },
+      { x: centerX - 3, y: edgeInset },
+      { x: centerX + 3, y: edgeInset },
+      { x: centerX - 3, y: MAP_HEIGHT - edgeInset - 1 },
+      { x: centerX + 3, y: MAP_HEIGHT - edgeInset - 1 },
     ];
     for (const pos of resourcePoints) {
       tiles[pos.y][pos.x] = TILE_TYPES.RESOURCE;

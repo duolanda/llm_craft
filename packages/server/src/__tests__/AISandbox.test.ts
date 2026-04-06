@@ -76,7 +76,7 @@ describe("AISandbox", () => {
     expect(result.commands).toHaveLength(1);
     expect(JSON.parse(JSON.stringify(result.commands[0]))).toMatchObject({
       type: "move",
-      position: { x: 17, y: 10 },
+      position: { x: 18, y: 10 },
       playerId: "player_1",
     });
   });

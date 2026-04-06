@@ -78,9 +78,22 @@ export class GameOrchestrator {
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
+
+      const latestState = this.game.getState();
+      if (latestState.winner) {
+        return;
+      }
+
+      const latestAIPackage = packageBuilder.build(
+        playerId,
+        latestState,
+        this.game,
+        this.lastAIState[playerId]?.tick
+      );
+
       this.game.setAIOutput(playerId, code);
 
-      const { commands, errorMessage } = await sandbox.executeCode(code, aiPackage);
+      const { commands, errorMessage } = await sandbox.executeCode(code, latestAIPackage);
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
@@ -92,7 +105,8 @@ export class GameOrchestrator {
       }
       this.aiTurns.push({
         playerId,
-        tick: state.tick,
+        requestTick: state.tick,
+        executeTick: latestState.tick,
         requestMessages,
         promptPayload,
         response: code,
@@ -102,7 +116,7 @@ export class GameOrchestrator {
         baseURL: llm.getBaseURL(),
         createdAt: new Date().toISOString(),
       });
-      this.lastAIState[playerId] = aiPackage;
+      this.lastAIState[playerId] = latestAIPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
       this.game.addAIFeedback(
@@ -217,7 +231,8 @@ export class GameOrchestrator {
   private buildSavedAITurns(): SavedAITurnRecord[] {
     return this.aiTurns.map((turn) => ({
       playerId: turn.playerId,
-      tick: turn.tick,
+      requestTick: turn.requestTick,
+      executeTick: turn.executeTick,
       windowMessageCount: turn.requestMessages.length,
       promptPayload: turn.promptPayload,
       response: turn.response,

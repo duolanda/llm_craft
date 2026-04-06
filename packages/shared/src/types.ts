@@ -229,7 +229,8 @@ export interface AIPromptPayload {
 
 export interface AITurnRecord {
   playerId: string;
-  tick: number;
+  requestTick: number;
+  executeTick: number;
   requestMessages: Array<{
     role: "system" | "user" | "assistant";
     content: string;
@@ -245,7 +246,8 @@ export interface AITurnRecord {
 
 export interface SavedAITurnRecord {
   playerId: string;
-  tick: number;
+  requestTick: number;
+  executeTick: number;
   windowMessageCount: number;
   promptPayload: AIPromptPayload;
   response: string;

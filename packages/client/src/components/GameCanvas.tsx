@@ -24,6 +24,56 @@ const COLORS = {
   barracks: "#2979ff",
 };
 
+function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const safeRadius = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + safeRadius, y);
+  ctx.lineTo(x + width - safeRadius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  ctx.lineTo(x + width, y + height - safeRadius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  ctx.lineTo(x + safeRadius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  ctx.lineTo(x, y + safeRadius);
+  ctx.quadraticCurveTo(x, y, x + safeRadius, y);
+  ctx.closePath();
+}
+
+function drawIdBadge(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  centerX: number,
+  centerY: number,
+  accentColor: string
+) {
+  ctx.save();
+  ctx.font = "bold 10px 'JetBrains Mono', monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const textWidth = ctx.measureText(text).width;
+  const badgeWidth = Math.max(16, Math.ceil(textWidth + 8));
+  const badgeHeight = 16;
+  const x = Math.round(centerX - badgeWidth / 2);
+  const y = Math.round(centerY - badgeHeight / 2);
+
+  ctx.shadowColor = "rgba(0, 0, 0, 0.35)";
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = "rgba(8, 10, 12, 0.95)";
+  drawRoundedRect(ctx, x, y, badgeWidth, badgeHeight, 6);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 1.5;
+  drawRoundedRect(ctx, x, y, badgeWidth, badgeHeight, 6);
+  ctx.stroke();
+
+  ctx.fillStyle = "#f8fbff";
+  ctx.fillText(text, centerX, centerY + 0.5);
+  ctx.restore();
+}
+
 export function GameCanvas({ state }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -111,8 +161,6 @@ export function GameCanvas({ state }: GameCanvasProps) {
         if (!building.exists) continue;
         const bx = BOARD_OFFSET_X + building.x * TILE_SIZE;
         const by = BOARD_OFFSET_Y + building.y * TILE_SIZE;
-        const cx = bx + TILE_SIZE / 2;
-        const cy = by + TILE_SIZE / 2;
         const typeColor = COLORS[building.type as keyof typeof COLORS] || color;
         ctx.fillStyle = typeColor;
         ctx.fillRect(bx + 3, by + 3, TILE_SIZE - 7, TILE_SIZE - 7);
@@ -129,18 +177,9 @@ export function GameCanvas({ state }: GameCanvasProps) {
         ctx.fillStyle = color;
         ctx.fillRect(bx + 2, by - 7, (TILE_SIZE - 4) * (building.hp / building.maxHp), 5);
 
-        // 绘制建筑 ID（居中显示，带描边）
+        // 建筑编号徽标
         const buildingIdText = building.id.split('_')[1];
-        ctx.font = "10px 'JetBrains Mono', monospace";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        // 描边
-        ctx.strokeStyle = "rgba(32, 32, 32, 0.6)";
-        ctx.lineWidth = 5;
-        ctx.strokeText(buildingIdText, cx, cy);
-        // 文字
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(buildingIdText, cx, cy);
+        drawIdBadge(ctx, buildingIdText, bx + TILE_SIZE - 1, by + 6, color);
       }
     }
 
@@ -193,18 +232,9 @@ export function GameCanvas({ state }: GameCanvasProps) {
         ctx.fillStyle = color;
         ctx.fillRect(ux + 4, uy - 5, (TILE_SIZE - 8) * (unit.hp / unit.maxHp), 4);
 
-        // 绘制单位 ID（居中显示，带描边）
+        // 单位编号徽标
         const unitIdText = unit.id.split('_')[1];
-        ctx.font = "10px 'JetBrains Mono', monospace";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        // 描边
-        ctx.strokeStyle = "rgba(32, 32, 32, 0.6)";
-        ctx.lineWidth = 5;
-        ctx.strokeText(unitIdText, cx, cy);
-        // 文字
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(unitIdText, cx, cy);
+        drawIdBadge(ctx, unitIdText, ux + TILE_SIZE - 1, uy + 6, color);
 
         // 工人载货标记
         if (unit.type === "worker" && unit.carryingCredits > 0) {
@@ -280,18 +310,6 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.lineTo(tx - 6, ty + 6);
             ctx.stroke();
 
-            if (unit.intent.targetId) {
-              ctx.fillStyle = "rgba(8, 10, 12, 0.88)";
-              ctx.fillRect(tx + 8, ty - 14, 64, 16);
-              ctx.strokeStyle = "rgba(255, 42, 74, 0.6)";
-              ctx.lineWidth = 1;
-              ctx.strokeRect(tx + 8, ty - 14, 64, 16);
-              ctx.fillStyle = "#ff6b7d";
-              ctx.font = "10px monospace";
-              ctx.textAlign = "left";
-              ctx.textBaseline = "middle";
-              ctx.fillText(unit.intent.targetId, tx + 12, ty - 6);
-            }
           } else if (unit.intent.type === 'hold') {
             // 待命意图：显示盾牌标记
             ctx.strokeStyle = color;

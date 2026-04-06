@@ -373,7 +373,8 @@ utils = {
 
 其中 `aiTurns` 会保存：
 
-- 当轮 tick
+- `requestTick`：发起本轮模型请求时的 tick
+- `executeTick`：模型返回后、用最新状态执行代码时的 tick
 - 发给模型的消息列表
 - 本轮 `promptPayload`
 - 模型返回代码
@@ -478,3 +479,5 @@ utils = {
 2. 这份现状文档
 3. README
 4. 历史设计文档 / 计划文档
+
+

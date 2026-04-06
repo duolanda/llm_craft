@@ -155,7 +155,8 @@ function buildTickDeltas(snapshots = []) {
 function buildSavedAITurns(aiTurns = []) {
   return aiTurns.map((turn) => ({
     playerId: turn.playerId,
-    tick: turn.tick,
+    requestTick: turn.requestTick ?? turn.tick,
+    executeTick: turn.executeTick ?? turn.requestTick ?? turn.tick,
     windowMessageCount: turn.requestMessages?.length || 0,
     promptPayload: turn.promptPayload,
     response: turn.response,
@@ -215,3 +216,5 @@ main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+

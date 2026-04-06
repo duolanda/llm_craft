@@ -17,10 +17,15 @@ type VisibleEnemy = AIStatePackage["enemies"][number];
 type VisibleEnemyBuilding = AIStatePackage["enemyBuildings"][number];
 
 export class AIStatePackageBuilder {
-  static build(playerId: string, state: GameState, game?: Game): AIStatePackage {
+  static build(playerId: string, state: GameState, game?: Game, sinceTick?: number): AIStatePackage {
     const player = state.players.find((p) => p.id === playerId)!;
     const enemy = state.players.find((p) => p.id !== playerId)!;
-    const aiFeedback = this.buildFeedback(game?.getAIFeedback(playerId) || []);
+    const aiFeedback = this.buildFeedback(
+      (game?.getAIFeedback(playerId) || []).filter((log) => sinceTick === undefined || log.tick > sinceTick)
+    );
+    const eventsSinceLastCall = state.logs
+      .filter((log) => sinceTick === undefined || log.tick > sinceTick)
+      .slice(-10);
 
     const tiles = [];
     for (let y = 0; y < state.tiles.length; y++) {
@@ -57,7 +62,7 @@ export class AIStatePackageBuilder {
         workerGatherRate: ECONOMY_RULES.WORKER_GATHER_RATE,
         hqDeliveryRange: ECONOMY_RULES.HQ_DELIVERY_RANGE,
       },
-      eventsSinceLastCall: state.logs.slice(-10),
+      eventsSinceLastCall,
       aiFeedbackSinceLastCall: aiFeedback,
       gameTimeRemaining: Math.max(0, 600 - state.tick / 2),
     };
@@ -68,13 +73,14 @@ export class AIStatePackageBuilder {
     previous: AIStatePackage | null,
     forceFull: boolean
   ): AIPromptPayload {
+    const summary = this.buildSummary(current, previous, forceFull);
+
     if (forceFull || !previous) {
       return {
         mode: "full",
         tick: current.tick,
         tickIntervalMs: 500,
-        summary:
-          "这是完整基线状态。你正在每个 tick 实时下达指令，只需要处理当前局面，不要试图一次性写完全部战术。",
+        summary,
         state: current,
         delta: null,
       };
@@ -90,8 +96,7 @@ export class AIStatePackageBuilder {
       mode: "delta",
       tick: current.tick,
       tickIntervalMs: 500,
-      summary:
-        "这是自上一轮 AI 调用后的增量状态。你在持续对话中实时发指令，只需根据变化做下一步，不要重写一整套长期脚本。",
+      summary,
       state: null,
       delta: {
         creditsChanged: creditsChanged === 0 ? undefined : creditsChanged,
@@ -103,6 +108,43 @@ export class AIStatePackageBuilder {
         aiFeedback: current.aiFeedbackSinceLastCall,
       },
     };
+  }
+
+  private static buildSummary(
+    current: AIStatePackage,
+    previous: AIStatePackage | null,
+    forceFull: boolean
+  ): string {
+    const alerts: string[] = [];
+
+    if (this.isHQUnderAttack(current, previous, forceFull)) {
+      alerts.push("Alert: our HQ is under attack.");
+    }
+
+    const baseSummary =
+      forceFull || !previous
+        ? "这是完整基线状态。你正在每个 tick 实时下达指令，只需要处理当前局面，不要试图一次性写完全部战术。"
+        : "这是自上一轮 AI 调用后的增量状态。你在持续对话中实时发指令，只需根据变化做下一步，不要重写一整套长期脚本。";
+
+    return alerts.length > 0 ? `${alerts.join(" ")}\n${baseSummary}` : baseSummary;
+  }
+
+  private static isHQUnderAttack(
+    current: AIStatePackage,
+    previous: AIStatePackage | null,
+    forceFull: boolean
+  ): boolean {
+    const currentHQ = current.my.buildings.find((building) => building.type === "hq");
+    if (!currentHQ) {
+      return false;
+    }
+
+    if (forceFull || !previous) {
+      return currentHQ.hp < currentHQ.maxHp;
+    }
+
+    const previousHQ = previous.my.buildings.find((building) => building.type === "hq");
+    return Boolean(previousHQ && currentHQ.hp < previousHQ.hp);
   }
 
   private static buildFeedback(logs: GameLog[]): AIFeedback[] {

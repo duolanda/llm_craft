@@ -12,8 +12,8 @@ export interface GenerateCodeResult {
 }
 
 export interface LLMProvider {
-  shouldResetConversation(): boolean;
-  generateCode(payload: AIPromptPayload, resetConversation?: boolean): Promise<GenerateCodeResult>;
+  shouldForceFullState(): boolean;
+  generateCode(payload: AIPromptPayload): Promise<GenerateCodeResult>;
   getModel(): string;
   getBaseURL(): string | undefined;
 }

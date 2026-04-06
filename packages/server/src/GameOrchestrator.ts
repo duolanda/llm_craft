@@ -23,9 +23,11 @@ export class GameOrchestrator {
   private ai2: AISandbox;
   private llm1: LLMProvider;
   private llm2: LLMProvider;
-  private lastAITick = { player_1: -100, player_2: -100 };
+  private lastAIDispatchTick = { player_1: -100, player_2: -100 };
   private aiInterval = 5; // AI 每 5 个 tick 思考一次
   private isRunningAI = { player_1: false, player_2: false }; // 防止并发调用
+  private aiDirty = { player_1: true, player_2: true };
+  private lastObservedTick = -1;
   private isPolling = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private runSession = 0;
@@ -53,21 +55,26 @@ export class GameOrchestrator {
 
     try {
       const state = this.game.getState();
+      this.aiDirty[playerId as keyof typeof this.aiDirty] = false;
+      this.lastAIDispatchTick[playerId as keyof typeof this.lastAIDispatchTick] = state.tick;
+
       const packageBuilder = AIStatePackageBuilder;
-      const aiPackage = packageBuilder.build(playerId, state, this.game);
+      const aiPackage = packageBuilder.build(
+        playerId,
+        state,
+        this.game,
+        this.lastAIState[playerId]?.tick
+      );
 
       const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
       const llm = playerId === "player_1" ? this.llm1 : this.llm2;
-      const shouldResetConversation = llm.shouldResetConversation();
+      const shouldForceFullState = llm.shouldForceFullState();
       const promptPayload = packageBuilder.buildPromptPayload(
         aiPackage,
         this.lastAIState[playerId],
-        shouldResetConversation
+        shouldForceFullState
       );
-      const { code, requestMessages } = await llm.generateCode(
-        promptPayload,
-        shouldResetConversation
-      );
+      const { code, requestMessages } = await llm.generateCode(promptPayload);
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
@@ -114,6 +121,8 @@ export class GameOrchestrator {
 
     this.runSession++;
     this.isPolling = true;
+    this.lastObservedTick = -1;
+    this.aiDirty = { player_1: true, player_2: true };
     this.game.start();
 
     // 轮询 AI 更新
@@ -126,9 +135,19 @@ export class GameOrchestrator {
         return;
       }
 
+      if (state.tick !== this.lastObservedTick) {
+        this.lastObservedTick = state.tick;
+        this.aiDirty.player_1 = true;
+        this.aiDirty.player_2 = true;
+      }
+
       for (const playerId of ["player_1", "player_2"]) {
-        if (state.tick - this.lastAITick[playerId as keyof typeof this.lastAITick] >= this.aiInterval) {
-          this.lastAITick[playerId as keyof typeof this.lastAITick] = state.tick;
+        if (
+          this.aiDirty[playerId as keyof typeof this.aiDirty] &&
+          !this.isRunningAI[playerId as keyof typeof this.isRunningAI] &&
+          state.tick - this.lastAIDispatchTick[playerId as keyof typeof this.lastAIDispatchTick] >=
+            this.aiInterval
+        ) {
           void this.runAI(playerId, this.runSession);
         }
       }

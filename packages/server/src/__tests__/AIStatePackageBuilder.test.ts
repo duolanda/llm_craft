@@ -76,4 +76,44 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.my.units[0]).toHaveProperty("carryingCredits", 30);
     expect(aiState.my.units[0]).toHaveProperty("carryCapacity", 100);
   });
+
+  it("filters events and feedback by the last successful AI tick", () => {
+    const game = new Game();
+    game.start();
+    const baselineTick = game.getTick();
+
+    game.addAIFeedback("player_1", "execution", "warning", "old warning");
+    game.tickUpdate();
+    game.addAIFeedback("player_1", "execution", "error", "new error");
+
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game, baselineTick);
+
+    expect(aiState.eventsSinceLastCall.every((log) => log.tick > baselineTick)).toBe(true);
+    expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
+    expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("new error");
+    game.stop();
+  });
+
+  it("adds an HQ-under-attack alert to full payloads when the HQ is already damaged", () => {
+    const game = new Game();
+    const hq = game.getBuildingManager().getBuildingsByPlayer("player_1").find((building) => building.type === "hq")!;
+    game.getBuildingManager().takeDamage(hq, 100);
+
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const payload = AIStatePackageBuilder.buildPromptPayload(aiState, null, true);
+
+    expect(payload.summary).toContain("Alert: our HQ is under attack.");
+  });
+
+  it("adds an HQ-under-attack alert to delta payloads when the HQ loses hp", () => {
+    const game = new Game();
+    const previous = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const hq = game.getBuildingManager().getBuildingsByPlayer("player_1").find((building) => building.type === "hq")!;
+    game.getBuildingManager().takeDamage(hq, 100);
+
+    const current = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const payload = AIStatePackageBuilder.buildPromptPayload(current, previous, false);
+
+    expect(payload.summary).toContain("Alert: our HQ is under attack.");
+  });
 });

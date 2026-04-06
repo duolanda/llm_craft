@@ -111,6 +111,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
         if (!building.exists) continue;
         const bx = BOARD_OFFSET_X + building.x * TILE_SIZE;
         const by = BOARD_OFFSET_Y + building.y * TILE_SIZE;
+        const cx = bx + TILE_SIZE / 2;
+        const cy = by + TILE_SIZE / 2;
         const typeColor = COLORS[building.type as keyof typeof COLORS] || color;
         ctx.fillStyle = typeColor;
         ctx.fillRect(bx + 3, by + 3, TILE_SIZE - 7, TILE_SIZE - 7);
@@ -126,6 +128,19 @@ export function GameCanvas({ state }: GameCanvasProps) {
         // 血条
         ctx.fillStyle = color;
         ctx.fillRect(bx + 2, by - 7, (TILE_SIZE - 4) * (building.hp / building.maxHp), 5);
+
+        // 绘制建筑 ID（居中显示，带描边）
+        const buildingIdText = building.id.split('_')[1];
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        // 描边
+        ctx.strokeStyle = "rgba(32, 32, 32, 0.6)";
+        ctx.lineWidth = 5;
+        ctx.strokeText(buildingIdText, cx, cy);
+        // 文字
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(buildingIdText, cx, cy);
       }
     }
 
@@ -177,6 +192,19 @@ export function GameCanvas({ state }: GameCanvasProps) {
         // 血条
         ctx.fillStyle = color;
         ctx.fillRect(ux + 4, uy - 5, (TILE_SIZE - 8) * (unit.hp / unit.maxHp), 4);
+
+        // 绘制单位 ID（居中显示，带描边）
+        const unitIdText = unit.id.split('_')[1];
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        // 描边
+        ctx.strokeStyle = "rgba(32, 32, 32, 0.6)";
+        ctx.lineWidth = 5;
+        ctx.strokeText(unitIdText, cx, cy);
+        // 文字
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(unitIdText, cx, cy);
 
         // 工人载货标记
         if (unit.type === "worker" && unit.carryingCredits > 0) {

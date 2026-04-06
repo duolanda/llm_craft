@@ -59,6 +59,10 @@ export class Game {
   }
 
   private initializeGame(): void {
+    const centerY = Math.floor(MAP_HEIGHT / 2);
+    const leftHqX = 2;
+    const rightHqX = MAP_WIDTH - 3;
+
     // 1. Generate map
     this.tiles = MapGenerator.generate();
 
@@ -78,16 +82,16 @@ export class Game {
       },
     ];
 
-    // 3. Place HQ: player_1 at (2,10), player_2 at (17,10)
-    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, 2, 10, "player_1");
-    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, 17, 10, "player_2");
+    // 3. Place HQ
+    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, leftHqX, centerY, "player_1");
+    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, rightHqX, centerY, "player_2");
 
     // 4. Place initial units: 2 workers for each player
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, 3, 9, "player_1");
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, 3, 11, "player_1");
+    this.unitManager.createUnit(UNIT_TYPES.WORKER, leftHqX + 1, centerY - 1, "player_1");
+    this.unitManager.createUnit(UNIT_TYPES.WORKER, leftHqX + 1, centerY + 1, "player_1");
 
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, 16, 9, "player_2");
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, 16, 11, "player_2");
+    this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY - 1, "player_2");
+    this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY + 1, "player_2");
 
     this.addLog("game_start", "Game initialized successfully");
     this.saveSnapshot();

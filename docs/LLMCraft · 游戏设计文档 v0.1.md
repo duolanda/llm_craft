@@ -472,7 +472,7 @@ AI 返回代码字符串
 
 ### 第一阶段（可以玩）
 
-- [ ] 基础地图（20×20 格子）
+- [ ] 基础地图（21×21 格子）
 - [ ] 3 种单位（Worker / Soldier / Scout）
 - [ ] 3 种建筑（HQ / Generator / Barracks）
 - [ ] 单资源（只有 Energy）

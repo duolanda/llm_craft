@@ -6,8 +6,13 @@ interface GameCanvasProps {
 }
 
 const TILE_SIZE = 32;
-const CANVAS_WIDTH = MAP_WIDTH * TILE_SIZE;
-const CANVAS_HEIGHT = MAP_HEIGHT * TILE_SIZE;
+const AXIS_GUTTER = 24;
+const BOARD_OFFSET_X = AXIS_GUTTER;
+const BOARD_OFFSET_Y = AXIS_GUTTER;
+const BOARD_WIDTH = MAP_WIDTH * TILE_SIZE;
+const BOARD_HEIGHT = MAP_HEIGHT * TILE_SIZE;
+const CANVAS_WIDTH = BOARD_OFFSET_X + BOARD_WIDTH;
+const CANVAS_HEIGHT = BOARD_OFFSET_Y + BOARD_HEIGHT;
 
 const COLORS = {
   empty: "#0d1014",
@@ -33,19 +38,37 @@ export function GameCanvas({ state }: GameCanvasProps) {
     ctx.fillStyle = "#080a0c";
     ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
+    // 坐标轴底板
+    ctx.fillStyle = "rgba(8, 10, 12, 0.98)";
+    ctx.fillRect(0, 0, CANVAS_WIDTH, BOARD_OFFSET_Y);
+    ctx.fillRect(0, 0, BOARD_OFFSET_X, CANVAS_HEIGHT);
+
+    // 坐标数字
+    ctx.fillStyle = "rgba(153, 182, 197, 0.85)";
+    ctx.font = "11px 'JetBrains Mono', monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let x = 0; x < MAP_WIDTH; x++) {
+      ctx.fillText(String(x), BOARD_OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2, BOARD_OFFSET_Y / 2);
+    }
+    ctx.textAlign = "right";
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      ctx.fillText(String(y), BOARD_OFFSET_X - 6, BOARD_OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2);
+    }
+
     // 绘制 subtle 网格
     ctx.strokeStyle = "rgba(42, 52, 64, 0.35)";
     ctx.lineWidth = 1;
     for (let x = 0; x <= MAP_WIDTH; x++) {
       ctx.beginPath();
-      ctx.moveTo(x * TILE_SIZE, 0);
-      ctx.lineTo(x * TILE_SIZE, CANVAS_HEIGHT);
+      ctx.moveTo(BOARD_OFFSET_X + x * TILE_SIZE, BOARD_OFFSET_Y);
+      ctx.lineTo(BOARD_OFFSET_X + x * TILE_SIZE, CANVAS_HEIGHT);
       ctx.stroke();
     }
     for (let y = 0; y <= MAP_HEIGHT; y++) {
       ctx.beginPath();
-      ctx.moveTo(0, y * TILE_SIZE);
-      ctx.lineTo(CANVAS_WIDTH, y * TILE_SIZE);
+      ctx.moveTo(BOARD_OFFSET_X, BOARD_OFFSET_Y + y * TILE_SIZE);
+      ctx.lineTo(CANVAS_WIDTH, BOARD_OFFSET_Y + y * TILE_SIZE);
       ctx.stroke();
     }
 
@@ -57,8 +80,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
           ctx.fillStyle = COLORS.resource;
           ctx.beginPath();
           ctx.arc(
-            x * TILE_SIZE + TILE_SIZE / 2,
-            y * TILE_SIZE + TILE_SIZE / 2,
+            BOARD_OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2,
+            BOARD_OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2,
             TILE_SIZE / 4,
             0,
             Math.PI * 2
@@ -72,8 +95,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
         } else if (tile?.type === "obstacle") {
           ctx.fillStyle = COLORS.obstacle;
           ctx.fillRect(
-            x * TILE_SIZE + 1,
-            y * TILE_SIZE + 1,
+            BOARD_OFFSET_X + x * TILE_SIZE + 1,
+            BOARD_OFFSET_Y + y * TILE_SIZE + 1,
             TILE_SIZE - 2,
             TILE_SIZE - 2
           );
@@ -86,8 +109,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
       const color = player.id === "player_1" ? COLORS.player1 : COLORS.player2;
       for (const building of player.buildings) {
         if (!building.exists) continue;
-        const bx = building.x * TILE_SIZE;
-        const by = building.y * TILE_SIZE;
+        const bx = BOARD_OFFSET_X + building.x * TILE_SIZE;
+        const by = BOARD_OFFSET_Y + building.y * TILE_SIZE;
         const typeColor = COLORS[building.type as keyof typeof COLORS] || color;
         ctx.fillStyle = typeColor;
         ctx.fillRect(bx + 3, by + 3, TILE_SIZE - 7, TILE_SIZE - 7);
@@ -111,8 +134,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
       const color = player.id === "player_1" ? COLORS.player1 : COLORS.player2;
       for (const unit of player.units) {
         if (!unit.exists) continue;
-        const ux = unit.x * TILE_SIZE;
-        const uy = unit.y * TILE_SIZE;
+        const ux = BOARD_OFFSET_X + unit.x * TILE_SIZE;
+        const uy = BOARD_OFFSET_Y + unit.y * TILE_SIZE;
         const cx = ux + TILE_SIZE / 2;
         const cy = uy + TILE_SIZE / 2;
         ctx.fillStyle = color;
@@ -192,8 +215,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.beginPath();
             ctx.moveTo(cx, cy);
             ctx.lineTo(
-              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
-              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
+              BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
             );
             ctx.stroke();
 
@@ -201,8 +224,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.fillStyle = color;
             ctx.beginPath();
             ctx.arc(
-              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
-              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2,
+              BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2,
               4, 0, Math.PI * 2
             );
             ctx.fill();
@@ -211,14 +234,14 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.beginPath();
             ctx.moveTo(cx, cy);
             ctx.lineTo(
-              unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
-              unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
+              BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
+              BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
             );
             ctx.stroke();
 
             // 攻击目标标记（X形）
-            const tx = unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
-            const ty = unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
+            const tx = BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
+            const ty = BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
             ctx.strokeStyle = '#ff0000';
             ctx.lineWidth = 3;
             ctx.setLineDash([]);

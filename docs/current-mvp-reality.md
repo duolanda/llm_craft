@@ -145,7 +145,7 @@
     ]
   },
   "unitStats": {
-    "worker": { "hp": 50, "speed": 1, "attack": 5, "cost": 50, "attackRange": 0 },
+    "worker": { "hp": 50, "speed": 1, "attack": 0, "cost": 50, "attackRange": 0 },
     "soldier": { "hp": 100, "speed": 1, "attack": 15, "cost": 80, "attackRange": 1 }
   },
   "eventsSinceLastCall": [],

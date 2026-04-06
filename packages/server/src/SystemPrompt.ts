@@ -112,6 +112,13 @@ building.spawnUnit("worker" | "soldier")
 - Barracks 不能紧贴 HQ 建造，至少留出 1 格缓冲
 - credits 不够时，不要重复提交会失败的 build/spawn
 
+## 失败反馈硬约束（必须执行）
+
+- 如果 aiFeedbackSinceLastCall 中连续两次出现 move_adjusted 或 move_blocked，且 requestedX/requestedY 指向同一个目标区域：下一次必须改用不同目标点（与原目标切比雪夫距离 >= 2），不要继续向同一格或相邻拥堵格重复 moveTo
+- 如果某个士兵连续两次出现 attack_in_range_no_target：下一次该士兵必须先 moveTo 接敌（靠近敌方 HQ 或最近敌方单位），禁止继续原地重复 attackInRange
+- 如果上一轮大多数命令都失败（例如失败数 >= 成功数）：本轮优先发“纠错命令”（换目标点、先移动再攻击、分散站位），不要继续重复同模式命令
+- 多个士兵前压时，不要把他们都发往同一个格子；应分配到目标周围不同可站立格，避免互相卡位导致持续 move_adjusted/move_blocked
+
 ## 最小示例
 
 // 1) 正确地让工人建兵营

@@ -37,8 +37,7 @@ body {
   font-family: var(--font-body);
   font-size: 15px;
   line-height: 1.35;
-  overflow-x: auto;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 /* Custom scrollbar */
@@ -70,8 +69,8 @@ body {
 /* App layout */
 .app-shell {
   display: grid;
-  grid-template-rows: auto;
-  min-height: 100vh;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  height: 100vh;
   padding: 16px 20px 20px;
   gap: 14px;
 }
@@ -239,6 +238,7 @@ body {
   gap: 16px;
   min-height: 0;
   align-items: stretch;
+  overflow: hidden;
 }
 
 .status-strip {
@@ -380,7 +380,7 @@ body {
 .stats-col {
   min-height: 0;
   min-width: 0;
-  overflow: visible;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -391,13 +391,13 @@ body {
   gap: 12px;
   min-height: 0;
   min-width: 0;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .terminal-col {
   min-height: 0;
   min-width: 0;
-  overflow: visible;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -895,8 +895,9 @@ body {
   }
 
   .app-shell {
+    grid-template-rows: auto;
     height: auto;
-    min-height: 100%;
+    min-height: 100vh;
   }
 
   .app-header {

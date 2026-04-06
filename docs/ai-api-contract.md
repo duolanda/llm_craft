@@ -83,7 +83,10 @@ interface AIPromptPayload {
 
 - `mode = "full"` 时，`state` 为完整基线状态，`delta = null`
 - `mode = "delta"` 时，`state = null`，变化写在 `delta`
-- 当窗口滚动需要裁剪旧消息时，服务端会重新发一次 `mode = "full"` 的完整基线
+- 对话历史采用滑动窗口，保留最近 20 轮 `user / assistant`
+- 当窗口滚动将导致历史里不再保留任何一条 `mode = "full"` 基线时，服务端会把当前轮升级为一次新的 `mode = "full"`
+- `summary` 不是纯固定文案；服务端可以在前面追加短告警行，用于强调当前高风险态势
+- 当前已实现的告警只有一条：当我方 HQ 已受损或本轮继续掉血时，会追加 `Alert: our HQ is under attack.`
 
 ## 2. `AIStatePackage`
 

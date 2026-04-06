@@ -7,7 +7,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
   private baseURL?: string;
-  private history: Array<{ role: "user" | "assistant"; content: string }> = [];
+  private history: Array<{
+    mode: AIPromptPayload["mode"];
+    user: string;
+    assistant: string;
+  }> = [];
   private maxTurns = 20;
 
   constructor(config: LLMProviderConfig) {
@@ -19,25 +23,22 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.baseURL = config.baseURL;
   }
 
-  shouldResetConversation(): boolean {
-    return this.history.length / 2 >= this.maxTurns;
+  shouldForceFullState(): boolean {
+    const retainedHistory = this.history.length >= this.maxTurns ? this.history.slice(1) : this.history;
+    return retainedHistory.every((turn) => turn.mode !== "full");
   }
 
-  async generateCode(
-    payload: AIPromptPayload,
-    resetConversation = false
-  ): Promise<{
+  async generateCode(payload: AIPromptPayload): Promise<{
     code: string;
     requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   }> {
-    if (resetConversation) {
-      this.history = [];
-    }
-
     const userPrompt = JSON.stringify(payload, null, 2);
     const requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
       { role: "system", content: SYSTEM_PROMPT },
-      ...this.history,
+      ...this.history.flatMap((turn) => [
+        { role: "user" as const, content: turn.user },
+        { role: "assistant" as const, content: turn.assistant },
+      ]),
       { role: "user", content: userPrompt },
     ];
 
@@ -51,10 +52,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
       const code = response.choices[0]?.message?.content || "";
       const cleanedCode = this.cleanCode(code);
-      this.history.push({ role: "user", content: userPrompt });
-      this.history.push({ role: "assistant", content: cleanedCode });
-      if (this.history.length > this.maxTurns * 2) {
-        this.history = this.history.slice(-(this.maxTurns * 2));
+      this.history.push({
+        mode: payload.mode,
+        user: userPrompt,
+        assistant: cleanedCode,
+      });
+      if (this.history.length > this.maxTurns) {
+        this.history = this.history.slice(-this.maxTurns);
       }
       return { code: cleanedCode, requestMessages };
     } catch (e) {

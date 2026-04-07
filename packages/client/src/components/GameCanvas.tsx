@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { GameState, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
+import { GameState, MAP_WIDTH, MAP_HEIGHT, PLAYER_COLORS, GAME_COLORS } from "@llmcraft/shared";
 
 interface GameCanvasProps {
   state: GameState | null;
@@ -15,13 +15,13 @@ const CANVAS_WIDTH = BOARD_OFFSET_X + BOARD_WIDTH;
 const CANVAS_HEIGHT = BOARD_OFFSET_Y + BOARD_HEIGHT;
 
 const COLORS = {
-  empty: "#0d1014",
-  obstacle: "#2a3440",
-  resource: "#ffb300",
-  player1: "#ff2a4a",
-  player2: "#00e5ff",
-  hq: "#c45fff",
-  barracks: "#2979ff",
+  empty: GAME_COLORS.empty,
+  obstacle: GAME_COLORS.obstacle,
+  resource: GAME_COLORS.resource,
+  player1: PLAYER_COLORS.player_1,
+  player2: PLAYER_COLORS.player_2,
+  hq: GAME_COLORS.hq,
+  barracks: GAME_COLORS.barracks,
 };
 
 function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {

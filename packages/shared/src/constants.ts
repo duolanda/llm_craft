@@ -62,3 +62,19 @@ export const ECONOMY_RULES = {
   WORKER_GATHER_RATE: 10,
   HQ_DELIVERY_RANGE: 1,
 } as const;
+
+/** 玩家颜色配置（用于客户端显示） */
+export const PLAYER_COLORS: Record<string, string> = {
+  player_1: "#ff2a4a",  // 红色
+  player_2: "#00e5ff",  // 青色
+  _system_: "#ffb300",  // 金色（系统消息）
+};
+
+/** 游戏内通用颜色配置 */
+export const GAME_COLORS = {
+  empty: "#0d1014",
+  obstacle: "#2a3440",
+  resource: "#ffb300",
+  hq: "#c45fff",
+  barracks: "#2979ff",
+} as const;

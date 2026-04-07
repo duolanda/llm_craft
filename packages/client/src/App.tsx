@@ -356,7 +356,8 @@ function App() {
 
         <div className="dashboard">
           <div className="stats-col">
-            <div className="hud-panel" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
+              <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战场数据</span>
@@ -364,7 +365,8 @@ function App() {
               <StatsPanel state={displayState} />
             </div>
 
-            <div className="hud-panel" style={{ marginTop: 12, display: "flex", flexDirection: "column" }}>
+            <div className="hud-panel" style={{ marginTop: 12 }}>
+              <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-red">战术图例</span>
@@ -374,7 +376,8 @@ function App() {
           </div>
 
           <div className="tactical-col">
-            <div className="hud-panel viewport">
+            <div className="hud-panel">
+              <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="scanlines" />
               <div className="viewport-data-lines">
@@ -383,10 +386,13 @@ function App() {
                 <span className="data-line dl-bl" />
                 <span className="data-line dl-br" />
               </div>
-              <GameCanvas state={displayState} />
+              <div className="viewport">
+                <GameCanvas state={displayState} />
+              </div>
             </div>
 
             <div className="hud-panel">
+              <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战术日志</span>
@@ -396,7 +402,8 @@ function App() {
           </div>
 
           <div className="terminal-col">
-            <div className="hud-panel" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+            <div className="hud-panel" style={{ flex: 1 }}>
+              <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-cyan">AI 指挥终端</span>

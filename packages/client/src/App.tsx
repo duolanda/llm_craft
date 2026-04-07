@@ -249,6 +249,8 @@ function App() {
 
         {mode === "replay" && (
           <section className="replay-toolbar">
+            <div className="hud-panel-top-corners" />
+            <div className="hud-panel-bottom-corners" />
             <div className="replay-toolbar-top">
               <div className="replay-loader">
                 <label className="replay-label">

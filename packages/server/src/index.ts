@@ -4,6 +4,10 @@ import http from "node:http";
 import path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator } from "./GameOrchestrator";
+import {
+  ServerMessage,
+  isClientMessage,
+} from "@llmcraft/shared";
 
 dotenv.config();
 
@@ -129,59 +133,85 @@ console.log(`WebSocket 服务器运行在端口 ${PORT}`);
 wss.on("connection", (ws) => {
   console.log("客户端已连接");
 
-  // 发送初始状态
+  const sendMessage = (message: ServerMessage) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  };
+
   const sendState = () => {
     const state = orchestrator?.getGame().getState() ?? null;
     const snapshots = orchestrator?.getGame().getSnapshots() ?? [];
-    ws.send(JSON.stringify({
+    sendMessage({
       type: "state",
       state,
       snapshots: snapshots.slice(-100),
       liveEnabled: Boolean(orchestrator),
-    }));
+    });
   };
 
   sendState();
 
-  // 轮询更新 (100ms 间隔)
   const interval = setInterval(sendState, 100);
 
   ws.on("message", (data) => {
     try {
-      const msg = JSON.parse(data.toString());
-      if (msg.type === "start") {
-        if (!orchestrator) {
-          ws.send(JSON.stringify({
-            type: "error",
-            message: "服务端当前处于回放模式，未启用实时对战。",
-          }));
-          return;
-        }
-        console.log("收到开始命令");
-        void orchestrator.start();
-      } else if (msg.type === "stop") {
-        if (!orchestrator) {
-          return;
-        }
-        console.log("收到停止命令");
-        orchestrator.stop();
-      } else if (msg.type === "save_record") {
-        if (!orchestrator) {
-          ws.send(JSON.stringify({
-            type: "error",
-            message: "回放模式下没有实时对局可保存。",
-          }));
-          return;
-        }
-        void orchestrator.saveRecord().then((filePath) => {
-          ws.send(JSON.stringify({
-            type: "record_saved",
-            filePath,
-          }));
+      const parsed = JSON.parse(data.toString());
+
+      if (!isClientMessage(parsed)) {
+        sendMessage({
+          type: "error",
+          message: "未知的消息类型",
         });
+        return;
+      }
+
+      switch (parsed.type) {
+        case "start": {
+          if (!orchestrator) {
+            sendMessage({
+              type: "error",
+              message: "服务端当前处于回放模式，未启用实时对战。",
+            });
+            return;
+          }
+          console.log("收到开始命令");
+          void orchestrator.start();
+          break;
+        }
+
+        case "stop": {
+          if (!orchestrator) {
+            return;
+          }
+          console.log("收到停止命令");
+          orchestrator.stop();
+          break;
+        }
+
+        case "save_record": {
+          if (!orchestrator) {
+            sendMessage({
+              type: "error",
+              message: "回放模式下没有实时对局可保存。",
+            });
+            return;
+          }
+          void orchestrator.saveRecord().then((filePath: string) => {
+            sendMessage({
+              type: "record_saved",
+              filePath,
+            });
+          });
+          break;
+        }
       }
     } catch (e) {
-      console.error("消息错误:", e);
+      console.error("消息解析错误:", e);
+      sendMessage({
+        type: "error",
+        message: "消息格式错误，无法解析 JSON",
+      });
     }
   });
 

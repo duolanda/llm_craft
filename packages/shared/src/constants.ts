@@ -63,8 +63,29 @@ export const ECONOMY_RULES = {
   HQ_DELIVERY_RANGE: 1,
 } as const;
 
-/** 玩家颜色配置（用于客户端显示） */
-export const PLAYER_COLORS: Record<string, string> = {
+/** 对战玩家标识（仅包含实际对局双方） */
+export const PLAYER_IDS = {
+  PLAYER_1: "player_1",
+  PLAYER_2: "player_2",
+} as const;
+
+/** 玩家标识类型 */
+export type PlayerId = typeof PLAYER_IDS[keyof typeof PLAYER_IDS];
+
+/** 参与者标识（包含所有对局参与者 + 系统） */
+export const ACTOR_IDS = {
+  ...PLAYER_IDS,
+  SYSTEM: "system_0",
+} as const;
+
+/** 参与者标识类型 */
+export type ActorId = typeof ACTOR_IDS[keyof typeof ACTOR_IDS];
+
+// 编译期校验：确保 PlayerId 是 ActorId 的子集
+const _assertPlayerIsActor: PlayerId extends ActorId ? true : false = true;
+
+/** 参与者颜色配置（用于客户端显示） */
+export const PLAYER_COLORS: Record<ActorId, string> = {
   player_1: "#ff2a4a",  // 红色
   player_2: "#00e5ff",  // 青色
   system_0: "#ffb300",  // 金色（系统消息）

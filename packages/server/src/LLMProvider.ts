@@ -1,10 +1,6 @@
-import { AIPromptPayload } from "@llmcraft/shared";
+import { AIPromptPayload, MatchPlayerLLMConfig } from "@llmcraft/shared";
 
-export interface LLMProviderConfig {
-  apiKey: string;
-  model?: string;
-  baseURL?: string;
-}
+export type LLMProviderConfig = MatchPlayerLLMConfig;
 
 export interface GenerateCodeResult {
   code: string;

@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-04-05
+日期: 2026-04-12
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -111,12 +111,42 @@ interface UpdateLLMPresetRequest {
 - `reset` 不会自动开始模拟
 - 用户需要随后再发送 `start` 才会开始新一局
 
-### 0.7 WebSocket `state`
+### 0.7 WebSocket `stop`
+
+当前实时对局暂停消息为：
+
+```json
+{
+  "type": "stop"
+}
+```
+
+说明：
+
+- `stop` 会停止当前 orchestrator 的实时模拟
+- 如果当前没有正在运行的实时对局，服务端不会额外返回成功消息
+
+### 0.8 WebSocket `save_record`
+
+当前实时对局保存消息为：
+
+```json
+{
+  "type": "save_record"
+}
+```
+
+说明：
+
+- 只有当前存在实时对局时才允许保存
+- 若当前没有可保存的实时对局，服务端会通过 `type = "error"` 返回错误消息
+
+### 0.9 WebSocket `state`
 
 服务端会持续推送当前实时状态：
 
 ```ts
-interface StateMessage {
+interface ServerStateMessage {
   type: "state";
   state: GameState | null;
   snapshots: GameSnapshot[];
@@ -128,6 +158,55 @@ interface StateMessage {
 
 - `snapshots` 在实时模式下当前只发送最近 1 帧，用于展示最新 AI 输出，不再传最近 100 帧
 - `liveEnabled` 是服务端缓存值，不会在每次状态推送时重新读取 preset 存储
+
+### 0.10 WebSocket `error`
+
+服务端错误消息为：
+
+```ts
+interface ServerErrorMessage {
+  type: "error";
+  message: string;
+}
+```
+
+说明：
+
+- 当前所有实时对局相关的可读错误都会通过该消息返回
+- 典型场景包括：消息类型非法、未选择预设、预设不存在、API Key 无法解密、当前没有可保存对局等
+
+### 0.11 WebSocket `record_saved`
+
+服务端保存成功消息为：
+
+```ts
+interface ServerRecordSavedMessage {
+  type: "record_saved";
+  filePath: string;
+}
+```
+
+说明：
+
+- `filePath` 是服务端返回的实际保存路径
+- 当前前端会据此提示用户记录文件保存位置
+
+### 0.12 WebSocket 共享联合类型
+
+当前 WebSocket 协议已统一收敛到 `packages/shared/src/ws-messages.ts`：
+
+```ts
+type ClientMessage =
+  | StartMatchMessage
+  | ResetMatchMessage
+  | { type: "stop" }
+  | { type: "save_record" };
+
+type ServerMessage =
+  | ServerStateMessage
+  | ServerErrorMessage
+  | ServerRecordSavedMessage;
+```
 
 ## 1. 输入结构
 

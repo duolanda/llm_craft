@@ -63,16 +63,13 @@
   - 区分“首次全量同步”和“后续增量更新”，减少空推送
   - 把连接管理从“每连接一个发送定时器”改成“服务端统一事件源 + 广播”
 
-### 3.4 WebSocket 协议类型未完全收敛到 shared
-- **描述**: 当前 `start` / `reset` 等部分客户端消息已经定义在 `packages/shared`，但服务端返回的 `state`、`error`、`record_saved` 等消息仍分别定义在 server/client 本地，导致 WebSocket 协议只有一半被共享
-- **影响**:
-  - 前后端各自维护消息 shape，修改字段时容易漏改
-  - 客户端目前通过本地 `WSMessage` 宽类型兜底，类型约束偏弱
-  - 文档、shared 类型、真实运行协议三者容易逐步漂移
-- **建议方向**:
-  - 在 `packages/shared` 中统一定义 `ClientToServerMessage` / `ServerToClientMessage` 联合类型
-  - 把 `state`、`error`、`record_saved`、`stop`、`save_record` 等消息全部纳入共享协议
-  - 让 server/client 都直接依赖 shared 协议类型，避免重复声明
+### 3.4 WebSocket 协议类型已收敛到 shared ? 已完成
+- **原问题**: 早期只有 `start` / `reset` 等部分客户端消息定义在 `packages/shared`，而 `state`、`error`、`record_saved` 等服务端消息仍在 server/client 本地重复声明
+- **已完成内容**:
+  - ? 在 `packages/shared/src/ws-messages.ts` 中统一定义 WebSocket 共享协议
+  - ? 客户端消息已统一纳入 `ClientMessage`：`start` / `reset` / `stop` / `save_record`
+  - ? 服务端消息已统一纳入 `ServerMessage`：`state` / `error` / `record_saved`
+  - ? server/client 均直接依赖 shared 中的协议类型与类型守卫，移除本地重复声明
 
 ## 中优先级
 
@@ -155,4 +152,4 @@
 
 ---
 
-*最后更新: 2026-04-11*
+*最后更新: 2026-04-12*

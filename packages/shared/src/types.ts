@@ -1,5 +1,54 @@
 import { UnitType, BuildingType, UnitState, TileType, ResultCode } from "./constants";
 
+export type LLMProviderType = "openai-compatible";
+
+export interface OpenAICompatibleRuntimeConfig {
+  providerType: "openai-compatible";
+  apiKey: string;
+  baseURL: string;
+  model: string;
+}
+
+export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig;
+
+export interface MatchLLMConfig {
+  player1: MatchPlayerLLMConfig;
+  player2: MatchPlayerLLMConfig;
+}
+
+export interface LLMPresetSummary {
+  id: string;
+  name: string;
+  providerType: LLMProviderType;
+  baseURL: string;
+  model: string;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateLLMPresetRequest {
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey: string;
+}
+
+export interface UpdateLLMPresetRequest {
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+}
+
+export interface StartMatchMessage {
+  type: "start";
+  player1PresetId: string;
+  player2PresetId: string;
+}
+
 export interface Position {
   x: number;
   y: number;

@@ -2,6 +2,7 @@ import * as dotenv from "dotenv";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { MatchLLMConfig } from "@llmcraft/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator } from "./GameOrchestrator";
 
@@ -11,6 +12,7 @@ const PORT = parseInt(process.env.PORT || "3001");
 const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const RECORDS_DIR = path.resolve(process.cwd(), "logs", "records");
 
 console.log("启动 LLMCraft 服务器...");
@@ -24,10 +26,19 @@ if (!OPENAI_KEY) {
 
 const orchestrator = OPENAI_KEY
   ? new GameOrchestrator({
-      apiKey: OPENAI_KEY,
-      baseURL: OPENAI_BASE_URL,
-      model: OPENAI_MODEL,
-    })
+      player1: {
+        providerType: "openai-compatible",
+        apiKey: OPENAI_KEY,
+        baseURL: OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL,
+        model: OPENAI_MODEL,
+      },
+      player2: {
+        providerType: "openai-compatible",
+        apiKey: OPENAI_KEY,
+        baseURL: OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL,
+        model: OPENAI_MODEL,
+      },
+    } satisfies MatchLLMConfig)
   : null;
 
 function setCorsHeaders(res: http.ServerResponse) {

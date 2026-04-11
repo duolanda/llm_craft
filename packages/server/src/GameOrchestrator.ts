@@ -3,6 +3,7 @@ import {
   AITurnRecord,
   GameRecord,
   GameState,
+  MatchLLMConfig,
   MAP_HEIGHT,
   MAP_WIDTH,
   SavedAITurnRecord,
@@ -14,7 +15,7 @@ import { Game } from "./Game";
 import { AISandbox } from "./AISandbox";
 import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
 import { createLLMProvider } from "./createLLMProvider";
-import { LLMProvider, LLMProviderConfig } from "./LLMProvider";
+import { LLMProvider } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
 export class GameOrchestrator {
@@ -36,12 +37,12 @@ export class GameOrchestrator {
   private aiTurns: AITurnRecord[] = [];
   private aiWindowSize = 20;
 
-  constructor(config: LLMProviderConfig) {
+  constructor(config: MatchLLMConfig) {
     this.game = new Game();
     this.ai1 = new AISandbox("player_1");
     this.ai2 = new AISandbox("player_2");
-    this.llm1 = createLLMProvider(config);
-    this.llm2 = createLLMProvider(config);
+    this.llm1 = createLLMProvider(config.player1);
+    this.llm2 = createLLMProvider(config.player2);
   }
 
   getGame(): Game {

@@ -11,6 +11,7 @@ import {
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AISandboxErrorType } from "./AISandbox";
 import { Game } from "./Game";
 import { AISandbox } from "./AISandbox";
@@ -18,6 +19,11 @@ import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
 import { createLLMProvider } from "./createLLMProvider";
 import { LLMProvider } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
+
+const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
+const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
+const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
+const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 
 type RecordedAITurn = AITurnRecord & { errorType?: AISandboxErrorType };
 type SavedRecordedAITurn = SavedAITurnRecord & { errorType?: AISandboxErrorType };
@@ -226,10 +232,9 @@ export class GameOrchestrator {
       aiTurns: this.buildSavedAITurns(),
     };
 
-    const recordsDir = path.resolve(process.cwd(), "logs", "records");
-    await fs.mkdir(recordsDir, { recursive: true });
+    await fs.mkdir(RECORDS_DIR, { recursive: true });
     const fileName = `match-${record.metadata.savedAt.replace(/[:.]/g, "-")}.json`;
-    const filePath = path.join(recordsDir, fileName);
+    const filePath = path.join(RECORDS_DIR, fileName);
     await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
     return filePath;
   }

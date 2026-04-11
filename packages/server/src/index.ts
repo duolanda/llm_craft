@@ -25,7 +25,7 @@ const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
-const RECORDS_DIR = path.resolve(WORKSPACE_ROOT, "logs", "records");
+const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LIVE_STATE_SNAPSHOT_LIMIT = 1;
 
 export function getDefaultPresetPaths() {

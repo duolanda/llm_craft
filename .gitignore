@@ -10,3 +10,4 @@ logs/*.json
 .vscode/
 *.tsbuildinfo
 packages/server/logs/records/
+**/llm-presets.json

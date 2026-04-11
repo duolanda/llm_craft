@@ -131,6 +131,7 @@ describe("GameOrchestrator", () => {
     await vi.advanceTimersByTimeAsync(150);
 
     expect(player1GenerateCode).toHaveBeenCalledTimes(2);
+    // @ts-expect-error vitest mock 类型无法推断 calls 数组元素
     expect(player1GenerateCode.mock.calls[1][0].tick).toBeGreaterThanOrEqual(5);
 
     orchestrator.stop();
@@ -165,6 +166,7 @@ describe("GameOrchestrator", () => {
     await orchestrator.start();
 
     expect(player1GenerateCode).toHaveBeenCalledTimes(1);
+    // @ts-expect-error vitest mock 类型无法推断 calls 数组元素
     const requestTick = player1GenerateCode.mock.calls[0][0].tick;
 
     await vi.advanceTimersByTimeAsync(3100);
@@ -173,12 +175,15 @@ describe("GameOrchestrator", () => {
     await vi.advanceTimersByTimeAsync(50);
 
     expect(player1ExecuteCode).toHaveBeenCalledTimes(1);
+    // @ts-expect-error vitest mock 类型无法推断 calls 数组元素
     const executionPackage = player1ExecuteCode.mock.calls[0][1];
+    // @ts-expect-error executionPackage 可能为 undefined（mock 类型限制）
     expect(executionPackage.tick).toBeGreaterThan(requestTick);
 
     const savedTurns = (orchestrator as any).buildSavedAITurns();
     const savedTurn = savedTurns.find((turn: { playerId: string }) => turn.playerId === "player_1");
     expect(savedTurn?.requestTick).toBe(requestTick);
+    // @ts-expect-error executionPackage 已在上文通过 @ts-expect-error 断言
     expect(savedTurn?.executeTick).toBe(executionPackage.tick);
     orchestrator.stop();
   });
@@ -211,6 +216,7 @@ describe("GameOrchestrator", () => {
     await vi.advanceTimersByTimeAsync(150);
 
     expect(player1GenerateCode).toHaveBeenCalled();
+    // @ts-expect-error vitest mock 类型无法推断 calls 数组元素
     expect(player1GenerateCode.mock.calls[0][0].mode).toBe("full");
 
     orchestrator.stop();

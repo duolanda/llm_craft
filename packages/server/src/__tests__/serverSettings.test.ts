@@ -3,8 +3,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { GameState } from "@llmcraft/shared";
 import { PresetStore } from "../PresetStore";
 import {
+  buildStateMessagePayload,
   createPresetStore,
   createServerState,
   getDefaultPresetPaths,
@@ -85,6 +87,16 @@ function createResponseCapture() {
     get headers() {
       return headers;
     },
+  };
+}
+
+function createMockGameState(tick: number): GameState {
+  return {
+    tick,
+    players: [],
+    tiles: [],
+    winner: null,
+    logs: [],
   };
 }
 
@@ -312,18 +324,18 @@ describe("server settings", () => {
 
     expect(createOrchestrator).toHaveBeenCalledTimes(1);
     expect(createOrchestrator).toHaveBeenCalledWith({
-      player1: {
+      player1: expect.objectContaining({
         providerType: "openai-compatible",
         apiKey: "token-one",
         baseURL: "https://api.one.test/v1",
         model: "model-one",
-      },
-      player2: {
+      }),
+      player2: expect.objectContaining({
         providerType: "openai-compatible",
         apiKey: "token-two",
         baseURL: "https://api.two.test/v1",
         model: "model-two",
-      },
+      }),
     });
     expect(start).toHaveBeenCalledTimes(1);
     expect(state.orchestrator).not.toBeNull();
@@ -351,7 +363,7 @@ describe("server settings", () => {
       stop: vi.fn<[], void>(() => undefined),
       saveRecord: vi.fn<[], Promise<string>>(async () => "logs/records/old.json"),
       getGame: vi.fn(() => ({
-        getState: () => ({ tick: 1 }),
+        getState: () => createMockGameState(1),
         getSnapshots: () => [],
       })),
     };
@@ -430,5 +442,50 @@ describe("server settings", () => {
     });
 
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("预设中的 API Key 无法解密"));
+  });
+
+  it("builds live state payloads without hitting preset storage and only includes the latest snapshot", async () => {
+    const presetStore = await createStore();
+    const listSpy = vi.spyOn(presetStore, "list");
+    const snapshots = Array.from({ length: 25 }, (_, index) => ({
+      tick: index,
+      state: createMockGameState(index),
+      aiOutputs: { player_1: `p1-${index}`, player_2: `p2-${index}` },
+    }));
+
+    const state = createServerState(
+      presetStore,
+      vi.fn(() => ({
+        start: vi.fn(async () => undefined),
+        stop: vi.fn(() => undefined),
+        saveRecord: vi.fn(async () => "logs/records/mock.json"),
+        getGame: vi.fn(() => ({
+          getState: () => createMockGameState(24),
+          getSnapshots: () => snapshots,
+        })),
+      }))
+    );
+    state.liveEnabled = true;
+    state.orchestrator = state.createOrchestrator({
+      player1: {
+        providerType: "openai-compatible",
+        apiKey: "token-one",
+        baseURL: "https://api.one.test/v1",
+        model: "model-one",
+      },
+      player2: {
+        providerType: "openai-compatible",
+        apiKey: "token-two",
+        baseURL: "https://api.two.test/v1",
+        model: "model-two",
+      },
+    }) as any;
+
+    const payload = buildStateMessagePayload(state);
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(payload.liveEnabled).toBe(true);
+    expect(payload.snapshots).toHaveLength(1);
+    expect(payload.snapshots[0]?.tick).toBe(24);
   });
 });

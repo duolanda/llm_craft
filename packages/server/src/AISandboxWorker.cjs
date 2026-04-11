@@ -134,7 +134,7 @@ function buildAPI(playerId, state) {
 
 process.on("message", (payload) => {
   if (!payload || typeof payload !== "object") {
-    process.send?.({ commands: [], errorMessage: "Invalid sandbox payload" });
+    process.send?.({ commands: [], errorType: "invalid_payload", errorMessage: "Invalid sandbox payload" });
     process.exit(0);
     return;
   }
@@ -148,9 +148,15 @@ process.on("message", (payload) => {
     script.runInContext(context, { timeout: AI_SANDBOX_TIMEOUT_MS });
     process.send?.({ commands });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const errorType = /Script execution timed out/i.test(message) ? "vm_timeout" : "runtime_error";
     process.send?.({
       commands,
-      errorMessage: error instanceof Error ? error.message : String(error),
+      errorType,
+      errorMessage:
+        errorType === "vm_timeout"
+          ? `Sandbox vm timeout after ${AI_SANDBOX_TIMEOUT_MS}ms`
+          : message,
     });
   } finally {
     process.exit(0);

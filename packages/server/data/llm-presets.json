@@ -14,10 +14,11 @@
     "name": "七牛",
     "providerType": "openai-compatible",
     "baseURL": "https://api.qnaigc.com/v1",
-    "model": "stepfun/step-3.5-flash",
+    "model": "z-ai/glm-4.5-air-free",
     "apiKeyEncrypted": "HEwHliqF0LIhdp6GywFR7bvtHMTF9oDfLnOkQqgl8S8Ok0u68970zbTKt3D+2ORR90JbrG5Cxtl8sFDP6i/rmehPhCKY5E1beaLlhOnc7DprebCI3iiORN35Z9xXmqdGM5gEpXSavOkD2MhZErSD",
     "createdAt": "2026-04-11T13:59:44.334Z",
-    "updatedAt": "2026-04-11T14:23:29.086Z"
+    "updatedAt": "2026-04-11T14:59:32.115Z",
+    "rpm": 10
   },
   {
     "id": "1fdc5551-e4c2-464c-ac54-e9a296f11525",
@@ -27,6 +28,18 @@
     "model": "glm-4.5-flash",
     "apiKeyEncrypted": "jy21BzCplhqYxKYYZuOU9tAeTk2ee2Tc/tF9VQ6/2vhRx6cLOnMT8/TYhUgJW9KW8Sbq9clathjZuTVlUNClySm7vEBtCL1KqJsafw8OKwrzT6IyEEpNHmtWYABI",
     "createdAt": "2026-04-11T14:07:09.096Z",
-    "updatedAt": "2026-04-11T14:29:57.741Z"
+    "updatedAt": "2026-04-11T14:51:35.550Z",
+    "rpm": 60
+  },
+  {
+    "id": "8baa606e-7af4-490e-858c-99afa6ea24cf",
+    "name": "火山方舟",
+    "providerType": "openai-compatible",
+    "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
+    "model": "doubao-seed-2-0-mini-260215",
+    "rpm": null,
+    "apiKeyEncrypted": "hhH6WOE/j3NPe1t4t0OnrBZlEX2/1SpL9VqpWOxWZDzx6R/GI/dGV/1/p2Iv9LLyvpWQRSwNW40bJ5i2MKBFxA5sb6KKCqctfbB1TRKjF24=",
+    "createdAt": "2026-04-11T15:08:06.287Z",
+    "updatedAt": "2026-04-11T15:08:06.287Z"
   }
 ]

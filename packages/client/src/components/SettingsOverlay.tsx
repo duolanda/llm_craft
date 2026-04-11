@@ -25,7 +25,7 @@ export function SettingsOverlay({ open, title, onClose, children }: SettingsOver
             type="button"
             className="hud-btn hud-btn-ghost settings-dialog-close"
             onClick={onClose}
-            aria-label="关闭模型预设设置"
+            aria-label="关闭设置"
           >
             关闭
           </button>

@@ -15,6 +15,7 @@ interface StoredPresetRecord {
   providerType: MatchPlayerLLMConfig["providerType"];
   baseURL: string;
   model: string;
+  rpm?: number | null;
   apiKeyEncrypted: string;
   createdAt: string;
   updatedAt: string;
@@ -50,6 +51,7 @@ export class PresetStore {
         providerType: input.providerType,
         baseURL: input.baseURL,
         model: input.model,
+        rpm: input.rpm ?? null,
         apiKeyEncrypted: encryptString(input.apiKey, this.options.encryptionSecret),
         createdAt: now,
         updatedAt: now,
@@ -73,6 +75,7 @@ export class PresetStore {
       preset.providerType = input.providerType;
       preset.baseURL = input.baseURL;
       preset.model = input.model;
+      preset.rpm = input.rpm ?? null;
       if (input.apiKey?.trim()) {
         preset.apiKeyEncrypted = encryptString(input.apiKey, this.options.encryptionSecret);
       }
@@ -115,6 +118,7 @@ export class PresetStore {
         apiKey,
         baseURL: preset.baseURL,
         model: preset.model,
+        rpm: preset.rpm ?? null,
       };
     });
   }
@@ -150,6 +154,7 @@ export class PresetStore {
       providerType: preset.providerType,
       baseURL: preset.baseURL,
       model: preset.model,
+      rpm: preset.rpm ?? null,
       hasApiKey: Boolean(preset.apiKeyEncrypted),
       createdAt: preset.createdAt,
       updatedAt: preset.updatedAt,

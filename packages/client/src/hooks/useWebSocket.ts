@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { GameState, GameSnapshot, StartMatchMessage } from "@llmcraft/shared";
+import { GameState, GameSnapshot, ResetMatchMessage, StartMatchMessage } from "@llmcraft/shared";
 
 interface WSMessage {
   type: string;
@@ -10,7 +10,7 @@ interface WSMessage {
   message?: string;
 }
 
-type ClientMessage = StartMatchMessage | { type: "stop" } | { type: "save_record" };
+type ClientMessage = StartMatchMessage | ResetMatchMessage | { type: "stop" } | { type: "save_record" };
 
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);

@@ -99,4 +99,15 @@ describe("AISandbox", () => {
       playerId: "player_1",
     });
   });
+
+  it("distinguishes parent watchdog timeouts from VM execution timeouts", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const vmTimeoutResult = await sandbox.executeCode("while (true) {}", aiState);
+
+    expect(vmTimeoutResult.errorType).toBe("vm_timeout");
+    expect(vmTimeoutResult.errorMessage).toContain("Sandbox vm timeout after 200ms");
+  });
 });

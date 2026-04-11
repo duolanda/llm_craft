@@ -5,7 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CreateLLMPresetRequest,
+  GameSnapshot,
+  GameState,
   MatchLLMConfig,
+  ResetMatchMessage,
   StartMatchMessage,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
@@ -22,6 +25,7 @@ const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const RECORDS_DIR = path.resolve(WORKSPACE_ROOT, "logs", "records");
+const LIVE_STATE_SNAPSHOT_LIMIT = 1;
 
 export function getDefaultPresetPaths() {
   return {
@@ -37,15 +41,17 @@ interface OrchestratorLike {
   stop(): void;
   saveRecord(): Promise<string>;
   getGame(): {
-    getState(): unknown;
-    getSnapshots(): Array<unknown>;
+    getState(): GameState | null;
+    getSnapshots(): GameSnapshot[];
+    getLatestSnapshot?: () => GameSnapshot | null;
   };
 }
 
-interface ServerState {
+export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
   createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike;
+  liveEnabled: boolean | null;
 }
 
 export function resolvePresetSecret(): string {
@@ -69,6 +75,33 @@ export function createServerState(
     presetStore,
     orchestrator: null,
     createOrchestrator,
+    liveEnabled: null,
+  };
+}
+
+type StateMessagePayload = {
+  type: "state";
+  state: GameState | null;
+  snapshots: GameSnapshot[];
+  liveEnabled: boolean;
+};
+
+async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
+  const presets = await state.presetStore.list();
+  state.liveEnabled = presets.length > 0;
+  return state.liveEnabled;
+}
+
+export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
+  const currentOrchestrator = state.orchestrator;
+  const game = currentOrchestrator?.getGame();
+  const latestSnapshot = game?.getLatestSnapshot?.() ?? game?.getSnapshots()?.slice(-LIVE_STATE_SNAPSHOT_LIMIT) ?? [];
+
+  return {
+    type: "state",
+    state: game?.getState() ?? null,
+    snapshots: Array.isArray(latestSnapshot) ? latestSnapshot : latestSnapshot ? [latestSnapshot] : [],
+    liveEnabled: Boolean(state.liveEnabled),
   };
 }
 
@@ -94,7 +127,20 @@ async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
   return JSON.parse(raw || "{}") as T;
 }
 
-function validateCreatePresetRequest(body: CreateLLMPresetRequest) {
+function normalizePresetRpm(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error("RPM 必须是正整数，留空表示不限制。");
+  }
+  return value;
+}
+
+function validateCreatePresetRequest(body: CreateLLMPresetRequest): CreateLLMPresetRequest {
   if (!body.name?.trim()) {
     throw new Error("预设名称不能为空。");
   }
@@ -110,9 +156,18 @@ function validateCreatePresetRequest(body: CreateLLMPresetRequest) {
   if (body.providerType !== "openai-compatible") {
     throw new Error("当前仅支持 OpenAI-compatible 预设。");
   }
+
+  return {
+    ...body,
+    name: body.name.trim(),
+    baseURL: body.baseURL.trim(),
+    model: body.model.trim(),
+    apiKey: body.apiKey.trim(),
+    rpm: normalizePresetRpm(body.rpm),
+  };
 }
 
-function validateUpdatePresetRequest(body: UpdateLLMPresetRequest) {
+function validateUpdatePresetRequest(body: UpdateLLMPresetRequest): UpdateLLMPresetRequest {
   if (!body.name?.trim()) {
     throw new Error("预设名称不能为空。");
   }
@@ -125,6 +180,15 @@ function validateUpdatePresetRequest(body: UpdateLLMPresetRequest) {
   if (body.providerType !== "openai-compatible") {
     throw new Error("当前仅支持 OpenAI-compatible 预设。");
   }
+
+  return {
+    ...body,
+    name: body.name.trim(),
+    baseURL: body.baseURL.trim(),
+    model: body.model.trim(),
+    apiKey: body.apiKey?.trim(),
+    rpm: normalizePresetRpm(body.rpm),
+  };
 }
 
 function parsePresetId(urlPath: string): string {
@@ -230,6 +294,7 @@ export async function handleHttpRequest(
 
     if (req.method === "GET" && url.pathname === "/api/settings/presets") {
       const presets = await state.presetStore.list();
+      state.liveEnabled = presets.length > 0;
       sendJson(res, 200, { presets });
       return;
     }
@@ -237,8 +302,9 @@ export async function handleHttpRequest(
     if (req.method === "POST" && url.pathname === "/api/settings/presets") {
       try {
         const body = await readJsonBody<CreateLLMPresetRequest>(req);
-        validateCreatePresetRequest(body);
-        const preset = await state.presetStore.create(body);
+        const validatedBody = validateCreatePresetRequest(body);
+        const preset = await state.presetStore.create(validatedBody);
+        state.liveEnabled = true;
         sendJson(res, 201, { preset });
       } catch (error) {
         sendPresetError(res, error);
@@ -250,8 +316,9 @@ export async function handleHttpRequest(
       try {
         const presetId = parsePresetId(url.pathname);
         const body = await readJsonBody<UpdateLLMPresetRequest>(req);
-        validateUpdatePresetRequest(body);
-        const preset = await state.presetStore.update(presetId, body);
+        const validatedBody = validateUpdatePresetRequest(body);
+        const preset = await state.presetStore.update(presetId, validatedBody);
+        state.liveEnabled = true;
         sendJson(res, 200, { preset });
       } catch (error) {
         sendPresetError(res, error);
@@ -263,6 +330,7 @@ export async function handleHttpRequest(
       try {
         const presetId = parsePresetId(url.pathname);
         await state.presetStore.delete(presetId);
+        await refreshLiveEnabled(state);
         sendJson(res, 200, { ok: true });
       } catch (error) {
         sendPresetError(res, error);
@@ -287,6 +355,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
   try {
     const message = JSON.parse(data.toString()) as
       | StartMatchMessage
+      | ResetMatchMessage
       | { type: "stop" }
       | { type: "save_record" };
 
@@ -318,6 +387,25 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
     if (message.type === "stop") {
       state.orchestrator?.stop();
+      return;
+    }
+
+    if (message.type === "reset") {
+      if (!message.player1PresetId || !message.player2PresetId) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "重置对局前必须为红蓝双方选择预设。",
+        }));
+        return;
+      }
+
+      const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
+      const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const previousOrchestrator = state.orchestrator;
+      const nextOrchestrator = state.createOrchestrator({ player1, player2 });
+
+      state.orchestrator = nextOrchestrator;
+      previousOrchestrator?.stop();
       return;
     }
 
@@ -360,18 +448,21 @@ function createServer(state: ServerState) {
 
   wss.on("connection", (ws) => {
     console.log("客户端已连接");
+    let isSendingState = false;
 
     const sendState = async () => {
-      const currentOrchestrator = state.orchestrator;
-      const gameState = currentOrchestrator?.getGame();
-      const presets = await state.presetStore.list();
-
-      ws.send(JSON.stringify({
-        type: "state",
-        state: gameState?.getState() ?? null,
-        snapshots: (gameState?.getSnapshots() ?? []).slice(-100),
-        liveEnabled: presets.length > 0,
-      }));
+      if (isSendingState) {
+        return;
+      }
+      isSendingState = true;
+      try {
+        if (state.liveEnabled === null) {
+          await refreshLiveEnabled(state);
+        }
+        ws.send(JSON.stringify(buildStateMessagePayload(state)));
+      } finally {
+        isSendingState = false;
+      }
     };
 
     void sendState();

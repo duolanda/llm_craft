@@ -13,6 +13,7 @@ interface PresetFormState {
   baseURL: string;
   model: string;
   apiKey: string;
+  rpm: string;
 }
 
 interface SettingsPanelProps {
@@ -31,6 +32,7 @@ const DEFAULT_FORM: PresetFormState = {
   baseURL: "",
   model: "",
   apiKey: "",
+  rpm: "",
 };
 
 export function SettingsPanel({
@@ -90,6 +92,7 @@ export function SettingsPanel({
       baseURL: selectedPreset.baseURL,
       model: selectedPreset.model,
       apiKey: "",
+      rpm: selectedPreset.rpm ? String(selectedPreset.rpm) : "",
     });
   }, [selectedPreset]);
 
@@ -118,6 +121,14 @@ export function SettingsPanel({
       return;
     }
 
+    const trimmedRpm = form.rpm.trim();
+    const parsedRpm = trimmedRpm ? Number(trimmedRpm) : null;
+    if (trimmedRpm && (parsedRpm === null || !Number.isInteger(parsedRpm) || parsedRpm <= 0)) {
+      setLocalError("RPM 必须是正整数，留空表示不限制。");
+      return;
+    }
+    const rpm = parsedRpm;
+
     setSaving(true);
     try {
       if (selectedPresetId) {
@@ -126,6 +137,7 @@ export function SettingsPanel({
           providerType: form.providerType,
           baseURL: form.baseURL.trim(),
           model: form.model.trim(),
+          rpm,
         };
         if (form.apiKey.trim()) {
           payload.apiKey = form.apiKey.trim();
@@ -139,6 +151,7 @@ export function SettingsPanel({
           baseURL: form.baseURL.trim(),
           model: form.model.trim(),
           apiKey: form.apiKey.trim(),
+          rpm,
         });
         resetForm({ clearStatus: false });
         setStatusMessage("预设已创建。");
@@ -257,12 +270,26 @@ export function SettingsPanel({
               placeholder={selectedPreset?.hasApiKey ? "已保存，留空则保持不变" : "sk-..."}
             />
           </label>
+
+          <label className="settings-field">
+            <span>RPM</span>
+            <input
+              className="settings-input"
+              type="number"
+              min={1}
+              step={1}
+              value={form.rpm}
+              onChange={(event) => setForm((current) => ({ ...current, rpm: event.target.value }))}
+              placeholder="留空表示不限制"
+            />
+          </label>
         </div>
 
         <div className="settings-meta">
           {selectedPreset && (
             <>
               <span className="replay-meta-chip">已保存 Key: {selectedPreset.hasApiKey ? "YES" : "NO"}</span>
+              <span className="replay-meta-chip">RPM: {selectedPreset.rpm ?? "UNLIMITED"}</span>
               <span className="replay-meta-chip">更新于: {new Date(selectedPreset.updatedAt).toLocaleString()}</span>
             </>
           )}

@@ -7,6 +7,7 @@ export interface OpenAICompatibleRuntimeConfig {
   apiKey: string;
   baseURL: string;
   model: string;
+  rpm?: number | null;
 }
 
 export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig;
@@ -22,6 +23,7 @@ export interface LLMPresetSummary {
   providerType: LLMProviderType;
   baseURL: string;
   model: string;
+  rpm?: number | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -33,6 +35,7 @@ export interface CreateLLMPresetRequest {
   baseURL: string;
   model: string;
   apiKey: string;
+  rpm?: number | null;
 }
 
 export interface UpdateLLMPresetRequest {
@@ -41,10 +44,17 @@ export interface UpdateLLMPresetRequest {
   baseURL: string;
   model: string;
   apiKey?: string;
+  rpm?: number | null;
 }
 
 export interface StartMatchMessage {
   type: "start";
+  player1PresetId: string;
+  player2PresetId: string;
+}
+
+export interface ResetMatchMessage {
+  type: "reset";
   player1PresetId: string;
   player2PresetId: string;
 }
@@ -287,6 +297,7 @@ export interface AITurnRecord {
   promptPayload: AIPromptPayload;
   response: string;
   commands: Command[];
+  errorType?: "parent_timeout" | "vm_timeout" | "runtime_error" | "process_error" | "process_exit" | "invalid_payload";
   errorMessage?: string;
   model: string;
   baseURL?: string;
@@ -301,6 +312,7 @@ export interface SavedAITurnRecord {
   promptPayload: AIPromptPayload;
   response: string;
   commands: Command[];
+  errorType?: "parent_timeout" | "vm_timeout" | "runtime_error" | "process_error" | "process_exit" | "invalid_payload";
   errorMessage?: string;
   model: string;
   baseURL?: string;

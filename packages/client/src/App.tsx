@@ -64,6 +64,7 @@ function App() {
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -119,6 +120,7 @@ function App() {
     if (state.tick !== startBaselineTick) {
       setStartPending(false);
       setIsPlaying(true);
+      setHasLiveMatchStarted(true);
     }
   }, [startBaselineTick, startPending, state]);
 
@@ -238,6 +240,22 @@ function App() {
   };
 
   const handleStart = () => {
+    startLiveMatch();
+  };
+
+  const handleRestart = () => {
+    if (!player1PresetId || !player2PresetId) {
+      return;
+    }
+
+    clearServerMessage();
+    setStartPending(false);
+    setIsPlaying(false);
+    setWinnerOverlayDismissed(false);
+    send({ type: "reset", player1PresetId, player2PresetId });
+  };
+
+  const startLiveMatch = () => {
     if (!player1PresetId || !player2PresetId) {
       return;
     }
@@ -289,6 +307,12 @@ function App() {
     : 0;
   const canStartLiveMatch = connected && liveEnabled && Boolean(player1PresetId) && Boolean(player2PresetId);
   const canStopLiveMatch = connected && (isPlaying || startPending);
+  const canRestartLiveMatch = connected
+    && !isPlaying
+    && !startPending
+    && hasLiveMatchStarted
+    && Boolean(player1PresetId)
+    && Boolean(player2PresetId);
   const canSaveLiveMatch = connected && Boolean(state || isPlaying);
 
   return (
@@ -359,15 +383,24 @@ function App() {
                   className="hud-btn hud-btn-ghost"
                   onClick={() => setSettingsOpen(true)}
                 >
-                  模型预设
+                  设置
                 </button>
                 <button
                   onClick={isPlaying ? handleStop : handleStart}
                   disabled={isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                 >
-                  {isPlaying ? "终止模拟" : startPending ? "启动中" : "启动模拟"}
+                  {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
                 </button>
+                {canRestartLiveMatch && (
+                  <button
+                    onClick={handleRestart}
+                    disabled={!canRestartLiveMatch}
+                    className="hud-btn hud-btn-ghost"
+                  >
+                    重置
+                  </button>
+                )}
                 <button
                   onClick={handleSaveRecord}
                   disabled={!canSaveLiveMatch}
@@ -559,7 +592,7 @@ function App() {
 
         <SettingsOverlay
           open={mode === "live" && settingsOpen}
-          title="模型预设"
+          title="设置"
           onClose={() => setSettingsOpen(false)}
         >
           <SettingsPanel

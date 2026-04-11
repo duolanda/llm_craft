@@ -24,6 +24,7 @@ interface LLMPresetSummary {
   providerType: "openai-compatible";
   baseURL: string;
   model: string;
+  rpm?: number | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -46,6 +47,7 @@ interface CreateLLMPresetRequest {
   baseURL: string;
   model: string;
   apiKey: string;
+  rpm?: number | null;
 }
 ```
 
@@ -60,12 +62,14 @@ interface UpdateLLMPresetRequest {
   baseURL: string;
   model: string;
   apiKey?: string;
+  rpm?: number | null;
 }
 ```
 
 说明：
 
 - `apiKey` 缺省或空串时，服务端保留旧 token
+- `rpm` 留空表示不限制；填写时必须为正整数
 
 ### 0.4 `DELETE /api/settings/presets/:id`
 
@@ -88,6 +92,42 @@ interface UpdateLLMPresetRequest {
 - 红蓝双方必须都选择预设
 - 服务端会按两个 preset 分别解密并创建两套独立 provider
 - 若 preset 不存在、不可解密或启动失败，服务端会通过 `type = "error"` 返回可读错误消息
+
+### 0.6 WebSocket `reset`
+
+当前实时对局重置消息为：
+
+```json
+{
+  "type": "reset",
+  "player1PresetId": "preset-red",
+  "player2PresetId": "preset-blue"
+}
+```
+
+说明：
+
+- `reset` 会按当前红蓝预设创建一局新的初始状态
+- `reset` 不会自动开始模拟
+- 用户需要随后再发送 `start` 才会开始新一局
+
+### 0.7 WebSocket `state`
+
+服务端会持续推送当前实时状态：
+
+```ts
+interface StateMessage {
+  type: "state";
+  state: GameState | null;
+  snapshots: GameSnapshot[];
+  liveEnabled: boolean;
+}
+```
+
+说明：
+
+- `snapshots` 在实时模式下当前只发送最近 1 帧，用于展示最新 AI 输出，不再传最近 100 帧
+- `liveEnabled` 是服务端缓存值，不会在每次状态推送时重新读取 preset 存储
 
 ## 1. 输入结构
 
@@ -238,6 +278,26 @@ AI 代码在子进程中的 Node `vm` 上下文里运行。
 - `utils`
 
 不要假设存在其他全局变量。
+
+## 3.5 AI 执行记录中的错误字段
+
+实时对局保存的 `aiTurns` 记录中，当前会同时保存：
+
+```ts
+type AITurnErrorType =
+  | "parent_timeout"
+  | "vm_timeout"
+  | "runtime_error"
+  | "process_error"
+  | "process_exit"
+  | "invalid_payload";
+```
+
+说明：
+
+- `errorType = "vm_timeout"` 表示 AI 代码在子进程 `vm` 中执行超时
+- `errorType = "parent_timeout"` 表示父进程在等待子进程结果时超时，通常代表进程启动、IPC 或主线程调度异常偏慢
+- `errorMessage` 仍保留可直接阅读的文本，用于 UI 和日志展示
 
 当前默认固定布局为：
 

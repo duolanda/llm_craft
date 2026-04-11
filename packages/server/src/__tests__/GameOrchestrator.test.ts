@@ -26,6 +26,7 @@ function createEmptyGenerateCodeResult(): GenerateCodeResult {
 type ExecuteCodeResult = {
   commands: Array<Record<string, never>>;
   errorMessage: string | undefined;
+  errorType?: string | undefined;
 };
 
 function createMatchConfig() {
@@ -186,6 +187,53 @@ describe("GameOrchestrator", () => {
     expect(record.tickDeltas.length).toBe(1001);
 
     await fs.unlink(recordPath);
+  });
+
+  it("records structured sandbox error types in ai turn records", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const game = orchestrator.getGame();
+    (orchestrator as any).isPolling = true;
+
+    (orchestrator as any).llm1 = {
+      shouldForceFullState: () => false,
+      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
+        code: "while (true) {}",
+        requestMessages: [],
+      })),
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).llm2 = {
+      shouldForceFullState: () => false,
+      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
+        async () => createEmptyGenerateCodeResult()
+      ),
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).ai1 = {
+      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
+        commands: [],
+        errorMessage: "Sandbox vm timeout after 200ms",
+        errorType: "vm_timeout",
+      })),
+    };
+    (orchestrator as any).ai2 = {
+      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
+        commands: [],
+        errorMessage: undefined,
+      })),
+    };
+
+    await orchestrator.runAI("player_1");
+
+    const turns = (orchestrator as any).aiTurns;
+    expect(turns).toHaveLength(1);
+    expect(turns[0].errorType).toBe("vm_timeout");
+
+    const savedTurns = (orchestrator as any).buildSavedAITurns();
+    expect(savedTurns[0].errorType).toBe("vm_timeout");
+    expect(game.getAIFeedback("player_1")[0]?.message).toContain("Sandbox vm timeout after 200ms");
   });
 
   it("dispatches the next AI turn immediately after a slow request finishes once the interval is already satisfied", async () => {

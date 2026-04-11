@@ -116,6 +116,7 @@ body {
   display: flex;
   align-items: center;
   gap: 14px;
+  flex-wrap: wrap;
 }
 
 .mode-switch {
@@ -229,6 +230,13 @@ body {
 .hud-btn-stop:hover:not(:disabled) {
   background: rgba(255, 42, 74, 0.22);
   box-shadow: 0 0 18px rgba(255, 42, 74, 0.25);
+}
+
+.match-preset-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* Main dashboard grid */
@@ -401,6 +409,7 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  gap: 12px;
 }
 
 /* HUD panel base */
@@ -904,6 +913,102 @@ body {
   white-space: nowrap;
 }
 
+.settings-shell {
+  min-height: 0;
+}
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 14px;
+}
+
+.settings-toolbar,
+.settings-actions,
+.settings-feedback,
+.settings-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.settings-field.compact {
+  gap: 4px;
+}
+
+.settings-field-wide {
+  grid-column: span 2;
+}
+
+.settings-input,
+.settings-select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-highlight);
+  background: rgba(8, 10, 12, 0.85);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.settings-input::placeholder {
+  color: rgba(138, 150, 168, 0.85);
+}
+
+.settings-input:focus,
+.settings-select:focus {
+  outline: none;
+  border-color: rgba(0, 229, 255, 0.6);
+  box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.12);
+}
+
+.live-preset-select {
+  min-width: 170px;
+}
+
+.live-preset-select.red {
+  border-color: rgba(255, 42, 74, 0.45);
+}
+
+.live-preset-select.blue {
+  border-color: rgba(0, 229, 255, 0.45);
+}
+
+@media (max-width: 900px) {
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-field-wide {
+    grid-column: auto;
+  }
+}
+
 @media (max-width: 1180px) {
   body {
     overflow: auto;
@@ -924,6 +1029,14 @@ body {
   .controls {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .match-preset-bar {
+    width: 100%;
+  }
+
+  .match-preset-bar .settings-field.compact {
+    flex: 1 1 220px;
   }
 
   .dashboard {

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import { GameState, GameSnapshot } from "@llmcraft/shared";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { GameState, GameSnapshot, StartMatchMessage } from "@llmcraft/shared";
 
 interface WSMessage {
   type: string;
@@ -10,6 +10,8 @@ interface WSMessage {
   message?: string;
 }
 
+type ClientMessage = StartMatchMessage | { type: "stop" } | { type: "save_record" };
+
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
@@ -19,10 +21,14 @@ export function useWebSocket(url: string) {
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const send = useCallback((data: any) => {
+  const send = useCallback((data: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
     }
+  }, []);
+
+  const clearServerMessage = useCallback(() => {
+    setServerMessage(null);
   }, []);
 
   useEffect(() => {
@@ -38,6 +44,7 @@ export function useWebSocket(url: string) {
       try {
         const data: WSMessage = JSON.parse(event.data);
         if (data.type === "state") {
+          setServerMessage(null);
           setState(data.state);
           setSnapshots(data.snapshots);
           setLiveEnabled(Boolean(data.liveEnabled));
@@ -65,5 +72,5 @@ export function useWebSocket(url: string) {
     };
   }, [url]);
 
-  return { state, snapshots, connected, lastSavedRecordPath, liveEnabled, serverMessage, send };
+  return { state, snapshots, connected, lastSavedRecordPath, liveEnabled, serverMessage, send, clearServerMessage };
 }

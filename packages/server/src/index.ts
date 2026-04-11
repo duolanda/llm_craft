@@ -2,41 +2,113 @@ import * as dotenv from "dotenv";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import WebSocket, { WebSocketServer } from "ws";
-import { GameOrchestrator } from "./GameOrchestrator";
+import { fileURLToPath } from "node:url";
 import {
+  ClientMessage,
+  CreateLLMPresetRequest,
+  GameSnapshot,
+  GameState,
+  MatchLLMConfig,
   ServerMessage,
+  UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
+import WebSocket, { WebSocketServer } from "ws";
+import { GameOrchestrator } from "./GameOrchestrator";
+import { PresetStore } from "./PresetStore";
 
 dotenv.config();
 
-const PORT = parseInt(process.env.PORT || "3001");
-const OPENAI_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const RECORDS_DIR = path.resolve(process.cwd(), "logs", "records");
+const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
+const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
+const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
+const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
-console.log("启动 LLMCraft 服务器...");
-console.log(`模型: ${OPENAI_MODEL}`);
-if (OPENAI_BASE_URL) {
-  console.log(`API地址: ${OPENAI_BASE_URL}`);
-}
-if (!OPENAI_KEY) {
-  console.log("未检测到 OPENAI_API_KEY，实时对战功能已禁用，可使用回放模式。");
+const PORT = parseInt(process.env.PORT || "3001", 10);
+const RECORDS_DIR = path.resolve(WORKSPACE_ROOT, "logs", "records");
+const LIVE_STATE_SNAPSHOT_LIMIT = 1;
+
+export function getDefaultPresetPaths() {
+  return {
+    filePath: path.resolve(SERVER_PACKAGE_DIR, "data", "llm-presets.json"),
+  };
 }
 
-const orchestrator = OPENAI_KEY
-  ? new GameOrchestrator({
-      apiKey: OPENAI_KEY,
-      baseURL: OPENAI_BASE_URL,
-      model: OPENAI_MODEL,
-    })
-  : null;
+const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
+const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
+
+interface OrchestratorLike {
+  start(): Promise<void>;
+  stop(): void;
+  saveRecord(): Promise<string>;
+  getGame(): {
+    getState(): GameState | null;
+    getSnapshots(): GameSnapshot[];
+    getLatestSnapshot?: () => GameSnapshot | null;
+  };
+}
+
+export interface ServerState {
+  presetStore: PresetStore;
+  orchestrator: OrchestratorLike | null;
+  createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike;
+  liveEnabled: boolean | null;
+}
+
+export function resolvePresetSecret(): string {
+  return BUILTIN_PRESET_SECRET;
+}
+
+export function createPresetStore(options?: {
+  filePath?: string;
+}): PresetStore {
+  return new PresetStore({
+    filePath: options?.filePath || PRESETS_FILE,
+    encryptionSecret: resolvePresetSecret(),
+  });
+}
+
+export function createServerState(
+  presetStore: PresetStore,
+  createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike = (config) => new GameOrchestrator(config)
+): ServerState {
+  return {
+    presetStore,
+    orchestrator: null,
+    createOrchestrator,
+    liveEnabled: null,
+  };
+}
+
+type StateMessagePayload = {
+  type: "state";
+  state: GameState | null;
+  snapshots: GameSnapshot[];
+  liveEnabled: boolean;
+};
+
+async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
+  const presets = await state.presetStore.list();
+  state.liveEnabled = presets.length > 0;
+  return state.liveEnabled;
+}
+
+export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
+  const currentOrchestrator = state.orchestrator;
+  const game = currentOrchestrator?.getGame();
+  const latestSnapshot = game?.getLatestSnapshot?.() ?? game?.getSnapshots()?.slice(-LIVE_STATE_SNAPSHOT_LIMIT) ?? [];
+
+  return {
+    type: "state",
+    state: game?.getState() ?? null,
+    snapshots: Array.isArray(latestSnapshot) ? latestSnapshot : latestSnapshot ? [latestSnapshot] : [],
+    liveEnabled: Boolean(state.liveEnabled),
+  };
+}
 
 function setCorsHeaders(res: http.ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
@@ -44,6 +116,104 @@ function sendJson(res: http.ServerResponse, statusCode: number, payload: unknown
   setCorsHeaders(res);
   res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
+}
+
+async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  return JSON.parse(raw || "{}") as T;
+}
+
+function normalizePresetRpm(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error("RPM 必须是正整数，留空表示不限制。");
+  }
+  return value;
+}
+
+function validateCreatePresetRequest(body: CreateLLMPresetRequest): CreateLLMPresetRequest {
+  if (!body.name?.trim()) {
+    throw new Error("预设名称不能为空。");
+  }
+  if (!body.baseURL?.trim()) {
+    throw new Error("Base URL 不能为空。");
+  }
+  if (!body.model?.trim()) {
+    throw new Error("模型名称不能为空。");
+  }
+  if (!body.apiKey?.trim()) {
+    throw new Error("API Key 不能为空。");
+  }
+  if (body.providerType !== "openai-compatible") {
+    throw new Error("当前仅支持 OpenAI-compatible 预设。");
+  }
+
+  return {
+    ...body,
+    name: body.name.trim(),
+    baseURL: body.baseURL.trim(),
+    model: body.model.trim(),
+    apiKey: body.apiKey.trim(),
+    rpm: normalizePresetRpm(body.rpm),
+  };
+}
+
+function validateUpdatePresetRequest(body: UpdateLLMPresetRequest): UpdateLLMPresetRequest {
+  if (!body.name?.trim()) {
+    throw new Error("预设名称不能为空。");
+  }
+  if (!body.baseURL?.trim()) {
+    throw new Error("Base URL 不能为空。");
+  }
+  if (!body.model?.trim()) {
+    throw new Error("模型名称不能为空。");
+  }
+  if (body.providerType !== "openai-compatible") {
+    throw new Error("当前仅支持 OpenAI-compatible 预设。");
+  }
+
+  return {
+    ...body,
+    name: body.name.trim(),
+    baseURL: body.baseURL.trim(),
+    model: body.model.trim(),
+    apiKey: body.apiKey?.trim(),
+    rpm: normalizePresetRpm(body.rpm),
+  };
+}
+
+function parsePresetId(urlPath: string): string {
+  const presetId = decodeURIComponent(urlPath.replace("/api/settings/presets/", ""));
+  if (!presetId || presetId.includes("/")) {
+    throw new Error("预设 ID 无效。");
+  }
+  return presetId;
+}
+
+function sendPresetError(res: http.ServerResponse, error: unknown) {
+  if (error instanceof SyntaxError) {
+    sendJson(res, 400, { error: "请求体不是有效的 JSON。" });
+    return;
+  }
+  if (error instanceof Error) {
+    if (error.message === "PRESET_NOT_FOUND") {
+      sendJson(res, 404, { error: "指定的预设不存在。" });
+      return;
+    }
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+  sendJson(res, 500, { error: "预设操作失败。" });
 }
 
 async function listRecordEntries() {
@@ -72,10 +242,14 @@ async function listRecordEntries() {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+export async function handleHttpRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  state: ServerState
+): Promise<void> {
   try {
     if (!req.url) {
-      sendJson(res, 400, { error: "Missing request URL" });
+      sendJson(res, 400, { error: "缺少请求 URL。" });
       return;
     }
 
@@ -98,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       const requestedFile = decodeURIComponent(url.pathname.replace("/api/replay/records/", ""));
       const safeFileName = path.basename(requestedFile);
       if (!safeFileName.endsWith(".json") || safeFileName !== requestedFile) {
-        sendJson(res, 400, { error: "Invalid record file name" });
+        sendJson(res, 400, { error: "记录文件名无效。" });
         return;
       }
 
@@ -110,125 +284,230 @@ const server = http.createServer(async (req, res) => {
         res.end(content);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          sendJson(res, 404, { error: "Record not found" });
+          sendJson(res, 404, { error: "记录不存在。" });
           return;
         }
         console.error("读取记录失败:", error);
-        sendJson(res, 500, { error: "Failed to read record" });
+        sendJson(res, 500, { error: "读取记录失败。" });
       }
       return;
     }
 
-    sendJson(res, 404, { error: "Not found" });
+    if (req.method === "GET" && url.pathname === "/api/settings/presets") {
+      const presets = await state.presetStore.list();
+      state.liveEnabled = presets.length > 0;
+      sendJson(res, 200, { presets });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/settings/presets") {
+      try {
+        const body = await readJsonBody<CreateLLMPresetRequest>(req);
+        const validatedBody = validateCreatePresetRequest(body);
+        const preset = await state.presetStore.create(validatedBody);
+        state.liveEnabled = true;
+        sendJson(res, 201, { preset });
+      } catch (error) {
+        sendPresetError(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "PUT" && url.pathname.startsWith("/api/settings/presets/")) {
+      try {
+        const presetId = parsePresetId(url.pathname);
+        const body = await readJsonBody<UpdateLLMPresetRequest>(req);
+        const validatedBody = validateUpdatePresetRequest(body);
+        const preset = await state.presetStore.update(presetId, validatedBody);
+        state.liveEnabled = true;
+        sendJson(res, 200, { preset });
+      } catch (error) {
+        sendPresetError(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/settings/presets/")) {
+      try {
+        const presetId = parsePresetId(url.pathname);
+        await state.presetStore.delete(presetId);
+        await refreshLiveEnabled(state);
+        sendJson(res, 200, { ok: true });
+      } catch (error) {
+        sendPresetError(res, error);
+      }
+      return;
+    }
+
+    sendJson(res, 404, { error: "未找到请求资源。" });
   } catch (error) {
     console.error("HTTP 处理失败:", error);
-    sendJson(res, 500, { error: "Internal server error" });
+    sendJson(res, 500, { error: "服务器内部错误。" });
   }
-});
+}
 
-const wss = new WebSocketServer({ server });
+type ClientMessageContext = {
+  data: { toString(): string };
+  ws: Pick<WebSocket, "send">;
+  state: ServerState;
+};
 
-console.log(`WebSocket 服务器运行在端口 ${PORT}`);
-
-wss.on("connection", (ws) => {
-  console.log("客户端已连接");
-
-  const sendMessage = (message: ServerMessage) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
+export async function handleClientMessage({ data, ws, state }: ClientMessageContext): Promise<void> {
+  try {
+    const parsed = JSON.parse(data.toString());
+    if (!isClientMessage(parsed)) {
+      ws.send(JSON.stringify({
+        type: "error",
+        message: "未知的消息类型。",
+      } satisfies ServerMessage));
+      return;
     }
-  };
 
-  const sendState = () => {
-    const state = orchestrator?.getGame().getState() ?? null;
-    const snapshots = orchestrator?.getGame().getSnapshots() ?? [];
-    sendMessage({
-      type: "state",
-      state,
-      snapshots: snapshots.slice(-100),
-      liveEnabled: Boolean(orchestrator),
-    });
-  };
+    const message: ClientMessage = parsed;
 
-  sendState();
-
-  const interval = setInterval(sendState, 100);
-
-  ws.on("message", (data) => {
-    try {
-      const parsed = JSON.parse(data.toString());
-
-      if (!isClientMessage(parsed)) {
-        sendMessage({
+    if (message.type === "start") {
+      if (!message.player1PresetId || !message.player2PresetId) {
+        ws.send(JSON.stringify({
           type: "error",
-          message: "未知的消息类型",
-        });
+          message: "启动对局前必须为红蓝双方选择预设。",
+        } satisfies ServerMessage));
         return;
       }
 
-      switch (parsed.type) {
-        case "start": {
-          if (!orchestrator) {
-            sendMessage({
-              type: "error",
-              message: "服务端当前处于回放模式，未启用实时对战。",
-            });
-            return;
-          }
-          console.log("收到开始命令");
-          void orchestrator.start();
-          break;
-        }
+      const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
+      const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const previousOrchestrator = state.orchestrator;
+      const nextOrchestrator = state.createOrchestrator({ player1, player2 });
 
-        case "stop": {
-          if (!orchestrator) {
-            return;
-          }
-          console.log("收到停止命令");
-          orchestrator.stop();
-          break;
-        }
-
-        case "save_record": {
-          if (!orchestrator) {
-            sendMessage({
-              type: "error",
-              message: "回放模式下没有实时对局可保存。",
-            });
-            return;
-          }
-          void orchestrator.saveRecord().then((filePath: string) => {
-            sendMessage({
-              type: "record_saved",
-              filePath,
-            });
-          });
-          break;
-        }
+      try {
+        await nextOrchestrator.start();
+      } catch (error) {
+        nextOrchestrator.stop();
+        throw error;
       }
-    } catch (e) {
-      console.error("消息解析错误:", e);
-      sendMessage({
-        type: "error",
-        message: "消息格式错误，无法解析 JSON",
-      });
+
+      state.orchestrator = nextOrchestrator;
+      previousOrchestrator?.stop();
+      return;
     }
+
+    if (message.type === "stop") {
+      state.orchestrator?.stop();
+      return;
+    }
+
+    if (message.type === "reset") {
+      if (!message.player1PresetId || !message.player2PresetId) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "重置对局前必须为红蓝双方选择预设。",
+        } satisfies ServerMessage));
+        return;
+      }
+
+      const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
+      const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const previousOrchestrator = state.orchestrator;
+      const nextOrchestrator = state.createOrchestrator({ player1, player2 });
+
+      state.orchestrator = nextOrchestrator;
+      previousOrchestrator?.stop();
+      return;
+    }
+
+    if (message.type === "save_record") {
+      if (!state.orchestrator) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "当前没有可保存的实时对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+
+      const filePath = await state.orchestrator.saveRecord();
+      ws.send(JSON.stringify({
+        type: "record_saved",
+        filePath,
+      } satisfies ServerMessage));
+    }
+  } catch (error) {
+    console.error("消息错误:", error);
+    ws.send(JSON.stringify({
+      type: "error",
+      message: error instanceof Error
+        ? error.message === "PRESET_NOT_FOUND"
+          ? "所选预设不存在或已被删除。"
+          : error.message === "PRESET_DECRYPT_FAILED"
+            ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
+            : "处理客户端消息失败。"
+        : "处理客户端消息失败。",
+    } satisfies ServerMessage));
+  }
+}
+
+function createServer(state: ServerState) {
+  const server = http.createServer((req, res) => {
+    void handleHttpRequest(req, res, state);
   });
 
-  ws.on("close", () => {
-    console.log("客户端已断开");
-    clearInterval(interval);
+  const wss = new WebSocketServer({ server });
+
+  wss.on("connection", (ws) => {
+    console.log("客户端已连接");
+    let isSendingState = false;
+
+    const sendState = async () => {
+      if (isSendingState) {
+        return;
+      }
+      isSendingState = true;
+      try {
+        if (state.liveEnabled === null) {
+          await refreshLiveEnabled(state);
+        }
+        ws.send(JSON.stringify(buildStateMessagePayload(state)));
+      } finally {
+        isSendingState = false;
+      }
+    };
+
+    void sendState();
+    const interval = setInterval(() => {
+      void sendState();
+    }, 100);
+
+    ws.on("message", (data) => {
+      void handleClientMessage({ data, ws, state });
+    });
+
+    ws.on("close", () => {
+      console.log("客户端已断开");
+      clearInterval(interval);
+    });
   });
-});
 
-// 优雅关闭
-process.on("SIGINT", () => {
-  console.log("\n关闭服务器...");
-  server.close();
-  wss.close();
-  process.exit(0);
-});
+  return { server, wss };
+}
 
-server.listen(PORT, () => {
+export function startServer() {
+  const state = createServerState(createPresetStore());
+  const { server, wss } = createServer(state);
+
+  console.log("启动 LLMCraft 服务器...");
   console.log(`HTTP/WebSocket 服务器运行在端口 ${PORT}`);
-});
+
+  process.on("SIGINT", () => {
+    console.log("\n关闭服务器...");
+    state.orchestrator?.stop();
+    server.close();
+    wss.close();
+    process.exit(0);
+  });
+
+  server.listen(PORT);
+  return { server, wss, state };
+}
+
+if (process.env.VITEST !== "true") {
+  startServer();
+}

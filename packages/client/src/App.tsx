@@ -1,11 +1,21 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { GameRecord, GameSnapshot, GameState } from "@llmcraft/shared";
+import {
+  CreateLLMPresetRequest,
+  GameRecord,
+  GameSnapshot,
+  GameState,
+  LLMPresetSummary,
+  UpdateLLMPresetRequest,
+} from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
 import { StatsPanel } from "./components/StatsPanel";
 import { LegendPanel } from "./components/LegendPanel";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { SettingsOverlay } from "./components/SettingsOverlay";
 import { useWebSocket } from "./hooks/useWebSocket";
+import { createPreset, deletePreset, listPresets, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
 
 type AppMode = "live" | "replay";
@@ -22,7 +32,16 @@ const WS_URL = `ws://${SERVER_HOST}:3001`;
 const API_BASE_URL = `http://${SERVER_HOST}:3001`;
 
 function App() {
-  const { state, snapshots, connected, lastSavedRecordPath, liveEnabled, serverMessage, send } = useWebSocket(WS_URL);
+  const {
+    state,
+    snapshots,
+    connected,
+    lastSavedRecordPath,
+    liveEnabled,
+    serverMessage,
+    send,
+    clearServerMessage,
+  } = useWebSocket(WS_URL);
   const [isPlaying, setIsPlaying] = useState(false);
   const [winnerOverlayDismissed, setWinnerOverlayDismissed] = useState(false);
   const [mode, setMode] = useState<AppMode>("live");
@@ -37,6 +56,15 @@ function App() {
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
+  const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(false);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [player1PresetId, setPlayer1PresetId] = useState("");
+  const [player2PresetId, setPlayer2PresetId] = useState("");
+  const [startPending, setStartPending] = useState(false);
+  const [startBaselineTick, setStartBaselineTick] = useState(-1);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -72,6 +100,29 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [mode, state?.winner, winnerOverlayDismissed]);
+
+  useEffect(() => {
+    if (!startPending) {
+      return;
+    }
+
+    if (serverMessage) {
+      setStartPending(false);
+      setIsPlaying(false);
+    }
+  }, [serverMessage, startPending]);
+
+  useEffect(() => {
+    if (!startPending || !state) {
+      return;
+    }
+
+    if (state.tick !== startBaselineTick) {
+      setStartPending(false);
+      setIsPlaying(true);
+      setHasLiveMatchStarted(true);
+    }
+  }, [startBaselineTick, startPending, state]);
 
   useEffect(() => {
     if (mode !== "replay" || !replayPlaying || replayFrames.length <= 1) {
@@ -112,9 +163,35 @@ function App() {
     }
   };
 
+  const refreshPresets = async () => {
+    setPresetsLoading(true);
+    setPresetError(null);
+    try {
+      const nextPresets = await listPresets(API_BASE_URL);
+      setPresets(nextPresets);
+    } catch (error) {
+      setPresetError(`获取预设列表失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPresetsLoading(false);
+    }
+  };
+
   useEffect(() => {
     void fetchRecordEntries();
+    void refreshPresets();
   }, []);
+
+  useEffect(() => {
+    if (presets.length === 0) {
+      setPlayer1PresetId("");
+      setPlayer2PresetId("");
+      return;
+    }
+
+    const presetIds = new Set(presets.map((preset) => preset.id));
+    setPlayer1PresetId((current) => (current && presetIds.has(current) ? current : presets[0]?.id ?? ""));
+    setPlayer2PresetId((current) => (current && presetIds.has(current) ? current : presets[1]?.id ?? presets[0]?.id ?? ""));
+  }, [presets]);
 
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
@@ -163,17 +240,56 @@ function App() {
   };
 
   const handleStart = () => {
-    send({ type: "start" });
-    setIsPlaying(true);
+    startLiveMatch();
+  };
+
+  const handleRestart = () => {
+    if (!player1PresetId || !player2PresetId) {
+      return;
+    }
+
+    clearServerMessage();
+    setStartPending(false);
+    setIsPlaying(false);
+    setWinnerOverlayDismissed(false);
+    send({ type: "reset", player1PresetId, player2PresetId });
+  };
+
+  const startLiveMatch = () => {
+    if (!player1PresetId || !player2PresetId) {
+      return;
+    }
+
+    clearServerMessage();
+    setStartPending(true);
+    setStartBaselineTick(state?.tick ?? -1);
+    setIsPlaying(false);
+    send({ type: "start", player1PresetId, player2PresetId });
   };
 
   const handleStop = () => {
     send({ type: "stop" });
+    setStartPending(false);
     setIsPlaying(false);
   };
 
   const handleSaveRecord = () => {
     send({ type: "save_record" });
+  };
+
+  const handleCreatePreset = async (input: CreateLLMPresetRequest) => {
+    await createPreset(API_BASE_URL, input);
+    await refreshPresets();
+  };
+
+  const handleUpdatePreset = async (presetId: string, input: UpdateLLMPresetRequest) => {
+    await updatePreset(API_BASE_URL, presetId, input);
+    await refreshPresets();
+  };
+
+  const handleDeletePreset = async (presetId: string) => {
+    await deletePreset(API_BASE_URL, presetId);
+    await refreshPresets();
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
@@ -189,6 +305,15 @@ function App() {
   const replayProgress = replayFrames.length > 1
     ? replayFrameIndex / (replayFrames.length - 1)
     : 0;
+  const canStartLiveMatch = connected && liveEnabled && Boolean(player1PresetId) && Boolean(player2PresetId);
+  const canStopLiveMatch = connected && (isPlaying || startPending);
+  const canRestartLiveMatch = connected
+    && !isPlaying
+    && !startPending
+    && hasLiveMatchStarted
+    && Boolean(player1PresetId)
+    && Boolean(player2PresetId);
+  const canSaveLiveMatch = connected && Boolean(state || isPlaying);
 
   return (
     <>
@@ -203,7 +328,6 @@ function App() {
             <div className="mode-switch">
               <button
                 onClick={() => setMode("live")}
-                disabled={!liveEnabled}
                 className={`mode-pill ${mode === "live" ? "active" : ""}`}
               >
                 实时对局
@@ -220,16 +344,66 @@ function App() {
             </span>
             {mode === "live" && (
               <>
+                <div className="match-preset-bar">
+                  <label className="settings-field compact">
+                    <span>红方预设</span>
+                    <select
+                      className="settings-select live-preset-select red"
+                      value={player1PresetId}
+                      onChange={(event) => setPlayer1PresetId(event.target.value)}
+                      disabled={presetsLoading || presets.length === 0}
+                    >
+                      <option value="">选择红方预设</option>
+                      {presets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="settings-field compact">
+                    <span>蓝方预设</span>
+                    <select
+                      className="settings-select live-preset-select blue"
+                      value={player2PresetId}
+                      onChange={(event) => setPlayer2PresetId(event.target.value)}
+                      disabled={presetsLoading || presets.length === 0}
+                    >
+                      <option value="">选择蓝方预设</option>
+                      {presets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <button
-                  onClick={isPlaying ? handleStop : handleStart}
-                  disabled={!connected || !liveEnabled}
-                  className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
+                  onClick={() => setSettingsOpen(true)}
                 >
-                  {isPlaying ? "终止模拟" : "启动模拟"}
+                  设置
                 </button>
                 <button
+                  onClick={isPlaying ? handleStop : handleStart}
+                  disabled={isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
+                  className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+                >
+                  {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
+                </button>
+                {canRestartLiveMatch && (
+                  <button
+                    onClick={handleRestart}
+                    disabled={!canRestartLiveMatch}
+                    className="hud-btn hud-btn-ghost"
+                  >
+                    重置
+                  </button>
+                )}
+                <button
                   onClick={handleSaveRecord}
-                  disabled={!connected || !state || !liveEnabled}
+                  disabled={!canSaveLiveMatch}
                   className="hud-btn"
                 >
                   保存记录
@@ -239,10 +413,11 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || replayError || lastSavedRecordPath) && (
+        {(serverMessage || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
             {replayError && <span className="status-error">{replayError}</span>}
+            {presetError && <span className="status-error">{presetError}</span>}
             {lastSavedRecordPath && <span>记录已保存到: {lastSavedRecordPath}</span>}
           </div>
         )}
@@ -404,7 +579,7 @@ function App() {
           </div>
 
           <div className="terminal-col">
-            <div className="hud-panel" style={{ flex: 1 }}>
+            <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
@@ -414,6 +589,22 @@ function App() {
             </div>
           </div>
         </div>
+
+        <SettingsOverlay
+          open={mode === "live" && settingsOpen}
+          title="设置"
+          onClose={() => setSettingsOpen(false)}
+        >
+          <SettingsPanel
+            presets={presets}
+            loading={presetsLoading}
+            error={presetError}
+            onRefresh={refreshPresets}
+            onCreate={handleCreatePreset}
+            onUpdate={handleUpdatePreset}
+            onDelete={handleDeletePreset}
+          />
+        </SettingsOverlay>
 
         {mode === "live" && state?.winner && !winnerOverlayDismissed && (
           <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>

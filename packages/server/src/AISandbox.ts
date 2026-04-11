@@ -2,12 +2,22 @@ import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, AIStatePackage } from "@llmcraft/shared";
 
+export type AISandboxErrorType =
+  | "parent_timeout"
+  | "vm_timeout"
+  | "runtime_error"
+  | "process_error"
+  | "process_exit"
+  | "invalid_payload";
+
 export interface AISandboxResult {
   commands: Command[];
+  errorType?: AISandboxErrorType;
   errorMessage?: string;
 }
 
 export const AI_SANDBOX_TIMEOUT_MS = 200;
+const AI_SANDBOX_PARENT_GRACE_MS = 100;
 
 export class AISandbox {
   private playerId: string;
@@ -48,13 +58,15 @@ export class AISandbox {
       const timeout = setTimeout(() => {
         finish({
           commands: [],
-          errorMessage: `Sandbox timed out after ${this.executionTimeoutMs}ms`,
+          errorType: "parent_timeout",
+          errorMessage: `Sandbox parent timeout after ${this.executionTimeoutMs + AI_SANDBOX_PARENT_GRACE_MS}ms`,
         });
-      }, this.executionTimeoutMs);
+      }, this.executionTimeoutMs + AI_SANDBOX_PARENT_GRACE_MS);
 
       child.once("message", (message: any) => {
         finish({
           commands: Array.isArray(message?.commands) ? message.commands : [],
+          errorType: typeof message?.errorType === "string" ? message.errorType : undefined,
           errorMessage: typeof message?.errorMessage === "string" ? message.errorMessage : undefined,
         });
       });
@@ -63,6 +75,7 @@ export class AISandbox {
         console.error(`AI ${this.playerId} 沙箱进程错误:`, error);
         finish({
           commands: [],
+          errorType: "process_error",
           errorMessage: stderrOutput.trim()
             ? `${error.message}\n${stderrOutput.trim()}`
             : error.message,
@@ -74,6 +87,7 @@ export class AISandbox {
           const detail = stderrOutput.trim();
           finish({
             commands: [],
+            errorType: "process_exit",
             errorMessage: signal
               ? `Sandbox exited with signal ${signal}`
               : detail

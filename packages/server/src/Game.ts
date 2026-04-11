@@ -858,6 +858,11 @@ export class Game {
     return this.cloneValue(this.snapshots);
   }
 
+  getLatestSnapshot(): GameSnapshot | null {
+    const latest = this.snapshots[this.snapshots.length - 1];
+    return latest ? this.cloneValue(latest) : null;
+  }
+
   getCommandResults(): CommandResult[] {
     return this.cloneValue(this.commandResults);
   }

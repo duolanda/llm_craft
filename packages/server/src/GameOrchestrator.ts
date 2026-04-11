@@ -3,6 +3,7 @@ import {
   AITurnRecord,
   GameRecord,
   GameState,
+  MatchLLMConfig,
   MAP_HEIGHT,
   MAP_WIDTH,
   SavedAITurnRecord,
@@ -10,12 +11,16 @@ import {
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { AISandboxErrorType } from "./AISandbox";
 import { Game } from "./Game";
 import { AISandbox } from "./AISandbox";
 import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
 import { createLLMProvider } from "./createLLMProvider";
-import { LLMProvider, LLMProviderConfig } from "./LLMProvider";
+import { LLMProvider } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
+
+type RecordedAITurn = AITurnRecord & { errorType?: AISandboxErrorType };
+type SavedRecordedAITurn = SavedAITurnRecord & { errorType?: AISandboxErrorType };
 
 export class GameOrchestrator {
   private game: Game;
@@ -33,15 +38,15 @@ export class GameOrchestrator {
   private runSession = 0;
   private startedAt = new Date().toISOString();
   private lastAIState: Record<string, AIStatePackage | null> = { player_1: null, player_2: null };
-  private aiTurns: AITurnRecord[] = [];
+  private aiTurns: RecordedAITurn[] = [];
   private aiWindowSize = 20;
 
-  constructor(config: LLMProviderConfig) {
+  constructor(config: MatchLLMConfig) {
     this.game = new Game();
     this.ai1 = new AISandbox("player_1");
     this.ai2 = new AISandbox("player_2");
-    this.llm1 = createLLMProvider(config);
-    this.llm2 = createLLMProvider(config);
+    this.llm1 = createLLMProvider(config.player1);
+    this.llm2 = createLLMProvider(config.player2);
   }
 
   getGame(): Game {
@@ -93,12 +98,12 @@ export class GameOrchestrator {
 
       this.game.setAIOutput(playerId, code);
 
-      const { commands, errorMessage } = await sandbox.executeCode(code, latestAIPackage);
+      const { commands, errorType, errorMessage } = await sandbox.executeCode(code, latestAIPackage);
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
       if (errorMessage) {
-        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { code });
+        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { code, errorType });
       }
       for (const cmd of commands) {
         this.game.queueCommand(cmd);
@@ -111,6 +116,7 @@ export class GameOrchestrator {
         promptPayload,
         response: code,
         commands,
+        errorType,
         errorMessage,
         model: llm.getModel(),
         baseURL: llm.getBaseURL(),
@@ -228,7 +234,7 @@ export class GameOrchestrator {
     return filePath;
   }
 
-  private buildSavedAITurns(): SavedAITurnRecord[] {
+  private buildSavedAITurns(): SavedRecordedAITurn[] {
     return this.aiTurns.map((turn) => ({
       playerId: turn.playerId,
       requestTick: turn.requestTick,
@@ -237,6 +243,7 @@ export class GameOrchestrator {
       promptPayload: turn.promptPayload,
       response: turn.response,
       commands: turn.commands,
+      errorType: turn.errorType,
       errorMessage: turn.errorMessage,
       model: turn.model,
       baseURL: turn.baseURL,

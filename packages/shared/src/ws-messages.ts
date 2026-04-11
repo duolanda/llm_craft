@@ -1,4 +1,4 @@
-import { GameState, GameSnapshot, ResetMatchMessage, StartMatchMessage } from "./types";
+import { GameState, GameSnapshot } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -6,6 +6,20 @@ import { GameState, GameSnapshot, ResetMatchMessage, StartMatchMessage } from ".
 // ============================================================
 
 // ---------- 客户端 → 服务端 ----------
+
+/** 开始 AI 对战模拟（需指定红蓝双方 LLM 预设） */
+export interface ClientStartMatchMessage {
+  type: "start";
+  player1PresetId: string;
+  player2PresetId: string;
+}
+
+/** 重置当前对局（需指定红蓝双方 LLM 预设） */
+export interface ClientResetMatchMessage {
+  type: "reset";
+  player1PresetId: string;
+  player2PresetId: string;
+}
 
 /** 停止 AI 对战模拟 */
 export interface ClientStopMessage {
@@ -19,8 +33,8 @@ export interface ClientSaveRecordMessage {
 
 /** 所有客户端发送的消息联合类型 */
 export type ClientMessage =
-  | StartMatchMessage
-  | ResetMatchMessage
+  | ClientStartMatchMessage
+  | ClientResetMatchMessage
   | ClientStopMessage
   | ClientSaveRecordMessage;
 

@@ -47,18 +47,6 @@ export interface UpdateLLMPresetRequest {
   rpm?: number | null;
 }
 
-export interface StartMatchMessage {
-  type: "start";
-  player1PresetId: string;
-  player2PresetId: string;
-}
-
-export interface ResetMatchMessage {
-  type: "reset";
-  player1PresetId: string;
-  player2PresetId: string;
-}
-
 export interface Position {
   x: number;
   y: number;

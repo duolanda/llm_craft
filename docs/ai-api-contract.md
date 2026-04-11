@@ -11,6 +11,84 @@
 
 不包含战术建议，不包含设计愿景，不包含未来计划。
 
+## 0. 对局与设置接口
+
+### 0.1 `GET /api/settings/presets`
+
+返回服务端保存的模型预设摘要列表：
+
+```ts
+interface LLMPresetSummary {
+  id: string;
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+说明：
+
+- 不返回明文 `apiKey`
+- `hasApiKey` 只表示服务端已保存可解密 token
+
+### 0.2 `POST /api/settings/presets`
+
+创建一个 OpenAI-compatible 预设：
+
+```ts
+interface CreateLLMPresetRequest {
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey: string;
+}
+```
+
+### 0.3 `PUT /api/settings/presets/:id`
+
+更新一个已有预设：
+
+```ts
+interface UpdateLLMPresetRequest {
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+}
+```
+
+说明：
+
+- `apiKey` 缺省或空串时，服务端保留旧 token
+
+### 0.4 `DELETE /api/settings/presets/:id`
+
+删除指定预设。
+
+### 0.5 WebSocket `start`
+
+当前实时对局启动消息为：
+
+```json
+{
+  "type": "start",
+  "player1PresetId": "preset-red",
+  "player2PresetId": "preset-blue"
+}
+```
+
+说明：
+
+- 红蓝双方必须都选择预设
+- 服务端会按两个 preset 分别解密并创建两套独立 provider
+- 若 preset 不存在、不可解密或启动失败，服务端会通过 `type = "error"` 返回可读错误消息
+
 ## 1. 输入结构
 
 每次模型调用都会收到：

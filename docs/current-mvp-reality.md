@@ -10,11 +10,12 @@
 
 - 前端: React + Vite + Canvas
 - 后端: Node.js + TypeScript
-- AI 请求方式: OpenAI Chat Completions，多轮连续对话
+- AI 请求方式: OpenAI-compatible Chat Completions，多轮连续对话
 - AI 执行环境: 子进程 + Node `vm`
 - 游戏 Tick: 500ms
 - AI 思考频率: 默认每 5 tick 触发一次
 - AI 对话窗口: 每个玩家保留最近 20 次 AI 调用的 `user / assistant` 往返
+- 模型配置来源: 服务端预设库（磁盘加密存储），前端负责管理与选择
 
 ## 2. 当前 MVP 规则
 
@@ -72,6 +73,15 @@
 | Soldier 攻击判定范围 | `8` 邻域，`attackRange = 1` |
 | Worker 攻击能力 | 无，`attack = 0` |
 | Barracks 与己方 HQ 的最小缓冲 | 至少留出 `1` 格 |
+
+## 2.2 当前模型配置与启动方式
+
+- 实时对局不再依赖 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` 这组三元 env 作为业务配置来源
+- 服务端把模型预设持久化在 `packages/server/data/llm-presets.json`
+- API token 在磁盘上不是明文，服务端用本机 secret 解密后再创建 provider
+- 前端 live 页允许分别为红方和蓝方选择不同预设
+- 服务端收到 `start` 消息后，会用 `player1PresetId` 和 `player2PresetId` 分别创建两套 provider，再启动这一局 `GameOrchestrator`
+- 如果服务端当前没有任何预设，`liveEnabled = false`，但前端仍可进入 live 页配置预设
 
 ## 3. 模型每轮实际收到什么
 

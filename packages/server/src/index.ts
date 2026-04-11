@@ -1,9 +1,8 @@
 import * as dotenv from "dotenv";
-import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   CreateLLMPresetRequest,
   MatchLLMConfig,
@@ -16,10 +15,22 @@ import { PresetStore } from "./PresetStore";
 
 dotenv.config();
 
+const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
+const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
+const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
+const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
+
 const PORT = parseInt(process.env.PORT || "3001", 10);
-const RECORDS_DIR = path.resolve(process.cwd(), "logs", "records");
-const PRESETS_FILE = path.resolve(process.cwd(), "packages", "server", "data", "llm-presets.json");
-const PRESET_SECRET_FILE = path.resolve(process.cwd(), "packages", "server", "data", "llm-presets.secret");
+const RECORDS_DIR = path.resolve(WORKSPACE_ROOT, "logs", "records");
+
+export function getDefaultPresetPaths() {
+  return {
+    filePath: path.resolve(SERVER_PACKAGE_DIR, "data", "llm-presets.json"),
+  };
+}
+
+const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
+const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
 
 interface OrchestratorLike {
   start(): Promise<void>;
@@ -37,43 +48,16 @@ interface ServerState {
   createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike;
 }
 
-export function resolvePresetSecret(
-  secretFilePath = PRESET_SECRET_FILE,
-  envSecret = process.env.LLMCRAFT_PRESET_SECRET
-): string {
-  if (envSecret !== undefined) {
-    if (!envSecret.trim()) {
-      throw new Error("LLMCRAFT_PRESET_SECRET 不能为空。");
-    }
-    return envSecret;
-  }
-
-  try {
-    const existingSecret = fsSync.readFileSync(secretFilePath, "utf8").trim();
-    if (!existingSecret) {
-      throw new Error("本地预设密钥文件为空，请删除后重启服务端重新生成。");
-    }
-    return existingSecret;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  const generatedSecret = crypto.randomBytes(32).toString("hex");
-  fsSync.mkdirSync(path.dirname(secretFilePath), { recursive: true });
-  fsSync.writeFileSync(secretFilePath, generatedSecret, "utf8");
-  return generatedSecret;
+export function resolvePresetSecret(): string {
+  return BUILTIN_PRESET_SECRET;
 }
 
 export function createPresetStore(options?: {
   filePath?: string;
-  secretFilePath?: string;
-  envSecret?: string;
 }): PresetStore {
   return new PresetStore({
     filePath: options?.filePath || PRESETS_FILE,
-    encryptionSecret: resolvePresetSecret(options?.secretFilePath, options?.envSecret),
+    encryptionSecret: resolvePresetSecret(),
   });
 }
 
@@ -356,8 +340,12 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     console.error("消息错误:", error);
     ws.send(JSON.stringify({
       type: "error",
-      message: error instanceof Error && error.message === "PRESET_NOT_FOUND"
-        ? "所选预设不存在或已被删除。"
+      message: error instanceof Error
+        ? error.message === "PRESET_NOT_FOUND"
+          ? "所选预设不存在或已被删除。"
+          : error.message === "PRESET_DECRYPT_FAILED"
+            ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
+            : "处理客户端消息失败。"
         : "处理客户端消息失败。",
     }));
   }

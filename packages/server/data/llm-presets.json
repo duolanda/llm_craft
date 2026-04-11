@@ -1,0 +1,32 @@
+[
+  {
+    "id": "0ad19ac7-549d-4786-805b-d9d93ec0864f",
+    "name": "longcat",
+    "providerType": "openai-compatible",
+    "baseURL": "https://api.longcat.chat/openai/v1",
+    "model": "LongCat-Flash-Lite",
+    "apiKeyEncrypted": "CKdjgmNoZCwPqI0B4xJrFy/9EUHPgvAPyMnChLhHmiwprJUw44T5bqnS8l5is0AW2EYcD8oKsauEOycLB6MZLY3K4ZFCNn2fz+jdKQ==",
+    "createdAt": "2026-04-11T13:58:37.384Z",
+    "updatedAt": "2026-04-11T14:23:18.635Z"
+  },
+  {
+    "id": "af3afa5f-7e9a-4505-9371-3fb4f0d10290",
+    "name": "七牛",
+    "providerType": "openai-compatible",
+    "baseURL": "https://api.qnaigc.com/v1",
+    "model": "stepfun/step-3.5-flash",
+    "apiKeyEncrypted": "HEwHliqF0LIhdp6GywFR7bvtHMTF9oDfLnOkQqgl8S8Ok0u68970zbTKt3D+2ORR90JbrG5Cxtl8sFDP6i/rmehPhCKY5E1beaLlhOnc7DprebCI3iiORN35Z9xXmqdGM5gEpXSavOkD2MhZErSD",
+    "createdAt": "2026-04-11T13:59:44.334Z",
+    "updatedAt": "2026-04-11T14:23:29.086Z"
+  },
+  {
+    "id": "1fdc5551-e4c2-464c-ac54-e9a296f11525",
+    "name": "GLM",
+    "providerType": "openai-compatible",
+    "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-4.5-flash",
+    "apiKeyEncrypted": "jy21BzCplhqYxKYYZuOU9tAeTk2ee2Tc/tF9VQ6/2vhRx6cLOnMT8/TYhUgJW9KW8Sbq9clathjZuTVlUNClySm7vEBtCL1KqJsafw8OKwrzT6IyEEpNHmtWYABI",
+    "createdAt": "2026-04-11T14:07:09.096Z",
+    "updatedAt": "2026-04-11T14:29:57.741Z"
+  }
+]

@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PresetStore } from "../PresetStore";
-import { createPresetStore, createServerState, handleClientMessage, handleHttpRequest } from "../index";
+import {
+  createPresetStore,
+  createServerState,
+  getDefaultPresetPaths,
+  handleClientMessage,
+  handleHttpRequest,
+} from "../index";
 
 const tempDirs: string[] = [];
 
@@ -83,7 +89,7 @@ function createResponseCapture() {
 }
 
 describe("server settings", () => {
-  it("bootstraps a per-instance preset secret file when no env secret is provided", async () => {
+  it("uses the built-in preset secret without creating a separate secret file", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-secret-bootstrap-"));
     tempDirs.push(dir);
     const filePath = path.join(dir, "llm-presets.json");
@@ -91,8 +97,6 @@ describe("server settings", () => {
 
     const store = createPresetStore({
       filePath,
-      secretFilePath,
-      envSecret: undefined,
     });
 
     await store.create({
@@ -103,17 +107,26 @@ describe("server settings", () => {
       apiKey: "secret-token",
     });
 
-    const generatedSecret = (await fs.readFile(secretFilePath, "utf8")).trim();
-    expect(generatedSecret).toBeTruthy();
-    expect(generatedSecret).not.toBe("llmcraft-local-dev-secret");
+    await expect(fs.access(secretFilePath)).rejects.toMatchObject({ code: "ENOENT" });
 
     const reloadedStore = createPresetStore({
       filePath,
-      secretFilePath,
-      envSecret: undefined,
     });
     const runtime = await reloadedStore.getRuntimeConfig((await reloadedStore.list())[0]!.id);
     expect(runtime.apiKey).toBe("secret-token");
+  });
+
+  it("resolves default preset paths independent of process cwd", () => {
+    const cwdSpy = vi.spyOn(process, "cwd");
+    cwdSpy.mockReturnValueOnce("E:/Projects/llm_craft");
+    const rootPaths = getDefaultPresetPaths();
+
+    cwdSpy.mockReturnValueOnce("E:/Projects/llm_craft/packages/server");
+    const nestedPaths = getDefaultPresetPaths();
+
+    expect(nestedPaths).toEqual(rootPaths);
+    expect(rootPaths.filePath).toContain(path.join("packages", "server", "data", "llm-presets.json"));
+    expect(rootPaths.filePath).not.toContain(path.join("packages", "server", "packages", "server"));
   });
 
   it("returns preset summaries from GET /api/settings/presets without exposing plaintext tokens", async () => {
@@ -373,5 +386,49 @@ describe("server settings", () => {
     expect(previousOrchestrator.stop).not.toHaveBeenCalled();
     expect(state.orchestrator).toBe(previousOrchestrator);
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("处理客户端消息失败"));
+  });
+
+  it("returns a readable error when a preset can no longer be decrypted", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-corrupt-preset-"));
+    tempDirs.push(dir);
+    const filePath = path.join(dir, "llm-presets.json");
+    const presetId = "broken-preset";
+
+    await fs.writeFile(
+      filePath,
+      JSON.stringify([
+        {
+          id: presetId,
+          name: "Broken",
+          providerType: "openai-compatible",
+          baseURL: "https://api.example.com/v1",
+          model: "gpt-4.1-mini",
+          apiKeyEncrypted: "invalid-payload",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]),
+      "utf8"
+    );
+
+    const presetStore = new PresetStore({
+      filePath,
+      encryptionSecret: "0123456789abcdef0123456789abcdef",
+    });
+    const state = createServerState(presetStore);
+    const ws = { send: vi.fn() };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: presetId,
+        player2PresetId: presetId,
+      }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("预设中的 API Key 无法解密"));
   });
 });

@@ -103,9 +103,16 @@ export class PresetStore {
         throw new Error("PRESET_NOT_FOUND");
       }
 
+      let apiKey: string;
+      try {
+        apiKey = decryptString(preset.apiKeyEncrypted, this.options.encryptionSecret);
+      } catch {
+        throw new Error("PRESET_DECRYPT_FAILED");
+      }
+
       return {
         providerType: preset.providerType,
-        apiKey: decryptString(preset.apiKeyEncrypted, this.options.encryptionSecret),
+        apiKey,
         baseURL: preset.baseURL,
         model: preset.model,
       };

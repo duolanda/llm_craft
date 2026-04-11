@@ -13,6 +13,7 @@ import { GameLog } from "./components/GameLog";
 import { StatsPanel } from "./components/StatsPanel";
 import { LegendPanel } from "./components/LegendPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { SettingsOverlay } from "./components/SettingsOverlay";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
@@ -62,6 +63,7 @@ function App() {
   const [player2PresetId, setPlayer2PresetId] = useState("");
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -353,6 +355,13 @@ function App() {
                   </label>
                 </div>
                 <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  模型预设
+                </button>
+                <button
                   onClick={isPlaying ? handleStop : handleStart}
                   disabled={isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
@@ -545,27 +554,24 @@ function App() {
               </div>
               <AIOutputPanel snapshots={displaySnapshots} />
             </div>
-
-            {mode === "live" && (
-              <div className="hud-panel settings-shell">
-                <div className="hud-panel-top-corners" />
-                <div className="hud-panel-bottom-corners" />
-                <div className="panel-header">
-                  <span className="panel-header-accent accent-red">模型预设</span>
-                </div>
-                <SettingsPanel
-                  presets={presets}
-                  loading={presetsLoading}
-                  error={presetError}
-                  onRefresh={refreshPresets}
-                  onCreate={handleCreatePreset}
-                  onUpdate={handleUpdatePreset}
-                  onDelete={handleDeletePreset}
-                />
-              </div>
-            )}
           </div>
         </div>
+
+        <SettingsOverlay
+          open={mode === "live" && settingsOpen}
+          title="模型预设"
+          onClose={() => setSettingsOpen(false)}
+        >
+          <SettingsPanel
+            presets={presets}
+            loading={presetsLoading}
+            error={presetError}
+            onRefresh={refreshPresets}
+            onCreate={handleCreatePreset}
+            onUpdate={handleUpdatePreset}
+            onDelete={handleDeletePreset}
+          />
+        </SettingsOverlay>
 
         {mode === "live" && state?.winner && !winnerOverlayDismissed && (
           <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>

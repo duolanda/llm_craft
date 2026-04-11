@@ -5,11 +5,11 @@ interface GameLogProps {
 }
 
 function getPlayerId(log: { data?: { playerId?: string } | null }): string {
-  return log.data?.playerId ?? "_system_";
+  return log.data?.playerId ?? "system_0";
 }
 
 function getPlayerColor(playerId: string): string {
-  return PLAYER_COLORS[playerId] ?? PLAYER_COLORS._system_;
+  return PLAYER_COLORS[playerId] ?? PLAYER_COLORS.system_0;
 }
 
 export function GameLog({ state }: GameLogProps) {

@@ -1,16 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { GameState, GameSnapshot, ResetMatchMessage, StartMatchMessage } from "@llmcraft/shared";
-
-interface WSMessage {
-  type: string;
-  state: GameState | null;
-  snapshots: GameSnapshot[];
-  filePath?: string;
-  liveEnabled?: boolean;
-  message?: string;
-}
-
-type ClientMessage = StartMatchMessage | ResetMatchMessage | { type: "stop" } | { type: "save_record" };
+import {
+  ClientMessage,
+  GameState,
+  GameSnapshot,
+  isServerMessage,
+} from "@llmcraft/shared";
 
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);
@@ -21,9 +15,9 @@ export function useWebSocket(url: string) {
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const send = useCallback((data: ClientMessage) => {
+  const send = useCallback((message: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
+      wsRef.current.send(JSON.stringify(message));
     }
   }, []);
 
@@ -42,19 +36,31 @@ export function useWebSocket(url: string) {
 
     ws.onmessage = (event) => {
       try {
-        const data: WSMessage = JSON.parse(event.data);
-        if (data.type === "state") {
-          setServerMessage(null);
-          setState(data.state);
-          setSnapshots(data.snapshots);
-          setLiveEnabled(Boolean(data.liveEnabled));
-        } else if (data.type === "error" && data.message) {
-          setServerMessage(data.message);
-        } else if (data.type === "record_saved" && data.filePath) {
-          setLastSavedRecordPath(data.filePath);
+        const parsed = JSON.parse(event.data);
+
+        if (!isServerMessage(parsed)) {
+          console.warn("收到未知的服务端消息:", parsed);
+          return;
+        }
+
+        switch (parsed.type) {
+          case "state":
+            setServerMessage(null);
+            setState(parsed.state);
+            setSnapshots(parsed.snapshots);
+            setLiveEnabled(parsed.liveEnabled);
+            break;
+
+          case "error":
+            setServerMessage(parsed.message);
+            break;
+
+          case "record_saved":
+            setLastSavedRecordPath(parsed.filePath);
+            break;
         }
       } catch (e) {
-        console.error("解析错误:", e);
+        console.error("消息解析错误:", e);
       }
     };
 

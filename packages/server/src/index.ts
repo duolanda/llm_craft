@@ -4,13 +4,14 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ClientMessage,
   CreateLLMPresetRequest,
   GameSnapshot,
   GameState,
   MatchLLMConfig,
-  ResetMatchMessage,
-  StartMatchMessage,
+  ServerMessage,
   UpdateLLMPresetRequest,
+  isClientMessage,
 } from "@llmcraft/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator } from "./GameOrchestrator";
@@ -353,18 +354,23 @@ type ClientMessageContext = {
 
 export async function handleClientMessage({ data, ws, state }: ClientMessageContext): Promise<void> {
   try {
-    const message = JSON.parse(data.toString()) as
-      | StartMatchMessage
-      | ResetMatchMessage
-      | { type: "stop" }
-      | { type: "save_record" };
+    const parsed = JSON.parse(data.toString());
+    if (!isClientMessage(parsed)) {
+      ws.send(JSON.stringify({
+        type: "error",
+        message: "未知的消息类型。",
+      } satisfies ServerMessage));
+      return;
+    }
+
+    const message: ClientMessage = parsed;
 
     if (message.type === "start") {
       if (!message.player1PresetId || !message.player2PresetId) {
         ws.send(JSON.stringify({
           type: "error",
           message: "启动对局前必须为红蓝双方选择预设。",
-        }));
+        } satisfies ServerMessage));
         return;
       }
 
@@ -395,7 +401,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         ws.send(JSON.stringify({
           type: "error",
           message: "重置对局前必须为红蓝双方选择预设。",
-        }));
+        } satisfies ServerMessage));
         return;
       }
 
@@ -414,7 +420,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         ws.send(JSON.stringify({
           type: "error",
           message: "当前没有可保存的实时对局。",
-        }));
+        } satisfies ServerMessage));
         return;
       }
 
@@ -422,7 +428,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       ws.send(JSON.stringify({
         type: "record_saved",
         filePath,
-      }));
+      } satisfies ServerMessage));
     }
   } catch (error) {
     console.error("消息错误:", error);
@@ -435,7 +441,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
             : "处理客户端消息失败。"
         : "处理客户端消息失败。",
-    }));
+    } satisfies ServerMessage));
   }
 }
 

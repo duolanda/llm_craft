@@ -67,7 +67,7 @@ export const ECONOMY_RULES = {
 export const PLAYER_COLORS: Record<string, string> = {
   player_1: "#ff2a4a",  // 红色
   player_2: "#00e5ff",  // 青色
-  _system_: "#ffb300",  // 金色（系统消息）
+  system_0: "#ffb300",  // 金色（系统消息）
 };
 
 /** 游戏内通用颜色配置 */

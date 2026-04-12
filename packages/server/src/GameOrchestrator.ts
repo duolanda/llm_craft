@@ -8,7 +8,7 @@ import {
   MAP_WIDTH,
   SavedAITurnRecord,
   TickDeltaRecord,
-  GAME_LOG_TYPES,
+  LOG_TYPES,
   LOG_LEVELS,
   LOG_DISPLAY_TARGETS,
   PlayerId,
@@ -170,7 +170,7 @@ export class GameOrchestrator {
       if (errorMessage) {
         const level = LOG_LEVELS.ERROR;
         this.game.addLog(
-          GAME_LOG_TYPES.COMMAND_ERROR,
+          LOG_TYPES.COMMAND_ERROR,
           errorMessage,
           { code, errorType, playerId, phase: "execution" as const, severity: "error" as const },
           { level, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
@@ -226,7 +226,7 @@ export class GameOrchestrator {
       console.error(`AI 错误 ${playerId}:`, e);
       const errorMessage = e instanceof Error ? e.message : String(e);
       this.game.addLog(
-        GAME_LOG_TYPES.COMMAND_ERROR,
+        LOG_TYPES.COMMAND_ERROR,
         e instanceof Error ? e.message : String(e),
         { playerId, phase: "generation" as const, severity: "error" as const },
         { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }

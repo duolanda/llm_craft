@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AISandbox } from "../AISandbox";
 import { AIStatePackageBuilder } from "../AIStatePackageBuilder";
 import { Game } from "../Game";
-import { GAME_LOG_TYPES, LOG_LEVELS, LOG_DISPLAY_TARGETS, AI_FEEDBACK_TARGETS, PlayerId } from "@llmcraft/shared";
+import { LOG_TYPES, LOG_LEVELS, LOG_DISPLAY_TARGETS, AI_FEEDBACK_TARGETS, PlayerId } from "@llmcraft/shared";
 
 describe("AISandbox", () => {
   it("should swallow sandbox runtime errors and return no commands", async () => {
@@ -21,7 +21,7 @@ describe("AISandbox", () => {
     const game = new Game();
     const playerId = "player_1";
     game.addLog(
-      GAME_LOG_TYPES.COMMAND_ERROR,
+      LOG_TYPES.COMMAND_ERROR,
       "last round failed",
       { playerId, phase: "execution" as const, severity: "error" as const },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }

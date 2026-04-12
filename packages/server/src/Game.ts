@@ -20,8 +20,9 @@ import {
   TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
-  GAME_LOG_TYPES,
-  GameLogType,
+  LOG_TYPES,
+  LogType,
+  defaultLogMeta,
   LOG_LEVELS,
   LogLevel,
   PLAYER_IDS,
@@ -32,10 +33,6 @@ import {
   AIFeedbackTarget,
   LOG_DISPLAY_TARGETS,
   LogDisplayTarget,
-  getDefaultFeedbackTarget,
-  getDefaultDisplayTarget,
-  LOG_TYPE_DEFAULT_LEVEL,
-  LOG_TYPE_DEFAULT_DISPLAY_TARGET,
   CommandLogMeta,
   GameLogDataMap,
 } from "@llmcraft/shared";
@@ -110,7 +107,7 @@ export class Game {
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY - 1, "player_2");
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY + 1, "player_2");
 
-    this.addLog(GAME_LOG_TYPES.GAME_START, "Game initialized successfully");
+    this.addLog(LOG_TYPES.GAME_START, "Game initialized successfully");
     this.saveSnapshot();
   }
 
@@ -152,7 +149,7 @@ export class Game {
       try {
         this.processCommand(command);
       } catch (error) {
-        const log = this.addLog(GAME_LOG_TYPES.COMMAND_ERROR, `Command processing crashed for ${command.type}`, {
+        const log = this.addLog(LOG_TYPES.COMMAND_ERROR, `Command processing crashed for ${command.type}`, {
           command,
           error: error instanceof Error ? error.message : String(error),
         }, {
@@ -189,7 +186,7 @@ export class Game {
                 (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
               ) {
                 this.addLog(
-                  GAME_LOG_TYPES.MOVE_ADJUSTED,
+                  LOG_TYPES.MOVE_ADJUSTED,
                   `Unit ${command.unitId} rerouted to (${resolvedTarget.x}, ${resolvedTarget.y})`,
                   {
                     command,
@@ -217,7 +214,7 @@ export class Game {
                 hint: "No reachable nearby tile found.",
               };
               this.addLog(
-                GAME_LOG_TYPES.MOVE_BLOCKED,
+                LOG_TYPES.MOVE_BLOCKED,
                 `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y})`,
                 {
                   command,
@@ -256,7 +253,7 @@ export class Game {
 
             if (result !== RESULT_CODES.OK) {
               this.addLog(
-                GAME_LOG_TYPES.COMMAND_ERROR,
+                LOG_TYPES.COMMAND_ERROR,
                 `Attack command failed for unit ${command.unitId}`,
                 {
                   command,
@@ -295,7 +292,7 @@ export class Game {
 
             if (result !== RESULT_CODES.OK) {
               this.addLog(
-                GAME_LOG_TYPES.COMMAND_ERROR,
+                LOG_TYPES.COMMAND_ERROR,
                 `Attack-in-range command failed for unit ${command.unitId}`,
                 {
                   command,
@@ -342,7 +339,7 @@ export class Game {
               if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
                 this.addLog(
-                  GAME_LOG_TYPES.COMMAND_ERROR,
+                  LOG_TYPES.COMMAND_ERROR,
                   `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
                   {
                     command,
@@ -369,7 +366,7 @@ export class Game {
                 this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
                 this.addLog(
-                  GAME_LOG_TYPES.COMMAND_ERROR,
+                  LOG_TYPES.COMMAND_ERROR,
                   "Spawn command failed: insufficient credits",
                   {
                     command,
@@ -412,7 +409,7 @@ export class Game {
 
           if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
             this.addLog(
-              GAME_LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_ERROR,
               "Build command failed: only barracks can be built in MVP",
               {
                 command,
@@ -436,7 +433,7 @@ export class Game {
           const buildingCost = this.getBuildingCost(command.buildingType);
           if (player.resources.credits < buildingCost) {
             this.addLog(
-              GAME_LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_ERROR,
               "Build command failed: insufficient credits",
               {
                 command,
@@ -468,7 +465,7 @@ export class Game {
           if (result !== RESULT_CODES.OK) {
             const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
             this.addLog(
-              GAME_LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_ERROR,
               "Build command failed: invalid build position",
               {
                 command,
@@ -498,7 +495,7 @@ export class Game {
             command.position.y,
             command.playerId
           );
-          this.addLog(GAME_LOG_TYPES.BUILDING_CONSTRUCTED, `Barracks constructed for ${command.playerId}`, {
+          this.addLog(LOG_TYPES.BUILDING_CONSTRUCTED, `Barracks constructed for ${command.playerId}`, {
             command,
           });
           this.recordCommandResult(command, RESULT_CODES.OK, true, "Building constructed");
@@ -674,7 +671,7 @@ export class Game {
         const winner = this.players.find((p) => p.id !== player.id);
         if (winner) {
           this.winner = winner.id;
-          this.addLog(GAME_LOG_TYPES.GAME_END, `Player ${winner.id} wins!`, {
+          this.addLog(LOG_TYPES.GAME_END, `Player ${winner.id} wins!`, {
             winner: winner.id,
             loser: player.id,
           });
@@ -722,12 +719,12 @@ export class Game {
             const spawnPos = this.findEmptySpawnPosition(spawnBuilding.x, spawnBuilding.y);
             if (spawnPos) {
               this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
-              this.addLog(GAME_LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
+              this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
                 playerId,
                 unitType,
               });
             } else {
-              this.addLog(GAME_LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
+              this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
                 playerId,
                 unitType,
               });
@@ -739,7 +736,7 @@ export class Game {
       // Check win condition
       this.checkWinCondition();
     } catch (error) {
-      this.addLog(GAME_LOG_TYPES.TICK_ERROR, "Tick update crashed", {
+      this.addLog(LOG_TYPES.TICK_ERROR, "Tick update crashed", {
         error: error instanceof Error ? error.message : String(error),
       });
       console.error("Tick 更新异常:", error);
@@ -753,7 +750,7 @@ export class Game {
     if (this.isRunning) return;
 
     this.isRunning = true;
-    this.addLog(GAME_LOG_TYPES.GAME_STARTED, "Game started");
+    this.addLog(LOG_TYPES.GAME_STARTED, "Game started");
 
     this.tickInterval = setInterval(() => {
       this.tickUpdate();
@@ -766,10 +763,10 @@ export class Game {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
     }
-    this.addLog(GAME_LOG_TYPES.GAME_STOPPED, "Game stopped");
+    this.addLog(LOG_TYPES.GAME_STOPPED, "Game stopped");
   }
 
-  addLog<T extends GameLogType>(
+  addLog<T extends LogType>(
     type: T,
     message: string,
     data?: GameLogDataMap[T],
@@ -780,13 +777,10 @@ export class Game {
       displayTarget?: LogDisplayTarget;
     }
   ): GameLog {
+    const base = defaultLogMeta(type);
     const owner = overrides?.owner
       ?? ((data as Record<string, unknown> | undefined)?.playerId as ActorId | undefined)
-      ?? ACTOR_IDS.SYSTEM;
-
-    const feedbackTarget = overrides?.feedbackTarget ?? getDefaultFeedbackTarget(type);
-    const level = overrides?.level ?? LOG_TYPE_DEFAULT_LEVEL[type];
-    const displayTarget = overrides?.displayTarget ?? getDefaultDisplayTarget(type);
+      ?? base.owner;
 
     const log: GameLog = {
       tick: this.tick,
@@ -794,10 +788,10 @@ export class Game {
       message,
       data,
       meta: {
-        level,
+        level: overrides?.level ?? base.level,
         owner,
-        feedbackTarget,
-        displayTarget,
+        feedbackTarget: overrides?.feedbackTarget ?? base.feedbackTarget,
+        displayTarget: overrides?.displayTarget ?? base.displayTarget,
       },
     } as GameLog;
     this.logs.push(log);
@@ -871,7 +865,7 @@ export class Game {
             unit.carryingCredits += gatheredCredits;
             unit.state = UNIT_STATES.GATHERING;
             unit.intent = { type: "gather", targetX: unit.x, targetY: unit.y };
-            this.addLog(GAME_LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
+            this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
               playerId: player.id,
               unitId: unit.id,
               amount: gatheredCredits,
@@ -887,7 +881,7 @@ export class Game {
           unit.carryingCredits = 0;
           unit.state = UNIT_STATES.IDLE;
           unit.intent = { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
-          this.addLog(GAME_LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
+          this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
             playerId: player.id,
             unitId: unit.id,
             buildingId: hq.id,

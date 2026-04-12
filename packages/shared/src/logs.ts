@@ -17,20 +17,20 @@ export type LogLevel = typeof LOG_LEVELS[keyof typeof LOG_LEVELS];
 // 日志等级颜色映射（用于前端/控制台显示）
 // ============================================================
 export const LOG_LEVEL_COLORS: Record<LogLevel, string> = {
-  debug: "#888888",
-  info: "#aaaaaa",
-  warning: "#ffaa00",
-  error: "#ff4444",
+  [LOG_LEVELS.DEBUG]: "#888888",
+  [LOG_LEVELS.INFO]: "#aaaaaa",
+  [LOG_LEVELS.WARNING]: "#ffaa00",
+  [LOG_LEVELS.ERROR]: "#ff4444",
 } as const;
 
 // ============================================================
 // 日志等级图标映射（用于前端显示）
 // ============================================================
 export const LOG_LEVEL_ICONS: Record<LogLevel, string> = {
-  debug: "🔍",
-  info: "ℹ️",
-  warning: "⚠️",
-  error: "❌",
+  [LOG_LEVELS.DEBUG]: "🔍",
+  [LOG_LEVELS.INFO]: "ℹ️",
+  [LOG_LEVELS.WARNING]: "⚠️",
+  [LOG_LEVELS.ERROR]: "❌",
 } as const;
 
 // ============================================================

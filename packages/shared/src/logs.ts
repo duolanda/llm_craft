@@ -1,4 +1,5 @@
 import { ResultCode, PlayerId, ActorId } from "./constants";
+import type { Command } from "./types";
 
 // ============================================================
 // 日志等级
@@ -97,15 +98,12 @@ export const GAME_LOG_TYPES = {
 
   // 未知命令
   UNKNOWN_COMMAND: "unknown_command",
-
-  // AI 反馈（专用）
-  AI_FEEDBACK: "ai_feedback",
 } as const;
 
 export type GameLogType = typeof GAME_LOG_TYPES[keyof typeof GAME_LOG_TYPES];
 
 // ============================================================
-// 命令相关的元数据
+// 命令反馈的 commandMeta（命令执行细节）
 // ============================================================
 export interface CommandLogMeta {
   x?: number;
@@ -114,45 +112,27 @@ export interface CommandLogMeta {
   requestedY?: number;
   targetId?: string;
   hint?: string;
+  [key: string]: unknown;
 }
 
 // ============================================================
-// GameLogData（日志附带的一般数据）
+// 命令反馈共用的 data 结构
 // ============================================================
-export interface GameLogData {
-  // 基础数据
-  command?: any; // Command 对象（避免循环依赖，使用 any）
-  result?: ResultCode;
-  error?: string;
-  amount?: number;
-  carryingCredits?: number;
-  credits?: number;
-  playerId?: string;
-  unitId?: string;
-  buildingId?: string;
-  unitType?: string;
-
-  // 反馈控制
-  phase?: "generation" | "execution" | "command";
-  severity?: "error" | "warning";
-  code?: string;
-  meta?: CommandLogMeta;
-
-  // 其他扩展字段
-  [key: string]: any;
+export interface CommandFeedbackData {
+  command: Command;
+  result: ResultCode;
+  phase: "command";
+  code: string;
+  commandMeta?: CommandLogMeta;
 }
 
 // ============================================================
-// GameLog 基础接口（超集）
+// GameLog 基础字段（所有日志共有）
 // ============================================================
-export interface GameLog {
+export interface GameLogBase {
   tick: number;
-  type: GameLogType;
   message: string;
-  data?: GameLogData;
-
-  // 元数据
-  meta?: {
+  meta: {
     level: LogLevel;
     owner: ActorId;
     feedbackTarget: AIFeedbackTarget;
@@ -161,25 +141,60 @@ export interface GameLog {
 }
 
 // ============================================================
-// AIFeedback（GameLog 的子集，专用于 AI 反馈）
+// GameLogType → data 类型的映射表
 // ============================================================
-export interface AIFeedback {
-  tick: number;
-  type: GameLogType;
-  message: string;
-  data?: {
-    phase: "generation" | "execution" | "command";
-    severity: "error" | "warning";
-    code?: string;
-    meta?: CommandLogMeta;
-    [key: string]: any;
+export interface GameLogDataMap {
+  game_start: undefined;
+  game_started: undefined;
+  game_stopped: undefined;
+  game_end: { winner: string; loser: string };
+  resource_gathered: {
+    playerId: string;
+    unitId: string;
+    amount: number;
+    carryingCredits?: number;
   };
-
-  // AIFeedback 只保留归属信息（仅针对具体玩家）
-  meta?: {
-    owner: PlayerId;
+  credits_delivered: {
+    playerId: string;
+    unitId: string;
+    buildingId: string;
+    amount: number;
+    credits: number;
   };
+  building_constructed: { command: Command };
+  unit_spawned: { playerId: string; unitType: string };
+  spawn_failed: { playerId: string; unitType: string };
+  tick_error: { error: string };
+  command_error: Record<string, unknown>; // 临时宽类型，稍后细化
+  move_adjusted: CommandFeedbackData;
+  move_blocked: CommandFeedbackData;
+  attack_not_in_range: CommandFeedbackData;
+  attack_in_range_no_target: CommandFeedbackData;
+  build_failed: CommandFeedbackData;
+  spawn_command_failed: CommandFeedbackData;
+  unknown_command: CommandFeedbackData;
 }
+
+/** 命令反馈类型集合 */
+export type CommandFeedbackType =
+  | "move_adjusted"
+  | "move_blocked"
+  | "attack_not_in_range"
+  | "attack_in_range_no_target"
+  | "build_failed"
+  | "spawn_command_failed"
+  | "unknown_command"
+  | "command_error";
+
+// ============================================================
+// 从映射表推导 GameLog 判别联合类型
+// ============================================================
+export type GameLog = {
+  [T in GameLogType]: GameLogBase & {
+    type: T;
+    data: GameLogDataMap[T];
+  };
+}[GameLogType];
 
 // ============================================================
 // 辅助类型：日志类型到默认等级的映射
@@ -203,29 +218,66 @@ export const LOG_TYPE_DEFAULT_LEVEL: Record<GameLogType, LogLevel> = {
   build_failed: "warning",
   spawn_command_failed: "warning",
   unknown_command: "error",
-  ai_feedback: "warning",
+};
+
+// ============================================================
+// 辅助类型：日志类型到默认反馈目标的映射
+// ============================================================
+export const LOG_TYPE_DEFAULT_FEEDBACK_TARGET: Record<GameLogType, AIFeedbackTarget> = {
+  game_start: "none",
+  game_started: "none",
+  game_stopped: "none",
+  game_end: "none",
+  resource_gathered: "none",
+  credits_delivered: "none",
+  building_constructed: "none",
+  unit_spawned: "none",
+  spawn_failed: "both",
+  command_error: "both",
+  tick_error: "both",
+  move_adjusted: "both",
+  move_blocked: "both",
+  attack_not_in_range: "both",
+  attack_in_range_no_target: "both",
+  build_failed: "both",
+  spawn_command_failed: "both",
+  unknown_command: "both",
+};
+
+// ============================================================
+// 辅助类型：日志类型到默认展示目标的映射
+// ============================================================
+export const LOG_TYPE_DEFAULT_DISPLAY_TARGET: Record<GameLogType, LogDisplayTarget> = {
+  game_start: "both",
+  game_started: "both",
+  game_stopped: "both",
+  game_end: "both",
+  resource_gathered: "both",
+  credits_delivered: "both",
+  building_constructed: "both",
+  unit_spawned: "both",
+  spawn_failed: "both",
+  command_error: "both",
+  tick_error: "both",
+  move_adjusted: "both",
+  move_blocked: "both",
+  attack_not_in_range: "both",
+  attack_in_range_no_target: "both",
+  build_failed: "both",
+  spawn_command_failed: "both",
+  unknown_command: "both",
 };
 
 // ============================================================
 // 辅助函数：根据日志类型判断默认反馈目标
 // ============================================================
 export function getDefaultFeedbackTarget(logType: GameLogType): AIFeedbackTarget {
-  switch (logType) {
-    case "move_adjusted":
-    case "move_blocked":
-    case "attack_not_in_range":
-    case "attack_in_range_no_target":
-    case "build_failed":
-    case "spawn_command_failed":
-    case "command_error":
-    case "ai_feedback":
-      return "both";
+  return LOG_TYPE_DEFAULT_FEEDBACK_TARGET[logType];
+}
 
-    case "tick_error":
-    case "unknown_command":
-      return "both";
-
-    default:
-      return "none";
-  }
+// ============================================================
+// 辅助函数：根据日志类型判断默认展示目标
+// ============================================================
+export function getDefaultDisplayTarget(logType: GameLogType): LogDisplayTarget {
+  return LOG_TYPE_DEFAULT_DISPLAY_TARGET[logType];
 }

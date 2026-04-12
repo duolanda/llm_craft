@@ -58,9 +58,30 @@ export const LOG_DISPLAY_TARGETS = {
 export type LogDisplayTarget = typeof LOG_DISPLAY_TARGETS[keyof typeof LOG_DISPLAY_TARGETS];
 
 // ============================================================
-// 日志类型
+// LogMeta（GameLogBase.meta 的完整类型）
 // ============================================================
-export const GAME_LOG_TYPES = {
+export interface LogMeta {
+  level: LogLevel;
+  owner: ActorId;
+  feedbackTarget: AIFeedbackTarget;
+  displayTarget: LogDisplayTarget;
+}
+
+/** 所有字段可选的默认 LogMeta */
+export type LogMetaDefault = Partial<LogMeta>;
+
+/** 兜底默认值 */
+const LOG_META_FALLBACK: LogMeta = {
+  level: "info",
+  owner: "system_0" as ActorId,
+  feedbackTarget: "none",
+  displayTarget: "frontend",
+};
+
+// ============================================================
+// LOG_TYPES：日志类型名称的简单映射
+// ============================================================
+export const LOG_TYPES = {
   // 游戏生命周期
   GAME_START: "game_start",
   GAME_STARTED: "game_started",
@@ -100,7 +121,45 @@ export const GAME_LOG_TYPES = {
   UNKNOWN_COMMAND: "unknown_command",
 } as const;
 
-export type GameLogType = typeof GAME_LOG_TYPES[keyof typeof GAME_LOG_TYPES];
+export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
+
+// ============================================================
+// LOG_META_DEFAULTS：每个日志类型的默认元数据
+// ============================================================
+export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
+  game_start: {},
+  game_started: {},
+  game_stopped: {},
+  game_end: {},
+  resource_gathered: { level: "debug" },
+  credits_delivered: { level: "debug" },
+  building_constructed: {},
+  unit_spawned: {},
+  spawn_failed: { level: "warning", feedbackTarget: "both" },
+  command_error: { level: "error", feedbackTarget: "both" },
+  tick_error: { level: "error", feedbackTarget: "both" },
+  move_adjusted: { level: "warning", feedbackTarget: "both" },
+  move_blocked: { level: "warning", feedbackTarget: "both" },
+  attack_not_in_range: { level: "warning", feedbackTarget: "both" },
+  attack_in_range_no_target: { level: "warning", feedbackTarget: "both" },
+  build_failed: { level: "warning", feedbackTarget: "both" },
+  spawn_command_failed: { level: "warning", feedbackTarget: "both" },
+  unknown_command: { level: "error", feedbackTarget: "both" },
+};
+
+// ============================================================
+// 辅助函数：从 LOG_META_DEFAULTS 查表
+// ============================================================
+/** 返回指定日志类型的完整 LogMeta（未指定的字段回退到兜底默认值） */
+export function defaultLogMeta(logType: LogType): LogMeta {
+  const d = LOG_META_DEFAULTS[logType];
+  return {
+    level: d.level ?? LOG_META_FALLBACK.level,
+    owner: d.owner ?? LOG_META_FALLBACK.owner,
+    feedbackTarget: d.feedbackTarget ?? LOG_META_FALLBACK.feedbackTarget,
+    displayTarget: d.displayTarget ?? LOG_META_FALLBACK.displayTarget,
+  };
+}
 
 // ============================================================
 // 命令反馈的 commandMeta（命令执行细节）
@@ -132,16 +191,11 @@ export interface CommandFeedbackData {
 export interface GameLogBase {
   tick: number;
   message: string;
-  meta: {
-    level: LogLevel;
-    owner: ActorId;
-    feedbackTarget: AIFeedbackTarget;
-    displayTarget: LogDisplayTarget;
-  };
+  meta: LogMeta;
 }
 
 // ============================================================
-// GameLogType → data 类型的映射表
+// LogType → data 类型的映射表
 // ============================================================
 export interface GameLogDataMap {
   game_start: undefined;
@@ -190,94 +244,8 @@ export type CommandFeedbackType =
 // 从映射表推导 GameLog 判别联合类型
 // ============================================================
 export type GameLog = {
-  [T in GameLogType]: GameLogBase & {
+  [T in LogType]: GameLogBase & {
     type: T;
     data: GameLogDataMap[T];
   };
-}[GameLogType];
-
-// ============================================================
-// 辅助类型：日志类型到默认等级的映射
-// ============================================================
-export const LOG_TYPE_DEFAULT_LEVEL: Record<GameLogType, LogLevel> = {
-  game_start: "info",
-  game_started: "info",
-  game_stopped: "info",
-  game_end: "info",
-  resource_gathered: "debug",
-  credits_delivered: "debug",
-  building_constructed: "info",
-  unit_spawned: "info",
-  spawn_failed: "warning",
-  command_error: "error",
-  tick_error: "error",
-  move_adjusted: "warning",
-  move_blocked: "warning",
-  attack_not_in_range: "warning",
-  attack_in_range_no_target: "warning",
-  build_failed: "warning",
-  spawn_command_failed: "warning",
-  unknown_command: "error",
-};
-
-// ============================================================
-// 辅助类型：日志类型到默认反馈目标的映射
-// ============================================================
-export const LOG_TYPE_DEFAULT_FEEDBACK_TARGET: Record<GameLogType, AIFeedbackTarget> = {
-  game_start: "none",
-  game_started: "none",
-  game_stopped: "none",
-  game_end: "none",
-  resource_gathered: "none",
-  credits_delivered: "none",
-  building_constructed: "none",
-  unit_spawned: "none",
-  spawn_failed: "both",
-  command_error: "both",
-  tick_error: "both",
-  move_adjusted: "both",
-  move_blocked: "both",
-  attack_not_in_range: "both",
-  attack_in_range_no_target: "both",
-  build_failed: "both",
-  spawn_command_failed: "both",
-  unknown_command: "both",
-};
-
-// ============================================================
-// 辅助类型：日志类型到默认展示目标的映射
-// ============================================================
-export const LOG_TYPE_DEFAULT_DISPLAY_TARGET: Record<GameLogType, LogDisplayTarget> = {
-  game_start: "both",
-  game_started: "both",
-  game_stopped: "both",
-  game_end: "both",
-  resource_gathered: "both",
-  credits_delivered: "both",
-  building_constructed: "both",
-  unit_spawned: "both",
-  spawn_failed: "both",
-  command_error: "both",
-  tick_error: "both",
-  move_adjusted: "both",
-  move_blocked: "both",
-  attack_not_in_range: "both",
-  attack_in_range_no_target: "both",
-  build_failed: "both",
-  spawn_command_failed: "both",
-  unknown_command: "both",
-};
-
-// ============================================================
-// 辅助函数：根据日志类型判断默认反馈目标
-// ============================================================
-export function getDefaultFeedbackTarget(logType: GameLogType): AIFeedbackTarget {
-  return LOG_TYPE_DEFAULT_FEEDBACK_TARGET[logType];
-}
-
-// ============================================================
-// 辅助函数：根据日志类型判断默认展示目标
-// ============================================================
-export function getDefaultDisplayTarget(logType: GameLogType): LogDisplayTarget {
-  return LOG_TYPE_DEFAULT_DISPLAY_TARGET[logType];
-}
+}[LogType];

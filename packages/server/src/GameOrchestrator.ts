@@ -8,6 +8,11 @@ import {
   MAP_WIDTH,
   SavedAITurnRecord,
   TickDeltaRecord,
+  GAME_LOG_TYPES,
+  LOG_LEVELS,
+  LOG_DISPLAY_TARGETS,
+  PlayerId,
+  AI_FEEDBACK_TARGETS,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -163,13 +168,19 @@ export class GameOrchestrator {
         return;
       }
       if (errorMessage) {
-        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { errorType });
+        const level = LOG_LEVELS.ERROR;
+        this.game.addLog(
+          GAME_LOG_TYPES.COMMAND_ERROR,
+          errorMessage,
+          { code, errorType, playerId, phase: "execution" as const, severity: "error" as const },
+          { level, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        );
       } else if (commands.length === 0) {
-        this.game.addAIFeedback(
-          playerId,
-          "execution",
-          "warning",
-          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act."
+        this.game.addLog(
+          GAME_LOG_TYPES.COMMAND_ERROR,
+          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
+          { code, playerId, phase: "execution" as const, severity: "warning" as const },
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }
       for (const cmd of commands) {
@@ -214,11 +225,11 @@ export class GameOrchestrator {
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
       const errorMessage = e instanceof Error ? e.message : String(e);
-      this.game.addAIFeedback(
-        playerId,
-        "generation",
-        "error",
-        errorMessage
+      this.game.addLog(
+        GAME_LOG_TYPES.COMMAND_ERROR,
+        e instanceof Error ? e.message : String(e),
+        { playerId, phase: "generation" as const, severity: "error" as const },
+        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
       );
       await this.writeTranscript(
         this.formatTranscriptEntry({

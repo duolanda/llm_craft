@@ -36,7 +36,6 @@ import {
   getDefaultDisplayTarget,
   LOG_TYPE_DEFAULT_LEVEL,
   LOG_TYPE_DEFAULT_DISPLAY_TARGET,
-  CommandFeedbackType,
   CommandLogMeta,
   GameLogDataMap,
 } from "@llmcraft/shared";
@@ -159,6 +158,7 @@ export class Game {
         }, {
           owner: command.playerId as ActorId,
           feedbackTarget: command.playerId as AIFeedbackTarget,
+          level: LOG_LEVELS.ERROR,
         });
         this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Command processing crashed");
         console.error("命令处理异常:", error, command);
@@ -188,18 +188,26 @@ export class Game {
                 resolvedTarget &&
                 (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
               ) {
-                this.recordCommandFeedback(
+                this.addLog(
                   GAME_LOG_TYPES.MOVE_ADJUSTED,
                   `Unit ${command.unitId} rerouted to (${resolvedTarget.x}, ${resolvedTarget.y})`,
-                  command,
-                  result,
-                  "move_adjusted",
                   {
-                    x: resolvedTarget.x,
-                    y: resolvedTarget.y,
-                    requestedX: command.position.x,
-                    requestedY: command.position.y,
-                    hint: "Target tile was blocked, so a nearby reachable tile was chosen.",
+                    command,
+                    result,
+                    phase: "command",
+                    code: "move_adjusted",
+                    commandMeta: {
+                      x: resolvedTarget.x,
+                      y: resolvedTarget.y,
+                      requestedX: command.position.x,
+                      requestedY: command.position.y,
+                      hint: "Target tile was blocked, so a nearby reachable tile was chosen.",
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    level: LOG_LEVELS.WARNING,
                   }
                 );
               }
@@ -208,18 +216,26 @@ export class Game {
                 code: "move_unreachable",
                 hint: "No reachable nearby tile found.",
               };
-              this.recordCommandFeedback(
+              this.addLog(
                 GAME_LOG_TYPES.MOVE_BLOCKED,
                 `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y})`,
-                command,
-                result,
-                failure.code,
                 {
-                  x: command.position.x,
-                  y: command.position.y,
-                  requestedX: command.position.x,
-                  requestedY: command.position.y,
-                  hint: failure.hint,
+                  command,
+                  result,
+                  phase: "command",
+                  code: failure.code,
+                  commandMeta: {
+                    x: command.position.x,
+                    y: command.position.y,
+                    requestedX: command.position.x,
+                    requestedY: command.position.y,
+                    hint: failure.hint,
+                  },
+                },
+                {
+                  owner: command.playerId as ActorId,
+                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  level: LOG_LEVELS.WARNING,
                 }
               );
             }
@@ -239,18 +255,26 @@ export class Game {
             });
 
             if (result !== RESULT_CODES.OK) {
-              this.recordCommandFeedback(
+              this.addLog(
                 GAME_LOG_TYPES.COMMAND_ERROR,
                 `Attack command failed for unit ${command.unitId}`,
-                command,
-                result,
-                result === RESULT_CODES.ERR_NOT_IN_RANGE ? "attack_out_of_range" : "attack_invalid_target",
                 {
-                  targetId: command.targetId,
-                  hint:
-                    result === RESULT_CODES.ERR_NOT_IN_RANGE
-                      ? "Move to a tile adjacent to the target before attacking."
-                      : "Check that the target still exists and belongs to the enemy.",
+                  command,
+                  result,
+                  phase: "command",
+                  code: result === RESULT_CODES.ERR_NOT_IN_RANGE ? "attack_out_of_range" : "attack_invalid_target",
+                  commandMeta: {
+                    targetId: command.targetId,
+                    hint:
+                      result === RESULT_CODES.ERR_NOT_IN_RANGE
+                        ? "Move to a tile adjacent to the target before attacking."
+                        : "Check that the target still exists and belongs to the enemy.",
+                  },
+                },
+                {
+                  owner: command.playerId as ActorId,
+                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  level: LOG_LEVELS.WARNING,
                 }
               );
             }
@@ -270,14 +294,22 @@ export class Game {
             });
 
             if (result !== RESULT_CODES.OK) {
-              this.recordCommandFeedback(
+              this.addLog(
                 GAME_LOG_TYPES.COMMAND_ERROR,
                 `Attack-in-range command failed for unit ${command.unitId}`,
-                command,
-                result,
-                "attack_in_range_no_target",
                 {
-                  hint: "No enemy matching the requested priority was in range at execution time.",
+                  command,
+                  result,
+                  phase: "command",
+                  code: "attack_in_range_no_target",
+                  commandMeta: {
+                    hint: "No enemy matching the requested priority was in range at execution time.",
+                  },
+                },
+                {
+                  owner: command.playerId as ActorId,
+                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  level: LOG_LEVELS.WARNING,
                 }
               );
             }
@@ -309,17 +341,25 @@ export class Game {
               const unitCost = this.getUnitCost(command.unitType);
               if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
-                this.recordCommandFeedback(
+                this.addLog(
                   GAME_LOG_TYPES.COMMAND_ERROR,
                   `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
-                  command,
-                  result,
-                  "spawn_invalid_building",
                   {
-                    targetId: building.id,
-                    hint: building.type === BUILDING_TYPES.HQ
-                      ? "HQ can only spawn workers. Build a barracks to produce soldiers."
-                      : "Check that the unit type matches the building.",
+                    command,
+                    result,
+                    phase: "command",
+                    code: "spawn_invalid_building",
+                    commandMeta: {
+                      targetId: building.id,
+                      hint: building.type === BUILDING_TYPES.HQ
+                        ? "HQ can only spawn workers. Build a barracks to produce soldiers."
+                        : "Check that the unit type matches the building.",
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    level: LOG_LEVELS.WARNING,
                   }
                 );
                 this.recordCommandResult(command, result, false, "Building cannot produce this unit type");
@@ -328,15 +368,23 @@ export class Game {
                 this.buildingManager.spawnUnit(building, command.unitType);
                 this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
-                this.recordCommandFeedback(
+                this.addLog(
                   GAME_LOG_TYPES.COMMAND_ERROR,
                   "Spawn command failed: insufficient credits",
-                  command,
-                  RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-                  "insufficient_credits",
                   {
-                    targetId: building.id,
-                    hint: `Need ${unitCost} credits before spawning ${command.unitType}.`,
+                    command,
+                    result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                    phase: "command",
+                    code: "insufficient_credits",
+                    commandMeta: {
+                      targetId: building.id,
+                      hint: `Need ${unitCost} credits before spawning ${command.unitType}.`,
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    level: LOG_LEVELS.WARNING,
                   }
                 );
                 this.recordCommandResult(
@@ -363,14 +411,22 @@ export class Game {
           }
 
           if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
-            this.recordCommandFeedback(
+            this.addLog(
               GAME_LOG_TYPES.COMMAND_ERROR,
               "Build command failed: only barracks can be built in MVP",
-              command,
-              RESULT_CODES.ERR_INVALID_BUILDING,
-              "build_invalid_building",
               {
-                hint: "Only barracks are buildable in the current MVP.",
+                command,
+                result: RESULT_CODES.ERR_INVALID_BUILDING,
+                phase: "command",
+                code: "build_invalid_building",
+                commandMeta: {
+                  hint: "Only barracks are buildable in the current MVP.",
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
               }
             );
             this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_BUILDING, false, "Only barracks can be built in MVP");
@@ -379,16 +435,24 @@ export class Game {
 
           const buildingCost = this.getBuildingCost(command.buildingType);
           if (player.resources.credits < buildingCost) {
-            this.recordCommandFeedback(
+            this.addLog(
               GAME_LOG_TYPES.COMMAND_ERROR,
               "Build command failed: insufficient credits",
-              command,
-              RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-              "insufficient_credits",
               {
-                x: command.position.x,
-                y: command.position.y,
-                hint: `Need ${buildingCost} credits before building a barracks.`,
+                command,
+                result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                phase: "command",
+                code: "insufficient_credits",
+                commandMeta: {
+                  x: command.position.x,
+                  y: command.position.y,
+                  hint: `Need ${buildingCost} credits before building a barracks.`,
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
               }
             );
             this.recordCommandResult(
@@ -403,16 +467,24 @@ export class Game {
           const result = this.validateBuildPosition(command.playerId, command.position.x, command.position.y);
           if (result !== RESULT_CODES.OK) {
             const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
-            this.recordCommandFeedback(
+            this.addLog(
               GAME_LOG_TYPES.COMMAND_ERROR,
               "Build command failed: invalid build position",
-              command,
-              result,
-              buildFailure.code,
               {
-                x: command.position.x,
-                y: command.position.y,
-                hint: buildFailure.hint,
+                command,
+                result,
+                phase: "command",
+                code: buildFailure.code,
+                commandMeta: {
+                  x: command.position.x,
+                  y: command.position.y,
+                  hint: buildFailure.hint,
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
               }
             );
             this.recordCommandResult(command, result, false, "Invalid build position");
@@ -697,7 +769,7 @@ export class Game {
     this.addLog(GAME_LOG_TYPES.GAME_STOPPED, "Game stopped");
   }
 
-  private addLog<T extends GameLogType>(
+  addLog<T extends GameLogType>(
     type: T,
     message: string,
     data?: GameLogDataMap[T],
@@ -758,34 +830,6 @@ export class Game {
 
   setAIOutput(playerId: string, output: string): void {
     this.aiOutputs[playerId] = output;
-  }
-
-  addAIFeedback(
-    playerId: string,
-    phase: "generation" | "execution" | "command",
-    severity: "error" | "warning",
-    message: string,
-    data?: Record<string, unknown>
-  ): void {
-    const level = severity === "error" ? LOG_LEVELS.ERROR : LOG_LEVELS.WARNING;
-    this.addLog(
-      GAME_LOG_TYPES.COMMAND_ERROR,
-      message,
-      {
-        playerId,
-        phase,
-        severity,
-        code: data?.code as string | undefined,
-        commandMeta: data?.commandMeta,
-        ...data,
-      },
-      {
-        level,
-        owner: playerId as PlayerId,
-        feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2,
-        displayTarget: LOG_DISPLAY_TARGETS.BACKEND,
-      }
-    );
   }
 
   getAIFeedback(playerId: string, sinceTick?: number): GameLog[] {
@@ -965,35 +1009,6 @@ export class Game {
       result,
       success,
       message,
-    });
-  }
-
-  private recordCommandFeedback(
-    type: CommandFeedbackType,
-    message: string,
-    command: Command,
-    result: ResultCode,
-    code: string,
-    meta?: {
-      x?: number;
-      y?: number;
-      requestedX?: number;
-      requestedY?: number;
-      targetId?: string;
-      hint?: string;
-    }
-  ): void {
-    const log = this.addLog(type, message, {
-      command,
-      result,
-      playerId: command.playerId,
-      phase: "command",
-      severity: "warning",
-      code,
-      commandMeta: meta,
-    }, {
-      owner: command.playerId as ActorId,
-      feedbackTarget: command.playerId as AIFeedbackTarget,
     });
   }
 

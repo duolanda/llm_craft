@@ -8,6 +8,11 @@ import {
   MAP_WIDTH,
   SavedAITurnRecord,
   TickDeltaRecord,
+  GAME_LOG_TYPES,
+  LOG_LEVELS,
+  LOG_DISPLAY_TARGETS,
+  PlayerId,
+  AI_FEEDBACK_TARGETS,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -109,7 +114,13 @@ export class GameOrchestrator {
         return;
       }
       if (errorMessage) {
-        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { code, errorType });
+        const level = LOG_LEVELS.ERROR;
+        this.game.addLog(
+          GAME_LOG_TYPES.COMMAND_ERROR,
+          errorMessage,
+          { code, errorType, playerId, phase: "execution" as const, severity: "error" as const },
+          { level, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        );
       }
       for (const cmd of commands) {
         this.game.queueCommand(cmd);
@@ -131,11 +142,11 @@ export class GameOrchestrator {
       this.lastAIState[playerId] = latestAIPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
-      this.game.addAIFeedback(
-        playerId,
-        "generation",
-        "error",
-        e instanceof Error ? e.message : String(e)
+      this.game.addLog(
+        GAME_LOG_TYPES.COMMAND_ERROR,
+        e instanceof Error ? e.message : String(e),
+        { playerId, phase: "generation" as const, severity: "error" as const },
+        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
       );
     } finally {
       this.isRunningAI[playerId as keyof typeof this.isRunningAI] = false;

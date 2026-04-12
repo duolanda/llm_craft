@@ -1,7 +1,6 @@
 import {
   AIStatePackage,
   AIPromptPayload,
-  AIFeedback,
   Building,
   BUILDING_STATS,
   ECONOMY_RULES,
@@ -21,11 +20,8 @@ export class AIStatePackageBuilder {
     const player = state.players.find((p) => p.id === playerId)!;
     const enemy = state.players.find((p) => p.id !== playerId)!;
     const aiFeedback = this.buildFeedback(
-      (game?.getAIFeedback(playerId) || []).filter((log) => sinceTick === undefined || log.tick > sinceTick)
+      game?.getAIFeedback(playerId, sinceTick) ?? []
     );
-    const eventsSinceLastCall = state.logs
-      .filter((log) => sinceTick === undefined || log.tick > sinceTick)
-      .slice(-10);
 
     const tiles = [];
     for (let y = 0; y < state.tiles.length; y++) {
@@ -62,7 +58,6 @@ export class AIStatePackageBuilder {
         workerGatherRate: ECONOMY_RULES.WORKER_GATHER_RATE,
         hqDeliveryRange: ECONOMY_RULES.HQ_DELIVERY_RANGE,
       },
-      eventsSinceLastCall,
       aiFeedbackSinceLastCall: aiFeedback,
       gameTimeRemaining: Math.max(0, 600 - state.tick / 2),
     };
@@ -104,7 +99,6 @@ export class AIStatePackageBuilder {
         myBuildingChanges,
         enemyUnitChanges,
         enemyBuildingChanges,
-        events: current.eventsSinceLastCall,
         aiFeedback: current.aiFeedbackSinceLastCall,
       },
     };
@@ -147,15 +141,8 @@ export class AIStatePackageBuilder {
     return Boolean(previousHQ && currentHQ.hp < previousHQ.hp);
   }
 
-  private static buildFeedback(logs: GameLog[]): AIFeedback[] {
-    return logs.slice(-10).map((log) => ({
-      tick: log.tick,
-      phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
-      severity: (log.data?.severity || "warning") as "error" | "warning",
-      message: log.message,
-      code: log.data?.code,
-      meta: log.data?.meta,
-    }));
+  private static buildFeedback(aiFeedbackList: GameLog[]): GameLog[] {
+    return aiFeedbackList.slice(-10);
   }
 
   private static diffMyUnits(previous: Unit[], current: Unit[]) {

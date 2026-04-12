@@ -1,4 +1,5 @@
 import { UnitType, BuildingType, UnitState, TileType, ResultCode } from "./constants";
+import type { GameLog } from "./logs";
 
 export type LLMProviderType = "openai-compatible";
 
@@ -119,29 +120,6 @@ export interface GameState {
   logs: GameLog[];
 }
 
-export interface GameLog {
-  tick: number;
-  type: string;
-  message: string;
-  data?: any;
-}
-
-export interface AIFeedback {
-  tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
-  message: string;
-  code?: string;
-  meta?: {
-    x?: number;
-    y?: number;
-    requestedX?: number;
-    requestedY?: number;
-    targetId?: string;
-    hint?: string;
-  };
-}
-
 export interface Command {
   id: string;
   type: string;
@@ -217,8 +195,7 @@ export interface AIStatePackage {
     workerGatherRate: number;
     hqDeliveryRange: number;
   };
-  eventsSinceLastCall: GameLog[];
-  aiFeedbackSinceLastCall: AIFeedback[];
+  aiFeedbackSinceLastCall: GameLog[];
   gameTimeRemaining: number;
 }
 
@@ -269,8 +246,7 @@ export interface AIPromptPayload {
       hp?: number;
       maxHp?: number;
     }>;
-    events: GameLog[];
-    aiFeedback: AIFeedback[];
+    aiFeedback: GameLog[];
   } | null;
 }
 

@@ -58,27 +58,6 @@ export const LOG_DISPLAY_TARGETS = {
 export type LogDisplayTarget = typeof LOG_DISPLAY_TARGETS[keyof typeof LOG_DISPLAY_TARGETS];
 
 // ============================================================
-// LogMeta（GameLogBase.meta 的完整类型）
-// ============================================================
-export interface LogMeta {
-  level: LogLevel;
-  owner: ActorId;
-  feedbackTarget: AIFeedbackTarget;
-  displayTarget: LogDisplayTarget;
-}
-
-/** 所有字段可选的默认 LogMeta */
-export type LogMetaDefault = Partial<LogMeta>;
-
-/** 兜底默认值 */
-const LOG_META_FALLBACK: LogMeta = {
-  level: "info",
-  owner: "system_0" as ActorId,
-  feedbackTarget: "none",
-  displayTarget: "frontend",
-};
-
-// ============================================================
 // LOG_TYPES：日志类型名称的简单映射
 // ============================================================
 export const LOG_TYPES = {
@@ -124,44 +103,6 @@ export const LOG_TYPES = {
 export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
 
 // ============================================================
-// LOG_META_DEFAULTS：每个日志类型的默认元数据
-// ============================================================
-export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
-  game_start: {},
-  game_started: {},
-  game_stopped: {},
-  game_end: {},
-  resource_gathered: { level: "debug" },
-  credits_delivered: { level: "debug" },
-  building_constructed: {},
-  unit_spawned: {},
-  spawn_failed: { level: "warning", feedbackTarget: "both" },
-  command_error: { level: "error", feedbackTarget: "both" },
-  tick_error: { level: "error", feedbackTarget: "both" },
-  move_adjusted: { level: "warning", feedbackTarget: "both" },
-  move_blocked: { level: "warning", feedbackTarget: "both" },
-  attack_not_in_range: { level: "warning", feedbackTarget: "both" },
-  attack_in_range_no_target: { level: "warning", feedbackTarget: "both" },
-  build_failed: { level: "warning", feedbackTarget: "both" },
-  spawn_command_failed: { level: "warning", feedbackTarget: "both" },
-  unknown_command: { level: "error", feedbackTarget: "both" },
-};
-
-// ============================================================
-// 辅助函数：从 LOG_META_DEFAULTS 查表
-// ============================================================
-/** 返回指定日志类型的完整 LogMeta（未指定的字段回退到兜底默认值） */
-export function defaultLogMeta(logType: LogType): LogMeta {
-  const d = LOG_META_DEFAULTS[logType];
-  return {
-    level: d.level ?? LOG_META_FALLBACK.level,
-    owner: d.owner ?? LOG_META_FALLBACK.owner,
-    feedbackTarget: d.feedbackTarget ?? LOG_META_FALLBACK.feedbackTarget,
-    displayTarget: d.displayTarget ?? LOG_META_FALLBACK.displayTarget,
-  };
-}
-
-// ============================================================
 // 命令反馈的 commandMeta（命令执行细节）
 // ============================================================
 export interface CommandLogMeta {
@@ -186,47 +127,38 @@ export interface CommandFeedbackData {
 }
 
 // ============================================================
-// GameLog 基础字段（所有日志共有）
-// ============================================================
-export interface GameLogBase {
-  tick: number;
-  message: string;
-  meta: LogMeta;
-}
-
-// ============================================================
 // LogType → data 类型的映射表
 // ============================================================
 export interface GameLogDataMap {
-  game_start: undefined;
-  game_started: undefined;
-  game_stopped: undefined;
-  game_end: { winner: string; loser: string };
-  resource_gathered: {
+  [LOG_TYPES.GAME_START]: undefined;
+  [LOG_TYPES.GAME_STARTED]: undefined;
+  [LOG_TYPES.GAME_STOPPED]: undefined;
+  [LOG_TYPES.GAME_END]: { winner: string; loser: string };
+  [LOG_TYPES.RESOURCE_GATHERED]: {
     playerId: string;
     unitId: string;
     amount: number;
     carryingCredits?: number;
   };
-  credits_delivered: {
+  [LOG_TYPES.CREDITS_DELIVERED]: {
     playerId: string;
     unitId: string;
     buildingId: string;
     amount: number;
     credits: number;
   };
-  building_constructed: { command: Command };
-  unit_spawned: { playerId: string; unitType: string };
-  spawn_failed: { playerId: string; unitType: string };
-  tick_error: { error: string };
-  command_error: Record<string, unknown>; // 临时宽类型，稍后细化
-  move_adjusted: CommandFeedbackData;
-  move_blocked: CommandFeedbackData;
-  attack_not_in_range: CommandFeedbackData;
-  attack_in_range_no_target: CommandFeedbackData;
-  build_failed: CommandFeedbackData;
-  spawn_command_failed: CommandFeedbackData;
-  unknown_command: CommandFeedbackData;
+  [LOG_TYPES.BUILDING_CONSTRUCTED]: { command: Command };
+  [LOG_TYPES.UNIT_SPAWNED]: { playerId: string; unitType: string };
+  [LOG_TYPES.SPAWN_FAILED]: { playerId: string; unitType: string };
+  [LOG_TYPES.TICK_ERROR]: { error: string };
+  [LOG_TYPES.COMMAND_ERROR]: Record<string, unknown>; // 临时宽类型，稍后细化
+  [LOG_TYPES.MOVE_ADJUSTED]: CommandFeedbackData;
+  [LOG_TYPES.MOVE_BLOCKED]: CommandFeedbackData;
+  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: CommandFeedbackData;
+  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: CommandFeedbackData;
+  [LOG_TYPES.BUILD_FAILED]: CommandFeedbackData;
+  [LOG_TYPES.SPAWN_COMMAND_FAILED]: CommandFeedbackData;
+  [LOG_TYPES.UNKNOWN_COMMAND]: CommandFeedbackData;
 }
 
 /** 命令反馈类型集合 */
@@ -239,6 +171,74 @@ export type CommandFeedbackType =
   | "spawn_command_failed"
   | "unknown_command"
   | "command_error";
+
+// ============================================================
+// LogMeta（GameLogBase.meta 的完整类型）
+// ============================================================
+export interface LogMeta {
+  level: LogLevel;
+  owner: ActorId;
+  feedbackTarget: AIFeedbackTarget;
+  displayTarget: LogDisplayTarget;
+}
+
+/** 所有字段可选的默认 LogMeta */
+export type LogMetaDefault = Partial<LogMeta>;
+
+/** 兜底默认值 */
+const LOG_META_FALLBACK: LogMeta = {
+  level: "info",
+  owner: "system_0" as ActorId,
+  feedbackTarget: "none",
+  displayTarget: "frontend",
+};
+
+// ============================================================
+// LOG_META_DEFAULTS：每个日志类型的默认元数据
+// ============================================================
+export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
+  [LOG_TYPES.GAME_START]: {},
+  [LOG_TYPES.GAME_STARTED]: {},
+  [LOG_TYPES.GAME_STOPPED]: {},
+  [LOG_TYPES.GAME_END]: {},
+  [LOG_TYPES.RESOURCE_GATHERED]: { level: "debug" },
+  [LOG_TYPES.CREDITS_DELIVERED]: { level: "debug" },
+  [LOG_TYPES.BUILDING_CONSTRUCTED]: {},
+  [LOG_TYPES.UNIT_SPAWNED]: {},
+  [LOG_TYPES.SPAWN_FAILED]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.COMMAND_ERROR]: { level: "error", feedbackTarget: "both" },
+  [LOG_TYPES.TICK_ERROR]: { level: "error", feedbackTarget: "both" },
+  [LOG_TYPES.MOVE_ADJUSTED]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.MOVE_BLOCKED]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.BUILD_FAILED]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.SPAWN_COMMAND_FAILED]: { level: "warning", feedbackTarget: "both" },
+  [LOG_TYPES.UNKNOWN_COMMAND]: { level: "error", feedbackTarget: "both" },
+};
+
+// ============================================================
+// 辅助函数：从 LOG_META_DEFAULTS 查表
+// ============================================================
+/** 返回指定日志类型的完整 LogMeta（未指定的字段回退到兜底默认值） */
+export function defaultLogMeta(logType: LogType): LogMeta {
+  const d = LOG_META_DEFAULTS[logType];
+  return {
+    level: d.level ?? LOG_META_FALLBACK.level,
+    owner: d.owner ?? LOG_META_FALLBACK.owner,
+    feedbackTarget: d.feedbackTarget ?? LOG_META_FALLBACK.feedbackTarget,
+    displayTarget: d.displayTarget ?? LOG_META_FALLBACK.displayTarget,
+  };
+}
+
+// ============================================================
+// GameLog 基础字段（所有日志共有）
+// ============================================================
+export interface GameLogBase {
+  tick: number;
+  message: string;
+  meta: LogMeta;
+}
 
 // ============================================================
 // 从映射表推导 GameLog 判别联合类型

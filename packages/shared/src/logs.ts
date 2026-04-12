@@ -1,4 +1,4 @@
-import { ResultCode, PlayerId, ActorId } from "./constants";
+import { ResultCode, PlayerId, ActorId, ACTOR_IDS } from "./constants";
 import type { Command } from "./types";
 
 // ============================================================
@@ -176,10 +176,10 @@ export type LogMetaDefault = Partial<LogMeta>;
 
 /** 兜底默认值 */
 const LOG_META_FALLBACK: LogMeta = {
-  level: "info",
-  owner: "system_0" as ActorId,
-  feedbackTarget: "none",
-  displayTarget: "frontend",
+  level: LOG_LEVELS.INFO,
+  owner: ACTOR_IDS.SYSTEM,
+  feedbackTarget: AI_FEEDBACK_TARGETS.NONE,
+  displayTarget: LOG_DISPLAY_TARGETS.FRONTEND,
 };
 
 // ============================================================
@@ -190,20 +190,20 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.GAME_STARTED]: {},
   [LOG_TYPES.GAME_STOPPED]: {},
   [LOG_TYPES.GAME_END]: {},
-  [LOG_TYPES.RESOURCE_GATHERED]: { level: "debug" },
-  [LOG_TYPES.CREDITS_DELIVERED]: { level: "debug" },
+  [LOG_TYPES.RESOURCE_GATHERED]: { level: LOG_LEVELS.DEBUG },
+  [LOG_TYPES.CREDITS_DELIVERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.BUILDING_CONSTRUCTED]: {},
   [LOG_TYPES.UNIT_SPAWNED]: {},
-  [LOG_TYPES.SPAWN_FAILED]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.COMMAND_ERROR]: { level: "error", feedbackTarget: "both" },
-  [LOG_TYPES.TICK_ERROR]: { level: "error", feedbackTarget: "both" },
-  [LOG_TYPES.MOVE_ADJUSTED]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.MOVE_BLOCKED]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.BUILD_FAILED]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.SPAWN_COMMAND_FAILED]: { level: "warning", feedbackTarget: "both" },
-  [LOG_TYPES.UNKNOWN_COMMAND]: { level: "error", feedbackTarget: "both" },
+  [LOG_TYPES.SPAWN_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.COMMAND_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.TICK_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.MOVE_ADJUSTED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.MOVE_BLOCKED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.BUILD_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.SPAWN_COMMAND_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.UNKNOWN_COMMAND]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
 };
 
 // ============================================================

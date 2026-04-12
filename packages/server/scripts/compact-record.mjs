@@ -117,17 +117,66 @@ function diffAIOutputs(previousOutputs = {}, currentOutputs = {}) {
   return diff;
 }
 
-function buildTickDeltas(snapshots = []) {
+function buildTickDeltas(snapshots = [], oldCommandResults = []) {
   if (snapshots.length <= 1) {
     return [];
+  }
+
+  // 按 tick 索引 snapshots（snapshots[0] 是 initialState，snapshots[1..] 是每 tick 结束状态）
+  // snapshots[i].tick 对应第 i 个 snapshot（i>=1 时 tick = i * TICK_INTERVAL）
+  // 我们的 tickDeltas 第 i 项对应 snapshots[i]（i>=1），代表 tick 的增量
+
+  // 先把 oldCommandResults 按 tick 分组，转换成 command_result 日志
+  const commandResultsByTick = new Map();
+  for (const cr of oldCommandResults) {
+    if (!cr || cr.tick == null) continue;
+    const tick = cr.tick;
+    if (!commandResultsByTick.has(tick)) {
+      commandResultsByTick.set(tick, []);
+    }
+    commandResultsByTick.get(tick).push(cr);
   }
 
   const deltas = [];
   for (let i = 1; i < snapshots.length; i++) {
     const previous = snapshots[i - 1];
     const current = snapshots[i];
+    const tick = current.tick;
+
+    // 从旧 commandResults 转换的日志（放在 newLogs 最前面，保持执行顺序）
+    const legacyCommandLogs = (commandResultsByTick.get(tick) || []).map((cr) => ({
+      tick,
+      type: "command_result",
+      message: cr.message || "Command processed",
+      data: {
+        command: cr.command,
+        result: cr.result,
+        success: cr.success,
+        playerId: cr.command?.playerId,
+      },
+    }));
+
+    // 从当前 snapshot 的 logs 切片（排除已作为 command_result 插入的重复条目）
+    // 注意：旧格式 snapshots 里的 logs 可能已经包含 command_result（如果是新格式旧记录）
+    // 这里我们只取非 command_result 类型的日志，避免重复
+    const currentLogs = current.state.logs || [];
+    const previousLogs = previous.state.logs || [];
+
+    // 计算增量日志：取 current 比 previous 新增的部分
+    const incrementalLogs = currentLogs.length >= previousLogs.length
+      ? currentLogs.slice(previousLogs.length)
+      : currentLogs;
+
+    // 过滤掉已经是 command_result 类型的（这些我们会从 oldCommandResults 重建）
+    const filteredIncrementalLogs = incrementalLogs.filter(
+      (log) => log.type !== "command_result"
+    );
+
+    // 合并：先 legacy command logs，再其他新增日志（保持命令结果优先的顺序）
+    const mergedNewLogs = [...legacyCommandLogs, ...filteredIncrementalLogs];
+
     deltas.push({
-      tick: current.tick,
+      tick,
       players: current.state.players.map((player, playerIndex) => {
         const previousPlayer = previous.state.players[playerIndex];
         return {
@@ -140,10 +189,7 @@ function buildTickDeltas(snapshots = []) {
           buildings: diffBuildings(previousPlayer.buildings, player.buildings),
         };
       }),
-      newLogs:
-        current.state.logs.length >= previous.state.logs.length
-          ? current.state.logs.slice(previous.state.logs.length)
-          : current.state.logs,
+      newLogs: mergedNewLogs,
       aiOutputs: diffAIOutputs(previous.aiOutputs, current.aiOutputs),
       winner: current.state.winner !== previous.state.winner ? current.state.winner : undefined,
     });
@@ -185,6 +231,7 @@ async function main() {
   }
 
   const snapshots = record.snapshots || [];
+  const oldCommandResults = record.commandResults || [];
   const compactRecord = {
     metadata: {
       ...record.metadata,
@@ -193,8 +240,8 @@ async function main() {
     },
     initialState: snapshots[0]?.state || record.finalState,
     finalState: record.finalState,
-    tickDeltas: buildTickDeltas(snapshots),
-    commandResults: record.commandResults || [],
+    tickDeltas: buildTickDeltas(snapshots, oldCommandResults),
+    // ❌ 不再保留顶层 commandResults 字段——已并入 tickDeltas[].newLogs
     aiTurns: buildSavedAITurns(record.aiTurns || []),
   };
 

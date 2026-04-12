@@ -119,28 +119,70 @@ export interface GameState {
   logs: GameLog[];
 }
 
-export interface GameLog {
-  tick: number;
-  type: string;
-  message: string;
-  data?: any;
+export type LogPhase = "generation" | "execution" | "command";
+export type LogSeverity = "error" | "warning";
+
+export interface LogMeta {
+  x?: number;
+  y?: number;
+  requestedX?: number;
+  requestedY?: number;
+  targetId?: string;
+  hint?: string;
+  code?: string;
+  phase?: LogPhase;
+  severity?: LogSeverity;
+  playerId?: string;
+  command?: Command;
+  result?: ResultCode;
+  success?: boolean;
+  [key: string]: any;
 }
 
-export interface AIFeedback {
-  tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
-  message: string;
-  code?: string;
-  meta?: {
-    x?: number;
-    y?: number;
-    requestedX?: number;
-    requestedY?: number;
-    targetId?: string;
-    hint?: string;
-  };
+export enum LogType {
+  // 游戏生命周期
+  GAME_START = "game_start",
+  GAME_STARTED = "game_started",
+  GAME_END = "game_end",
+  GAME_STOPPED = "game_stopped",
+
+  // 错误与异常
+  TICK_ERROR = "tick_error",
+  COMMAND_ERROR = "command_error",
+
+  // 资源与经济
+  RESOURCE_GATHERED = "resource_gathered",
+  CREDITS_DELIVERED = "credits_delivered",
+
+  // 单位与建筑
+  UNIT_SPAWNED = "unit_spawned",
+  SPAWN_FAILED = "spawn_failed",
+  BUILDING_CONSTRUCTED = "building_constructed",
+
+  // AI 相关日志类型
+  AI_GENERATION_ERROR = "ai_generation_error",
+  AI_EXECUTION_ERROR = "ai_execution_error",
+  AI_COMMAND_FEEDBACK = "ai_command_feedback",
+
+  // 命令执行结果（替代 CommandResult 的持久化存储）
+  COMMAND_RESULT = "command_result",
 }
+
+export interface GameLog {
+  tick: number;
+  type: LogType;
+  message: string;
+  data: LogMeta;
+}
+
+// AIFeedback 已废弃——不再作为独立类型，AI 相关日志通过 GameLog.type 区分
+// 保留此类型仅用于向后兼容转换，新代码应直接使用 GameLog
+export type AIFeedback = Omit<GameLog, 'type'> & {
+  phase: LogPhase;
+  severity: LogSeverity;
+  code?: string;
+  meta?: Record<string, any>;
+};
 
 export interface Command {
   id: string;
@@ -161,13 +203,14 @@ export interface GameSnapshot {
   aiOutputs: Record<string, string>;
 }
 
-export interface CommandResult {
-  tick: number;
+// CommandResult 已废弃——命令结果现在记录为 GameLog(type=command_result)
+// 保留此类型仅用于向后兼容转换
+export type CommandResult = Omit<GameLog, 'type'> & {
   command: Command;
   result: ResultCode;
   success: boolean;
   message: string;
-}
+};
 
 export interface UnitStats {
   hp: number;
@@ -217,8 +260,8 @@ export interface AIStatePackage {
     workerGatherRate: number;
     hqDeliveryRange: number;
   };
-  eventsSinceLastCall: GameLog[];
-  aiFeedbackSinceLastCall: AIFeedback[];
+  eventsSinceLastCall: GameLog[];  // AI 相关日志（已过滤）
+  // ❌ 删除 aiFeedbackSinceLastCall 字段——events 已包含所有 AI 反馈
   gameTimeRemaining: number;
 }
 
@@ -270,7 +313,7 @@ export interface AIPromptPayload {
       maxHp?: number;
     }>;
     events: GameLog[];
-    aiFeedback: AIFeedback[];
+    // ❌ 删除 aiFeedback 字段——events 已包含所有 AI 相关日志（经 filterAIRelevantLogs 过滤）
   } | null;
 }
 
@@ -365,6 +408,7 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: CommandResult[];
+  // ❌ 删除 commandResults 字段——命令结果记录在 tickDeltas[].newLogs 中
+  // commandResults: CommandResult[];
   aiTurns: SavedAITurnRecord[];
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AIStatePackageBuilder } from "../AIStatePackageBuilder";
 import { Game } from "../Game";
+import { LogType } from "@llmcraft/shared";
 
 describe("AIStatePackageBuilder", () => {
   it("should include AI feedback for the requesting player", () => {
@@ -12,11 +13,11 @@ describe("AIStatePackageBuilder", () => {
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
-    expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
-    expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
-    expect(aiState.aiFeedbackSinceLastCall[0].phase).toBe("execution");
-    expect(aiState.aiFeedbackSinceLastCall[0].code).toBe("execution_error");
-    expect(aiState.aiFeedbackSinceLastCall[0].meta?.hint).toBe("Check variable names.");
+    expect(aiState.eventsSinceLastCall).toHaveLength(1);
+    expect(aiState.eventsSinceLastCall[0].message).toContain("ReferenceError");
+    expect(aiState.eventsSinceLastCall[0].data.phase).toBe("execution");
+    expect(aiState.eventsSinceLastCall[0].data.code).toBe("execution_error");
+    expect(aiState.eventsSinceLastCall[0].data.meta?.hint).toBe("Check variable names.");
   });
 
   it("should not leak another player's AI feedback", () => {
@@ -25,7 +26,7 @@ describe("AIStatePackageBuilder", () => {
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
-    expect(aiState.aiFeedbackSinceLastCall).toEqual([]);
+    expect(aiState.eventsSinceLastCall).toEqual([]);
   });
 
   it("should expose enemy units under enemies", () => {
@@ -89,8 +90,8 @@ describe("AIStatePackageBuilder", () => {
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game, baselineTick);
 
     expect(aiState.eventsSinceLastCall.every((log) => log.tick > baselineTick)).toBe(true);
-    expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
-    expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("new error");
+    expect(aiState.eventsSinceLastCall).toHaveLength(1);
+    expect(aiState.eventsSinceLastCall[0].message).toContain("new error");
     game.stop();
   });
 

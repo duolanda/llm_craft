@@ -228,7 +228,8 @@ export class GameOrchestrator {
       initialState,
       finalState: this.game.getState(),
       tickDeltas: this.buildTickDeltas(snapshots),
-      commandResults: this.game.getCommandResults(),
+      // ❌ commandResults 已废弃——命令结果记录在 tickDeltas[].newLogs(type="command_result") 中
+      // commandResults: this.game.getCommandResults(),
       aiTurns: this.buildSavedAITurns(),
     };
 

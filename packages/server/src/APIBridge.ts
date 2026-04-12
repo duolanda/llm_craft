@@ -100,7 +100,7 @@ export class APIBridge {
       },
       enemies: state.enemies,
       enemyBuildings: state.enemyBuildings,
-      aiFeedbackSinceLastCall: state.aiFeedbackSinceLastCall,
+      eventsSinceLastCall: state.eventsSinceLastCall,
       map: {
         width: state.map.width,
         height: state.map.height,

@@ -271,7 +271,7 @@ interface AIPromptPayload {
       maxHp?: number;
     }>;
     events: GameLog[];
-    aiFeedback: AIFeedback[];
+    // ❌ 已删除 aiFeedback 字段——events 已包含所有 AI 相关日志（经 filterAIRelevantLogs 过滤）
   } | null;
 }
 ```
@@ -328,8 +328,8 @@ interface AIStatePackage {
     worker: UnitStats;
     soldier: UnitStats;
   };
-  eventsSinceLastCall: GameLog[];
-  aiFeedbackSinceLastCall: AIFeedback[];
+  eventsSinceLastCall: GameLog[];  // AI 相关日志（已通过 filterAIRelevantLogs 过滤）
+  // ❌ 已删除 aiFeedbackSinceLastCall 字段——events 已包含所有 AI 反馈
   gameTimeRemaining: number;
 }
 ```
@@ -339,7 +339,7 @@ interface AIStatePackage {
 - `enemies` 在输入 JSON 中只包含敌方单位
 - `enemyBuildings` 单独包含敌方建筑
 - `map.tiles` 当前只包含非空地块，也就是障碍物和资源点
-- `eventsSinceLastCall` 和 `aiFeedbackSinceLastCall` 是最近切片，不是严格一次性消费队列
+- `eventsSinceLastCall` 是最近切片，不是严格一次性消费队列
 
 ## 3. 沙箱全局对象
 
@@ -351,7 +351,7 @@ AI 代码在子进程中的 Node `vm` 上下文里运行。
 - `me`
 - `enemies`
 - `enemyBuildings`
-- `aiFeedbackSinceLastCall`
+- `eventsSinceLastCall`  // 替代 aiFeedbackSinceLastCall
 - `map`
 - `unitStats`
 - `utils`
@@ -466,25 +466,42 @@ const enemyBuildings: Array<{
 }>;
 ```
 
-### 4.5 `aiFeedbackSinceLastCall`
+### 4.5 `eventsSinceLastCall`
 
 ```ts
-const aiFeedbackSinceLastCall: Array<{
+const eventsSinceLastCall: Array<{
   tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
+  type: LogType;  // "ai_generation_error" | "ai_execution_error" | "ai_command_feedback" | "command_result" | ...
   message: string;
-  code?: string;
-  meta?: {
-    x?: number;
-    y?: number;
-    requestedX?: number;
-    requestedY?: number;
-    targetId?: string;
-    hint?: string;
+  data: {
+    phase?: "generation" | "execution" | "command";
+    severity?: "error" | "warning";
+    code?: string;         // 如 "build_too_close_to_hq", "attack_in_range_no_target", "move_adjusted"
+    meta?: {
+      hint?: string;
+      requestedX?: number;
+      requestedY?: number;
+      x?: number;
+      y?: number;
+      targetId?: string;
+      // command / result / success 等字段按需存在
+    };
+    command?: Command;
+    result?: ResultCode;
+    success?: boolean;
+    playerId?: string;
+    [key: string]: any;
   };
 }>;
 ```
+
+说明：
+
+- 这是经过服务端过滤的 AI 相关日志，只包含与当前玩家相关的错误/警告信息
+- `type` 为 `LogType` 枚举，见 `@llmcraft/shared` 类型定义
+- 失败命令的反馈 `code` 字段会给出具体错误码（如 `build_too_close_to_hq`）
+- `meta` 包含额外的上下文信息（如 `requestedX/Y` 表示请求的目标格，`x/y` 表示实际执行格）
+- 不要依赖事件的顺序或数量，只检查 `code` 是否存在来识别特定错误
 
 ### 4.6 `map`
 
@@ -545,7 +562,7 @@ const utils: {
 
 - `unit.moveTo(...)` 会下发移动命令，实际移动由游戏系统逐 tick 执行
 - 如果 `moveTo` 的目标格不可站，系统会自动改到附近最近的可达格
-- 当 `moveTo` 被自动改点时，`aiFeedbackSinceLastCall` 会出现 `code = "move_adjusted"`，并在 `meta.x / meta.y` 返回实际目标格
+- 当 `moveTo` 被自动改点时，`eventsSinceLastCall` 中会出现 `type="ai_command_feedback"` 且 `code="move_adjusted"` 的日志，在 `meta.x / meta.y` 返回实际目标格
 - `unit.attack(...)` 会下发攻击命令，目标需要在攻击范围内
 - `unit.attackInRange(targetPriority?)` 会在命令真正执行时，按优先级重新选择当前射程内目标
 - `unit.attackInRange()` 的默认优先级是 `["hq", "soldier", "worker", "barracks"]`
@@ -564,7 +581,7 @@ const utils: {
 ## 6. 当前不保证的行为
 
 - 不保证严格战争迷雾
-- 不保证 `eventsSinceLastCall` / `aiFeedbackSinceLastCall` 是严格单次消费
+- 不保证 `eventsSinceLastCall` 是严格单次消费队列
 - 不保证输入 JSON 和沙箱全局对象完全同构
 - 不保证存在未在本文列出的兼容变量名
 

@@ -20,6 +20,8 @@ import {
   TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
+  LogType,
+  LogMeta,
 } from "@llmcraft/shared";
 import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
@@ -46,10 +48,10 @@ export class Game {
   private players: Player[] = [];
   private logs: GameLog[] = [];
   private commandQueue: Command[] = [];
-  private commandResults: CommandResult[] = [];
+  private commandResults: CommandResult[] = [];  // 保留用于向后兼容（旧记录文件）
   private snapshots: GameSnapshot[] = [];
   private aiOutputs: Record<string, string> = {};
-  private aiFeedback: Record<string, GameLog[]> = { player_1: [], player_2: [] };
+  // ❌ 删除 aiFeedback 字段——现在直接从 logs 过滤
   private winner: string | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
@@ -93,7 +95,7 @@ export class Game {
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY - 1, "player_2");
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY + 1, "player_2");
 
-    this.addLog("game_start", "Game initialized successfully");
+    this.addLog(LogType.GAME_START, "Game initialized successfully");
     this.saveSnapshot();
   }
 
@@ -135,11 +137,11 @@ export class Game {
       try {
         this.processCommand(command);
       } catch (error) {
-        const log = this.addLog("command_error", `Command processing crashed for ${command.type}`, {
+        this.addLog(LogType.COMMAND_ERROR, `Command processing crashed for ${command.type}`, {
           command,
           error: error instanceof Error ? error.message : String(error),
         });
-        this.recordAIRelevantLog(log);
+        // command_error 是系统内部错误，不发送给 AI
         this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Command processing crashed");
         console.error("命令处理异常:", error, command);
       }
@@ -169,7 +171,6 @@ export class Game {
                 (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
               ) {
                 this.recordCommandFeedback(
-                  "move_adjusted",
                   `Unit ${command.unitId} rerouted to (${resolvedTarget.x}, ${resolvedTarget.y})`,
                   command,
                   result,
@@ -189,7 +190,6 @@ export class Game {
                 hint: "No reachable nearby tile found.",
               };
               this.recordCommandFeedback(
-                "move_blocked",
                 `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y})`,
                 command,
                 result,
@@ -220,7 +220,6 @@ export class Game {
 
             if (result !== RESULT_CODES.OK) {
               this.recordCommandFeedback(
-                "command_failed",
                 `Attack command failed for unit ${command.unitId}`,
                 command,
                 result,
@@ -251,7 +250,6 @@ export class Game {
 
             if (result !== RESULT_CODES.OK) {
               this.recordCommandFeedback(
-                "command_failed",
                 `Attack-in-range command failed for unit ${command.unitId}`,
                 command,
                 result,
@@ -289,13 +287,12 @@ export class Game {
               const unitCost = this.getUnitCost(command.unitType);
               if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
-                this.recordCommandFeedback(
-                  "command_failed",
-                  `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
-                  command,
-                  result,
-                  "spawn_invalid_building",
-                  {
+              this.recordCommandFeedback(
+                `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
+                command,
+                result,
+                "spawn_invalid_building",
+                {
                     targetId: building.id,
                     hint: building.type === BUILDING_TYPES.HQ
                       ? "HQ can only spawn workers. Build a barracks to produce soldiers."
@@ -309,7 +306,6 @@ export class Game {
                 this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
                 this.recordCommandFeedback(
-                  "command_failed",
                   "Spawn command failed: insufficient credits",
                   command,
                   RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
@@ -344,7 +340,6 @@ export class Game {
 
           if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
             this.recordCommandFeedback(
-              "command_failed",
               "Build command failed: only barracks can be built in MVP",
               command,
               RESULT_CODES.ERR_INVALID_BUILDING,
@@ -360,7 +355,6 @@ export class Game {
           const buildingCost = this.getBuildingCost(command.buildingType);
           if (player.resources.credits < buildingCost) {
             this.recordCommandFeedback(
-              "command_failed",
               "Build command failed: insufficient credits",
               command,
               RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
@@ -384,7 +378,6 @@ export class Game {
           if (result !== RESULT_CODES.OK) {
             const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
             this.recordCommandFeedback(
-              "command_failed",
               "Build command failed: invalid build position",
               command,
               result,
@@ -406,7 +399,7 @@ export class Game {
             command.position.y,
             command.playerId
           );
-          this.addLog("building_constructed", `Barracks constructed for ${command.playerId}`, {
+          this.addLog(LogType.BUILDING_CONSTRUCTED, `Barracks constructed for ${command.playerId}`, {
             command,
           });
           this.recordCommandResult(command, RESULT_CODES.OK, true, "Building constructed");
@@ -582,7 +575,7 @@ export class Game {
         const winner = this.players.find((p) => p.id !== player.id);
         if (winner) {
           this.winner = winner.id;
-          this.addLog("game_end", `Player ${winner.id} wins!`, {
+          this.addLog(LogType.GAME_END, `Player ${winner.id} wins!`, {
             winner: winner.id,
             loser: player.id,
           });
@@ -630,12 +623,12 @@ export class Game {
             const spawnPos = this.findEmptySpawnPosition(spawnBuilding.x, spawnBuilding.y);
             if (spawnPos) {
               this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
-              this.addLog("unit_spawned", `Unit ${unitType} spawned for ${playerId}`, {
+              this.addLog(LogType.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
                 playerId,
                 unitType,
               });
             } else {
-              this.addLog("spawn_failed", `No empty position to spawn ${unitType} for ${playerId}`, {
+              this.addLog(LogType.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
                 playerId,
                 unitType,
               });
@@ -647,7 +640,7 @@ export class Game {
       // Check win condition
       this.checkWinCondition();
     } catch (error) {
-      this.addLog("tick_error", "Tick update crashed", {
+      this.addLog(LogType.TICK_ERROR, "Tick update crashed", {
         error: error instanceof Error ? error.message : String(error),
       });
       console.error("Tick 更新异常:", error);
@@ -661,7 +654,7 @@ export class Game {
     if (this.isRunning) return;
 
     this.isRunning = true;
-    this.addLog("game_started", "Game started");
+    this.addLog(LogType.GAME_STARTED, "Game started");
 
     this.tickInterval = setInterval(() => {
       this.tickUpdate();
@@ -674,15 +667,15 @@ export class Game {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
     }
-    this.addLog("game_stopped", "Game stopped");
+    this.addLog(LogType.GAME_STOPPED, "Game stopped");
   }
 
-  private addLog(type: string, message: string, data?: any): GameLog {
+  private addLog(type: LogType, message: string, data?: LogMeta): GameLog {
     const log = {
       tick: this.tick,
       type,
       message,
-      data,
+      data: data || {},
     };
     this.logs.push(log);
     // 限制日志数量，防止内存泄漏
@@ -692,16 +685,27 @@ export class Game {
     return log;
   }
 
-  private recordAIRelevantLog(log: GameLog): void {
-    const playerId = log.data?.command?.playerId;
-    if (!playerId) return;
-    if (!this.aiFeedback[playerId]) {
-      this.aiFeedback[playerId] = [];
-    }
-    this.aiFeedback[playerId].push(log);
-    if (this.aiFeedback[playerId].length > 100) {
-      this.aiFeedback[playerId] = this.aiFeedback[playerId].slice(-50);
-    }
+  // 过滤出 AI 相关的日志（发送给 LLM 的上下文）
+  static filterAIRelevantLogs(logs: GameLog[]): GameLog[] {
+    return logs.filter(log => {
+      const type = log.type;
+      const data = log.data || {};
+
+      // AI 相关日志白名单：
+      // 1. type 以 'ai_' 开头
+      if (type.startsWith('ai_')) return true;
+
+      // 2. type 为 ai_command_feedback
+      if (type === 'ai_command_feedback') return true;
+
+      // 3. type 为 command_result 且成功为 false
+      if (type === 'command_result' && data.success === false) return true;
+
+      // 4. 兜底：有 phase 字段的（向后兼容旧日志）
+      if (data.phase) return true;
+
+      return false;
+    });
   }
 
   private saveSnapshot(): void {
@@ -735,24 +739,42 @@ export class Game {
     message: string,
     data?: any
   ): void {
-    const log = this.addLog("ai_feedback", message, {
+    // 根据 phase 映射到具体的 LogType 枚举（废弃通用的 ai_feedback）
+    let logType: LogType;
+    switch (phase) {
+      case "generation":
+        logType = LogType.AI_GENERATION_ERROR;
+        break;
+      case "execution":
+        logType = LogType.AI_EXECUTION_ERROR;
+        break;
+      case "command":
+        logType = LogType.AI_COMMAND_FEEDBACK;
+        break;
+      default:
+        // 防御性编程，理论上不会走到这里
+        logType = LogType.AI_EXECUTION_ERROR;
+    }
+    this.addLog(logType, message, {
       playerId,
       phase,
       severity,
       ...data,
     });
-
-    if (!this.aiFeedback[playerId]) {
-      this.aiFeedback[playerId] = [];
-    }
-    this.aiFeedback[playerId].push(log);
-    if (this.aiFeedback[playerId].length > 100) {
-      this.aiFeedback[playerId] = this.aiFeedback[playerId].slice(-50);
-    }
+    // 不再单独维护 aiFeedback 数组——调用方应使用过滤后的 logs
   }
 
+  // 兼容方法：获取 AI 相关日志（从 logs 中过滤）
+  // 新代码应直接使用 AIStatePackageBuilder 的 filterAIRelevantLogs
   getAIFeedback(playerId: string): GameLog[] {
-    return [...(this.aiFeedback[playerId] || [])];
+    return this.logs.filter(log => {
+      // 只返回该玩家相关的 AI 日志
+      if (log.data?.playerId && log.data.playerId !== playerId) {
+        return false;
+      }
+      // 通过 filterAIRelevantLogs 判断是否 AI 相关
+      return Game.filterAIRelevantLogs([log]).length > 0;
+    });
   }
 
   private processWorkerEconomy(): void {
@@ -784,7 +806,7 @@ export class Game {
             unit.carryingCredits += gatheredCredits;
             unit.state = UNIT_STATES.GATHERING;
             unit.intent = { type: "gather", targetX: unit.x, targetY: unit.y };
-            this.addLog("resource_gathered", `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
+            this.addLog(LogType.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
               playerId: player.id,
               unitId: unit.id,
               amount: gatheredCredits,
@@ -800,7 +822,7 @@ export class Game {
           unit.carryingCredits = 0;
           unit.state = UNIT_STATES.IDLE;
           unit.intent = { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
-          this.addLog("credits_delivered", `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
+          this.addLog(LogType.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
             playerId: player.id,
             unitId: unit.id,
             buildingId: hq.id,
@@ -916,17 +938,27 @@ export class Game {
     success: boolean,
     message: string
   ): void {
+    // 保留 commandResults 数组仅用于向后兼容（GameRecord 序列化）
+    // 新代码应使用 logs 中 type="command_result" 的条目
     this.commandResults.push({
       tick: this.tick,
       command,
       result,
       success,
       message,
+      data: {}, // 满足 CommandResult 类型要求（旧格式无 data，补空对象兼容）
+    });
+
+    // 同时记录为结构化日志
+    this.addLog(LogType.COMMAND_RESULT, message, {
+      command,
+      result,
+      success,
+      playerId: command.playerId,
     });
   }
 
   private recordCommandFeedback(
-    type: string,
     message: string,
     command: Command,
     result: ResultCode,
@@ -940,7 +972,8 @@ export class Game {
       hint?: string;
     }
   ): void {
-    const log = this.addLog(type, message, {
+    // 统一记录为 ai_command_feedback 类型
+    this.addLog(LogType.AI_COMMAND_FEEDBACK, message, {
       command,
       result,
       playerId: command.playerId,
@@ -949,7 +982,7 @@ export class Game {
       code,
       meta,
     });
-    this.recordAIRelevantLog(log);
+    // 不再单独维护 aiFeedback 数组——从 logs 过滤即可
   }
 
   private describeMoveFailure(unitId: string, x: number, y: number): { code: string; hint: string } | null {

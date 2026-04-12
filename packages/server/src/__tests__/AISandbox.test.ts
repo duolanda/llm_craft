@@ -16,14 +16,14 @@ describe("AISandbox", () => {
     expect(result.errorMessage).toContain("boom");
   });
 
-  it("should expose aiFeedbackSinceLastCall in the sandbox globals", async () => {
+  it("should expose eventsSinceLastCall in the sandbox globals", async () => {
     const game = new Game();
     game.addAIFeedback("player_1", "execution", "error", "last round failed");
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
     const sandbox = new AISandbox("player_1");
 
     const result = await sandbox.executeCode(
-      "if (aiFeedbackSinceLastCall.length > 0) { me.workers[0].holdPosition(); }",
+      "if (eventsSinceLastCall.length > 0) { me.workers[0].holdPosition(); }",
       aiState
     );
 

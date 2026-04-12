@@ -1,7 +1,7 @@
 import {
   Building,
   Command,
-  CommandResult,
+  GameLog,
   GameRecord,
   GameSnapshot,
   GameState,
@@ -142,7 +142,8 @@ function resolveMoveTarget(
   logs: GameState["logs"]
 ) {
   const adjusted = logs.find((log) =>
-    log.type === "move_adjusted" &&
+    log.type === "ai_command_feedback" &&
+    log.data?.code === "move_adjusted" &&
     log.data?.command?.id === command.id &&
     typeof log.data?.meta?.x === "number" &&
     typeof log.data?.meta?.y === "number"
@@ -189,11 +190,14 @@ function findAttackTargetFromDelta(
 function applyCommandIntentsForTick(
   state: GameState,
   delta: TickDeltaRecord,
-  commandResults: CommandResult[]
+  commandResultLogs: GameLog[]
 ) {
-  for (const result of commandResults) {
-    const command = result.command;
-    if (!result.success || !command.unitId) {
+  for (const log of commandResultLogs) {
+    const data = log.data;
+    const command = data.command as Command | undefined;
+    const success = data.success === true;
+
+    if (!success || !command?.unitId) {
       continue;
     }
 
@@ -251,12 +255,19 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
   clearTransientIntentState(currentState);
-  const commandResultsByTick = new Map<number, CommandResult[]>();
-  for (const result of record.commandResults) {
-    const bucket = commandResultsByTick.get(result.tick) ?? [];
-    bucket.push(result);
-    commandResultsByTick.set(result.tick, bucket);
+
+  // 从所有 tick 的 newLogs 中提取 command_result 日志，按 tick 分组
+  const commandResultLogsByTick = new Map<number, GameLog[]>();
+  for (const delta of record.tickDeltas) {
+    for (const log of delta.newLogs) {
+      if (log.type === "command_result") {
+        const bucket = commandResultLogsByTick.get(delta.tick) ?? [];
+        bucket.push(log);
+        commandResultLogsByTick.set(delta.tick, bucket);
+      }
+    }
   }
+
   const frames: ReplayFrame[] = [
     {
       tick: currentState.tick,
@@ -299,7 +310,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
       currentAIOutputs[playerId] = output;
     }
 
-    applyCommandIntentsForTick(currentState, delta, commandResultsByTick.get(delta.tick) ?? []);
+    applyCommandIntentsForTick(currentState, delta, commandResultLogsByTick.get(delta.tick) ?? []);
 
     frames.push({
       tick: delta.tick,

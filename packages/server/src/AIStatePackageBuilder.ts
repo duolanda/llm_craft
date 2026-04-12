@@ -10,6 +10,8 @@ import {
   TILE_TYPES,
   UNIT_STATS,
   Unit,
+  LogType,
+  LogMeta,
 } from "@llmcraft/shared";
 import { Game } from "./Game";
 
@@ -20,12 +22,17 @@ export class AIStatePackageBuilder {
   static build(playerId: string, state: GameState, game?: Game, sinceTick?: number): AIStatePackage {
     const player = state.players.find((p) => p.id === playerId)!;
     const enemy = state.players.find((p) => p.id !== playerId)!;
-    const aiFeedback = this.buildFeedback(
-      (game?.getAIFeedback(playerId) || []).filter((log) => sinceTick === undefined || log.tick > sinceTick)
+
+    // 过滤出 AI 相关日志（替代原有的 aiFeedback 独立存储）
+    const allRelevantLogs = state.logs.filter(log =>
+      sinceTick === undefined || log.tick > sinceTick
     );
-    const eventsSinceLastCall = state.logs
-      .filter((log) => sinceTick === undefined || log.tick > sinceTick)
-      .slice(-10);
+    const aiRelevantLogs = this.filterAIRelevantLogs(allRelevantLogs);
+    // 再过滤出当前玩家的日志（logs 里可能混有 he playerId 的日志，如 player_2 的 ai_feedback）
+    const playerRelevantLogs = aiRelevantLogs.filter(log =>
+      !log.data?.playerId || log.data.playerId === playerId
+    );
+    const eventsSinceLastCall = playerRelevantLogs.slice(-10);
 
     const tiles = [];
     for (let y = 0; y < state.tiles.length; y++) {
@@ -63,7 +70,7 @@ export class AIStatePackageBuilder {
         hqDeliveryRange: ECONOMY_RULES.HQ_DELIVERY_RANGE,
       },
       eventsSinceLastCall,
-      aiFeedbackSinceLastCall: aiFeedback,
+      // ❌ 删除 aiFeedbackSinceLastCall 字段
       gameTimeRemaining: Math.max(0, 600 - state.tick / 2),
     };
   }
@@ -105,7 +112,7 @@ export class AIStatePackageBuilder {
         enemyUnitChanges,
         enemyBuildingChanges,
         events: current.eventsSinceLastCall,
-        aiFeedback: current.aiFeedbackSinceLastCall,
+        // ❌ 删除 aiFeedback 字段——events 已包含所有 AI 相关日志
       },
     };
   }
@@ -145,17 +152,6 @@ export class AIStatePackageBuilder {
 
     const previousHQ = previous.my.buildings.find((building) => building.type === "hq");
     return Boolean(previousHQ && currentHQ.hp < previousHQ.hp);
-  }
-
-  private static buildFeedback(logs: GameLog[]): AIFeedback[] {
-    return logs.slice(-10).map((log) => ({
-      tick: log.tick,
-      phase: (log.data?.phase || "command") as "generation" | "execution" | "command",
-      severity: (log.data?.severity || "warning") as "error" | "warning",
-      message: log.message,
-      code: log.data?.code,
-      meta: log.data?.meta,
-    }));
   }
 
   private static diffMyUnits(previous: Unit[], current: Unit[]) {
@@ -229,5 +225,28 @@ export class AIStatePackageBuilder {
     }
 
     return changes;
+  }
+
+  // 静态工具：过滤出 AI 相关的日志
+  static filterAIRelevantLogs(logs: GameLog[]): GameLog[] {
+    return logs.filter(log => {
+      const type = log.type;
+      const data = log.data || {};
+
+      // AI 相关日志白名单：
+      // 1. type 以 'ai_' 开头
+      if (type.startsWith('ai_')) return true;
+
+      // 2. type 为 ai_command_feedback
+      if (type === 'ai_command_feedback') return true;
+
+      // 3. type 为 command_result 且成功为 false
+      if (type === 'command_result' && data.success === false) return true;
+
+      // 4. 兜底：有 phase 字段的（向后兼容旧日志）
+      if (data.phase) return true;
+
+      return false;
+    });
   }
 }

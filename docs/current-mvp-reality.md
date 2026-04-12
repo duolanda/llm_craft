@@ -127,8 +127,7 @@
 - `map.width` / `map.height`: 地图尺寸
 - `map.tiles`: 当前只传非空地块，也就是障碍物和资源点
 - `unitStats`: 单位静态属性表
-- `eventsSinceLastCall`: 最近日志切片
-- `aiFeedbackSinceLastCall`: 最近 AI 错误/命令反馈切片，包含短结构 `code + meta + hint`
+- `eventsSinceLastCall`: 最近 AI 相关日志切片（已过滤）
 - `gameTimeRemaining`: 剩余时间
 
 ### 3.3 当前发送给模型的完整基线大致长什么样
@@ -203,7 +202,6 @@
     "soldier": { "hp": 100, "speed": 1, "attack": 15, "cost": 80, "attackRange": 1 }
   },
   "eventsSinceLastCall": [],
-  "aiFeedbackSinceLastCall": [],
   "gameTimeRemaining": 587.5
 }
 ```
@@ -220,7 +218,7 @@
 - `me`
 - `enemies`
 - `enemyBuildings`
-- `aiFeedbackSinceLastCall`
+- `eventsSinceLastCall`
 - `map`
 - `unitStats`
 - `utils`
@@ -324,27 +322,45 @@ enemyBuildings = [
 ]
 ```
 
-### 5.5 `aiFeedbackSinceLastCall`
+### 5.5 `eventsSinceLastCall`
 
 ```js
-aiFeedbackSinceLastCall = [
+eventsSinceLastCall = [
   {
     tick: number,
-    phase: "generation" | "execution" | "command",
-    severity: "error" | "warning",
+    type: "ai_generation_error" | "ai_execution_error" | "ai_command_feedback" | "command_result" | ...,
     message: string,
-    code?: string,
-    meta?: {
-      x?: number,
-      y?: number,
-      requestedX?: number,
-      requestedY?: number,
-      targetId?: string,
-      hint?: string
+    data: {
+      phase?: "generation" | "execution" | "command",
+      severity?: "error" | "warning",
+      code?: string,           // 如 "build_too_close_to_hq", "attack_in_range_no_target", "move_adjusted"
+      meta?: {
+        hint?: string,
+        requestedX?: number,
+        requestedY?: number,
+        x?: number,
+        y?: number,
+        targetId?: string,
+        // command / result / success 等字段按需存在
+      },
+      command?: Command,
+      result?: ResultCode,
+      success?: boolean,
+      playerId?: string,
+      [key: string]: any
     }
-  }
+  },
+  ...
 ]
 ```
+
+说明：
+
+- 这是经过服务端过滤的 AI 相关日志，只包含与当前玩家相关的错误/警告信息
+- `type` 为 `LogType` 枚举（见 `@llmcraft/shared`）
+- 失败命令的反馈 `data.code` 会给出具体错误码
+- `data.meta` 包含额外的上下文信息（如 `requestedX/Y` 是请求的目标格，`x/y` 是实际执行格）
+- 应通过检查 `data.code` 来识别特定错误，不要依赖顺序或数量
 
 ### 5.6 `map`
 
@@ -398,7 +414,7 @@ utils = {
 - 基于 `enemyBuildings` 直接冲敌方 HQ
 - 基于 `enemies` 进行最近目标选择
 - 基于 `map.tiles` 找资源点和障碍物
-- 基于 `aiFeedbackSinceLastCall` 避免重复同类错误
+- 基于 `eventsSinceLastCall` 避免重复同类错误
 - 基于滑动窗口内的多轮对话历史延续短期战术
 
 ## 7. AI 当前做不到什么
@@ -421,8 +437,7 @@ utils = {
 - 对局元数据：开始时间、保存时间、双方模型、Base URL、AI 调用间隔、窗口大小
 - `initialState`
 - `finalState`
-- `tickDeltas`
-- `commandResults`
+- `tickDeltas`（包含每 tick 的 `newLogs`，其中 `type="command_result"` 的日志记录了命令执行结果）
 - `aiTurns`
 
 其中 `aiTurns` 会保存：
@@ -469,7 +484,7 @@ utils = {
 
 - `intent` 的完整历史
   - 保存记录不会在每个 tick 直接保存所有单位的完整 `intent`
-  - 回放里的移动目标、攻击目标，主要是根据 `commandResults`、`tickDeltas`、日志和状态变化反推出来的
+  - 回放里的移动目标、攻击目标，主要是根据 `tickDeltas[].newLogs`（包含 `command_result` 日志）和状态变化反推出来的
   - `move` 通常能较稳定恢复目标格
   - `attack(targetId)` 通常能较稳定恢复目标对象
   - `attackInRange(priority)` 只能根据该 tick 的受伤/移除变化推断实际命中目标；如果同 tick 内有多个可能候选，回放展示可能只是最合理近似
@@ -484,7 +499,7 @@ utils = {
   - 这些结果大多能从最终状态和日志推断，但内部筛选过程本身并没有完整持久化
 
 - 纯日志未覆盖的失败上下文
-  - 当前只会保存关键 `commandResults` 和部分 `aiFeedback/newLogs`
+  - 当前只会保存关键 `command_result` 日志和部分 `eventsSinceLastCall`
   - 如果某个分析依赖更细的局部上下文，而该上下文没进入记录，回放就无法补出来
 
 所以当前应把回放理解为：

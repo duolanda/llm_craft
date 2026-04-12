@@ -77,13 +77,29 @@ unitStats: {
   worker: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0 };
   soldier: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 };
 }
-aiFeedbackSinceLastCall: Array<{
+eventsSinceLastCall: Array<{
   tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
+  type: "ai_generation_error" | "ai_execution_error" | "ai_command_feedback" | "command_result" | "game_start" | "game_end" | ...;
   message: string;
-  code?: string;
-  meta?: { x?: number; y?: number; requestedX?: number; requestedY?: number; targetId?: string; hint?: string; };
+  data: {
+    phase?: "generation" | "execution" | "command";
+    severity?: "error" | "warning";
+    code?: string;         // 如 "build_too_close_to_hq", "attack_in_range_no_target", "move_adjusted"
+    meta?: {
+      hint?: string;
+      requestedX?: number;
+      requestedY?: number;
+      x?: number;
+      y?: number;
+      targetId?: string;
+      ...
+    };
+    command?: Command;
+    result?: ResultCode;
+    success?: boolean;
+    playerId?: string;
+    ...
+  };
 }>
 
 ## 可用方法
@@ -97,7 +113,7 @@ building.spawnUnit("worker" | "soldier")
 
 ## 关键规则细节
 
-- 沙箱里的可用顶层对象只有: game, me, enemies, enemyBuildings, map, unitStats, buildingStats, economy, aiFeedbackSinceLastCall, utils
+- 沙箱里的可用顶层对象只有: game, me, enemies, enemyBuildings, map, unitStats, buildingStats, economy, eventsSinceLastCall, utils
 - 不要使用 state.xxx、game.me、game.enemies、state.me 之类未提供的名字
 - 不要假设存在 worker1、worker2、soldier1、hq、barracks 这些局部变量，除非你先自己从 me / enemyBuildings 里取出来
 - 没有单独的 gather()/deposit() API，采集和交付都是自动触发
@@ -111,15 +127,15 @@ building.spawnUnit("worker" | "soldier")
 - 当前攻击范围按 8 邻域计算；对 attackRange = 1 的 Soldier 来说，上下左右和四个斜角相邻格都算射程内
 - 如果目标不在射程内，先 moveTo 到目标附近空地，再在后续 tick attack
 - 不要对所有远处目标盲目连续 attack，否则只会反复得到不在射程内的失败
-- moveTo({ x, y }) 如果目标格不可站，系统会自动改到附近可达格；看 aiFeedbackSinceLastCall 里的 move_adjusted / meta 获取实际落点
-- aiFeedbackSinceLastCall 里的 code / meta 会告诉你失败原因；优先按 hint 修正目标格或命令形式
+- moveTo({ x, y }) 如果目标格不可站，系统会自动改到附近可达格；看 eventsSinceLastCall 里的 move_adjusted / meta 获取实际落点
+- eventsSinceLastCall 里的 code / meta 会告诉你失败原因；优先按 hint 修正目标格或命令形式
 - Barracks cost = 120，Worker cost = 50，Soldier cost = 80
 - Barracks 不能紧贴 HQ 建造，至少留出 1 格缓冲
 - credits 不够时，不要重复提交会失败的 build/spawn
 
 ## 失败反馈硬约束（必须执行）
 
-- 如果 aiFeedbackSinceLastCall 中连续两次出现 move_adjusted 或 move_blocked，且 requestedX/requestedY 指向同一个目标区域：下一次必须改用不同目标点（与原目标切比雪夫距离 >= 2），不要继续向同一格或相邻拥堵格重复 moveTo
+- 如果 eventsSinceLastCall 中连续两次出现 move_adjusted 或 move_blocked，且 requestedX/requestedY 指向同一个目标区域：下一次必须改用不同目标点（与原目标切比雪夫距离 >= 2），不要继续向同一格或相邻拥堵格重复 moveTo
 - 如果某个士兵连续两次出现 attack_in_range_no_target：下一次该士兵必须先 moveTo 接敌（靠近敌方 HQ 或最近敌方单位），禁止继续原地重复 attackInRange
 - 如果上一轮大多数命令都失败（例如失败数 >= 成功数）：本轮优先发“纠错命令”（换目标点、先移动再攻击、分散站位），不要继续重复同模式命令
 - 多个士兵前压时，不要把他们都发往同一个格子；应分配到目标周围不同可站立格，避免互相卡位导致持续 move_adjusted/move_blocked

@@ -139,7 +139,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
-    expect(game.getAIFeedback("player_1").at(-1)?.data?.code).toBe("build_too_close_to_hq");
+    expect((game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>)?.code).toBe("build_too_close_to_hq");
   });
 
   it("requires barracks before soldiers can be queued", () => {
@@ -336,7 +336,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
-    expect(game.getAIFeedback("player_1").at(-1)?.data?.code).toBe("attack_in_range_no_target");
+    expect((game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>)?.code).toBe("attack_in_range_no_target");
   });
 
   it("adjusts move targets to a nearby reachable tile when the requested tile is blocked", () => {
@@ -354,14 +354,15 @@ describe("Game", () => {
 
     const result = game.getCommandResults().at(-1)!;
     const feedback = game.getAIFeedback("player_1").at(-1)!;
+    const feedbackData = feedback.data as Record<string, unknown>;
     const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
 
     expect(result.success).toBe(true);
     expect(runtimeWorker.pathTarget).toBeDefined();
     expect(runtimeWorker.pathTarget).not.toEqual({ x: 18, y: 10 });
-    expect(feedback.data?.code).toBe("move_adjusted");
-    expect(feedback.data?.meta?.requestedX).toBe(18);
-    expect(feedback.data?.meta?.requestedY).toBe(10);
+    expect(feedbackData?.code).toBe("move_adjusted");
+    expect((feedbackData?.commandMeta as any)?.requestedX).toBe(18);
+    expect((feedbackData?.commandMeta as any)?.requestedY).toBe(10);
   });
 
   it("records command results for saved game records", () => {

@@ -7,16 +7,17 @@ describe("AIStatePackageBuilder", () => {
     const game = new Game();
     game.addAIFeedback("player_1", "execution", "error", "ReferenceError: foo is not defined", {
       code: "execution_error",
-      meta: { hint: "Check variable names." },
+      commandMeta: { hint: "Check variable names." },
     });
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
-    expect(aiState.aiFeedbackSinceLastCall[0].phase).toBe("execution");
-    expect(aiState.aiFeedbackSinceLastCall[0].code).toBe("execution_error");
-    expect(aiState.aiFeedbackSinceLastCall[0].meta?.hint).toBe("Check variable names.");
+    const data = aiState.aiFeedbackSinceLastCall[0].data as Record<string, unknown>;
+    expect(data?.phase).toBe("execution");
+    expect(data?.code).toBe("execution_error");
+    expect((data?.commandMeta as any)?.hint).toBe("Check variable names.");
   });
 
   it("should not leak another player's AI feedback", () => {
@@ -77,7 +78,7 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.my.units[0]).toHaveProperty("carryCapacity", 100);
   });
 
-  it("filters events and feedback by the last successful AI tick", () => {
+  it("filters feedback by the last successful AI tick", () => {
     const game = new Game();
     game.start();
     const baselineTick = game.getTick();
@@ -88,7 +89,6 @@ describe("AIStatePackageBuilder", () => {
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game, baselineTick);
 
-    expect(aiState.eventsSinceLastCall.every((log) => log.tick > baselineTick)).toBe(true);
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("new error");
     game.stop();

@@ -86,9 +86,10 @@ const _assertPlayerIsActor: PlayerId extends ActorId ? true : false = true;
 
 /** 参与者颜色配置（用于客户端显示） */
 export const PLAYER_COLORS: Record<ActorId, string> = {
-  player_1: "#ff2a4a",  // 红色
-  player_2: "#00e5ff",  // 青色
-  system_0: "#ffb300",  // 金色（系统消息）
+  [ACTOR_IDS.PLAYER_1]: "#ff2a4a",  // 红色
+  [ACTOR_IDS.PLAYER_2]: "#00e5ff",  // 青色
+  [ACTOR_IDS.SYSTEM]: "#ffb300",  // 金色（系统消息）
+};
 };
 
 /** 游戏内通用颜色配置 */

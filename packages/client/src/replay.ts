@@ -8,6 +8,7 @@ import {
   Player,
   TickDeltaRecord,
   Unit,
+  LOG_TYPES,
 } from "@llmcraft/shared";
 
 export interface ReplayFrame {
@@ -142,14 +143,14 @@ function resolveMoveTarget(
   logs: GameState["logs"]
 ) {
   const adjusted = logs.find((log) =>
-    log.type === "move_adjusted" &&
-    log.data?.command?.id === command.id &&
-    typeof log.data?.meta?.x === "number" &&
-    typeof log.data?.meta?.y === "number"
+    log.type === LOG_TYPES.MOVE_ADJUSTED &&
+    (log.data as any)?.command?.id === command.id &&
+    typeof (log.data as any)?.commandMeta?.x === "number" &&
+    typeof (log.data as any)?.commandMeta?.y === "number"
   );
 
-  if (adjusted) {
-    return { x: adjusted.data.meta.x as number, y: adjusted.data.meta.y as number };
+  if (adjusted && adjusted.data && (adjusted.data as any).commandMeta) {
+    return { x: (adjusted.data as any).commandMeta.x as number, y: (adjusted.data as any).commandMeta.y as number };
   }
 
   if (command.position) {

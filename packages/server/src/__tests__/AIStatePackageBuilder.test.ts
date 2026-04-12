@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { AIStatePackageBuilder } from "../AIStatePackageBuilder";
 import { Game } from "../Game";
+import { GAME_LOG_TYPES, LOG_LEVELS, LOG_DISPLAY_TARGETS, AI_FEEDBACK_TARGETS, PlayerId } from "@llmcraft/shared";
 
 describe("AIStatePackageBuilder", () => {
   it("should include AI feedback for the requesting player", () => {
     const game = new Game();
-    game.addAIFeedback("player_1", "execution", "error", "ReferenceError: foo is not defined", {
-      code: "execution_error",
-      commandMeta: { hint: "Check variable names." },
-    });
+    const playerId = "player_1";
+    game.addLog(
+      GAME_LOG_TYPES.COMMAND_ERROR,
+      "ReferenceError: foo is not defined",
+      { playerId, phase: "execution" as const, severity: "error" as const, code: "execution_error", commandMeta: { hint: "Check variable names." } },
+      { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+    );
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
@@ -22,7 +26,13 @@ describe("AIStatePackageBuilder", () => {
 
   it("should not leak another player's AI feedback", () => {
     const game = new Game();
-    game.addAIFeedback("player_2", "execution", "error", "player_2 failed");
+    const playerId = "player_2";
+    game.addLog(
+      GAME_LOG_TYPES.COMMAND_ERROR,
+      "player_2 failed",
+      { playerId, phase: "execution" as const, severity: "error" as const },
+      { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+    );
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
 
@@ -83,9 +93,20 @@ describe("AIStatePackageBuilder", () => {
     game.start();
     const baselineTick = game.getTick();
 
-    game.addAIFeedback("player_1", "execution", "warning", "old warning");
+    const playerId = "player_1";
+    game.addLog(
+      GAME_LOG_TYPES.COMMAND_ERROR,
+      "old warning",
+      { playerId, phase: "execution" as const, severity: "warning" as const },
+      { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+    );
     game.tickUpdate();
-    game.addAIFeedback("player_1", "execution", "error", "new error");
+    game.addLog(
+      GAME_LOG_TYPES.COMMAND_ERROR,
+      "new error",
+      { playerId, phase: "execution" as const, severity: "error" as const },
+      { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+    );
 
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game, baselineTick);
 

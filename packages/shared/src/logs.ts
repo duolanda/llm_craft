@@ -161,17 +161,6 @@ export interface GameLogDataMap {
   [LOG_TYPES.UNKNOWN_COMMAND]: CommandFeedbackData;
 }
 
-/** 命令反馈类型集合 */
-export type CommandFeedbackType =
-  | "move_adjusted"
-  | "move_blocked"
-  | "attack_not_in_range"
-  | "attack_in_range_no_target"
-  | "build_failed"
-  | "spawn_command_failed"
-  | "unknown_command"
-  | "command_error";
-
 // ============================================================
 // LogMeta（GameLogBase.meta 的完整类型）
 // ============================================================

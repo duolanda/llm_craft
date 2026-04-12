@@ -90,7 +90,6 @@ export const PLAYER_COLORS: Record<ActorId, string> = {
   [ACTOR_IDS.PLAYER_2]: "#00e5ff",  // 青色
   [ACTOR_IDS.SYSTEM]: "#ffb300",  // 金色（系统消息）
 };
-};
 
 /** 游戏内通用颜色配置 */
 export const GAME_COLORS = {

@@ -49,6 +49,28 @@ export class APIBridge {
           playerId: self.playerId,
         });
       },
+      attackMoveTo: (pos: Position, targetPriority?: string[]) => {
+        self.commands.push({
+          id: self.generateId(),
+          type: "attack_move",
+          unitId: unit.id,
+          position: pos,
+          targetPriority:
+            targetPriority && targetPriority.length > 0
+              ? targetPriority.map((value) => String(value))
+              : [...APIBridge.DEFAULT_ATTACK_PRIORITY],
+          playerId: self.playerId,
+        });
+      },
+      harvestLoop: (resourcePos?: Position) => {
+        self.commands.push({
+          id: self.generateId(),
+          type: "harvest_loop",
+          unitId: unit.id,
+          position: resourcePos,
+          playerId: self.playerId,
+        });
+      },
       holdPosition: () => {
         self.commands.push({
           id: self.generateId(),

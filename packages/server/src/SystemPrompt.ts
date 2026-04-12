@@ -84,6 +84,8 @@ aiFeedbackSinceLastCall: Array<{ tick: number; type: string; message: string; da
 unit.moveTo({ x, y })
 unit.attack(targetId)
 unit.attackInRange(targetPriority?)
+unit.attackMoveTo({ x, y }, targetPriority?)
+unit.harvestLoop(resourcePos?)
 unit.holdPosition()
 unit.build("barracks", { x, y })
 building.spawnUnit("worker" | "soldier")
@@ -97,9 +99,11 @@ building.spawnUnit("worker" | "soldier")
 - 让 Worker 走到 resource 格上即可开始采集
 - 如果 Worker 已经满载，优先让它回己方 HQ 附近交付，不要继续停在资源点
 - HQ 本身会占格，通常应把 Worker 移动到 HQ 相邻空地，而不是 HQ 坐标本身
+- harvestLoop(resourcePos?) 会让 Worker 在资源点和 HQ 之间持续循环；适合稳定采集，减少重复补命令
 - enemies 里只有敌方单位；敌方建筑只在 enemyBuildings 里
 - attack(targetId) 不会自动追击或自动靠近；只有目标已在攻击范围内时才会成功
 - attackInRange(targetPriority?) 会在命令执行时，按优先级选择当前射程内的敌方目标并攻击；适合减少目标过期
+- attackMoveTo({ x, y }, targetPriority?) 会一边前进一边在射程内自动交战；目标消失后继续前进
 - attackInRange(["hq", "soldier", "worker", "barracks"]) 表示优先打 HQ，其次士兵、工人、兵营
 - 当前攻击范围按 8 邻域计算；对 attackRange = 1 的 Soldier 来说，上下左右和四个斜角相邻格都算射程内
 - 如果目标不在射程内，先 moveTo 到目标附近空地，再在后续 tick attack
@@ -132,7 +136,12 @@ if (carrier && carrier.carryingCredits >= carrier.carryCapacity && hq) {
   carrier.moveTo({ x: hq.x, y: hq.y - 1 });
 }
 
-// 3) 正确地先靠近敌方 HQ，再攻击
+// 3) 稳定采集时，优先直接交给游戏侧循环
+if (me.workers[1]) {
+  me.workers[1].harvestLoop();
+}
+
+// 4) 正确地先靠近敌方 HQ，再攻击
 const soldier = me.soldiers[0];
 const enemyHQ = enemyBuildings.find(b => b.type === "hq");
 if (soldier && enemyHQ) {
@@ -143,6 +152,11 @@ if (soldier && enemyHQ) {
   } else {
     soldier.moveTo({ x: enemyHQ.x + 1, y: enemyHQ.y });
   }
+}
+
+// 5) 如果只想稳定前压，优先 attackMoveTo
+if (me.soldiers[1] && enemyHQ) {
+  me.soldiers[1].attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ["hq", "soldier", "worker", "barracks"]);
 }
 
 ## 你会收到两类 user 消息

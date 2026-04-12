@@ -413,6 +413,61 @@ describe("Game", () => {
     expect(runtimeWorker.state).toBe("idle");
   });
 
+  it("attack_move keeps advancing and attacks on contact without another command", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.WORKER, 8, 5, "player_2");
+
+    game.queueCommand({
+      id: "attack_move_forward",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: 10, y: 5 },
+      targetPriority: [UNIT_TYPES.WORKER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    expect(attacker.x).toBe(6);
+    expect(target.hp).toBe(target.maxHp);
+
+    game.tickUpdate();
+    game.stop();
+
+    expect(target.hp).toBeLessThan(target.maxHp);
+    expect((attacker.intent as { type: string }).type).toBe("attack_move");
+  });
+
+  it("harvest_loop keeps gathering and delivering without another command", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+
+    runtimeWorker.x = 3;
+    runtimeWorker.y = 9;
+
+    game.queueCommand({
+      id: "harvest_loop_worker",
+      type: "harvest_loop",
+      unitId: worker.id,
+      position: { x: 2, y: 7 },
+      playerId: "player_1",
+    });
+
+    game.start();
+    for (let i = 0; i < 16; i++) {
+      game.tickUpdate();
+    }
+    game.stop();
+
+    expect(game.getState().players[0].resources.credits).toBeGreaterThan(200);
+    expect(runtimeWorker.carryingCredits).toBeLessThan(runtimeWorker.carryCapacity);
+    expect((runtimeWorker.intent as { type: string }).type).toBe("harvest_loop");
+  });
+
   it("keeps snapshot history without mutating earlier snapshots", () => {
     game.start();
     game.tickUpdate();

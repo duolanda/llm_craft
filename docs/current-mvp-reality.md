@@ -259,6 +259,8 @@ me = {
 unit.moveTo({ x, y })
 unit.attack(targetId)
 unit.attackInRange(targetPriority?)
+unit.attackMoveTo({ x, y }, targetPriority?)
+unit.harvestLoop(resourcePos?)
 unit.holdPosition()
 unit.build("barracks", { x, y })
 ```
@@ -275,6 +277,8 @@ building.spawnUnit("worker" | "soldier")
 - 读取单位位置、血量、状态、攻击范围
 - 让单位移动、攻击、待命
 - 让单位在执行时按优先级自动攻击当前射程内的对象
+- 让单位持续 attack-move 前压
+- 让 Worker 持续执行采集循环
 - 让 Worker 建兵营
 - 让建筑产兵
 - 直接把 `moveTo` 指到建筑格或拥堵格，系统会自动尝试改到附近可达格
@@ -284,6 +288,8 @@ building.spawnUnit("worker" | "soldier")
 - `unit.attack(targetId)` 是指定具体目标 ID
 - `unit.attackInRange(targetPriority?)` 是到执行时再按优先级挑当前射程内目标
 - `unit.attackInRange()` 默认优先级是 `["hq", "soldier", "worker", "barracks"]`
+- `unit.attackMoveTo({ x, y }, targetPriority?)` 会在游戏侧持续结算“前进并交战”
+- `unit.harvestLoop(resourcePos?)` 会在游戏侧持续结算“采集 -> 满载返程 -> 卸货 -> 继续采集”
 
 当前不能做的事：
 
@@ -502,6 +508,7 @@ utils = {
 
 - Worker / Soldier: 每 tick 最多移动 1 格
 - `moveTo` 是给目标点，系统自动寻路
+- `attackMoveTo` 会复用寻路，但在行军过程中持续检查并攻击射程内目标
 - 如果目标格不可站，系统会自动改到附近最近的可达格
 - 障碍物不可通行
 - 单位碰撞会阻挡移动
@@ -515,12 +522,14 @@ utils = {
 - 对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
 - 目标不在攻击范围内，命令失败
 - 攻击同队目标会失败
+- `attackMoveTo` 不需要每轮重新补一次 `moveTo + attackInRange`，行为由游戏 tick 持续维持
 
 ### 9.4 建造与产兵
 
 - 只有 Worker 可以建造 Barracks
 - 建造是瞬间完成
 - 建造会扣除 `120 credits`
+- `harvestLoop` 会让 Worker 自动在资源点和 HQ 之间往返；资源采集和交付仍然沿用现有经济规则
 - `HQ` 只能生产 `Worker`
 - `Barracks` 只能生产 `Soldier`
 - 产兵会在建筑附近找空位生成单位

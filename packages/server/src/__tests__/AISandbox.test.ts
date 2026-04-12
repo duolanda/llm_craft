@@ -107,6 +107,45 @@ describe("AISandbox", () => {
     });
   });
 
+  it("should expose attackMoveTo and keep payloads serializable", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const result = await sandbox.executeCode(
+      "me.workers[0].attackMoveTo({ x: enemyBuildings[0].x, y: enemyBuildings[0].y }, ['hq']);",
+      aiState
+    );
+
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.commands).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(result.commands[0]))).toMatchObject({
+      type: "attack_move",
+      position: { x: 18, y: 10 },
+      targetPriority: ["hq"],
+      playerId: "player_1",
+    });
+  });
+
+  it("should expose harvestLoop and keep payloads serializable", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const result = await sandbox.executeCode(
+      "me.workers[0].harvestLoop({ x: 2, y: 7 });",
+      aiState
+    );
+
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.commands).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(result.commands[0]))).toMatchObject({
+      type: "harvest_loop",
+      position: { x: 2, y: 7 },
+      playerId: "player_1",
+    });
+  });
+
   it("distinguishes parent watchdog timeouts from VM execution timeouts", async () => {
     const game = new Game();
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);

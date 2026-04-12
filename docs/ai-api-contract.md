@@ -503,6 +503,8 @@ const me: {
 unit.moveTo(pos: { x: number; y: number }): void;
 unit.attack(targetId: string): void;
 unit.attackInRange(targetPriority?: string[]): void;
+unit.attackMoveTo(pos: { x: number; y: number }, targetPriority?: string[]): void;
+unit.harvestLoop(resourcePos?: { x: number; y: number }): void;
 unit.holdPosition(): void;
 unit.build(buildingType: "barracks", pos: { x: number; y: number }): void;
 ```
@@ -518,6 +520,7 @@ building.spawnUnit(unitType: "worker" | "soldier"): void;
 - `hq` 只能 `spawnUnit("worker")`
 - `barracks` 只能 `spawnUnit("soldier")`
 - `worker.build("barracks", ...)` 是当前唯一可建造的建筑命令
+- `worker.harvestLoop(...)` 会把采集和返程交给游戏侧持续执行
 
 ### 4.3 `enemies`
 
@@ -636,6 +639,8 @@ const utils: {
 - `unit.attackInRange(targetPriority?)` 会在命令真正执行时，按优先级重新选择当前射程内目标
 - `unit.attackInRange()` 的默认优先级是 `["hq", "soldier", "worker", "barracks"]`
 - `unit.attackInRange(["hq", "soldier", "worker"])` 适合在 AI 返回延迟较大时减少目标过期
+- `unit.attackMoveTo(pos, targetPriority?)` 会下发持续前压意图；单位会在逐 tick 前进的同时攻击当前射程内目标
+- `unit.harvestLoop(resourcePos?)` 会下发持续采集意图；Worker 会在资源点和 HQ 之间自动循环
 - 当前攻击范围按 8 邻域计算；对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
 - `unit.holdPosition()` 会下发待命命令
 - `unit.build("barracks", ...)` 会下发建造兵营命令
@@ -670,16 +675,11 @@ if (barracks && me.resources.credits >= unitStats.soldier.cost) {
 
 if (enemyHQ) {
   me.soldiers.forEach(s => {
-    const inRange = Math.max(Math.abs(s.x - enemyHQ.x), Math.abs(s.y - enemyHQ.y)) <= s.attackRange;
-    if (inRange) {
-      s.attackInRange(["hq", "soldier", "worker", "barracks"]);
-    } else {
-      s.moveTo({ x: enemyHQ.x, y: enemyHQ.y });
-    }
+    s.attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ["hq", "soldier", "worker", "barracks"]);
   });
 }
 ```
 
 说明：
 
-- 上面示例里的 `moveTo({ x: enemyHQ.x, y: enemyHQ.y })` 是允许的；如果目标是建筑格，系统会自动吸附到附近可站格
+- 上面示例里的 `attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y })` 也是允许的；如果目标是建筑格，系统会自动吸附到附近可站格

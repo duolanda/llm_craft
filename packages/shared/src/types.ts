@@ -84,7 +84,7 @@ export interface Unit extends GameObject {
   carryCapacity: number;
   // 意图显示
   intent?: {
-    type: 'move' | 'attack' | 'hold' | 'gather' | 'deposit';
+    type: "move" | "attack" | "hold" | "gather" | "deposit" | "attack_move" | "harvest_loop";
     targetX?: number;
     targetY?: number;
     targetId?: string;

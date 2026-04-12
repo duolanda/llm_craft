@@ -156,6 +156,9 @@ export class Game {
         const log = this.addLog(GAME_LOG_TYPES.COMMAND_ERROR, `Command processing crashed for ${command.type}`, {
           command,
           error: error instanceof Error ? error.message : String(error),
+        }, {
+          owner: command.playerId as ActorId,
+          feedbackTarget: command.playerId as AIFeedbackTarget,
         });
         this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Command processing crashed");
         console.error("命令处理异常:", error, command);
@@ -988,6 +991,9 @@ export class Game {
       severity: "warning",
       code,
       commandMeta: meta,
+    }, {
+      owner: command.playerId as ActorId,
+      feedbackTarget: command.playerId as AIFeedbackTarget,
     });
   }
 

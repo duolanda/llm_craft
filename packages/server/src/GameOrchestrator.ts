@@ -24,6 +24,7 @@ const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
+const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
 
 type RecordedAITurn = AITurnRecord & { errorType?: AISandboxErrorType };
 type SavedRecordedAITurn = SavedAITurnRecord & { errorType?: AISandboxErrorType };
@@ -46,11 +47,18 @@ export class GameOrchestrator {
   private lastAIState: Record<string, AIStatePackage | null> = { player_1: null, player_2: null };
   private aiTurns: RecordedAITurn[] = [];
   private aiWindowSize = 20;
+  private readonly transcriptEnabled: boolean;
+  private readonly transcriptFilePath: string | null;
+  private transcriptWriteChain = Promise.resolve();
 
   constructor(config: MatchLLMConfig) {
     this.game = new Game();
     this.ai1 = new AISandbox("player_1");
     this.ai2 = new AISandbox("player_2");
+    this.transcriptEnabled = Boolean(config.debug?.recordLLMTranscript);
+    this.transcriptFilePath = this.transcriptEnabled
+      ? path.join(LLM_DEBUG_DIR, `match-${this.startedAt.replace(/[:.]/g, "-")}.log`)
+      : null;
     this.llm1 = createLLMProvider(config.player1);
     this.llm2 = createLLMProvider(config.player2);
   }
@@ -85,8 +93,26 @@ export class GameOrchestrator {
         this.lastAIState[playerId],
         shouldForceFullState
       );
-      const { code, requestMessages } = await llm.generateCode(promptPayload);
+      const { code, rawResponse, requestMessages, errorMessage: providerErrorMessage } =
+        await llm.generateCode(promptPayload);
       if (!this.isPolling || sessionId !== this.runSession) {
+        await this.writeTranscript(
+          this.formatTranscriptEntry({
+            createdAt: new Date().toISOString(),
+            playerId,
+            requestTick: state.tick,
+            executeTick: undefined,
+            mode: promptPayload.mode,
+            model: llm.getModel(),
+            requestMessages,
+            rawResponse,
+            parsedCode: code,
+            providerErrorMessage,
+            commands: undefined,
+            sandboxErrorMessage: "本轮响应返回后，对局已停止，未执行沙箱。",
+            sandboxErrorType: undefined,
+          })
+        );
         return;
       }
 
@@ -114,6 +140,7 @@ export class GameOrchestrator {
       for (const cmd of commands) {
         this.game.queueCommand(cmd);
       }
+      const createdAt = new Date().toISOString();
       this.aiTurns.push({
         playerId,
         requestTick: state.tick,
@@ -126,16 +153,51 @@ export class GameOrchestrator {
         errorMessage,
         model: llm.getModel(),
         baseURL: llm.getBaseURL(),
-        createdAt: new Date().toISOString(),
+        createdAt,
       });
+      await this.writeTranscript(
+        this.formatTranscriptEntry({
+          createdAt,
+          playerId,
+          requestTick: state.tick,
+          executeTick: latestState.tick,
+          mode: promptPayload.mode,
+          model: llm.getModel(),
+          requestMessages,
+          rawResponse,
+          parsedCode: code,
+          providerErrorMessage,
+          commands,
+          sandboxErrorMessage: errorMessage,
+          sandboxErrorType: errorType,
+        })
+      );
       this.lastAIState[playerId] = latestAIPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
+      const errorMessage = e instanceof Error ? e.message : String(e);
       this.game.addAIFeedback(
         playerId,
         "generation",
         "error",
-        e instanceof Error ? e.message : String(e)
+        errorMessage
+      );
+      await this.writeTranscript(
+        this.formatTranscriptEntry({
+          createdAt: new Date().toISOString(),
+          playerId,
+          requestTick: this.game.getState().tick,
+          executeTick: undefined,
+          mode: "delta",
+          model: playerId === "player_1" ? this.llm1.getModel() : this.llm2.getModel(),
+          requestMessages: [],
+          rawResponse: "",
+          parsedCode: "",
+          providerErrorMessage: errorMessage,
+          commands: undefined,
+          sandboxErrorMessage: "AI 调度阶段抛出异常，未完成本轮执行。",
+          sandboxErrorType: undefined,
+        })
       );
     } finally {
       this.isRunningAI[playerId as keyof typeof this.isRunningAI] = false;
@@ -405,5 +467,56 @@ export class GameOrchestrator {
       }
     }
     return diff;
+  }
+
+  private formatTranscriptEntry(input: {
+    createdAt: string;
+    playerId: string;
+    requestTick: number;
+    executeTick?: number;
+    mode: "full" | "delta";
+    model: string;
+    requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+    rawResponse: string;
+    parsedCode: string;
+    providerErrorMessage?: string;
+    commands?: unknown[];
+    sandboxErrorMessage?: string;
+    sandboxErrorType?: string;
+  }): string {
+    return [
+      `[${input.createdAt}] player=${input.playerId} mode=${input.mode} requestTick=${input.requestTick} executeTick=${input.executeTick ?? "n/a"} model=${input.model}`,
+      "--- request ---",
+      input.requestMessages.length > 0
+        ? input.requestMessages.map((message) => `(${message.role})\n${message.content}`).join("\n\n")
+        : "(none)",
+      "--- response ---",
+      input.rawResponse || "(empty)",
+      "--- parsed_code ---",
+      input.parsedCode || "(empty)",
+      "--- provider_error ---",
+      input.providerErrorMessage || "(none)",
+      "--- commands ---",
+      input.commands && input.commands.length > 0 ? JSON.stringify(input.commands, null, 2) : "(none)",
+      "--- sandbox ---",
+      input.sandboxErrorMessage
+        ? `${input.sandboxErrorType ? `type=${input.sandboxErrorType}\n` : ""}${input.sandboxErrorMessage}`
+        : "(none)",
+      "==========",
+      "",
+    ].join("\n");
+  }
+
+  private async writeTranscript(content: string): Promise<void> {
+    if (!this.transcriptEnabled || !this.transcriptFilePath) {
+      return;
+    }
+
+    this.transcriptWriteChain = this.transcriptWriteChain.then(async () => {
+      await fs.mkdir(LLM_DEBUG_DIR, { recursive: true });
+      await fs.appendFile(this.transcriptFilePath!, content, "utf8");
+    });
+
+    await this.transcriptWriteChain;
   }
 }

@@ -336,6 +336,7 @@ describe("server settings", () => {
         baseURL: "https://api.two.test/v1",
         model: "model-two",
       }),
+      debug: undefined,
     });
     expect(start).toHaveBeenCalledTimes(1);
     expect(state.orchestrator).not.toBeNull();
@@ -442,6 +443,51 @@ describe("server settings", () => {
     });
 
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("预设中的 API Key 无法解密"));
+  });
+
+  it("passes per-match debug flags through start message orchestration config", async () => {
+    const presetStore = await createStore();
+    const player1Preset = await presetStore.create({
+      name: "Red",
+      providerType: "openai-compatible",
+      baseURL: "https://api.one.test/v1",
+      model: "model-one",
+      apiKey: "token-one",
+    });
+    const player2Preset = await presetStore.create({
+      name: "Blue",
+      providerType: "openai-compatible",
+      baseURL: "https://api.two.test/v1",
+      model: "model-two",
+      apiKey: "token-two",
+    });
+    const createOrchestrator = vi.fn(() => ({
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(() => undefined),
+      saveRecord: vi.fn(async () => "logs/records/mock.json"),
+      getGame: vi.fn(() => ({
+        getState: () => null,
+        getSnapshots: () => [],
+      })),
+    }));
+    const state = createServerState(presetStore, createOrchestrator);
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+        debug: { recordLLMTranscript: true },
+      }),
+      ws: { send: vi.fn() } as any,
+      state,
+    });
+
+    expect(createOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        debug: { recordLLMTranscript: true },
+      })
+    );
   });
 
   it("builds live state payloads without hitting preset storage and only includes the latest snapshot", async () => {

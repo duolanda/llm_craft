@@ -5,6 +5,7 @@ import {
   GameSnapshot,
   GameState,
   LLMPresetSummary,
+  MatchDebugOptions,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
@@ -61,6 +62,7 @@ function App() {
   const [presetError, setPresetError] = useState<string | null>(null);
   const [player1PresetId, setPlayer1PresetId] = useState("");
   const [player2PresetId, setPlayer2PresetId] = useState("");
+  const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -252,7 +254,12 @@ function App() {
     setStartPending(false);
     setIsPlaying(false);
     setWinnerOverlayDismissed(false);
-    send({ type: "reset", player1PresetId, player2PresetId });
+    send({
+      type: "reset",
+      player1PresetId,
+      player2PresetId,
+      debug: buildMatchDebugOptions(recordLLMTranscript),
+    });
   };
 
   const startLiveMatch = () => {
@@ -264,7 +271,12 @@ function App() {
     setStartPending(true);
     setStartBaselineTick(state?.tick ?? -1);
     setIsPlaying(false);
-    send({ type: "start", player1PresetId, player2PresetId });
+    send({
+      type: "start",
+      player1PresetId,
+      player2PresetId,
+      debug: buildMatchDebugOptions(recordLLMTranscript),
+    });
   };
 
   const handleStop = () => {
@@ -376,6 +388,14 @@ function App() {
                         </option>
                       ))}
                     </select>
+                  </label>
+                  <label className="settings-field compact live-debug-toggle">
+                    <span>LLM Debug</span>
+                    <input
+                      type="checkbox"
+                      checked={recordLLMTranscript}
+                      onChange={(event) => setRecordLLMTranscript(event.target.checked)}
+                    />
                   </label>
                 </div>
                 <button
@@ -632,3 +652,7 @@ function App() {
 }
 
 export default App;
+
+function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
+  return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+}

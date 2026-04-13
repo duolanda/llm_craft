@@ -17,6 +17,7 @@ function createPayload(): AIPromptPayload {
 function createResult(): GenerateCodeResult {
   return {
     code: "return [];",
+    rawResponse: "return [];",
     requestMessages: [],
   };
 }

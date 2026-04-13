@@ -377,7 +377,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
       const previousOrchestrator = state.orchestrator;
-      const nextOrchestrator = state.createOrchestrator({ player1, player2 });
+      const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
 
       try {
         await nextOrchestrator.start();
@@ -408,7 +408,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
       const previousOrchestrator = state.orchestrator;
-      const nextOrchestrator = state.createOrchestrator({ player1, player2 });
+      const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
 
       state.orchestrator = nextOrchestrator;
       previousOrchestrator?.stop();

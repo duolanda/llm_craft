@@ -12,9 +12,14 @@ export interface OpenAICompatibleRuntimeConfig {
 
 export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig;
 
+export interface MatchDebugOptions {
+  recordLLMTranscript?: boolean;
+}
+
 export interface MatchLLMConfig {
   player1: MatchPlayerLLMConfig;
   player2: MatchPlayerLLMConfig;
+  debug?: MatchDebugOptions;
 }
 
 export interface LLMPresetSummary {

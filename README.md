@@ -135,6 +135,52 @@ pnpm --filter @llmcraft/client build
 - 回放是基于 `initialState + tickDeltas + commandResults + aiTurns` 的重建，不是重新跑一遍引擎
 - 视觉过程和战局分析是可靠的，但极少数瞬时内部状态不保证 100% 还原
 
+## 记录与调试日志
+
+当前有两种不同的文件输出，职责不同：
+
+- `logs/records/*.json`：对局记录文件，用于回放和结构化分析
+- `packages/server/logs/llm-debug/*.log`：单局 LLM debug transcript，用于人工排查 prompt / response / 执行结果
+
+### `save_record` 会保存什么
+
+- 点击前端“保存记录”，或对局结束后前端自动触发 `save_record`
+- 服务端会把当前整局写成一份 JSON 到 `logs/records/`
+- 这份 JSON 包含 `initialState / finalState / tickDeltas / commandResults / aiTurns`
+
+### `LLM Debug` 会保存什么
+
+- 前端勾选 `LLM Debug` 后，再执行 `start` 或 `reset`
+- 该开关只对当前这一局生效
+- 服务端会为这局分配一个独立 transcript 路径：`packages/server/logs/llm-debug/match-<timestamp>.log`
+
+当前实现里，debug transcript 不是在点击 `start/reset` 时立刻创建空文件，而是在该局第一次真正写入 transcript 时才创建目录和文件。
+
+### transcript 何时真正落盘
+
+服务端会在以下场景向当前对局的 `.log` 追加一段纯文本：
+
+- 一轮 LLM 请求正常返回，且随后完成沙箱执行
+- LLM 已返回，但这时对局已经停止，于是记录“未执行沙箱”
+- `runAI()` 流程抛异常，于是记录调度失败
+
+每一段 transcript 当前会包含：
+
+- 时间、玩家、`mode`、`requestTick`、`executeTick`、模型名
+- 完整 request messages
+- 原始 response
+- 清洗后的代码
+- provider 错误
+- 命令结果
+- 沙箱错误
+
+### 暂停、重置与文件边界
+
+- `暂停` 不会主动新建文件，也不会强制写一个结束块
+- 如果暂停前已经有请求在飞，等它返回后，仍可能向当前 transcript 追加最后一段“对局已停止，未执行沙箱”
+- `重置` 会创建新的 `GameOrchestrator`，因此按当前实现视为新对局，并使用新的 transcript 文件
+- 如果某一局在被暂停或重置前从未发生过任何 transcript 写入，那么这局可能不会留下 `.log` 文件
+
 ## 游戏机制
 
 ### 地图

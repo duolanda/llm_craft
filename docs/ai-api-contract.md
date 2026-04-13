@@ -83,7 +83,10 @@ interface UpdateLLMPresetRequest {
 {
   "type": "start",
   "player1PresetId": "preset-red",
-  "player2PresetId": "preset-blue"
+  "player2PresetId": "preset-blue",
+  "debug": {
+    "recordLLMTranscript": true
+  }
 }
 ```
 
@@ -91,6 +94,7 @@ interface UpdateLLMPresetRequest {
 
 - 红蓝双方必须都选择预设
 - 服务端会按两个 preset 分别解密并创建两套独立 provider
+- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 LLM 完整 transcript 到 `packages/server/logs/llm-debug/`
 - 若 preset 不存在、不可解密或启动失败，服务端会通过 `type = "error"` 返回可读错误消息
 
 ### 0.6 WebSocket `reset`
@@ -101,13 +105,17 @@ interface UpdateLLMPresetRequest {
 {
   "type": "reset",
   "player1PresetId": "preset-red",
-  "player2PresetId": "preset-blue"
+  "player2PresetId": "preset-blue",
+  "debug": {
+    "recordLLMTranscript": true
+  }
 }
 ```
 
 说明：
 
 - `reset` 会按当前红蓝预设创建一局新的初始状态
+- `debug.recordLLMTranscript` 会跟随这次重置后的新对局配置
 - `reset` 不会自动开始模拟
 - 用户需要随后再发送 `start` 才会开始新一局
 

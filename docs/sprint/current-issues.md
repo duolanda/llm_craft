@@ -103,6 +103,17 @@
   - ✅ 新增 `unitStats` - 单位属性表：speed/attack/attackRange/cost/hp
   - ✅ 更新 SystemPrompt，告知 AI 如何使用新接口
 
+### 6.1 shared 改动后下游脚本缺少自动预构建护栏
+- **描述**: `packages/shared/src/*` 变更后，`server/client` 当前依赖的是 shared 的 `dist` 产物；如果直接跑 `pnpm --filter @llmcraft/server test|typecheck` 或 `pnpm --filter @llmcraft/client build|typecheck`，很容易继续读取旧的 shared 输出
+- **影响**:
+  - 容易出现“代码已经改了，但下游类型/协议还没生效”的假象
+  - 排查成本高，尤其是改 `types.ts`、`ws-messages.ts` 这类共享契约时
+  - 该问题对 agent 和人工开发都会反复踩坑
+- **建议方向**:
+  - 在 `packages/server/package.json` 增加 `pretest` / `pretypecheck` / `prebuild`，先执行 `pnpm --filter @llmcraft/shared build`
+  - 在 `packages/client/package.json` 增加 `pretypecheck` / `prebuild`，先执行 `pnpm --filter @llmcraft/shared build`
+  - 保留根脚本里的 shared 构建步骤，但不要只依赖根脚本约束
+
 ## 低优先级
 
 ### 7. 前端 UI 改进 ✅ 已完成
@@ -152,4 +163,4 @@
 
 ---
 
-*最后更新: 2026-04-12*
+*最后更新: 2026-04-13*

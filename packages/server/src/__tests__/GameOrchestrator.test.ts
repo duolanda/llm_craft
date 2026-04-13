@@ -13,14 +13,16 @@ function createDeferred<T>() {
 
 type GenerateCodeResult = {
   code: string;
+  rawResponse: string;
   requestMessages: Array<{
     role: "system" | "user" | "assistant";
     content: string;
   }>;
+  errorMessage?: string;
 };
 
 function createEmptyGenerateCodeResult(): GenerateCodeResult {
-  return { code: "", requestMessages: [] };
+  return { code: "", rawResponse: "", requestMessages: [] };
 }
 
 type ExecuteCodeResult = {
@@ -198,6 +200,7 @@ describe("GameOrchestrator", () => {
       shouldForceFullState: () => false,
       generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
         code: "while (true) {}",
+        rawResponse: "while (true) {}",
         requestMessages: [],
       })),
       getModel: () => "test-model",
@@ -400,6 +403,43 @@ describe("GameOrchestrator", () => {
     expect(firstCall[0].mode).toBe("full");
 
     orchestrator.stop();
+  });
+
+  it("writes a readable transcript file when per-match debug recording is enabled", async () => {
+    const mkdirSpy = vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+    const appendFileSpy = vi.spyOn(fs, "appendFile").mockResolvedValue(undefined);
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      debug: { recordLLMTranscript: true },
+    });
+
+    (orchestrator as any).isPolling = true;
+    (orchestrator as any).llm1 = {
+      shouldForceFullState: () => false,
+      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
+        code: "function main() {}",
+        rawResponse: "```javascript\nfunction main() {}\n```",
+        requestMessages: [{ role: "user", content: "{\"tick\":0}" }],
+      })),
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).ai1 = {
+      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
+        commands: [],
+        errorMessage: undefined,
+      })),
+    };
+
+    await orchestrator.runAI("player_1");
+
+    expect(mkdirSpy).toHaveBeenCalled();
+    expect(appendFileSpy).toHaveBeenCalledTimes(1);
+    const transcript = appendFileSpy.mock.calls[0]?.[1];
+    expect(String(transcript)).toContain("player=player_1");
+    expect(String(transcript)).toContain("--- request ---");
+    expect(String(transcript)).toContain("--- response ---");
+    expect(String(transcript)).toContain("function main() {}");
   });
 });
 

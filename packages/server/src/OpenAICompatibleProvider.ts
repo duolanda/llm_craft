@@ -30,7 +30,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   async generateCode(payload: AIPromptPayload): Promise<{
     code: string;
+    rawResponse: string;
     requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+    errorMessage?: string;
   }> {
     const userPrompt = JSON.stringify(payload, null, 2);
     const requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
@@ -50,8 +52,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
         max_tokens: 1024,
       });
 
-      const code = response.choices[0]?.message?.content || "";
-      const cleanedCode = this.cleanCode(code);
+      const rawResponse = response.choices[0]?.message?.content || "";
+      const cleanedCode = this.cleanCode(rawResponse);
       this.history.push({
         mode: payload.mode,
         user: userPrompt,
@@ -60,10 +62,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
       if (this.history.length > this.maxTurns) {
         this.history = this.history.slice(-this.maxTurns);
       }
-      return { code: cleanedCode, requestMessages };
+      return { code: cleanedCode, rawResponse, requestMessages };
     } catch (e) {
       console.error("OpenAI API 错误:", e);
-      return { code: "// AI 生成失败", requestMessages };
+      return {
+        code: "// AI 生成失败",
+        rawResponse: "",
+        requestMessages,
+        errorMessage: e instanceof Error ? e.message : String(e),
+      };
     }
   }
 

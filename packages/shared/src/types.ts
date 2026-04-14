@@ -2,6 +2,8 @@ import { UnitType, BuildingType, UnitState, TileType, ResultCode } from "./const
 
 export type LLMProviderType = "openai-compatible";
 
+export type CPUStrategyType = "random" | "rush";
+
 export interface OpenAICompatibleRuntimeConfig {
   providerType: "openai-compatible";
   apiKey: string;
@@ -10,7 +12,12 @@ export interface OpenAICompatibleRuntimeConfig {
   rpm?: number | null;
 }
 
-export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig;
+export interface BuiltinCPURuntimeConfig {
+  providerType: "builtin-cpu";
+  strategy: CPUStrategyType;
+}
+
+export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig | BuiltinCPURuntimeConfig;
 
 export interface MatchDebugOptions {
   recordLLMTranscript?: boolean;

@@ -10,4 +10,6 @@ logs/*.json
 .vscode/
 *.tsbuildinfo
 packages/server/logs/records/
+packages/server/logs/benchmark-records/
+packages/server/logs/benchmark-llm-debug/
 **/llm-presets.json

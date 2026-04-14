@@ -29,6 +29,17 @@ const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
 type RecordedAITurn = AITurnRecord & { errorType?: AISandboxErrorType };
 type SavedRecordedAITurn = SavedAITurnRecord & { errorType?: AISandboxErrorType };
 
+export interface GameOrchestratorRuntimeOptions {
+  aiIntervalTicks?: number;
+  aiIntervalTicksByPlayer?: Partial<Record<"player_1" | "player_2", number>>;
+  recordDir?: string;
+  transcriptDir?: string;
+}
+
+export type GameOrchestratorConfig = MatchLLMConfig & {
+  runtime?: GameOrchestratorRuntimeOptions;
+};
+
 export class GameOrchestrator {
   private game: Game;
   private ai1: AISandbox;
@@ -36,7 +47,8 @@ export class GameOrchestrator {
   private llm1: LLMProvider;
   private llm2: LLMProvider;
   private lastAIDispatchTick = { player_1: -100, player_2: -100 };
-  private aiInterval = 5; // AI 每 5 个 tick 思考一次
+  private aiInterval = 5; // 兼容记录格式，表示默认 AI 间隔
+  private aiIntervals = { player_1: 5, player_2: 5 };
   private isRunningAI = { player_1: false, player_2: false }; // 防止并发调用
   private aiDirty = { player_1: true, player_2: true };
   private lastObservedTick = -1;
@@ -49,15 +61,24 @@ export class GameOrchestrator {
   private aiWindowSize = 20;
   private readonly transcriptEnabled: boolean;
   private readonly transcriptFilePath: string | null;
+  private readonly recordDir: string;
+  private lastSavedRecordSignature: string | null = null;
+  private lastSavedRecordPath: string | null = null;
   private transcriptWriteChain = Promise.resolve();
 
-  constructor(config: MatchLLMConfig) {
+  constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
     this.ai1 = new AISandbox("player_1");
     this.ai2 = new AISandbox("player_2");
+    this.aiInterval = config.runtime?.aiIntervalTicks ?? 5;
+    this.aiIntervals = {
+      player_1: config.runtime?.aiIntervalTicksByPlayer?.player_1 ?? this.aiInterval,
+      player_2: config.runtime?.aiIntervalTicksByPlayer?.player_2 ?? this.aiInterval,
+    };
+    this.recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
     this.transcriptEnabled = Boolean(config.debug?.recordLLMTranscript);
     this.transcriptFilePath = this.transcriptEnabled
-      ? path.join(LLM_DEBUG_DIR, `match-${this.startedAt.replace(/[:.]/g, "-")}.log`)
+      ? path.join(config.runtime?.transcriptDir ?? LLM_DEBUG_DIR, `match-${this.startedAt.replace(/[:.]/g, "-")}.log`)
       : null;
     this.llm1 = createLLMProvider(config.player1);
     this.llm2 = createLLMProvider(config.player2);
@@ -65,6 +86,10 @@ export class GameOrchestrator {
 
   getGame(): Game {
     return this.game;
+  }
+
+  getTranscriptFilePath(): string | null {
+    return this.transcriptFilePath;
   }
 
   async runAI(playerId: string, sessionId = this.runSession): Promise<void> {
@@ -234,7 +259,7 @@ export class GameOrchestrator {
           this.aiDirty[playerId as keyof typeof this.aiDirty] &&
           !this.isRunningAI[playerId as keyof typeof this.isRunningAI] &&
           state.tick - this.lastAIDispatchTick[playerId as keyof typeof this.lastAIDispatchTick] >=
-            this.aiInterval
+            this.aiIntervals[playerId as keyof typeof this.aiIntervals]
         ) {
           void this.runAI(playerId, this.runSession);
         }
@@ -257,14 +282,28 @@ export class GameOrchestrator {
   }
 
   async saveRecord(): Promise<string> {
+    const state = this.game.getState();
+    const recordStatus = this.game.getWinner() ? "finished" : this.game.isGameRunning() ? "running" : "stopped";
+    const recordSignature = JSON.stringify({
+      tick: state.tick,
+      winner: this.game.getWinner(),
+      status: recordStatus,
+      aiTurns: this.aiTurns.length,
+      commandResults: this.game.getCommandResults().length,
+    });
+
+    if (this.lastSavedRecordSignature === recordSignature && this.lastSavedRecordPath) {
+      return this.lastSavedRecordPath;
+    }
+
     const snapshots = this.game.getSnapshots();
-    const initialState = snapshots[0]?.state || this.game.getState();
+    const initialState = snapshots[0]?.state || state;
     const record: GameRecord = {
       metadata: {
         startedAt: this.startedAt,
         savedAt: new Date().toISOString(),
         endedAt: this.game.getWinner() || !this.game.isGameRunning() ? new Date().toISOString() : undefined,
-        status: this.game.getWinner() ? "finished" : this.game.isGameRunning() ? "running" : "stopped",
+        status: recordStatus,
         winner: this.game.getWinner(),
         aiIntervalTicks: this.aiInterval,
         aiContextWindowTurns: this.aiWindowSize,
@@ -288,16 +327,18 @@ export class GameOrchestrator {
         ],
       },
       initialState,
-      finalState: this.game.getState(),
+      finalState: state,
       tickDeltas: this.buildTickDeltas(snapshots),
       commandResults: this.game.getCommandResults(),
       aiTurns: this.buildSavedAITurns(),
     };
 
-    await fs.mkdir(RECORDS_DIR, { recursive: true });
+    await fs.mkdir(this.recordDir, { recursive: true });
     const fileName = `match-${record.metadata.savedAt.replace(/[:.]/g, "-")}.json`;
-    const filePath = path.join(RECORDS_DIR, fileName);
+    const filePath = path.join(this.recordDir, fileName);
     await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
+    this.lastSavedRecordSignature = recordSignature;
+    this.lastSavedRecordPath = filePath;
     return filePath;
   }
 

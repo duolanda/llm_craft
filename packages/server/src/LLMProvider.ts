@@ -1,6 +1,7 @@
-import { AIPromptPayload, MatchPlayerLLMConfig } from "@llmcraft/shared";
+import { AIPromptPayload, MatchPlayerLLMConfig, OpenAICompatibleRuntimeConfig } from "@llmcraft/shared";
 
 export type LLMProviderConfig = MatchPlayerLLMConfig;
+export type OpenAIProviderConfig = OpenAICompatibleRuntimeConfig;
 
 export interface GenerateCodeResult {
   code: string;

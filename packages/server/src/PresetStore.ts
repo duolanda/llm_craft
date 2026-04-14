@@ -1,7 +1,7 @@
 import {
   CreateLLMPresetRequest,
   LLMPresetSummary,
-  MatchPlayerLLMConfig,
+  OpenAICompatibleRuntimeConfig,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
@@ -12,7 +12,7 @@ import { decryptString, encryptString } from "./crypto";
 interface StoredPresetRecord {
   id: string;
   name: string;
-  providerType: MatchPlayerLLMConfig["providerType"];
+  providerType: CreateLLMPresetRequest["providerType"];
   baseURL: string;
   model: string;
   rpm?: number | null;
@@ -98,7 +98,7 @@ export class PresetStore {
     });
   }
 
-  async getRuntimeConfig(id: string): Promise<MatchPlayerLLMConfig> {
+  async getRuntimeConfig(id: string): Promise<OpenAICompatibleRuntimeConfig> {
     return this.withLock(async () => {
       const presets = await this.readAll();
       const preset = presets.find((item) => item.id === id);
@@ -114,7 +114,7 @@ export class PresetStore {
       }
 
       return {
-        providerType: preset.providerType,
+        providerType: "openai-compatible",
         apiKey,
         baseURL: preset.baseURL,
         model: preset.model,
@@ -151,7 +151,7 @@ export class PresetStore {
     return {
       id: preset.id,
       name: preset.name,
-      providerType: preset.providerType,
+      providerType: "openai-compatible",
       baseURL: preset.baseURL,
       model: preset.model,
       rpm: preset.rpm ?? null,

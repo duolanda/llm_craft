@@ -1030,6 +1030,47 @@ body {
   box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.12);
 }
 
+.benchmark-number-input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  padding-right: 12px;
+}
+
+.benchmark-number-input::-webkit-outer-spin-button,
+.benchmark-number-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.benchmark-toggle-group {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.benchmark-inline-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.benchmark-inline-toggle-row input {
+  margin: 0;
+  accent-color: #00d98b;
+  flex: 0 0 auto;
+}
+
+.benchmark-inline-toggle-row input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .live-preset-select {
   min-width: 170px;
 }
@@ -1053,6 +1094,12 @@ body {
 
   .settings-field-wide {
     grid-column: auto;
+  }
+
+  .benchmark-toggle-group {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
   }
 }
 

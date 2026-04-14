@@ -3,6 +3,8 @@ import {
   ClientMessage,
   GameState,
   GameSnapshot,
+  ServerBenchmarkCompleteMessage,
+  ServerBenchmarkProgressMessage,
   isServerMessage,
 } from "@llmcraft/shared";
 
@@ -13,6 +15,8 @@ export function useWebSocket(url: string) {
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [serverMessage, setServerMessage] = useState<string | null>(null);
+  const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
+  const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const send = useCallback((message: ClientMessage) => {
@@ -23,6 +27,11 @@ export function useWebSocket(url: string) {
 
   const clearServerMessage = useCallback(() => {
     setServerMessage(null);
+  }, []);
+
+  const clearBenchmarkResult = useCallback(() => {
+    setBenchmarkResult(null);
+    setBenchmarkProgress(null);
   }, []);
 
   useEffect(() => {
@@ -58,6 +67,15 @@ export function useWebSocket(url: string) {
           case "record_saved":
             setLastSavedRecordPath(parsed.filePath);
             break;
+
+          case "benchmark_progress":
+            setBenchmarkProgress(parsed);
+            break;
+
+          case "benchmark_complete":
+            setBenchmarkProgress(null);
+            setBenchmarkResult(parsed);
+            break;
         }
       } catch (e) {
         console.error("消息解析错误:", e);
@@ -78,5 +96,17 @@ export function useWebSocket(url: string) {
     };
   }, [url]);
 
-  return { state, snapshots, connected, lastSavedRecordPath, liveEnabled, serverMessage, send, clearServerMessage };
+  return {
+    state,
+    snapshots,
+    connected,
+    lastSavedRecordPath,
+    liveEnabled,
+    serverMessage,
+    benchmarkProgress,
+    benchmarkResult,
+    send,
+    clearServerMessage,
+    clearBenchmarkResult,
+  };
 }

@@ -1,5 +1,6 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CPUStrategyType,
   CreateLLMPresetRequest,
   GameRecord,
   GameSnapshot,
@@ -15,6 +16,8 @@ import { StatsPanel } from "./components/StatsPanel";
 import { LegendPanel } from "./components/LegendPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsOverlay } from "./components/SettingsOverlay";
+import { BenchmarkPanel } from "./components/BenchmarkPanel";
+import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
@@ -40,8 +43,11 @@ function App() {
     lastSavedRecordPath,
     liveEnabled,
     serverMessage,
+    benchmarkProgress,
+    benchmarkResult,
     send,
     clearServerMessage,
+    clearBenchmarkResult,
   } = useWebSocket(WS_URL);
   const [isPlaying, setIsPlaying] = useState(false);
   const [winnerOverlayDismissed, setWinnerOverlayDismissed] = useState(false);
@@ -66,11 +72,17 @@ function App() {
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [benchmarkOpen, setBenchmarkOpen] = useState(false);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkRunSummary, setBenchmarkRunSummary] = useState<{
+    cpuStrategy: CPUStrategyType;
+    totalRounds: number;
+  } | null>(null);
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (mode !== "live") {
+    if (mode !== "live" || benchmarkRunning) {
       return;
     }
 
@@ -84,10 +96,10 @@ function App() {
     } else {
       lastAutoSavedWinnerRef.current = null;
     }
-  }, [mode, send, state?.winner]);
+  }, [benchmarkRunning, mode, send, state?.winner]);
 
   useEffect(() => {
-    if (mode !== "live" || !state?.winner || winnerOverlayDismissed) {
+    if (mode !== "live" || benchmarkRunning || !state?.winner || winnerOverlayDismissed) {
       return;
     }
 
@@ -101,7 +113,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [mode, state?.winner, winnerOverlayDismissed]);
+  }, [benchmarkRunning, mode, state?.winner, winnerOverlayDismissed]);
 
   useEffect(() => {
     if (!startPending) {
@@ -125,6 +137,24 @@ function App() {
       setHasLiveMatchStarted(true);
     }
   }, [startBaselineTick, startPending, state]);
+
+  useEffect(() => {
+    if (!benchmarkResult) {
+      return;
+    }
+
+    setBenchmarkRunning(false);
+    setBenchmarkOpen(true);
+    setBenchmarkRunSummary(null);
+    void fetchRecordEntries();
+  }, [benchmarkResult]);
+
+  useEffect(() => {
+    if (benchmarkRunning && serverMessage) {
+      setBenchmarkRunning(false);
+      setBenchmarkRunSummary(null);
+    }
+  }, [benchmarkRunning, serverMessage]);
 
   useEffect(() => {
     if (mode !== "replay" || !replayPlaying || replayFrames.length <= 1) {
@@ -289,6 +319,35 @@ function App() {
     send({ type: "save_record" });
   };
 
+  const handleStartBenchmark = (input: {
+    presetId: string;
+    cpuStrategy: CPUStrategyType;
+    rounds: number;
+    recordReplay: boolean;
+    decisionIntervalTicks: number;
+    debug?: MatchDebugOptions;
+  }) => {
+    clearServerMessage();
+    clearBenchmarkResult();
+    setBenchmarkRunning(true);
+    setBenchmarkOpen(false);
+    setBenchmarkRunSummary({
+      cpuStrategy: input.cpuStrategy,
+      totalRounds: input.rounds,
+    });
+    setWinnerOverlayDismissed(true);
+    setIsPlaying(false);
+    send({
+      type: "start_benchmark",
+      presetId: input.presetId,
+      cpuStrategy: input.cpuStrategy,
+      rounds: input.rounds,
+      recordReplay: input.recordReplay,
+      decisionIntervalTicks: input.decisionIntervalTicks,
+      debug: input.debug,
+    });
+  };
+
   const handleCreatePreset = async (input: CreateLLMPresetRequest) => {
     await createPreset(API_BASE_URL, input);
     await refreshPresets();
@@ -318,14 +377,15 @@ function App() {
     ? replayFrameIndex / (replayFrames.length - 1)
     : 0;
   const canStartLiveMatch = connected && liveEnabled && Boolean(player1PresetId) && Boolean(player2PresetId);
-  const canStopLiveMatch = connected && (isPlaying || startPending);
+  const canStopLiveMatch = connected && (isPlaying || startPending || benchmarkRunning);
   const canRestartLiveMatch = connected
     && !isPlaying
     && !startPending
+    && !benchmarkRunning
     && hasLiveMatchStarted
     && Boolean(player1PresetId)
     && Boolean(player2PresetId);
-  const canSaveLiveMatch = connected && Boolean(state || isPlaying);
+  const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
 
   return (
     <>
@@ -402,16 +462,38 @@ function App() {
                   type="button"
                   className="hud-btn hud-btn-ghost"
                   onClick={() => setSettingsOpen(true)}
+                  disabled={benchmarkRunning}
                 >
                   设置
                 </button>
                 <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
+                  onClick={() => {
+                    clearBenchmarkResult();
+                    setBenchmarkOpen(true);
+                  }}
+                  disabled={!connected || presets.length === 0 || benchmarkRunning}
+                >
+                  Benchmark
+                </button>
+                <button
                   onClick={isPlaying ? handleStop : handleStart}
-                  disabled={isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
+                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                 >
                   {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
                 </button>
+                {benchmarkRunning && (
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-stop"
+                    onClick={handleStop}
+                    disabled={!canStopLiveMatch}
+                  >
+                    停止 Benchmark
+                  </button>
+                )}
                 {canRestartLiveMatch && (
                   <button
                     onClick={handleRestart}
@@ -436,6 +518,13 @@ function App() {
         {(serverMessage || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
+            {(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary)) && (
+              <span>
+                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: {benchmarkProgress?.completedRounds ?? 0} / {benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0}
+                {" · "}
+                LLM / CPU / 平 {benchmarkProgress?.llmWins ?? 0} / {benchmarkProgress?.cpuWins ?? 0} / {benchmarkProgress?.draws ?? 0}
+              </span>
+            )}
             {replayError && <span className="status-error">{replayError}</span>}
             {presetError && <span className="status-error">{presetError}</span>}
             {lastSavedRecordPath && <span>记录已保存到: {lastSavedRecordPath}</span>}
@@ -626,7 +715,34 @@ function App() {
           />
         </SettingsOverlay>
 
-        {mode === "live" && state?.winner && !winnerOverlayDismissed && (
+        <SettingsOverlay
+          open={mode === "live" && benchmarkOpen}
+          title={benchmarkResult ? "Benchmark 结果" : "Benchmark"}
+          onClose={() => {
+            setBenchmarkOpen(false);
+            if (benchmarkResult) {
+              clearBenchmarkResult();
+            }
+          }}
+        >
+          {benchmarkOpen && !benchmarkRunning && !benchmarkResult && (
+            <BenchmarkPanel
+              presets={presets}
+              initialPresetId={player1PresetId}
+              running={benchmarkRunning}
+              onStart={handleStartBenchmark}
+              onClose={() => setBenchmarkOpen(false)}
+            />
+          )}
+          {benchmarkOpen && benchmarkResult && (
+            <BenchmarkResult
+              progress={benchmarkProgress}
+              result={benchmarkResult}
+            />
+          )}
+        </SettingsOverlay>
+
+        {mode === "live" && !benchmarkRunning && state?.winner && !winnerOverlayDismissed && (
           <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>
             <div className="winner-card" onClick={(event) => event.stopPropagation()}>
               <div className="winner-label">Simulation Complete</div>

@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { AIPromptPayload } from "@llmcraft/shared";
-import { LLMProvider, LLMProviderConfig } from "./LLMProvider";
+import { LLMProvider, OpenAIProviderConfig } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
 export class OpenAICompatibleProvider implements LLMProvider {
@@ -14,7 +14,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }> = [];
   private maxTurns = 20;
 
-  constructor(config: LLMProviderConfig) {
+  constructor(config: OpenAIProviderConfig) {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,

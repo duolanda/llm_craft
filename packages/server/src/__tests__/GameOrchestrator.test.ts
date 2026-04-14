@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AIPromptPayload, AIStatePackage } from "@llmcraft/shared";
 import { GameOrchestrator } from "../GameOrchestrator";
@@ -191,6 +193,32 @@ describe("GameOrchestrator", () => {
     await fs.unlink(recordPath);
   });
 
+  it("saveRecord reuses the same file for unchanged finished state", async () => {
+    const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-record-"));
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      runtime: {
+        recordDir,
+      },
+    });
+    const game = orchestrator.getGame();
+
+    game.start();
+    for (let i = 0; i < 5; i++) {
+      game.tickUpdate();
+    }
+    game.stop();
+
+    const firstPath = await orchestrator.saveRecord();
+    const secondPath = await orchestrator.saveRecord();
+    const files = await fs.readdir(recordDir);
+
+    expect(secondPath).toBe(firstPath);
+    expect(files).toHaveLength(1);
+
+    await fs.rm(recordDir, { recursive: true, force: true });
+  });
+
   it("records structured sandbox error types in ai turn records", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const game = orchestrator.getGame();
@@ -286,6 +314,54 @@ describe("GameOrchestrator", () => {
       throw new Error("Expected second generateCode call");
     }
     expect(secondCall[0].tick).toBeGreaterThanOrEqual(5);
+
+    orchestrator.stop();
+  });
+
+  it("supports different AI intervals per player", async () => {
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      runtime: {
+        aiIntervalTicksByPlayer: {
+          player_1: 2,
+          player_2: 6,
+        },
+      },
+    });
+    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
+      async () => createEmptyGenerateCodeResult()
+    );
+    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
+      async () => createEmptyGenerateCodeResult()
+    );
+
+    (orchestrator as any).llm1 = {
+      shouldForceFullState: () => false,
+      generateCode: player1GenerateCode,
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).llm2 = {
+      shouldForceFullState: () => false,
+      generateCode: player2GenerateCode,
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).ai1 = {
+      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
+    };
+    (orchestrator as any).ai2 = {
+      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
+    };
+
+    await orchestrator.start();
+
+    expect(player1GenerateCode).toHaveBeenCalledTimes(1);
+    expect(player2GenerateCode).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2500);
+
+    expect(player1GenerateCode.mock.calls.length).toBeGreaterThan(player2GenerateCode.mock.calls.length);
 
     orchestrator.stop();
   });

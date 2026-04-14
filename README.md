@@ -142,11 +142,25 @@ pnpm --filter @llmcraft/client build
 - `logs/records/*.json`：对局记录文件，用于回放和结构化分析
 - `packages/server/logs/llm-debug/*.log`：单局 LLM debug transcript，用于人工排查 prompt / response / 执行结果
 
+benchmark 另有两类独立输出：
+
+- `packages/server/logs/benchmark-records/*.json`：benchmark 每个已完成 round 的回放
+- `packages/server/logs/benchmark-llm-debug/*.log`：benchmark 每个已完成 round 的 LLM transcript
+
 ### `save_record` 会保存什么
 
 - 点击前端“保存记录”，或对局结束后前端自动触发 `save_record`
 - 服务端会把当前整局写成一份 JSON 到 `logs/records/`
 - 这份 JSON 包含 `initialState / finalState / tickDeltas / commandResults / aiTurns`
+
+### Benchmark 会保存什么
+
+- benchmark 会先停止当前 live 对局，再串行执行多个 round
+- `recordReplay = true` 时，每个已完成 round 会自动写出 1 份回放到 `packages/server/logs/benchmark-records/`
+- `debug.recordLLMTranscript = true` 时，每个已完成 round 会额外写出 1 份 transcript 到 `packages/server/logs/benchmark-llm-debug/`
+- benchmark 的 `decisionIntervalTicks` 只影响 CPU 一侧；LLM 一侧保持默认 5 tick 调度
+- 同一已结束对局如果被重复保存，服务端会复用已有文件路径，不再额外生成重复回放
+- benchmark 文件当前按时间戳命名；在串行执行模型下通常不会冲突，但命名不是强唯一
 
 ### `LLM Debug` 会保存什么
 

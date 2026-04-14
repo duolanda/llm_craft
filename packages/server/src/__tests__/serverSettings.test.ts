@@ -490,6 +490,74 @@ describe("server settings", () => {
     );
   });
 
+  it("starts benchmark orchestration with the selected preset and cpu strategy", async () => {
+    const presetStore = await createStore();
+    const preset = await presetStore.create({
+      name: "Benchmark LLM",
+      providerType: "openai-compatible",
+      baseURL: "https://api.one.test/v1",
+      model: "model-one",
+      apiKey: "token-one",
+    });
+
+    const previousOrchestrator = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(() => undefined),
+      saveRecord: vi.fn(async () => "logs/records/live.json"),
+      getGame: vi.fn(() => ({
+        getState: () => createMockGameState(3),
+        getSnapshots: () => [],
+      })),
+    };
+    const benchmarkOrchestrator = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(() => undefined),
+      saveRecord: vi.fn(async () => "logs/records/benchmark.json"),
+      getGame: vi.fn(() => ({
+        getState: () => createMockGameState(0),
+        getSnapshots: () => [],
+      })),
+    };
+    const createBenchmarkOrchestrator = vi.fn(() => benchmarkOrchestrator as any);
+    const state = createServerState(presetStore, undefined, createBenchmarkOrchestrator);
+    state.orchestrator = previousOrchestrator as any;
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start_benchmark",
+        presetId: preset.id,
+        cpuStrategy: "random",
+        rounds: 12,
+        recordReplay: true,
+        decisionIntervalTicks: 7,
+        debug: { recordLLMTranscript: true },
+      }),
+      ws: { send: vi.fn() } as any,
+      state,
+    });
+
+    expect(previousOrchestrator.stop).toHaveBeenCalledTimes(1);
+    expect(createBenchmarkOrchestrator).toHaveBeenCalledWith(
+      {
+        presetId: preset.id,
+        llmConfig: expect.objectContaining({
+          providerType: "openai-compatible",
+          apiKey: "token-one",
+          baseURL: "https://api.one.test/v1",
+          model: "model-one",
+        }),
+        cpuStrategy: "random",
+        rounds: 12,
+        recordReplay: true,
+        decisionIntervalTicks: 7,
+        debug: { recordLLMTranscript: true },
+      },
+      expect.any(Object)
+    );
+    expect(benchmarkOrchestrator.start).toHaveBeenCalledTimes(1);
+    expect(state.orchestrator).toBe(benchmarkOrchestrator);
+  });
+
   it("builds live state payloads without hitting preset storage and only includes the latest snapshot", async () => {
     const presetStore = await createStore();
     const listSpy = vi.spyOn(presetStore, "list");

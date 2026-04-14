@@ -1,4 +1,4 @@
-import { GameState, GameSnapshot, MatchDebugOptions } from "./types";
+import { CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -33,12 +33,24 @@ export interface ClientSaveRecordMessage {
   type: "save_record";
 }
 
+/** 开始 LLM 对 CPU 的 benchmark */
+export interface ClientStartBenchmarkMessage {
+  type: "start_benchmark";
+  presetId: string;
+  cpuStrategy: CPUStrategyType;
+  rounds: number;
+  recordReplay?: boolean;
+  decisionIntervalTicks?: number;
+  debug?: MatchDebugOptions;
+}
+
 /** 所有客户端发送的消息联合类型 */
 export type ClientMessage =
   | ClientStartMatchMessage
   | ClientResetMatchMessage
   | ClientStopMessage
-  | ClientSaveRecordMessage;
+  | ClientSaveRecordMessage
+  | ClientStartBenchmarkMessage;
 
 /** 客户端消息类型字符串（用于路由） */
 export type ClientMessageType = ClientMessage["type"];
@@ -65,11 +77,47 @@ export interface ServerRecordSavedMessage {
   filePath: string;
 }
 
+export interface ServerBenchmarkProgressMessage {
+  type: "benchmark_progress";
+  cpuStrategy: CPUStrategyType;
+  completedRounds: number;
+  totalRounds: number;
+  llmWins: number;
+  cpuWins: number;
+  draws: number;
+}
+
+export interface ServerBenchmarkRoundResult {
+  round: number;
+  llmSide: "player_1" | "player_2";
+  winner: "llm" | "cpu" | "draw";
+  durationTicks: number;
+  recordPath?: string;
+  transcriptPath?: string;
+}
+
+export interface ServerBenchmarkCompleteMessage {
+  type: "benchmark_complete";
+  cpuStrategy: CPUStrategyType;
+  presetId: string;
+  totalRounds: number;
+  completedRounds: number;
+  llmWins: number;
+  cpuWins: number;
+  draws: number;
+  llmWinRate: number;
+  averageDurationTicks: number;
+  stopped: boolean;
+  rounds: ServerBenchmarkRoundResult[];
+}
+
 /** 所有服务端发送的消息联合类型 */
 export type ServerMessage =
   | ServerStateMessage
   | ServerErrorMessage
-  | ServerRecordSavedMessage;
+  | ServerRecordSavedMessage
+  | ServerBenchmarkProgressMessage
+  | ServerBenchmarkCompleteMessage;
 
 /** 服务端消息类型字符串（用于路由） */
 export type ServerMessageType = ServerMessage["type"];

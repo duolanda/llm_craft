@@ -5,17 +5,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ClientMessage,
+  ClientStartBenchmarkMessage,
   CreateLLMPresetRequest,
   GameSnapshot,
   GameState,
   MatchLLMConfig,
+  OpenAICompatibleRuntimeConfig,
   ServerMessage,
   UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
 import WebSocket, { WebSocketServer } from "ws";
-import { GameOrchestrator } from "./GameOrchestrator";
+import { GameOrchestrator, GameOrchestratorConfig } from "./GameOrchestrator";
 import { PresetStore } from "./PresetStore";
+import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 
 dotenv.config();
 
@@ -51,7 +54,19 @@ interface OrchestratorLike {
 export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
-  createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike;
+  createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
+  createBenchmarkOrchestrator: (
+    config: {
+      presetId: string;
+      llmConfig: OpenAICompatibleRuntimeConfig;
+      cpuStrategy: ClientStartBenchmarkMessage["cpuStrategy"];
+      rounds: number;
+      recordReplay: boolean;
+      decisionIntervalTicks?: number;
+      debug?: ClientStartBenchmarkMessage["debug"];
+    },
+    ws: Pick<WebSocket, "send"> | null
+  ) => OrchestratorLike;
   liveEnabled: boolean | null;
 }
 
@@ -70,12 +85,15 @@ export function createPresetStore(options?: {
 
 export function createServerState(
   presetStore: PresetStore,
-  createOrchestrator: (config: MatchLLMConfig) => OrchestratorLike = (config) => new GameOrchestrator(config)
+  createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike = (config) => new GameOrchestrator(config),
+  createBenchmarkOrchestrator: ServerState["createBenchmarkOrchestrator"] = (config, ws) =>
+    new BenchmarkOrchestrator(config, ws)
 ): ServerState {
   return {
     presetStore,
     orchestrator: null,
     createOrchestrator,
+    createBenchmarkOrchestrator,
     liveEnabled: null,
   };
 }
@@ -348,7 +366,7 @@ export async function handleHttpRequest(
 
 type ClientMessageContext = {
   data: { toString(): string };
-  ws: Pick<WebSocket, "send">;
+  ws: WebSocket;
   state: ServerState;
 };
 
@@ -429,6 +447,57 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         type: "record_saved",
         filePath,
       } satisfies ServerMessage));
+      return;
+    }
+
+    if (message.type === "start_benchmark") {
+      if (!message.presetId) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "启动 benchmark 前必须选择一个 LLM 预设。",
+        } satisfies ServerMessage));
+        return;
+      }
+
+      if (!Number.isInteger(message.rounds) || message.rounds <= 0 || message.rounds > 100) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "Benchmark 局数必须是 1 到 100 之间的整数。",
+        } satisfies ServerMessage));
+        return;
+      }
+
+      const llmConfig = await state.presetStore.getRuntimeConfig(message.presetId);
+      if (llmConfig.providerType !== "openai-compatible") {
+        throw new Error("BENCHMARK_PRESET_INVALID");
+      }
+
+      const previousOrchestrator = state.orchestrator;
+      const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
+        {
+          presetId: message.presetId,
+          llmConfig,
+          cpuStrategy: message.cpuStrategy,
+          rounds: message.rounds,
+          recordReplay: message.recordReplay ?? true,
+          decisionIntervalTicks: message.decisionIntervalTicks,
+          debug: message.debug,
+        },
+        ws
+      );
+
+      state.orchestrator = benchmarkOrchestrator;
+      previousOrchestrator?.stop();
+
+      try {
+        await benchmarkOrchestrator.start();
+      } catch (error) {
+        benchmarkOrchestrator.stop();
+        state.orchestrator = previousOrchestrator;
+        throw error;
+      }
+
+      return;
     }
   } catch (error) {
     console.error("消息错误:", error);
@@ -439,6 +508,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           ? "所选预设不存在或已被删除。"
           : error.message === "PRESET_DECRYPT_FAILED"
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
+            : error.message === "BENCHMARK_PRESET_INVALID"
+              ? "Benchmark 只能使用 OpenAI-compatible 预设。"
             : "处理客户端消息失败。"
         : "处理客户端消息失败。",
     } satisfies ServerMessage));

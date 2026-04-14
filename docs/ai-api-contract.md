@@ -208,13 +208,95 @@ type ClientMessage =
   | StartMatchMessage
   | ResetMatchMessage
   | { type: "stop" }
-  | { type: "save_record" };
+  | { type: "save_record" }
+  | ClientStartBenchmarkMessage;
 
 type ServerMessage =
   | ServerStateMessage
   | ServerErrorMessage
-  | ServerRecordSavedMessage;
+  | ServerRecordSavedMessage
+  | ServerBenchmarkProgressMessage
+  | ServerBenchmarkCompleteMessage;
 ```
+
+### 0.13 WebSocket `start_benchmark`
+
+当前 benchmark 启动消息为：
+
+```json
+{
+  "type": "start_benchmark",
+  "presetId": "preset-red",
+  "cpuStrategy": "rush",
+  "rounds": 10,
+  "recordReplay": true,
+  "decisionIntervalTicks": 10,
+  "debug": {
+    "recordLLMTranscript": false
+  }
+}
+```
+
+说明：
+
+- benchmark 只支持 `LLM preset vs CPU strategy`
+- 当前 CPU 策略仅支持 `random` 和 `rush`
+- benchmark 会先停止当前 live 对局，再串行跑完整个批次
+- 每一局会交替让 LLM 处于红方 / 蓝方，用于减少出生位偏差
+- `decisionIntervalTicks` 只用于控制 benchmark 中 CPU 一侧的决策间隔，单位是 tick；LLM 一侧保持默认 5 tick 调度
+- `recordReplay = true` 时，每个已完成 round 会自动保存 1 份回放到 `packages/server/logs/benchmark-records/`
+- 同一已结束对局的重复保存会复用已生成文件，不应再额外创建重复回放文件
+- `debug.recordLLMTranscript = true` 时，每个已完成 round 会额外生成 1 份 LLM Debug 日志到 `packages/server/logs/benchmark-llm-debug/`
+- benchmark 回放与 transcript 目前都以时间戳命名；在当前串行执行模型下通常不会冲突，但命名并非强唯一
+
+### 0.14 WebSocket `benchmark_progress`
+
+服务端在每局结束后推送当前汇总进度：
+
+```ts
+interface ServerBenchmarkProgressMessage {
+  type: "benchmark_progress";
+  cpuStrategy: "random" | "rush";
+  completedRounds: number;
+  totalRounds: number;
+  llmWins: number;
+  cpuWins: number;
+  draws: number;
+}
+```
+
+### 0.15 WebSocket `benchmark_complete`
+
+服务端在 benchmark 完成或被用户停止后推送最终结果：
+
+```ts
+interface ServerBenchmarkCompleteMessage {
+  type: "benchmark_complete";
+  cpuStrategy: "random" | "rush";
+  presetId: string;
+  totalRounds: number;
+  completedRounds: number;
+  llmWins: number;
+  cpuWins: number;
+  draws: number;
+  llmWinRate: number;
+  averageDurationTicks: number;
+  stopped: boolean;
+  rounds: Array<{
+    round: number;
+    llmSide: "player_1" | "player_2";
+    winner: "llm" | "cpu" | "draw";
+    durationTicks: number;
+    recordPath?: string;
+    transcriptPath?: string;
+  }>;
+}
+```
+
+说明：
+
+- `stopped = true` 表示 benchmark 在全部局数完成前被用户中止
+- `rounds` 里只包含实际跑完的局，不包含中止时未完成的当前局
 
 ## 1. 输入结构
 

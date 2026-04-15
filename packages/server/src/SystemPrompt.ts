@@ -82,6 +82,7 @@ aiFeedbackSinceLastCall: Array<{
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  errorType?: string;
   code?: string;
   meta?: { x?: number; y?: number; requestedX?: number; requestedY?: number; targetId?: string; hint?: string; };
 }>

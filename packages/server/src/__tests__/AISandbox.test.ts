@@ -110,4 +110,16 @@ describe("AISandbox", () => {
     expect(vmTimeoutResult.errorType).toBe("vm_timeout");
     expect(vmTimeoutResult.errorMessage).toContain("Sandbox vm timeout after 200ms");
   });
+
+  it("returns the original JavaScript error name for syntax errors", async () => {
+    const game = new Game();
+    const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const sandbox = new AISandbox("player_1");
+
+    const result = await sandbox.executeCode("This is not JavaScript", aiState);
+
+    expect(result.commands).toEqual([]);
+    expect(result.errorType).toBe("SyntaxError");
+    expect(result.errorMessage).toContain("Unexpected identifier");
+  });
 });

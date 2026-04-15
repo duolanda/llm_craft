@@ -71,6 +71,34 @@
   - ✅ 服务端消息已统一纳入 `ServerMessage`：`state` / `error` / `record_saved`
   - ✅ server/client 均直接依赖 shared 中的协议类型与类型守卫，移除本地重复声明
 
+### 3.5 Benchmark 结果面板需增加 LLM 反应时长统计
+- **描述**: 当前 Benchmark 结束面板只显示胜率、平均 tick 时长等宏观指标，缺少 LLM 每次决策的响应耗时统计
+- **影响**: 无法评估不同模型/配置的实际推理速度，难以分析性能瓶颈
+- **需求**:
+  - 在每局对局中记录每次 LLM 调用的响应时长（从请求发出到收到响应的毫秒数）
+  - Benchmark 结束面板除胜率外，显示 LLM 反应时长的**平均数**和**中位数**
+  - 逐局结果中可展开查看每局的响应时长明细
+
+### 3.6 预设需支持 temperature 配置
+- **描述**: 当前预设仅支持 baseURL、model、rpm 等基础配置，缺少 temperature 参数
+- **影响**: 无法通过预设调整 LLM 输出的随机性/确定性，所有调用均使用硬编码默认值
+- **需求**:
+  - 预设存储（`PresetStore` / `llm-presets.json`）增加 `temperature` 字段
+  - 预设创建/编辑/查看界面增加 temperature 输入（范围 0-2，步长 0.1）
+  - LLM Provider 调用时使用预设中配置的 temperature 而非硬编码默认值
+  - 历史预设缺失 temperature 时默认使用 0.7
+
+### 3.7 慢 LLM 响应期间的反馈被误标为已读 ✅ 已修复
+- **原问题**: AI 请求发出后，服务端会在响应返回时用“执行时最新状态”更新 `lastAIState`。如果 LLM 响应较慢，中间 tick 产生的命令结果、资源变化或沙箱错误会被标记为已读，但实际上从未进入过该轮 prompt。
+- **影响**: 模型会连续收到“无变化”的 delta，错过 `Insufficient credits`、`Unexpected end of input` 等关键反馈，容易重复空命令或陷入截断代码循环；高延迟模型受影响更严重。
+- **已完成内容**:
+  - ✅ `lastAIState` 改为记录“请求时实际发送给 LLM 的状态”
+  - ✅ 响应期间产生的状态变化和反馈会进入下一轮 prompt
+  - ✅ 沙箱成功但无命令时写入 AI feedback，提示下一轮必须产出有效指令
+  - ✅ 沙箱错误和空命令反馈不再把完整生成源码塞进 `aiFeedbackSinceLastCall.code`
+  - ✅ 沙箱 JS 错误会在 `errorType` 中原样透传 `error.name`，例如 `SyntaxError` / `ReferenceError`
+  - ✅ OpenAI-compatible provider 将默认 `max_tokens` 从 1024 提升到 2048，并在响应因长度截断时写入 provider feedback
+
 ## 中优先级
 
 ### 4. 观赏性改进 - 数据面板 ✅ 已完成
@@ -163,4 +191,4 @@
 
 ---
 
-*最后更新: 2026-04-13*
+*最后更新: 2026-04-15*

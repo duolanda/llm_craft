@@ -149,7 +149,11 @@ process.on("message", (payload) => {
     process.send?.({ commands });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const errorType = /Script execution timed out/i.test(message) ? "vm_timeout" : "runtime_error";
+    const errorType = /Script execution timed out/i.test(message)
+      ? "vm_timeout"
+      : error instanceof Error && error.name
+        ? error.name
+        : "Error";
     process.send?.({
       commands,
       errorType,

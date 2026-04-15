@@ -453,19 +453,14 @@ AI 代码在子进程中的 Node `vm` 上下文里运行。
 实时对局保存的 `aiTurns` 记录中，当前会同时保存：
 
 ```ts
-type AITurnErrorType =
-  | "parent_timeout"
-  | "vm_timeout"
-  | "runtime_error"
-  | "process_error"
-  | "process_exit"
-  | "invalid_payload";
+type AITurnErrorType = string;
 ```
 
 说明：
 
 - `errorType = "vm_timeout"` 表示 AI 代码在子进程 `vm` 中执行超时
 - `errorType = "parent_timeout"` 表示父进程在等待子进程结果时超时，通常代表进程启动、IPC 或主线程调度异常偏慢
+- JS 编译/运行错误会保留原始 `error.name`，例如 `"SyntaxError"`、`"ReferenceError"`、`"TypeError"`
 - `errorMessage` 仍保留可直接阅读的文本，用于 UI 和日志展示
 
 当前默认固定布局为：
@@ -564,6 +559,7 @@ const aiFeedbackSinceLastCall: Array<{
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  errorType?: string;
   code?: string;
   meta?: {
     x?: number;

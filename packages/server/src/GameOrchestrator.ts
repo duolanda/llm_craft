@@ -120,6 +120,9 @@ export class GameOrchestrator {
       );
       const { code, rawResponse, requestMessages, errorMessage: providerErrorMessage } =
         await llm.generateCode(promptPayload);
+      if (providerErrorMessage) {
+        this.game.addAIFeedback(playerId, "generation", "warning", providerErrorMessage);
+      }
       if (!this.isPolling || sessionId !== this.runSession) {
         await this.writeTranscript(
           this.formatTranscriptEntry({
@@ -160,7 +163,14 @@ export class GameOrchestrator {
         return;
       }
       if (errorMessage) {
-        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { code, errorType });
+        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { errorType });
+      } else if (commands.length === 0) {
+        this.game.addAIFeedback(
+          playerId,
+          "execution",
+          "warning",
+          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act."
+        );
       }
       for (const cmd of commands) {
         this.game.queueCommand(cmd);
@@ -197,7 +207,10 @@ export class GameOrchestrator {
           sandboxErrorType: errorType,
         })
       );
-      this.lastAIState[playerId] = latestAIPackage;
+      // Track what the LLM actually saw, not the later state used for sandbox execution.
+      // Otherwise feedback/events that occur while a slow request is in flight are skipped
+      // from future prompts even though they were never sent to the model.
+      this.lastAIState[playerId] = aiPackage;
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
       const errorMessage = e instanceof Error ? e.message : String(e);

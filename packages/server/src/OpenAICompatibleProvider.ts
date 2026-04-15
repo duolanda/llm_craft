@@ -3,6 +3,9 @@ import { AIPromptPayload } from "@llmcraft/shared";
 import { LLMProvider, OpenAIProviderConfig } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 
+const DEFAULT_TEMPERATURE = 0.7;
+const DEFAULT_MAX_TOKENS = 2048;
+
 export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
@@ -48,12 +51,17 @@ export class OpenAICompatibleProvider implements LLMProvider {
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages: requestMessages,
-        temperature: 0.7,
-        max_tokens: 1024,
+        temperature: DEFAULT_TEMPERATURE,
+        max_tokens: DEFAULT_MAX_TOKENS,
       });
 
-      const rawResponse = response.choices[0]?.message?.content || "";
+      const choice = response.choices[0];
+      const rawResponse = choice?.message?.content || "";
       const cleanedCode = this.cleanCode(rawResponse);
+      const errorMessage =
+        choice?.finish_reason === "length"
+          ? `LLM response was truncated by max_tokens (${DEFAULT_MAX_TOKENS}); generated code may be incomplete.`
+          : undefined;
       this.history.push({
         mode: payload.mode,
         user: userPrompt,
@@ -62,7 +70,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       if (this.history.length > this.maxTurns) {
         this.history = this.history.slice(-this.maxTurns);
       }
-      return { code: cleanedCode, rawResponse, requestMessages };
+      return { code: cleanedCode, rawResponse, requestMessages, errorMessage };
     } catch (e) {
       console.error("OpenAI API 错误:", e);
       return {

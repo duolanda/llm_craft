@@ -143,6 +143,7 @@ export interface AIFeedback {
   phase: "generation" | "execution" | "command";
   severity: "error" | "warning";
   message: string;
+  errorType?: string;
   code?: string;
   meta?: {
     x?: number;
@@ -297,7 +298,7 @@ export interface AITurnRecord {
   promptPayload: AIPromptPayload;
   response: string;
   commands: Command[];
-  errorType?: "parent_timeout" | "vm_timeout" | "runtime_error" | "process_error" | "process_exit" | "invalid_payload";
+  errorType?: string;
   errorMessage?: string;
   model: string;
   baseURL?: string;
@@ -312,7 +313,7 @@ export interface SavedAITurnRecord {
   promptPayload: AIPromptPayload;
   response: string;
   commands: Command[];
-  errorType?: "parent_timeout" | "vm_timeout" | "runtime_error" | "process_error" | "process_exit" | "invalid_payload";
+  errorType?: string;
   errorMessage?: string;
   model: string;
   baseURL?: string;

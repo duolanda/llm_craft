@@ -2,13 +2,7 @@ import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, AIStatePackage } from "@llmcraft/shared";
 
-export type AISandboxErrorType =
-  | "parent_timeout"
-  | "vm_timeout"
-  | "runtime_error"
-  | "process_error"
-  | "process_exit"
-  | "invalid_payload";
+export type AISandboxErrorType = string;
 
 export interface AISandboxResult {
   commands: Command[];

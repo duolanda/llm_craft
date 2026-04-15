@@ -426,6 +426,7 @@ describe("GameOrchestrator", () => {
       throw new Error("Expected execution package");
     }
     expect(executionPackage.tick).toBeGreaterThan(requestTick);
+    expect((orchestrator as any).lastAIState.player_1.tick).toBe(requestTick);
 
     const savedTurns = (orchestrator as any).buildSavedAITurns();
     const savedTurn = savedTurns.find((turn: { playerId: string }) => turn.playerId === "player_1");
@@ -479,6 +480,66 @@ describe("GameOrchestrator", () => {
     expect(firstCall[0].mode).toBe("full");
 
     orchestrator.stop();
+  });
+
+  it("feeds back when generated code produces no commands", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+
+    (orchestrator as any).isPolling = true;
+    (orchestrator as any).llm1 = {
+      shouldForceFullState: () => false,
+      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
+        code: "const worker = me.workers[0];",
+        rawResponse: "const worker = me.workers[0];",
+        requestMessages: [],
+      })),
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).ai1 = {
+      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
+        commands: [],
+        errorMessage: undefined,
+      })),
+    };
+
+    await orchestrator.runAI("player_1");
+
+    const feedback = orchestrator.getGame().getAIFeedback("player_1");
+    const noCommandFeedback = feedback.find((log) => log.message.includes("produced no commands"));
+    expect(noCommandFeedback).toBeTruthy();
+    expect(noCommandFeedback?.data?.code).toBeUndefined();
+  });
+
+  it("does not include generated source code in sandbox error feedback", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+
+    (orchestrator as any).isPolling = true;
+    (orchestrator as any).llm1 = {
+      shouldForceFullState: () => false,
+      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
+        code: "This is not JavaScript\nconst worker = me.workers[0];",
+        rawResponse: "This is not JavaScript\nconst worker = me.workers[0];",
+        requestMessages: [],
+      })),
+      getModel: () => "test-model",
+      getBaseURL: () => undefined,
+    };
+    (orchestrator as any).ai1 = {
+      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
+        commands: [],
+        errorMessage: "Unexpected identifier 'is'",
+        errorType: "SyntaxError",
+      })),
+    };
+
+    await orchestrator.runAI("player_1");
+
+    const feedback = orchestrator.getGame().getAIFeedback("player_1");
+    const errorFeedback = feedback.find((log) => log.message.includes("Unexpected identifier"));
+    expect(errorFeedback).toBeTruthy();
+    expect(errorFeedback?.data?.errorType).toBe("SyntaxError");
+    expect(errorFeedback?.data?.code).toBeUndefined();
   });
 
   it("writes a readable transcript file when per-match debug recording is enabled", async () => {

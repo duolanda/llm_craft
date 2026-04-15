@@ -6,6 +6,7 @@ describe("AIStatePackageBuilder", () => {
   it("should include AI feedback for the requesting player", () => {
     const game = new Game();
     game.addAIFeedback("player_1", "execution", "error", "ReferenceError: foo is not defined", {
+      errorType: "ReferenceError",
       code: "execution_error",
       meta: { hint: "Check variable names." },
     });
@@ -15,6 +16,7 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
     expect(aiState.aiFeedbackSinceLastCall[0].phase).toBe("execution");
+    expect(aiState.aiFeedbackSinceLastCall[0].errorType).toBe("ReferenceError");
     expect(aiState.aiFeedbackSinceLastCall[0].code).toBe("execution_error");
     expect(aiState.aiFeedbackSinceLastCall[0].meta?.hint).toBe("Check variable names.");
   });

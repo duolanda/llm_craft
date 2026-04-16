@@ -24,13 +24,9 @@ import {
   defaultLogMeta,
   LOG_LEVELS,
   LogLevel,
-  PLAYER_IDS,
-  ACTOR_IDS,
-  PlayerId,
   ActorId,
   AI_FEEDBACK_TARGETS,
   AIFeedbackTarget,
-  LOG_DISPLAY_TARGETS,
   LogDisplayTarget,
   GameLogDataMap,
   RESULT_TYPES

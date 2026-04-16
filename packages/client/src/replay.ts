@@ -1,7 +1,7 @@
 import {
   Building,
   Command,
-  CommandResult,
+  GameLog,
   GameRecord,
   GameSnapshot,
   GameState,
@@ -9,6 +9,9 @@ import {
   TickDeltaRecord,
   Unit,
   LOG_TYPES,
+  RESULT_TYPES,
+  CommandResultData,
+  RESULT_CODES,
 } from "@llmcraft/shared";
 
 export interface ReplayFrame {
@@ -143,14 +146,16 @@ function resolveMoveTarget(
   logs: GameState["logs"]
 ) {
   const adjusted = logs.find((log) =>
-    log.type === LOG_TYPES.MOVE_ADJUSTED &&
-    (log.data as any)?.command?.id === command.id &&
-    typeof (log.data as any)?.commandMeta?.x === "number" &&
-    typeof (log.data as any)?.commandMeta?.y === "number"
+    log.type === LOG_TYPES.COMMAND_RESULT &&
+    (log.data as CommandResultData)?.type === RESULT_TYPES.MOVE_ADJUSTED &&
+    (log.data as CommandResultData)?.command?.id === command.id
   );
 
-  if (adjusted && adjusted.data && (adjusted.data as any).commandMeta) {
-    return { x: (adjusted.data as any).commandMeta.x as number, y: (adjusted.data as any).commandMeta.y as number };
+  if (adjusted && adjusted.data) {
+    const data = adjusted.data as CommandResultData & { type: "move_adjusted" };
+    if (data.result_data && typeof data.result_data.x === "number" && typeof data.result_data.y === "number") {
+      return { x: data.result_data.x, y: data.result_data.y };
+    }
   }
 
   if (command.position) {
@@ -190,11 +195,12 @@ function findAttackTargetFromDelta(
 function applyCommandIntentsForTick(
   state: GameState,
   delta: TickDeltaRecord,
-  commandResults: CommandResult[]
+  commandResults: GameLog[]
 ) {
   for (const result of commandResults) {
-    const command = result.command;
-    if (!result.success || !command.unitId) {
+    const data = result.data as CommandResultData;
+    const command = data.command;
+    if (data.result_code !== RESULT_CODES.OK || !command.unitId) {
       continue;
     }
 
@@ -252,8 +258,9 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
   clearTransientIntentState(currentState);
-  const commandResultsByTick = new Map<number, CommandResult[]>();
+  const commandResultsByTick = new Map<number, GameLog[]>();
   for (const result of record.commandResults) {
+    if (result.type !== LOG_TYPES.COMMAND_RESULT) continue;
     const bucket = commandResultsByTick.get(result.tick) ?? [];
     bucket.push(result);
     commandResultsByTick.set(result.tick, bucket);

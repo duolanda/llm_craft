@@ -58,6 +58,128 @@ export const LOG_DISPLAY_TARGETS = {
 export type LogDisplayTarget = typeof LOG_DISPLAY_TARGETS[keyof typeof LOG_DISPLAY_TARGETS];
 
 // ============================================================
+// RESULT_TYPES：命令结果类型名称的简单映射
+// ============================================================
+export const RESULT_TYPES = {
+  // 成功结果
+  BUILDING_CONSTRUCTED: "building_constructed",
+
+  // 移动相关
+  MOVE_ADJUSTED: "move_adjusted",
+  MOVE_BLOCKED: "move_blocked",
+
+  // 攻击相关
+  ATTACK_OUT_OF_RANGE: "attack_out_of_range",
+  ATTACK_NO_TARGET_IN_RANGE: "attack_no_target_in_range",
+  ATTACK_INVALID_TARGET: "attack_invalid_target",
+
+  // 建造相关
+  BUILD_INVALID_POSITION: "build_invalid_position",
+  BUILD_INSUFFICIENT_CREDITS: "build_insufficient_credits",
+  BUILD_INVALID_BUILDING: "build_invalid_building",
+
+  // 生产相关
+  SPAWN_INSUFFICIENT_CREDITS: "spawn_insufficient_credits",
+  SPAWN_INVALID_BUILDING: "spawn_invalid_building",
+
+  // 通用错误
+  COMMAND_CRASHED: "command_crashed",
+} as const;
+
+export type ResultType = typeof RESULT_TYPES[keyof typeof RESULT_TYPES];
+
+// ============================================================
+// 命令结果的额外数据（按 result_type 分类）
+// ============================================================
+export interface CommandResultExtraDataMap {
+  [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
+    buildingId: string;
+    buildingType: string;
+    x: number;
+    y: number;
+  };
+  [RESULT_TYPES.MOVE_ADJUSTED]: {
+    x: number;
+    y: number;
+    requestedX: number;
+    requestedY: number;
+    hint: string;
+  };
+  [RESULT_TYPES.MOVE_BLOCKED]: {
+    x: number;
+    y: number;
+    requestedX: number;
+    requestedY: number;
+    hint: string;
+    code: string;
+  };
+  [RESULT_TYPES.ATTACK_OUT_OF_RANGE]: {
+    targetId: string;
+    hint: string;
+  };
+  [RESULT_TYPES.ATTACK_NO_TARGET_IN_RANGE]: {
+    hint: string;
+  };
+  [RESULT_TYPES.ATTACK_INVALID_TARGET]: {
+    hint: string;
+  };
+  [RESULT_TYPES.BUILD_INVALID_POSITION]: {
+    x: number;
+    y: number;
+    hint: string;
+  };
+  [RESULT_TYPES.BUILD_INSUFFICIENT_CREDITS]: {
+    x?: number;
+    y?: number;
+    requiredCredits: number;
+    currentCredits: number;
+    hint: string;
+  };
+  [RESULT_TYPES.BUILD_INVALID_BUILDING]: {
+    hint: string;
+  };
+  [RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS]: {
+    buildingId: string;
+    unitType: string;
+    requiredCredits: number;
+    currentCredits: number;
+    hint: string;
+  };
+  [RESULT_TYPES.SPAWN_INVALID_BUILDING]: {
+    buildingId: string;
+    buildingType: string;
+    unitType: string;
+    hint: string;
+  };
+  [RESULT_TYPES.COMMAND_CRASHED]: {
+    error: string;
+  };
+}
+
+// ============================================================
+// 命令结果数据结构
+// ============================================================
+export interface CommandResultBase {
+  command: Command;
+  result_code: ResultCode;
+}
+
+export type CommandResultData = {
+  [T in ResultType]: CommandResultBase & {
+    type: T;
+    result_data: CommandResultExtraDataMap[T];
+  };
+}[ResultType];
+
+// ============================================================
+// AI 执行错误数据结构
+// ============================================================
+export interface AIExecutionErrorData {
+  code: string;
+  errorType: string;
+}
+
+// ============================================================
 // LOG_TYPES：日志类型名称的简单映射
 // ============================================================
 export const LOG_TYPES = {
@@ -71,60 +193,22 @@ export const LOG_TYPES = {
   RESOURCE_GATHERED: "resource_gathered",
   CREDITS_DELIVERED: "credits_delivered",
 
-  // 建筑系统
-  BUILDING_CONSTRUCTED: "building_constructed",
-
   // 单位系统
   UNIT_SPAWNED: "unit_spawned",
   SPAWN_FAILED: "spawn_failed",
 
-  // 命令执行
-  COMMAND_ERROR: "command_error",
+  // 命令执行结果（统一）
+  COMMAND_RESULT: "command_result",
+
+  // AI 相关错误
+  AI_GENERATION_ERROR: "ai_generation_error",
+  AI_EXECUTION_ERROR: "ai_execution_error",
+
+  // Tick 错误
   TICK_ERROR: "tick_error",
-
-  // 移动命令反馈
-  MOVE_ADJUSTED: "move_adjusted",
-  MOVE_BLOCKED: "move_blocked",
-
-  // 攻击命令反馈
-  ATTACK_NOT_IN_RANGE: "attack_not_in_range",
-  ATTACK_IN_RANGE_NO_TARGET: "attack_in_range_no_target",
-
-  // 建造命令反馈
-  BUILD_FAILED: "build_failed",
-
-  // 生产命令反馈
-  SPAWN_COMMAND_FAILED: "spawn_command_failed",
-
-  // 未知命令
-  UNKNOWN_COMMAND: "unknown_command",
 } as const;
 
 export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
-
-// ============================================================
-// 命令反馈的 commandMeta（命令执行细节）
-// ============================================================
-export interface CommandLogMeta {
-  x?: number;
-  y?: number;
-  requestedX?: number;
-  requestedY?: number;
-  targetId?: string;
-  hint?: string;
-  [key: string]: unknown;
-}
-
-// ============================================================
-// 命令反馈共用的 data 结构
-// ============================================================
-export interface CommandFeedbackData {
-  command: Command;
-  result: ResultCode;
-  phase: "command";
-  code: string;
-  commandMeta?: CommandLogMeta;
-}
 
 // ============================================================
 // LogType → data 类型的映射表
@@ -147,18 +231,12 @@ export interface GameLogDataMap {
     amount: number;
     credits: number;
   };
-  [LOG_TYPES.BUILDING_CONSTRUCTED]: { command: Command };
   [LOG_TYPES.UNIT_SPAWNED]: { playerId: string; unitType: string };
   [LOG_TYPES.SPAWN_FAILED]: { playerId: string; unitType: string };
+  [LOG_TYPES.COMMAND_RESULT]: CommandResultData;
+  [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
+  [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;
   [LOG_TYPES.TICK_ERROR]: { error: string };
-  [LOG_TYPES.COMMAND_ERROR]: Record<string, unknown>; // 临时宽类型，稍后细化
-  [LOG_TYPES.MOVE_ADJUSTED]: CommandFeedbackData;
-  [LOG_TYPES.MOVE_BLOCKED]: CommandFeedbackData;
-  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: CommandFeedbackData;
-  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: CommandFeedbackData;
-  [LOG_TYPES.BUILD_FAILED]: CommandFeedbackData;
-  [LOG_TYPES.SPAWN_COMMAND_FAILED]: CommandFeedbackData;
-  [LOG_TYPES.UNKNOWN_COMMAND]: CommandFeedbackData;
 }
 
 // ============================================================
@@ -192,18 +270,12 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.GAME_END]: {},
   [LOG_TYPES.RESOURCE_GATHERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.CREDITS_DELIVERED]: { level: LOG_LEVELS.DEBUG },
-  [LOG_TYPES.BUILDING_CONSTRUCTED]: {},
   [LOG_TYPES.UNIT_SPAWNED]: {},
   [LOG_TYPES.SPAWN_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.COMMAND_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.COMMAND_RESULT]: { level: LOG_LEVELS.INFO, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.AI_GENERATION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH, displayTarget: LOG_DISPLAY_TARGETS.BACKEND },
+  [LOG_TYPES.AI_EXECUTION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH, displayTarget: LOG_DISPLAY_TARGETS.BACKEND },
   [LOG_TYPES.TICK_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.MOVE_ADJUSTED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.MOVE_BLOCKED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.ATTACK_NOT_IN_RANGE]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.ATTACK_IN_RANGE_NO_TARGET]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.BUILD_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.SPAWN_COMMAND_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
-  [LOG_TYPES.UNKNOWN_COMMAND]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
 };
 
 // ============================================================

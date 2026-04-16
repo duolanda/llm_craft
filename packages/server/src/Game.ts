@@ -33,8 +33,8 @@ import {
   AIFeedbackTarget,
   LOG_DISPLAY_TARGETS,
   LogDisplayTarget,
-  CommandLogMeta,
   GameLogDataMap,
+  RESULT_TYPES
 } from "@llmcraft/shared";
 import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
@@ -149,9 +149,12 @@ export class Game {
       try {
         this.processCommand(command);
       } catch (error) {
-        const log = this.addLog(LOG_TYPES.COMMAND_ERROR, `Command processing crashed for ${command.type}`, {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.addLog(LOG_TYPES.COMMAND_RESULT, `Command processing crashed for ${command.type}`, {
           command,
-          error: error instanceof Error ? error.message : String(error),
+          result_code: RESULT_CODES.ERR_INVALID_TARGET,
+          type: RESULT_TYPES.COMMAND_CRASHED,
+          result_data: { error: errorMessage },
         }, {
           owner: command.playerId as ActorId,
           feedbackTarget: command.playerId as AIFeedbackTarget,
@@ -186,14 +189,13 @@ export class Game {
                 (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
               ) {
                 this.addLog(
-                  LOG_TYPES.MOVE_ADJUSTED,
+                  LOG_TYPES.COMMAND_RESULT,
                   `Unit ${command.unitId} rerouted to (${resolvedTarget.x}, ${resolvedTarget.y})`,
                   {
                     command,
-                    result,
-                    phase: "command",
-                    code: "move_adjusted",
-                    commandMeta: {
+                    result_code: result,
+                    type: RESULT_TYPES.MOVE_ADJUSTED,
+                    result_data: {
                       x: resolvedTarget.x,
                       y: resolvedTarget.y,
                       requestedX: command.position.x,
@@ -214,19 +216,19 @@ export class Game {
                 hint: "No reachable nearby tile found.",
               };
               this.addLog(
-                LOG_TYPES.MOVE_BLOCKED,
+                LOG_TYPES.COMMAND_RESULT,
                 `Unit ${command.unitId} cannot move to (${command.position.x}, ${command.position.y})`,
                 {
                   command,
-                  result,
-                  phase: "command",
-                  code: failure.code,
-                  commandMeta: {
+                  result_code: result,
+                  type: RESULT_TYPES.MOVE_BLOCKED,
+                  result_data: {
                     x: command.position.x,
                     y: command.position.y,
                     requestedX: command.position.x,
                     requestedY: command.position.y,
                     hint: failure.hint,
+                    code: failure.code,
                   },
                 },
                 {
@@ -252,20 +254,54 @@ export class Game {
             });
 
             if (result !== RESULT_CODES.OK) {
+              if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Attack command failed for unit ${command.unitId}`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.ATTACK_OUT_OF_RANGE,
+                    result_data: {
+                      targetId: command.targetId!,
+                      hint: "Move to a tile adjacent to the target before attacking.",
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    level: LOG_LEVELS.WARNING,
+                  }
+                );
+              } else {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Attack command failed for unit ${command.unitId}`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.ATTACK_INVALID_TARGET,
+                    result_data: {
+                      hint: "Check that the target still exists and belongs to the enemy.",
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    level: LOG_LEVELS.WARNING,
+                  }
+                );
+              }
               this.addLog(
-                LOG_TYPES.COMMAND_ERROR,
+                LOG_TYPES.COMMAND_RESULT,
                 `Attack command failed for unit ${command.unitId}`,
                 {
                   command,
-                  result,
-                  phase: "command",
-                  code: result === RESULT_CODES.ERR_NOT_IN_RANGE ? "attack_out_of_range" : "attack_invalid_target",
-                  commandMeta: {
-                    targetId: command.targetId,
-                    hint:
-                      result === RESULT_CODES.ERR_NOT_IN_RANGE
-                        ? "Move to a tile adjacent to the target before attacking."
-                        : "Check that the target still exists and belongs to the enemy.",
+                  result_code: result,
+                  type: RESULT_TYPES.ATTACK_OUT_OF_RANGE,
+                  result_data: {
+                    targetId: command.targetId!,
+                    hint: "Move to a tile adjacent to the target before attacking.",
                   },
                 },
                 {
@@ -292,14 +328,13 @@ export class Game {
 
             if (result !== RESULT_CODES.OK) {
               this.addLog(
-                LOG_TYPES.COMMAND_ERROR,
+                LOG_TYPES.COMMAND_RESULT,
                 `Attack-in-range command failed for unit ${command.unitId}`,
                 {
                   command,
-                  result,
-                  phase: "command",
-                  code: "attack_in_range_no_target",
-                  commandMeta: {
+                  result_code: result,
+                  type: RESULT_TYPES.ATTACK_NO_TARGET_IN_RANGE,
+                  result_data: {
                     hint: "No enemy matching the requested priority was in range at execution time.",
                   },
                 },
@@ -339,15 +374,16 @@ export class Game {
               if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
                 this.addLog(
-                  LOG_TYPES.COMMAND_ERROR,
+                  LOG_TYPES.COMMAND_RESULT,
                   `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
                   {
                     command,
-                    result,
-                    phase: "command",
-                    code: "spawn_invalid_building",
-                    commandMeta: {
-                      targetId: building.id,
+                    result_code: result,
+                    type: RESULT_TYPES.SPAWN_INVALID_BUILDING,
+                    result_data: {
+                      buildingId: building.id,
+                      buildingType: building.type,
+                      unitType: command.unitType,
                       hint: building.type === BUILDING_TYPES.HQ
                         ? "HQ can only spawn workers. Build a barracks to produce soldiers."
                         : "Check that the unit type matches the building.",
@@ -366,15 +402,17 @@ export class Game {
                 this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
               } else {
                 this.addLog(
-                  LOG_TYPES.COMMAND_ERROR,
+                  LOG_TYPES.COMMAND_RESULT,
                   "Spawn command failed: insufficient credits",
                   {
                     command,
-                    result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-                    phase: "command",
-                    code: "insufficient_credits",
-                    commandMeta: {
-                      targetId: building.id,
+                    result_code: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                    type: RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS,
+                    result_data: {
+                      buildingId: building.id,
+                      unitType: command.unitType,
+                      requiredCredits: unitCost,
+                      currentCredits: player.resources.credits,
                       hint: `Need ${unitCost} credits before spawning ${command.unitType}.`,
                     },
                   },
@@ -409,14 +447,13 @@ export class Game {
 
           if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
             this.addLog(
-              LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_RESULT,
               "Build command failed: only barracks can be built in MVP",
               {
                 command,
-                result: RESULT_CODES.ERR_INVALID_BUILDING,
-                phase: "command",
-                code: "build_invalid_building",
-                commandMeta: {
+                result_code: RESULT_CODES.ERR_INVALID_BUILDING,
+                type: RESULT_TYPES.BUILD_INVALID_BUILDING,
+                result_data: {
                   hint: "Only barracks are buildable in the current MVP.",
                 },
               },
@@ -433,16 +470,17 @@ export class Game {
           const buildingCost = this.getBuildingCost(command.buildingType);
           if (player.resources.credits < buildingCost) {
             this.addLog(
-              LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_RESULT,
               "Build command failed: insufficient credits",
               {
                 command,
-                result: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-                phase: "command",
-                code: "insufficient_credits",
-                commandMeta: {
+                result_code: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
+                type: RESULT_TYPES.BUILD_INSUFFICIENT_CREDITS,
+                result_data: {
                   x: command.position.x,
                   y: command.position.y,
+                  requiredCredits: buildingCost,
+                  currentCredits: player.resources.credits,
                   hint: `Need ${buildingCost} credits before building a barracks.`,
                 },
               },
@@ -465,14 +503,13 @@ export class Game {
           if (result !== RESULT_CODES.OK) {
             const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
             this.addLog(
-              LOG_TYPES.COMMAND_ERROR,
+              LOG_TYPES.COMMAND_RESULT,
               "Build command failed: invalid build position",
               {
                 command,
-                result,
-                phase: "command",
-                code: buildFailure.code,
-                commandMeta: {
+                result_code: result,
+                type: RESULT_TYPES.BUILD_INVALID_POSITION,
+                result_data: {
                   x: command.position.x,
                   y: command.position.y,
                   hint: buildFailure.hint,
@@ -489,14 +526,24 @@ export class Game {
           }
 
           player.resources.credits -= buildingCost;
-          this.buildingManager.createBuilding(
+          const newBuilding = this.buildingManager.createBuilding(
             command.buildingType,
             command.position.x,
             command.position.y,
             command.playerId
           );
-          this.addLog(LOG_TYPES.BUILDING_CONSTRUCTED, `Barracks constructed for ${command.playerId}`, {
+          this.addLog(LOG_TYPES.COMMAND_RESULT, `Barracks constructed for ${command.playerId}`, {
             command,
+            result_code: RESULT_CODES.OK,
+            type: RESULT_TYPES.BUILDING_CONSTRUCTED,
+            result_data: {
+              buildingId: newBuilding.id,
+              buildingType: newBuilding.type,
+              x: newBuilding.x,
+              y: newBuilding.y,
+            },
+          }, {
+            owner: command.playerId as ActorId,
           });
           this.recordCommandResult(command, RESULT_CODES.OK, true, "Building constructed");
         }

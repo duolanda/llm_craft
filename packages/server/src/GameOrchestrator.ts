@@ -12,7 +12,7 @@ import {
   LOG_LEVELS,
   LOG_DISPLAY_TARGETS,
   PlayerId,
-  AI_FEEDBACK_TARGETS,
+  AIFeedbackTarget
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -127,10 +127,10 @@ export class GameOrchestrator {
         await llm.generateCode(promptPayload);
       if (providerErrorMessage) {
         this.game.addLog(
-          LOG_TYPES.COMMAND_ERROR,
+          LOG_TYPES.AI_GENERATION_ERROR,
           providerErrorMessage,
-          { playerId, phase: "generation" as const},
-          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+          undefined,
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }
       if (!this.isPolling || sessionId !== this.runSession) {
@@ -174,17 +174,17 @@ export class GameOrchestrator {
       }
       if (errorMessage) {
         this.game.addLog(
-          LOG_TYPES.COMMAND_ERROR,
+          LOG_TYPES.AI_EXECUTION_ERROR,
           errorMessage,
-          { code, errorType, playerId, phase: "execution" as const},
-          { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+          { code, errorType: errorType ?? "unknown" },
+          { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       } else if (commands.length === 0) {
         this.game.addLog(
-          LOG_TYPES.COMMAND_ERROR,
+          LOG_TYPES.AI_EXECUTION_ERROR,
           "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
-          { code, playerId, phase: "execution" as const},
-          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+          { code, errorType: "no_commands" },
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }
       for (const cmd of commands) {
@@ -230,10 +230,10 @@ export class GameOrchestrator {
       console.error(`AI 错误 ${playerId}:`, e);
       const errorMessage = e instanceof Error ? e.message : String(e);
       this.game.addLog(
-        LOG_TYPES.COMMAND_ERROR,
-        e instanceof Error ? e.message : String(e),
-        { playerId, phase: "generation" as const},
-        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        LOG_TYPES.AI_GENERATION_ERROR,
+        errorMessage,
+        undefined,
+        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
       );
       await this.writeTranscript(
         this.formatTranscriptEntry({

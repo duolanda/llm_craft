@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { AIStatePackageBuilder } from "../AIStatePackageBuilder";
 import { Game } from "../Game";
-import { LOG_TYPES, LOG_LEVELS, LOG_DISPLAY_TARGETS, AI_FEEDBACK_TARGETS, PlayerId } from "@llmcraft/shared";
+import { LOG_TYPES, LOG_LEVELS, LOG_DISPLAY_TARGETS, AI_FEEDBACK_TARGETS, PlayerId, AIExecutionErrorData, RESULT_TYPES, RESULT_CODES } from "@llmcraft/shared";
 
 describe("AIStatePackageBuilder", () => {
   it("should include AI feedback for the requesting player", () => {
     const game = new Game();
     const playerId = "player_1";
     game.addLog(
-      LOG_TYPES.COMMAND_ERROR,
+      LOG_TYPES.AI_EXECUTION_ERROR,
       "ReferenceError: foo is not defined",
-      { playerId, phase: "execution" as const, severity: "error" as const, code: "execution_error", commandMeta: { hint: "Check variable names." } },
+      { code: "execution_error_code", errorType: "ReferenceError" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 
@@ -18,19 +18,18 @@ describe("AIStatePackageBuilder", () => {
 
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
-    const data = aiState.aiFeedbackSinceLastCall[0].data as Record<string, unknown>;
-    expect(data?.phase).toBe("execution");
-    expect(data?.code).toBe("execution_error");
-    expect((data?.commandMeta as any)?.hint).toBe("Check variable names.");
+    const data = aiState.aiFeedbackSinceLastCall[0].data as AIExecutionErrorData;
+    expect(data?.code).toBe("execution_error_code");
+    expect(data?.errorType).toBe("ReferenceError");
   });
 
   it("should not leak another player's AI feedback", () => {
     const game = new Game();
     const playerId = "player_2";
     game.addLog(
-      LOG_TYPES.COMMAND_ERROR,
+      LOG_TYPES.AI_EXECUTION_ERROR,
       "player_2 failed",
-      { playerId, phase: "execution" as const, severity: "error" as const },
+      { code: "", errorType: "test_error" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 
@@ -95,16 +94,16 @@ describe("AIStatePackageBuilder", () => {
 
     const playerId = "player_1";
     game.addLog(
-      LOG_TYPES.COMMAND_ERROR,
+      LOG_TYPES.AI_EXECUTION_ERROR,
       "old warning",
-      { playerId, phase: "execution" as const, severity: "warning" as const },
+      { code: "", errorType: "test_error" },
       { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
     game.tickUpdate();
     game.addLog(
-      LOG_TYPES.COMMAND_ERROR,
+      LOG_TYPES.AI_EXECUTION_ERROR,
       "new error",
-      { playerId, phase: "execution" as const, severity: "error" as const },
+      { code: "", errorType: "test_error" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 

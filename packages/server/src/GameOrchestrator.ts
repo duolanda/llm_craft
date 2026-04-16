@@ -126,7 +126,12 @@ export class GameOrchestrator {
       const { code, rawResponse, requestMessages, errorMessage: providerErrorMessage } =
         await llm.generateCode(promptPayload);
       if (providerErrorMessage) {
-        this.game.addAIFeedback(playerId, "generation", "warning", providerErrorMessage);
+        this.game.addLog(
+          LOG_TYPES.COMMAND_ERROR,
+          providerErrorMessage,
+          { playerId, phase: "generation" as const},
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        );
       }
       if (!this.isPolling || sessionId !== this.runSession) {
         await this.writeTranscript(
@@ -168,18 +173,17 @@ export class GameOrchestrator {
         return;
       }
       if (errorMessage) {
-        const level = LOG_LEVELS.ERROR;
         this.game.addLog(
           LOG_TYPES.COMMAND_ERROR,
           errorMessage,
-          { code, errorType, playerId, phase: "execution" as const, severity: "error" as const },
-          { level, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+          { code, errorType, playerId, phase: "execution" as const},
+          { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       } else if (commands.length === 0) {
         this.game.addLog(
-          GAME_LOG_TYPES.COMMAND_ERROR,
+          LOG_TYPES.COMMAND_ERROR,
           "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
-          { code, playerId, phase: "execution" as const, severity: "warning" as const },
+          { code, playerId, phase: "execution" as const},
           { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }
@@ -228,7 +232,7 @@ export class GameOrchestrator {
       this.game.addLog(
         LOG_TYPES.COMMAND_ERROR,
         e instanceof Error ? e.message : String(e),
-        { playerId, phase: "generation" as const, severity: "error" as const },
+        { playerId, phase: "generation" as const},
         { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId === "player_1" ? AI_FEEDBACK_TARGETS.PLAYER_1 : AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
       );
       await this.writeTranscript(

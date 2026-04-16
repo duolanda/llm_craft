@@ -353,6 +353,6 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: CommandResult[];
+  commandResults: GameLog[];
   aiTurns: SavedAITurnRecord[];
 }

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
-import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES, RESULT_TYPES, CommandResultData } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
@@ -56,7 +56,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect(game.getState().players[0].resources.credits).toBe(150);
-    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
   it("rejects spawning soldiers directly from HQ", () => {
@@ -74,7 +74,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
     expect(game.getState().players[0].resources.credits).toBe(200);
   });
 
@@ -98,7 +98,7 @@ describe("Game", () => {
     const state = game.getState();
     expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS)).toHaveLength(1);
     expect(state.players[0].resources.credits).toBe(80);
-    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
   it("rejects building on an occupied tile", () => {
@@ -118,7 +118,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
   });
 
   it("rejects building a barracks adjacent to HQ", () => {
@@ -138,7 +138,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
     const feedbackData = game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>;
     expect(feedbackData?.type).toBe("build_invalid_position");
   });
@@ -157,7 +157,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.success).toBe(false);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(0);
   });
 
@@ -223,7 +223,8 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    // Attack command doesn't produce a COMMAND_RESULT log on success (attacks are sustained)
+    // The attack happens via processAttackIntents, so we check the target's HP instead
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -244,7 +245,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    // Attack command doesn't produce a COMMAND_RESULT log on success
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -316,7 +317,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.success).toBe(true);
+    // Attack command doesn't produce a COMMAND_RESULT log on success
     expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
     expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
   });
@@ -336,7 +337,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getCommandResults().at(-1)?.result).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
     expect((game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>)?.type).toBe("attack_no_target_in_range");
   });
 
@@ -358,7 +359,7 @@ describe("Game", () => {
     const feedbackData = feedback.data as Record<string, unknown>;
     const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
 
-    expect(result.success).toBe(true);
+    expect((result.data as CommandResultData).result_code).toBe(RESULT_CODES.OK);
     expect(runtimeWorker.pathTarget).toBeDefined();
     expect(runtimeWorker.pathTarget).not.toEqual({ x: 18, y: 10 });
     expect(feedbackData?.type).toBe("move_adjusted");
@@ -380,7 +381,7 @@ describe("Game", () => {
     game.processCommands();
 
     const lastResult = game.getCommandResults().at(-1);
-    expect(lastResult?.command.id).toBe("spawn_worker");
+    expect((lastResult?.data as CommandResultData)?.command.id).toBe("spawn_worker");
     expect(lastResult?.tick).toBe(game.getTick());
   });
 

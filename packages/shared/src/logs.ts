@@ -61,28 +61,34 @@ export type LogDisplayTarget = typeof LOG_DISPLAY_TARGETS[keyof typeof LOG_DISPL
 // RESULT_TYPES：命令结果类型名称的简单映射
 // ============================================================
 export const RESULT_TYPES = {
-  // 成功结果
-  BUILDING_CONSTRUCTED: "building_constructed",
-
   // 移动相关
+  MOVE_SUCCESS: "move_success",
   MOVE_ADJUSTED: "move_adjusted",
   MOVE_BLOCKED: "move_blocked",
 
   // 攻击相关
+  ATTACK_SUCCESS: "attack_success",
   ATTACK_OUT_OF_RANGE: "attack_out_of_range",
   ATTACK_NO_TARGET_IN_RANGE: "attack_no_target_in_range",
   ATTACK_INVALID_TARGET: "attack_invalid_target",
 
   // 建造相关
+  BUILDING_CONSTRUCTED: "building_constructed",
   BUILD_INVALID_POSITION: "build_invalid_position",
   BUILD_INSUFFICIENT_CREDITS: "build_insufficient_credits",
   BUILD_INVALID_BUILDING: "build_invalid_building",
+  BUILD_INVALID_UNIT: "build_invalid_unit",
 
   // 生产相关
+  SPAWN_SUCCESS: "spawn_success",
   SPAWN_INSUFFICIENT_CREDITS: "spawn_insufficient_credits",
   SPAWN_INVALID_BUILDING: "spawn_invalid_building",
 
+  // 暂停相关
+  HOLD_SUCCESS: "hold_success",
+
   // 通用错误
+  INVALID_UNIT: "invalid_unit",
   COMMAND_CRASHED: "command_crashed",
 } as const;
 
@@ -92,12 +98,7 @@ export type ResultType = typeof RESULT_TYPES[keyof typeof RESULT_TYPES];
 // 命令结果的额外数据（按 result_type 分类）
 // ============================================================
 export interface CommandResultExtraDataMap {
-  [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
-    buildingId: string;
-    buildingType: string;
-    x: number;
-    y: number;
-  };
+  [RESULT_TYPES.MOVE_SUCCESS]: Record<string, never>;
   [RESULT_TYPES.MOVE_ADJUSTED]: {
     x: number;
     y: number;
@@ -113,6 +114,7 @@ export interface CommandResultExtraDataMap {
     hint: string;
     code: string;
   };
+  [RESULT_TYPES.ATTACK_SUCCESS]: Record<string, never>;
   [RESULT_TYPES.ATTACK_OUT_OF_RANGE]: {
     targetId: string;
     hint: string;
@@ -122,6 +124,12 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.ATTACK_INVALID_TARGET]: {
     hint: string;
+  };
+  [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
+    buildingId: string;
+    buildingType: string;
+    x: number;
+    y: number;
   };
   [RESULT_TYPES.BUILD_INVALID_POSITION]: {
     x: number;
@@ -138,6 +146,13 @@ export interface CommandResultExtraDataMap {
   [RESULT_TYPES.BUILD_INVALID_BUILDING]: {
     hint: string;
   };
+  [RESULT_TYPES.BUILD_INVALID_UNIT]: {
+    hint: string;
+  };
+  [RESULT_TYPES.SPAWN_SUCCESS]: {
+    buildingId: string;
+    unitType: string;
+  };
   [RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS]: {
     buildingId: string;
     unitType: string;
@@ -149,6 +164,13 @@ export interface CommandResultExtraDataMap {
     buildingId: string;
     buildingType: string;
     unitType: string;
+    hint: string;
+  };
+  [RESULT_TYPES.HOLD_SUCCESS]: {
+    unitId: string;
+  };
+  [RESULT_TYPES.INVALID_UNIT]: {
+    unitId: string;
     hint: string;
   };
   [RESULT_TYPES.COMMAND_CRASHED]: {

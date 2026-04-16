@@ -6,7 +6,6 @@ import {
   Command,
   GameSnapshot,
   GameState,
-  CommandResult,
   Tile,
   TileType,
   ResultCode,
@@ -61,7 +60,6 @@ export class Game {
   private players: Player[] = [];
   private logs: GameLog[] = [];
   private commandQueue: Command[] = [];
-  private commandResults: CommandResult[] = [];
   private snapshots: GameSnapshot[] = [];
   private aiOutputs: Record<string, string> = {};
   private winner: string | null = null;
@@ -160,7 +158,6 @@ export class Game {
           feedbackTarget: command.playerId as AIFeedbackTarget,
           level: LOG_LEVELS.ERROR,
         });
-        this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Command processing crashed");
         console.error("命令处理异常:", error, command);
       }
     }
@@ -209,6 +206,21 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
+              } else {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Unit ${command.unitId} moving to (${command.position.x}, ${command.position.y})`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.MOVE_SUCCESS,
+                    result_data: {},
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                  }
+                );
               }
             } else {
               const failure = this.describeMoveFailure(unit.id, command.position.x, command.position.y) ?? {
@@ -238,7 +250,25 @@ export class Game {
                 }
               );
             }
-            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Move command processed");
+          } else {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Move command failed: unit ${command.unitId} not found or does not belong to player`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Check that the unit exists and belongs to your player.",
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
           }
         }
         break;
@@ -292,26 +322,41 @@ export class Game {
                   }
                 );
               }
+            } else {
               this.addLog(
                 LOG_TYPES.COMMAND_RESULT,
-                `Attack command failed for unit ${command.unitId}`,
+                `Unit ${command.unitId} attacking target ${command.targetId}`,
                 {
                   command,
                   result_code: result,
-                  type: RESULT_TYPES.ATTACK_OUT_OF_RANGE,
-                  result_data: {
-                    targetId: command.targetId!,
-                    hint: "Move to a tile adjacent to the target before attacking.",
-                  },
+                  type: RESULT_TYPES.ATTACK_SUCCESS,
+                  result_data: {},
                 },
                 {
                   owner: command.playerId as ActorId,
                   feedbackTarget: command.playerId as AIFeedbackTarget,
-                  level: LOG_LEVELS.WARNING,
                 }
               );
             }
-            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Attack command processed");
+          } else {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Attack command failed: unit ${command.unitId} not found or does not belong to player`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Check that the unit exists and belongs to your player.",
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
           }
         }
         break;
@@ -344,8 +389,41 @@ export class Game {
                   level: LOG_LEVELS.WARNING,
                 }
               );
+            } else {
+              this.addLog(
+                LOG_TYPES.COMMAND_RESULT,
+                `Unit ${command.unitId} attacking nearest enemy in range`,
+                {
+                  command,
+                  result_code: result,
+                  type: RESULT_TYPES.ATTACK_SUCCESS,
+                  result_data: {},
+                },
+                {
+                  owner: command.playerId as ActorId,
+                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                }
+              );
             }
-            this.recordCommandResult(command, result, result === RESULT_CODES.OK, "Attack-in-range command processed");
+          } else {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Attack-in-range command failed: unit ${command.unitId} not found or does not belong to player`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Check that the unit exists and belongs to your player.",
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
           }
         }
         break;
@@ -358,7 +436,22 @@ export class Game {
             this.unitManager.holdPosition(unit);
             // 清除寻路路径
             this.unitManager.clearPath(unit);
-            this.recordCommandResult(command, RESULT_CODES.OK, true, "Hold command processed");
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Unit ${command.unitId} holding position`,
+              {
+                command,
+                result_code: RESULT_CODES.OK,
+                type: RESULT_TYPES.HOLD_SUCCESS,
+                result_data: {
+                  unitId: command.unitId,
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+              }
+            );
           }
         }
         break;
@@ -395,11 +488,26 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
-                this.recordCommandResult(command, result, false, "Building cannot produce this unit type");
               } else if (player.resources.credits >= unitCost) {
                 player.resources.credits -= unitCost;
                 this.buildingManager.spawnUnit(building, command.unitType);
-                this.recordCommandResult(command, RESULT_CODES.OK, true, "Spawn command queued");
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Spawn command queued: ${command.unitType} from ${building.type}`,
+                  {
+                    command,
+                    result_code: RESULT_CODES.OK,
+                    type: RESULT_TYPES.SPAWN_SUCCESS,
+                    result_data: {
+                      buildingId: building.id,
+                      unitType: command.unitType,
+                    },
+                  },
+                  {
+                    owner: command.playerId as ActorId,
+                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                  }
+                );
               } else {
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
@@ -422,12 +530,6 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
-                this.recordCommandResult(
-                  command,
-                  RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-                  false,
-                  "Insufficient credits"
-                );
               }
             }
           }
@@ -441,7 +543,23 @@ export class Game {
           const player = this.players.find((p) => p.id === command.playerId);
 
           if (!unit || !player || unit.playerId !== command.playerId || unit.type !== UNIT_TYPES.WORKER) {
-            this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Only a friendly worker can build");
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              "Build command failed: only a friendly worker can build",
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.BUILD_INVALID_UNIT,
+                result_data: {
+                  hint: "Only workers can construct buildings. Ensure the unit is a worker and belongs to your player.",
+                },
+              },
+              {
+                owner: command.playerId as ActorId,
+                feedbackTarget: command.playerId as AIFeedbackTarget,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
             break;
           }
 
@@ -463,7 +581,6 @@ export class Game {
                 level: LOG_LEVELS.WARNING,
               }
             );
-            this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_BUILDING, false, "Only barracks can be built in MVP");
             break;
           }
 
@@ -490,12 +607,6 @@ export class Game {
                 level: LOG_LEVELS.WARNING,
               }
             );
-            this.recordCommandResult(
-              command,
-              RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-              false,
-              "Insufficient credits"
-            );
             break;
           }
 
@@ -521,7 +632,6 @@ export class Game {
                 level: LOG_LEVELS.WARNING,
               }
             );
-            this.recordCommandResult(command, result, false, "Invalid build position");
             break;
           }
 
@@ -545,7 +655,6 @@ export class Game {
           }, {
             owner: command.playerId as ActorId,
           });
-          this.recordCommandResult(command, RESULT_CODES.OK, true, "Building constructed");
         }
         break;
       }
@@ -991,8 +1100,12 @@ export class Game {
     return latest ? this.cloneValue(latest) : null;
   }
 
-  getCommandResults(): CommandResult[] {
-    return this.cloneValue(this.commandResults);
+  getCommandResults(sinceTick?: number): GameLog[] {
+    return this.logs.filter((log) => {
+      if (log.type !== LOG_TYPES.COMMAND_RESULT) return false;
+      if (sinceTick !== undefined && log.tick <= sinceTick) return false;
+      return true;
+    });
   }
 
   // For testing purposes
@@ -1036,21 +1149,6 @@ export class Game {
     }
 
     return RESULT_CODES.OK;
-  }
-
-  private recordCommandResult(
-    command: Command,
-    result: ResultCode,
-    success: boolean,
-    message: string
-  ): void {
-    this.commandResults.push({
-      tick: this.tick,
-      command,
-      result,
-      success,
-      message,
-    });
   }
 
   private describeMoveFailure(unitId: string, x: number, y: number): { code: string; hint: string } | null {

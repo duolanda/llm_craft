@@ -139,8 +139,9 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_POSITION_OCCUPIED);
-    const feedbackData = game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>;
-    expect(feedbackData?.type).toBe("build_invalid_position");
+    const feedbackData = game.getAIFeedback("player_1").at(-1)?.data as CommandResultData;
+    expect(feedbackData?.type).toBe(RESULT_TYPES.BUILD_INVALID_POSITION);
+    expect((feedbackData?.result_data as any)?.type).toBe("build_too_close_to_hq");
   });
 
   it("requires barracks before soldiers can be queued", () => {
@@ -223,8 +224,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    // Attack command doesn't produce a COMMAND_RESULT log on success (attacks are sustained)
-    // The attack happens via processAttackIntents, so we check the target's HP instead
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -245,7 +245,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    // Attack command doesn't produce a COMMAND_RESULT log on success
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -317,7 +317,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    // Attack command doesn't produce a COMMAND_RESULT log on success
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
     expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
     expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
   });

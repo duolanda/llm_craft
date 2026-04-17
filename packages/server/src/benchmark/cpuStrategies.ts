@@ -4,10 +4,16 @@ function serializeLines(lines: string[]): string {
   return lines.filter(Boolean).join("\n");
 }
 
-function withCommentHeader(strategy: CPUStrategyType, plan: string, lines: string[]): string {
+function withCommentHeader(
+  strategy: CPUStrategyType,
+  plan: string,
+  lines: string[],
+  annotations: string[] = []
+): string {
   return serializeLines([
     `// ===== CPU STRATEGY: ${strategy} =====`,
     `// plan: ${plan}`,
+    ...annotations.map((annotation) => `// ${annotation}`),
     "// ================================",
     ...lines,
   ]);
@@ -67,7 +73,7 @@ function buildRandomStrategy(payload: AIPromptPayload): string {
     return withCommentHeader("random", "build-barracks", lines);
   }
 
-  const candidatePlans: Array<"mine" | "spawn-worker" | "spawn-soldier" | "attack-hq"> = ["mine"];
+  const candidatePlans: Array<"mine" | "spawn-worker" | "spawn-soldier" | "attack"> = ["mine"];
   if (canSpawnWorker && workerCount < 4) {
     candidatePlans.push("spawn-worker");
   }
@@ -75,20 +81,13 @@ function buildRandomStrategy(payload: AIPromptPayload): string {
     candidatePlans.push("spawn-soldier");
   }
   if (soldierCount > 0 || hasBarracks) {
-    candidatePlans.push("attack-hq");
+    candidatePlans.push("attack");
   }
 
   const selectedPlan = chooseRandom(candidatePlans);
 
   if (selectedPlan === "mine") {
     lines.push(...buildWorkerEconomyLines());
-    lines.push(
-      "for (const soldier of me.soldiers) {",
-      "  if (Math.random() > 0.75) {",
-      "    soldier.attackInRange(['soldier', 'worker', 'barracks', 'hq']);",
-      "  }",
-      "}"
-    );
     return withCommentHeader("random", "mine", lines);
   }
 
@@ -108,7 +107,7 @@ function buildRandomStrategy(payload: AIPromptPayload): string {
     return withCommentHeader("random", "spawn-soldier", lines);
   }
 
-  lines.push(...buildWorkerEconomyLines());
+  const shouldAttackThisTurn = Math.random() > 0.75;
   lines.push(
     "if (me.soldiers.length === 0 && me.buildings.some((building) => building.type === 'barracks') && me.resources.credits >= unitStats.soldier.cost) {",
     "  for (const barracks of me.buildings.filter((building) => building.type === 'barracks')) {",
@@ -120,14 +119,20 @@ function buildRandomStrategy(payload: AIPromptPayload): string {
     "  for (const soldier of me.soldiers) {",
     "    if (enemyHQ) {",
     "      soldier.moveTo({ x: enemyHQ.x, y: enemyHQ.y });",
-    "    } else {",
-    "      soldier.attackInRange(['soldier', 'worker', 'barracks', 'hq']);",
+    shouldAttackThisTurn
+      ? "      soldier.attackInRange(['hq', 'soldier', 'worker', 'barracks']);"
+      : "",
     "    }",
     "  }",
     "}"
   );
 
-  return withCommentHeader("random", "attack-hq", lines);
+  return withCommentHeader(
+    "random",
+    "attack",
+    lines,
+    [`attack-roll: ${shouldAttackThisTurn ? "hit" : "miss"}`]
+  );
 }
 
 function buildRushStrategy(payload: AIPromptPayload): string {

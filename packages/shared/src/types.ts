@@ -1,4 +1,5 @@
-import { UnitType, BuildingType, UnitState, TileType, ResultCode } from "./constants";
+import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId } from "./constants";
+import type { GameLog } from "./logs";
 
 export type LLMProviderType = "openai-compatible";
 
@@ -77,7 +78,7 @@ export interface Unit extends GameObject {
   maxHp: number;
   state: UnitState;
   my: boolean;
-  playerId: string;
+  playerId: PlayerId;
   attackRange: number;
   carryingCredits: number;
   carryCapacity: number;
@@ -102,7 +103,7 @@ export interface Building extends GameObject {
   hp: number;
   maxHp: number;
   my: boolean;
-  playerId: string;
+  playerId: PlayerId;
   productionQueue: UnitType[];
 }
 
@@ -111,7 +112,7 @@ export interface Resources {
 }
 
 export interface Player {
-  id: string;
+  id: PlayerId;
   units: Unit[];
   buildings: Building[];
   resources: Resources;
@@ -127,32 +128,8 @@ export interface GameState {
   tick: number;
   players: Player[];
   tiles: Tile[][];
-  winner: string | null;
+  winner: PlayerId | null;
   logs: GameLog[];
-}
-
-export interface GameLog {
-  tick: number;
-  type: string;
-  message: string;
-  data?: any;
-}
-
-export interface AIFeedback {
-  tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
-  message: string;
-  errorType?: string;
-  code?: string;
-  meta?: {
-    x?: number;
-    y?: number;
-    requestedX?: number;
-    requestedY?: number;
-    targetId?: string;
-    hint?: string;
-  };
 }
 
 export interface Command {
@@ -165,7 +142,7 @@ export interface Command {
   position?: Position;
   unitType?: UnitType;
   buildingType?: BuildingType;
-  playerId: string;
+  playerId: PlayerId;
 }
 
 export interface GameSnapshot {
@@ -230,8 +207,7 @@ export interface AIStatePackage {
     workerGatherRate: number;
     hqDeliveryRange: number;
   };
-  eventsSinceLastCall: GameLog[];
-  aiFeedbackSinceLastCall: AIFeedback[];
+  aiFeedbackSinceLastCall: GameLog[];
   gameTimeRemaining: number;
 }
 
@@ -282,13 +258,12 @@ export interface AIPromptPayload {
       hp?: number;
       maxHp?: number;
     }>;
-    events: GameLog[];
-    aiFeedback: AIFeedback[];
+    aiFeedback: GameLog[];
   } | null;
 }
 
 export interface AITurnRecord {
-  playerId: string;
+  playerId: PlayerId;
   requestTick: number;
   executeTick: number;
   requestMessages: Array<{
@@ -306,7 +281,7 @@ export interface AITurnRecord {
 }
 
 export interface SavedAITurnRecord {
-  playerId: string;
+  playerId: PlayerId;
   requestTick: number;
   executeTick: number;
   windowMessageCount: number;
@@ -323,7 +298,7 @@ export interface SavedAITurnRecord {
 export interface TickDeltaRecord {
   tick: number;
   players: Array<{
-    playerId: string;
+    playerId: PlayerId;
     credits?: number;
     units: Array<{
       id: string;
@@ -351,7 +326,7 @@ export interface TickDeltaRecord {
   }>;
   newLogs: GameLog[];
   aiOutputs: Record<string, string>;
-  winner?: string | null;
+  winner?: PlayerId | null;
 }
 
 export interface GameRecord {
@@ -360,7 +335,7 @@ export interface GameRecord {
     savedAt: string;
     endedAt?: string;
     status: "running" | "stopped" | "finished";
-    winner: string | null;
+    winner: PlayerId | null;
     aiIntervalTicks: number;
     aiContextWindowTurns: number;
     map: {
@@ -370,7 +345,7 @@ export interface GameRecord {
     recordFormat: "compact-v2";
     systemPrompt: string;
     players: Array<{
-      playerId: string;
+      playerId: PlayerId;
       model: string;
       baseURL?: string;
     }>;
@@ -378,6 +353,6 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: CommandResult[];
+  commandResults: GameLog[];
   aiTurns: SavedAITurnRecord[];
 }

@@ -1,4 +1,5 @@
 import {
+  PlayerId,
   Building,
   BuildingType,
   UnitType,
@@ -14,7 +15,7 @@ export class BuildingManager {
     type: BuildingType,
     x: number,
     y: number,
-    playerId: string
+    playerId: PlayerId
   ): Building {
     const stats = BUILDING_STATS[type];
     const building: Building = {
@@ -37,7 +38,7 @@ export class BuildingManager {
     return this.buildings.get(id);
   }
 
-  getBuildingsByPlayer(playerId: string): Building[] {
+  getBuildingsByPlayer(playerId: PlayerId): Building[] {
     return Array.from(this.buildings.values()).filter(
       (b) => b.playerId === playerId && b.exists
     );
@@ -103,8 +104,8 @@ export class BuildingManager {
     return false; // Building still alive
   }
 
-  processProductionQueues(): Map<string, UnitType[]> {
-    const completedUnits = new Map<string, UnitType[]>();
+  processProductionQueues(): Map<PlayerId, UnitType[]> {
+    const completedUnits = new Map<PlayerId, UnitType[]>();
 
     for (const building of this.buildings.values()) {
       if (building.exists && building.productionQueue.length > 0) {

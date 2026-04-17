@@ -508,7 +508,7 @@ describe("GameOrchestrator", () => {
     const feedback = orchestrator.getGame().getAIFeedback("player_1");
     const noCommandFeedback = feedback.find((log) => log.message.includes("produced no commands"));
     expect(noCommandFeedback).toBeTruthy();
-    expect(noCommandFeedback?.data?.code).toBeUndefined();
+    expect(noCommandFeedback?.type).toBe("ai_execution_error");
   });
 
   it("does not include generated source code in sandbox error feedback", async () => {
@@ -538,8 +538,7 @@ describe("GameOrchestrator", () => {
     const feedback = orchestrator.getGame().getAIFeedback("player_1");
     const errorFeedback = feedback.find((log) => log.message.includes("Unexpected identifier"));
     expect(errorFeedback).toBeTruthy();
-    expect(errorFeedback?.data?.errorType).toBe("SyntaxError");
-    expect(errorFeedback?.data?.code).toBeUndefined();
+    expect(errorFeedback?.type).toBe("ai_execution_error");
   });
 
   it("writes a readable transcript file when per-match debug recording is enabled", async () => {

@@ -8,6 +8,12 @@ import {
   MAP_WIDTH,
   SavedAITurnRecord,
   TickDeltaRecord,
+  LOG_TYPES,
+  LOG_LEVELS,
+  LOG_DISPLAY_TARGETS,
+  PlayerId,
+  PLAYER_IDS,
+  AIFeedbackTarget
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -92,7 +98,7 @@ export class GameOrchestrator {
     return this.transcriptFilePath;
   }
 
-  async runAI(playerId: string, sessionId = this.runSession): Promise<void> {
+  async runAI(playerId: PlayerId, sessionId = this.runSession): Promise<void> {
     // 防止并发调用
     if (this.isRunningAI[playerId as keyof typeof this.isRunningAI]) return;
     this.isRunningAI[playerId as keyof typeof this.isRunningAI] = true;
@@ -110,8 +116,8 @@ export class GameOrchestrator {
         this.lastAIState[playerId]?.tick
       );
 
-      const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
-      const llm = playerId === "player_1" ? this.llm1 : this.llm2;
+      const sandbox = playerId === PLAYER_IDS.PLAYER_1 ? this.ai1 : this.ai2;
+      const llm = playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
       const shouldForceFullState = llm.shouldForceFullState();
       const promptPayload = packageBuilder.buildPromptPayload(
         aiPackage,
@@ -121,7 +127,12 @@ export class GameOrchestrator {
       const { code, rawResponse, requestMessages, errorMessage: providerErrorMessage } =
         await llm.generateCode(promptPayload);
       if (providerErrorMessage) {
-        this.game.addAIFeedback(playerId, "generation", "warning", providerErrorMessage);
+        this.game.addLog(
+          LOG_TYPES.AI_GENERATION_ERROR,
+          providerErrorMessage,
+          undefined,
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        );
       }
       if (!this.isPolling || sessionId !== this.runSession) {
         await this.writeTranscript(
@@ -163,13 +174,18 @@ export class GameOrchestrator {
         return;
       }
       if (errorMessage) {
-        this.game.addAIFeedback(playerId, "execution", "error", errorMessage, { errorType });
+        this.game.addLog(
+          LOG_TYPES.AI_EXECUTION_ERROR,
+          errorMessage,
+          { errorType: errorType ?? "unknown" },
+          { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        );
       } else if (commands.length === 0) {
-        this.game.addAIFeedback(
-          playerId,
-          "execution",
-          "warning",
-          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act."
+        this.game.addLog(
+          LOG_TYPES.AI_EXECUTION_ERROR,
+          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
+          { errorType: "no_commands" },
+          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }
       for (const cmd of commands) {
@@ -214,11 +230,11 @@ export class GameOrchestrator {
     } catch (e) {
       console.error(`AI 错误 ${playerId}:`, e);
       const errorMessage = e instanceof Error ? e.message : String(e);
-      this.game.addAIFeedback(
-        playerId,
-        "generation",
-        "error",
-        errorMessage
+      this.game.addLog(
+        LOG_TYPES.AI_GENERATION_ERROR,
+        errorMessage,
+        undefined,
+        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
       );
       await this.writeTranscript(
         this.formatTranscriptEntry({
@@ -267,7 +283,7 @@ export class GameOrchestrator {
         this.aiDirty.player_2 = true;
       }
 
-      for (const playerId of ["player_1", "player_2"]) {
+      for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
         if (
           this.aiDirty[playerId as keyof typeof this.aiDirty] &&
           !this.isRunningAI[playerId as keyof typeof this.isRunningAI] &&
@@ -328,12 +344,12 @@ export class GameOrchestrator {
         systemPrompt: SYSTEM_PROMPT,
         players: [
           {
-            playerId: "player_1",
+            playerId: PLAYER_IDS.PLAYER_1,
             model: this.llm1.getModel(),
             baseURL: this.llm1.getBaseURL(),
           },
           {
-            playerId: "player_2",
+            playerId: PLAYER_IDS.PLAYER_2,
             model: this.llm2.getModel(),
             baseURL: this.llm2.getBaseURL(),
           },
@@ -525,7 +541,7 @@ export class GameOrchestrator {
 
   private formatTranscriptEntry(input: {
     createdAt: string;
-    playerId: string;
+    playerId: PlayerId;
     requestTick: number;
     executeTick?: number;
     mode: "full" | "delta";

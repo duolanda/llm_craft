@@ -1,11 +1,10 @@
 import {
+  PlayerId,
   Unit,
   UnitType,
-  UnitState,
   TileType,
   ECONOMY_RULES,
   TILE_TYPES,
-  UNIT_TYPES,
   UNIT_STATES,
   UNIT_STATS,
   RESULT_CODES,
@@ -27,7 +26,7 @@ export class UnitManager {
   private units: Map<string, Unit> = new Map();
   private idCounter = 0;
 
-  createUnit(type: UnitType, x: number, y: number, playerId: string): Unit {
+  createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): Unit {
     const stats = UNIT_STATS[type];
     const unit: Unit = {
       id: `unit_${++this.idCounter}`,
@@ -52,7 +51,7 @@ export class UnitManager {
     return this.units.get(id);
   }
 
-  getUnitsByPlayer(playerId: string): Unit[] {
+  getUnitsByPlayer(playerId: PlayerId): Unit[] {
     return Array.from(this.units.values()).filter(
       (u) => u.playerId === playerId && u.exists
     );

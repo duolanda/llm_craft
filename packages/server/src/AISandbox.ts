@@ -1,6 +1,6 @@
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { Command, AIStatePackage } from "@llmcraft/shared";
+import { PlayerId, Command, AIStatePackage } from "@llmcraft/shared";
 
 export type AISandboxErrorType = string;
 
@@ -14,10 +14,10 @@ export const AI_SANDBOX_TIMEOUT_MS = 200;
 const AI_SANDBOX_PARENT_GRACE_MS = 100;
 
 export class AISandbox {
-  private playerId: string;
+  private playerId: PlayerId;
   private executionTimeoutMs = AI_SANDBOX_TIMEOUT_MS;
 
-  constructor(playerId: string) {
+  constructor(playerId: PlayerId) {
     this.playerId = playerId;
   }
 

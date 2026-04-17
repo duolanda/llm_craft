@@ -101,7 +101,7 @@ export class Game {
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY - 1, "player_2");
     this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY + 1, "player_2");
 
-    this.addLog(LOG_TYPES.GAME_START, "Game initialized successfully");
+    this.addLog(LOG_TYPES.GAME_INIT, "Game initialized successfully");
     this.saveSnapshot();
   }
 

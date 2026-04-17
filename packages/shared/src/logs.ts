@@ -206,7 +206,7 @@ export interface AIExecutionErrorData {
 // ============================================================
 export const LOG_TYPES = {
   // 游戏生命周期
-  GAME_START: "game_start",
+  GAME_INIT: "game_init",
   GAME_STARTED: "game_started",
   GAME_STOPPED: "game_stopped",
   GAME_END: "game_end",
@@ -236,7 +236,7 @@ export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
 // LogType → data 类型的映射表
 // ============================================================
 export interface GameLogDataMap {
-  [LOG_TYPES.GAME_START]: undefined;
+  [LOG_TYPES.GAME_INIT]: undefined;
   [LOG_TYPES.GAME_STARTED]: undefined;
   [LOG_TYPES.GAME_STOPPED]: undefined;
   [LOG_TYPES.GAME_END]: { winner: string; loser: string };
@@ -286,7 +286,7 @@ const LOG_META_FALLBACK: LogMeta = {
 // LOG_META_DEFAULTS：每个日志类型的默认元数据
 // ============================================================
 export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
-  [LOG_TYPES.GAME_START]: {},
+  [LOG_TYPES.GAME_INIT]: {},
   [LOG_TYPES.GAME_STARTED]: {},
   [LOG_TYPES.GAME_STOPPED]: {},
   [LOG_TYPES.GAME_END]: {},

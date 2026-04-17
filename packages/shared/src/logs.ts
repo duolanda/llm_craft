@@ -1,4 +1,4 @@
-import { ResultCode, PLAYER_IDS, ActorId, ACTOR_IDS } from "./constants";
+import { ResultCode, PLAYER_IDS, PlayerId, ActorId, ACTOR_IDS } from "./constants";
 import type { Command } from "./types";
 
 // ============================================================
@@ -234,22 +234,20 @@ export interface GameLogDataMap {
   [LOG_TYPES.GAME_INIT]: undefined;
   [LOG_TYPES.GAME_STARTED]: undefined;
   [LOG_TYPES.GAME_STOPPED]: undefined;
-  [LOG_TYPES.GAME_END]: { winner: string; loser: string };
+  [LOG_TYPES.GAME_END]: { winner: PlayerId; loser: PlayerId };
   [LOG_TYPES.RESOURCE_GATHERED]: {
-    playerId: string;
     unitId: string;
     amount: number;
     carryingCredits?: number;
   };
   [LOG_TYPES.CREDITS_DELIVERED]: {
-    playerId: string;
     unitId: string;
     buildingId: string;
     amount: number;
     credits: number;
   };
-  [LOG_TYPES.UNIT_SPAWNED]: { playerId: string; unitType: string };
-  [LOG_TYPES.SPAWN_FAILED]: { playerId: string; unitType: string };
+  [LOG_TYPES.UNIT_SPAWNED]: { unitType: string };
+  [LOG_TYPES.SPAWN_FAILED]: { unitType: string };
   [LOG_TYPES.COMMAND_RESULT]: CommandResultData;
   [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
   [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;

@@ -2,6 +2,7 @@ import {
   Unit,
   Building,
   Player,
+  PlayerId,
   GameLog,
   Command,
   GameSnapshot,
@@ -58,7 +59,7 @@ export class Game {
   private commandQueue: Command[] = [];
   private snapshots: GameSnapshot[] = [];
   private aiOutputs: Record<string, string> = {};
-  private winner: string | null = null;
+  private winner: PlayerId | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
 
@@ -150,8 +151,8 @@ export class Game {
           type: RESULT_TYPES.COMMAND_CRASHED,
           result_data: { error: errorMessage },
         }, {
-          owner: command.playerId as ActorId,
-          feedbackTarget: command.playerId as AIFeedbackTarget,
+          owner: command.playerId,
+          feedbackTarget: command.playerId,
           level: LOG_LEVELS.ERROR,
         });
         console.error("命令处理异常:", error, command);
@@ -197,8 +198,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                     level: LOG_LEVELS.WARNING,
                   }
                 );
@@ -213,8 +214,8 @@ export class Game {
                     result_data: {},
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                   }
                 );
               }
@@ -240,8 +241,8 @@ export class Game {
                   },
                 },
                 {
-                  owner: command.playerId as ActorId,
-                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
                   level: LOG_LEVELS.WARNING,
                 }
               );
@@ -260,8 +261,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -294,8 +295,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                     level: LOG_LEVELS.WARNING,
                   }
                 );
@@ -312,8 +313,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                     level: LOG_LEVELS.WARNING,
                   }
                 );
@@ -329,8 +330,8 @@ export class Game {
                   result_data: {},
                 },
                 {
-                  owner: command.playerId as ActorId,
-                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
                 }
               );
             }
@@ -348,8 +349,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -380,8 +381,8 @@ export class Game {
                   },
                 },
                 {
-                  owner: command.playerId as ActorId,
-                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
                   level: LOG_LEVELS.WARNING,
                 }
               );
@@ -396,8 +397,8 @@ export class Game {
                   result_data: {},
                 },
                 {
-                  owner: command.playerId as ActorId,
-                  feedbackTarget: command.playerId as AIFeedbackTarget,
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
                 }
               );
             }
@@ -415,8 +416,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -444,8 +445,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
               }
             );
           }
@@ -479,8 +480,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                     level: LOG_LEVELS.WARNING,
                   }
                 );
@@ -500,8 +501,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                   }
                 );
               } else {
@@ -521,8 +522,8 @@ export class Game {
                     },
                   },
                   {
-                    owner: command.playerId as ActorId,
-                    feedbackTarget: command.playerId as AIFeedbackTarget,
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
                     level: LOG_LEVELS.WARNING,
                   }
                 );
@@ -552,8 +553,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -573,8 +574,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -599,8 +600,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -625,8 +626,8 @@ export class Game {
                 },
               },
               {
-                owner: command.playerId as ActorId,
-                feedbackTarget: command.playerId as AIFeedbackTarget,
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
                 level: LOG_LEVELS.WARNING,
               }
             );
@@ -651,7 +652,7 @@ export class Game {
               y: newBuilding.y,
             },
           }, {
-            owner: command.playerId as ActorId,
+            owner: command.playerId,
           });
         }
         break;
@@ -704,7 +705,7 @@ export class Game {
 
   private executeAttackIntent(
     attacker: RuntimeUnit,
-    playerId: string,
+    playerId: PlayerId,
     intent: AttackIntent | Unit["intent"]
   ): ResultCode {
     if (!attacker.exists || !intent || intent.type !== "attack") {
@@ -770,7 +771,7 @@ export class Game {
 
   private findPrioritizedAttackTarget(
     attacker: Unit,
-    playerId: string,
+    playerId: PlayerId,
     targetPriority?: string[]
   ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
     const priority = (targetPriority && targetPriority.length > 0
@@ -874,14 +875,12 @@ export class Game {
             if (spawnPos) {
               this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
               this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
-                playerId,
                 unitType,
-              });
+              }, { owner: playerId });
             } else {
               this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
-                playerId,
                 unitType,
-              });
+              }, { owner: playerId });
             }
           }
         }
@@ -932,9 +931,6 @@ export class Game {
     }
   ): GameLog {
     const base = defaultLogMeta(type);
-    const owner = overrides?.owner
-      ?? ((data as Record<string, unknown> | undefined)?.playerId as ActorId | undefined)
-      ?? base.owner;
 
     const log: GameLog = {
       tick: this.tick,
@@ -943,7 +939,7 @@ export class Game {
       data,
       meta: {
         level: overrides?.level ?? base.level,
-        owner,
+        owner: overrides?.owner ?? base.owner,
         feedbackTarget: overrides?.feedbackTarget ?? base.feedbackTarget,
         displayTarget: overrides?.displayTarget ?? base.displayTarget,
       },
@@ -964,7 +960,7 @@ export class Game {
     });
   }
 
-  getWinner(): string | null {
+  getWinner(): PlayerId | null {
     return this.winner;
   }
 
@@ -976,11 +972,11 @@ export class Game {
     return this.tick;
   }
 
-  setAIOutput(playerId: string, output: string): void {
+  setAIOutput(playerId: PlayerId, output: string): void {
     this.aiOutputs[playerId] = output;
   }
 
-  getAIFeedback(playerId: string, sinceTick?: number): GameLog[] {
+  getAIFeedback(playerId: PlayerId, sinceTick?: number): GameLog[] {
     return this.logs.filter((log) => {
       if (sinceTick !== undefined && log.tick <= sinceTick) return false;
       const target = log.meta?.feedbackTarget;
@@ -1020,11 +1016,10 @@ export class Game {
             unit.state = UNIT_STATES.GATHERING;
             unit.intent = { type: "gather", targetX: unit.x, targetY: unit.y };
             this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
-              playerId: player.id,
               unitId: unit.id,
               amount: gatheredCredits,
               carryingCredits: unit.carryingCredits,
-            });
+            }, { owner: player.id });
             economyActionTaken = true;
           }
         }
@@ -1036,12 +1031,11 @@ export class Game {
           unit.state = UNIT_STATES.IDLE;
           unit.intent = { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
           this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
-            playerId: player.id,
             unitId: unit.id,
             buildingId: hq.id,
             amount: deliveredCredits,
             credits: player.resources.credits,
-          });
+          }, { owner: player.id });
           economyActionTaken = true;
         }
 
@@ -1122,7 +1116,7 @@ export class Game {
     );
   }
 
-  private validateBuildPosition(playerId: string, x: number, y: number): ResultCode {
+  private validateBuildPosition(playerId: PlayerId, x: number, y: number): ResultCode {
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -1173,7 +1167,7 @@ export class Game {
     return { type: "move_unreachable", hint: "No reachable nearby tile found." };
   }
 
-  private describeBuildFailure(playerId: string, x: number, y: number): { type: string; hint: string } {
+  private describeBuildFailure(playerId: PlayerId, x: number, y: number): { type: string; hint: string } {
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
       return { type: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
     }
@@ -1220,7 +1214,7 @@ export class Game {
         : undefined,
       unitType: command.unitType,
       buildingType: command.buildingType,
-      playerId: String(command.playerId),
+      playerId: command.playerId,
     };
   }
 }

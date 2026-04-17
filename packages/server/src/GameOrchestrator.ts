@@ -12,6 +12,7 @@ import {
   LOG_LEVELS,
   LOG_DISPLAY_TARGETS,
   PlayerId,
+  PLAYER_IDS,
   AIFeedbackTarget
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
@@ -97,7 +98,7 @@ export class GameOrchestrator {
     return this.transcriptFilePath;
   }
 
-  async runAI(playerId: string, sessionId = this.runSession): Promise<void> {
+  async runAI(playerId: PlayerId, sessionId = this.runSession): Promise<void> {
     // 防止并发调用
     if (this.isRunningAI[playerId as keyof typeof this.isRunningAI]) return;
     this.isRunningAI[playerId as keyof typeof this.isRunningAI] = true;
@@ -115,8 +116,8 @@ export class GameOrchestrator {
         this.lastAIState[playerId]?.tick
       );
 
-      const sandbox = playerId === "player_1" ? this.ai1 : this.ai2;
-      const llm = playerId === "player_1" ? this.llm1 : this.llm2;
+      const sandbox = playerId === PLAYER_IDS.PLAYER_1 ? this.ai1 : this.ai2;
+      const llm = playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
       const shouldForceFullState = llm.shouldForceFullState();
       const promptPayload = packageBuilder.buildPromptPayload(
         aiPackage,
@@ -282,7 +283,7 @@ export class GameOrchestrator {
         this.aiDirty.player_2 = true;
       }
 
-      for (const playerId of ["player_1", "player_2"]) {
+      for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
         if (
           this.aiDirty[playerId as keyof typeof this.aiDirty] &&
           !this.isRunningAI[playerId as keyof typeof this.isRunningAI] &&
@@ -343,12 +344,12 @@ export class GameOrchestrator {
         systemPrompt: SYSTEM_PROMPT,
         players: [
           {
-            playerId: "player_1",
+            playerId: PLAYER_IDS.PLAYER_1,
             model: this.llm1.getModel(),
             baseURL: this.llm1.getBaseURL(),
           },
           {
-            playerId: "player_2",
+            playerId: PLAYER_IDS.PLAYER_2,
             model: this.llm2.getModel(),
             baseURL: this.llm2.getBaseURL(),
           },
@@ -540,7 +541,7 @@ export class GameOrchestrator {
 
   private formatTranscriptEntry(input: {
     createdAt: string;
-    playerId: string;
+    playerId: PlayerId;
     requestTick: number;
     executeTick?: number;
     mode: "full" | "delta";

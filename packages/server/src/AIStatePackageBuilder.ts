@@ -1,4 +1,5 @@
 import {
+  PlayerId,
   AIStatePackage,
   AIPromptPayload,
   Building,
@@ -16,7 +17,7 @@ type VisibleEnemy = AIStatePackage["enemies"][number];
 type VisibleEnemyBuilding = AIStatePackage["enemyBuildings"][number];
 
 export class AIStatePackageBuilder {
-  static build(playerId: string, state: GameState, game?: Game, sinceTick?: number): AIStatePackage {
+  static build(playerId: PlayerId, state: GameState, game?: Game, sinceTick?: number): AIStatePackage {
     const player = state.players.find((p) => p.id === playerId)!;
     const enemy = state.players.find((p) => p.id !== playerId)!;
     const aiFeedback = this.buildFeedback(

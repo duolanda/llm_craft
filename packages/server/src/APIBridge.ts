@@ -1,12 +1,12 @@
-import { Unit, Building, Command, Position, Player, AIStatePackage } from "@llmcraft/shared";
+import { Command, Position, PlayerId, AIStatePackage } from "@llmcraft/shared";
 
 export class APIBridge {
   private commands: Command[] = [];
-  private playerId: string;
+  private playerId: PlayerId;
   private static counter = 0;
   private static readonly DEFAULT_ATTACK_PRIORITY = ["hq", "soldier", "worker", "barracks"];
 
-  constructor(playerId: string) {
+  constructor(playerId: PlayerId) {
     this.playerId = playerId;
   }
 

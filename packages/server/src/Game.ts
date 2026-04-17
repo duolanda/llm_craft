@@ -545,9 +545,10 @@ export class Game {
               {
                 command,
                 result_code: RESULT_CODES.ERR_INVALID_TARGET,
-                type: RESULT_TYPES.BUILD_INVALID_UNIT,
+                type: RESULT_TYPES.INVALID_UNIT,
                 result_data: {
-                  hint: "Only workers can construct buildings. Ensure the unit is a worker and belongs to your player.",
+                  unitId: command.unitId,
+                  hint: "Only workers can construct buildings. Ensure the unit exists and is a worker and belongs to your player.",
                 },
               },
               {

@@ -76,7 +76,6 @@ export const RESULT_TYPES = {
   BUILD_INVALID_POSITION: "build_invalid_position",
   BUILD_INSUFFICIENT_CREDITS: "build_insufficient_credits",
   BUILD_INVALID_BUILDING: "build_invalid_building",
-  BUILD_INVALID_UNIT: "build_invalid_unit",
 
   // 生产相关
   SPAWN_SUCCESS: "spawn_success",
@@ -144,9 +143,6 @@ export interface CommandResultExtraDataMap {
     hint: string;
   };
   [RESULT_TYPES.BUILD_INVALID_BUILDING]: {
-    hint: string;
-  };
-  [RESULT_TYPES.BUILD_INVALID_UNIT]: {
     hint: string;
   };
   [RESULT_TYPES.SPAWN_SUCCESS]: {

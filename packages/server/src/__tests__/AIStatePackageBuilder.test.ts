@@ -10,7 +10,7 @@ describe("AIStatePackageBuilder", () => {
     game.addLog(
       LOG_TYPES.AI_EXECUTION_ERROR,
       "ReferenceError: foo is not defined",
-      { code: "execution_error_code", errorType: "ReferenceError" },
+      { errorType: "ReferenceError" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 
@@ -19,7 +19,6 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.aiFeedbackSinceLastCall).toHaveLength(1);
     expect(aiState.aiFeedbackSinceLastCall[0].message).toContain("ReferenceError");
     const data = aiState.aiFeedbackSinceLastCall[0].data as AIExecutionErrorData;
-    expect(data?.code).toBe("execution_error_code");
     expect(data?.errorType).toBe("ReferenceError");
   });
 
@@ -29,7 +28,7 @@ describe("AIStatePackageBuilder", () => {
     game.addLog(
       LOG_TYPES.AI_EXECUTION_ERROR,
       "player_2 failed",
-      { code: "", errorType: "test_error" },
+      { errorType: "test_error" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_2, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 
@@ -96,14 +95,14 @@ describe("AIStatePackageBuilder", () => {
     game.addLog(
       LOG_TYPES.AI_EXECUTION_ERROR,
       "old warning",
-      { code: "", errorType: "test_error" },
+      { errorType: "test_error" },
       { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
     game.tickUpdate();
     game.addLog(
       LOG_TYPES.AI_EXECUTION_ERROR,
       "new error",
-      { code: "", errorType: "test_error" },
+      { errorType: "test_error" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
 

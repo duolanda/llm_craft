@@ -23,7 +23,7 @@ describe("AISandbox", () => {
     game.addLog(
       LOG_TYPES.AI_EXECUTION_ERROR,
       "last round failed",
-      { code: "", errorType: "test_error" },
+      { errorType: "test_error" },
       { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: AI_FEEDBACK_TARGETS.PLAYER_1, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
     );
     const aiState = AIStatePackageBuilder.build("player_1", game.getState(), game);

@@ -193,7 +193,6 @@ export type CommandResultData = {
 // AI 执行错误数据结构
 // ============================================================
 export interface AIExecutionErrorData {
-  code: string;
   errorType: string;
 }
 

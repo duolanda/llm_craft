@@ -176,14 +176,14 @@ export class GameOrchestrator {
         this.game.addLog(
           LOG_TYPES.AI_EXECUTION_ERROR,
           errorMessage,
-          { code, errorType: errorType ?? "unknown" },
+          { errorType: errorType ?? "unknown" },
           { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       } else if (commands.length === 0) {
         this.game.addLog(
           LOG_TYPES.AI_EXECUTION_ERROR,
           "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
-          { code, errorType: "no_commands" },
+          { errorType: "no_commands" },
           { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
       }

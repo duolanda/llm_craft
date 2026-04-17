@@ -220,7 +220,7 @@ export class Game {
               }
             } else {
               const failure = this.describeMoveFailure(unit.id, command.position.x, command.position.y) ?? {
-                code: "move_unreachable",
+                type: "move_unreachable",
                 hint: "No reachable nearby tile found.",
               };
               this.addLog(
@@ -236,7 +236,7 @@ export class Game {
                     requestedX: command.position.x,
                     requestedY: command.position.y,
                     hint: failure.hint,
-                    code: failure.code,
+                    type: failure.type,
                   },
                 },
                 {
@@ -620,6 +620,7 @@ export class Game {
                   x: command.position.x,
                   y: command.position.y,
                   hint: buildFailure.hint,
+                  type: buildFailure.type,
                 },
               },
               {
@@ -1147,51 +1148,51 @@ export class Game {
     return RESULT_CODES.OK;
   }
 
-  private describeMoveFailure(unitId: string, x: number, y: number): { code: string; hint: string } | null {
+  private describeMoveFailure(unitId: string, x: number, y: number): { type: string; hint: string } | null {
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
-      return { code: "move_bad_target", hint: "Use integer map coordinates." };
+      return { type: "move_bad_target", hint: "Use integer map coordinates." };
     }
 
     if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
-      return { code: "move_bad_target", hint: "Choose a tile inside the map bounds." };
+      return { type: "move_bad_target", hint: "Choose a tile inside the map bounds." };
     }
 
     if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
-      return { code: "move_blocked_tile", hint: "That tile is an obstacle. Pick a nearby empty tile." };
+      return { type: "move_blocked_tile", hint: "That tile is an obstacle. Pick a nearby empty tile." };
     }
 
     if (this.buildingManager.hasBuildingAt(x, y)) {
-      return { code: "move_blocked_tile", hint: "Buildings occupy their tile. Move to an adjacent empty tile instead." };
+      return { type: "move_blocked_tile", hint: "Buildings occupy their tile. Move to an adjacent empty tile instead." };
     }
 
     if (this.unitManager.hasUnitAt(x, y, unitId)) {
-      return { code: "move_blocked_tile", hint: "Another unit is already on that tile. Pick a different nearby tile." };
+      return { type: "move_blocked_tile", hint: "Another unit is already on that tile. Pick a different nearby tile." };
     }
 
-    return { code: "move_unreachable", hint: "No reachable nearby tile found." };
+    return { type: "move_unreachable", hint: "No reachable nearby tile found." };
   }
 
-  private describeBuildFailure(playerId: string, x: number, y: number): { code: string; hint: string } {
+  private describeBuildFailure(playerId: string, x: number, y: number): { type: string; hint: string } {
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
-      return { code: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
+      return { type: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
     }
 
     if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
-      return { code: "build_blocked_tile", hint: "That tile is blocked by terrain." };
+      return { type: "build_blocked_tile", hint: "That tile is blocked by terrain." };
     }
 
     if (this.buildingManager.hasBuildingAt(x, y) || this.unitManager.hasUnitAt(x, y)) {
-      return { code: "build_blocked_tile", hint: "That tile is already occupied." };
+      return { type: "build_blocked_tile", hint: "That tile is already occupied." };
     }
 
     const hq = this.buildingManager
       .getBuildingsByPlayer(playerId)
       .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
-      return { code: "build_too_close_to_hq", hint: "Leave at least one empty tile around HQ before placing barracks." };
+      return { type: "build_too_close_to_hq", hint: "Leave at least one empty tile around HQ before placing barracks." };
     }
 
-    return { code: "build_bad_target", hint: "Choose another empty tile." };
+    return { type: "build_bad_target", hint: "Choose another empty tile." };
   }
 
   private cloneValue<T>(value: T): T {

@@ -1,4 +1,4 @@
-import { ResultCode, PlayerId, ActorId, ACTOR_IDS } from "./constants";
+import { ResultCode, PLAYER_IDS, ActorId, ACTOR_IDS } from "./constants";
 import type { Command } from "./types";
 
 // ============================================================
@@ -39,8 +39,7 @@ export const LOG_LEVEL_ICONS: Record<LogLevel, string> = {
 export const AI_FEEDBACK_TARGETS = {
   NONE: "none",
   BOTH: "both",
-  PLAYER_1: "player_1",
-  PLAYER_2: "player_2",
+  ...PLAYER_IDS
 } as const;
 
 export type AIFeedbackTarget = typeof AI_FEEDBACK_TARGETS[keyof typeof AI_FEEDBACK_TARGETS];
@@ -112,7 +111,7 @@ export interface CommandResultExtraDataMap {
     requestedX: number;
     requestedY: number;
     hint: string;
-    code: string;
+    type: string;
   };
   [RESULT_TYPES.ATTACK_SUCCESS]: Record<string, never>;
   [RESULT_TYPES.ATTACK_OUT_OF_RANGE]: {
@@ -135,10 +134,11 @@ export interface CommandResultExtraDataMap {
     x: number;
     y: number;
     hint: string;
+    type: string;
   };
   [RESULT_TYPES.BUILD_INSUFFICIENT_CREDITS]: {
-    x?: number;
-    y?: number;
+    x: number;
+    y: number;
     requiredCredits: number;
     currentCredits: number;
     hint: string;

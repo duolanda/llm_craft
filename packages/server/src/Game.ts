@@ -1195,7 +1195,7 @@ export class Game {
         if (this.tiles[y][x] !== TILE_TYPES.RESOURCE) {
           continue;
         }
-        const distance = Math.abs(worker.x - x) + Math.abs(worker.y - y);
+        const distance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
         if (!best || distance < best.distance || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))) {
           best = { x, y, distance };
         }

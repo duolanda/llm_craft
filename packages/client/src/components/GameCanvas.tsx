@@ -310,6 +310,46 @@ export function GameCanvas({ state }: GameCanvasProps) {
             ctx.lineTo(tx - 6, ty + 6);
             ctx.stroke();
 
+          } else if (unit.intent.type === 'attack_move' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
+            const tx = BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
+            const ty = BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(255, 136, 64, 0.18)";
+            ctx.beginPath();
+            ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = "#ff8840";
+            ctx.setLineDash([]);
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+            ctx.stroke();
+
+          } else if (unit.intent.type === 'harvest_loop' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
+            const tx = BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
+            const ty = BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
+            ctx.strokeStyle = "#ffd54f";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+            ctx.strokeStyle = "#ffd54f";
+            ctx.strokeRect(tx - 6, ty - 6, 12, 12);
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, 10, Math.PI * 0.2, Math.PI * 1.8);
+            ctx.stroke();
+
           } else if (unit.intent.type === 'hold') {
             // 待命意图：显示盾牌标记
             ctx.strokeStyle = color;

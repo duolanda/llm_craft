@@ -183,7 +183,7 @@ export class GameOrchestrator {
       } else if (commands.length === 0) {
         this.game.addLog(
           LOG_TYPES.AI_EXECUTION_ERROR,
-          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, or hold command when units or buildings can act.",
+          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, attackMoveTo, harvestLoop, or hold command when units or buildings can act.",
           { errorType: "no_commands" },
           { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
         );
@@ -441,13 +441,20 @@ export class GameOrchestrator {
           maxHp: unit.maxHp,
           state: unit.state,
           attackRange: unit.attackRange,
+          carryingCredits: unit.carryingCredits,
+          carryCapacity: unit.carryCapacity,
+          intent: unit.intent ?? null,
         });
         continue;
       }
 
       const moved = previousUnit.x !== unit.x || previousUnit.y !== unit.y;
       const damaged = previousUnit.hp !== unit.hp;
-      const updated = previousUnit.state !== unit.state;
+      const carryingChanged = previousUnit.carryingCredits !== unit.carryingCredits;
+      const updated =
+        previousUnit.state !== unit.state ||
+        carryingChanged ||
+        JSON.stringify(previousUnit.intent ?? null) !== JSON.stringify(unit.intent ?? null);
 
       if (moved || damaged || updated) {
         changes.push({
@@ -460,6 +467,9 @@ export class GameOrchestrator {
           maxHp: unit.maxHp,
           state: unit.state,
           attackRange: unit.attackRange,
+          carryingCredits: unit.carryingCredits,
+          carryCapacity: unit.carryCapacity,
+          intent: unit.intent ?? null,
         });
       }
     }

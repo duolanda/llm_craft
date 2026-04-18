@@ -10,6 +10,7 @@ import {
   TILE_TYPES,
   UNIT_STATS,
   Unit,
+  UnitIntent,
 } from "@llmcraft/shared";
 import { Game } from "./Game";
 
@@ -181,6 +182,7 @@ export class AIStatePackageBuilder {
           state: item.state,
           carryingCredits: item.carryingCredits,
           carryCapacity: item.carryCapacity,
+          intent: item.intent ?? null,
         });
         continue;
       }
@@ -189,8 +191,9 @@ export class AIStatePackageBuilder {
       const damaged = oldItem.hp !== item.hp;
       const stateChanged = movable && oldItem.state !== item.state;
       const carryingChanged = movable && oldItem.carryingCredits !== item.carryingCredits;
+      const intentChanged = movable && !this.areIntentsEqual(oldItem.intent, item.intent);
 
-      if (moved || damaged || stateChanged || carryingChanged) {
+      if (moved || damaged || stateChanged || carryingChanged || intentChanged) {
         changes.push({
           id: item.id,
           type: item.type,
@@ -202,6 +205,7 @@ export class AIStatePackageBuilder {
           state: item.state,
           carryingCredits: item.carryingCredits,
           carryCapacity: item.carryCapacity,
+          intent: item.intent ?? null,
         });
       }
     }
@@ -217,5 +221,12 @@ export class AIStatePackageBuilder {
     }
 
     return changes;
+  }
+
+  private static areIntentsEqual(
+    previousIntent: UnitIntent | undefined,
+    currentIntent: UnitIntent | undefined
+  ): boolean {
+    return JSON.stringify(previousIntent ?? null) === JSON.stringify(currentIntent ?? null);
   }
 }

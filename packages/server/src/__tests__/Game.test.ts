@@ -341,6 +341,43 @@ describe("Game", () => {
     expect((game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>)?.type).toBe("attack_no_target_in_range");
   });
 
+  it("attack_move keeps advancing and attacking until overridden", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
+
+    game.queueCommand({
+      id: "attack_move_push",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: 8, y: 5 },
+      targetPriority: [UNIT_TYPES.SOLDIER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    expect(attacker.intent?.type).toBe("attack_move");
+    expect(attacker.x).toBe(6);
+    expect(target.hp).toBe(target.maxHp);
+
+    game.tickUpdate();
+    expect(attacker.intent?.type).toBe("attack_move");
+    expect(attacker.x).toBe(7);
+    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
+
+    game.queueCommand({
+      id: "override_attack_move",
+      type: "hold",
+      unitId: attacker.id,
+      playerId: "player_1",
+    });
+    game.tickUpdate();
+    game.stop();
+
+    expect(attacker.intent?.type).toBe("hold");
+  });
+
   it("adjusts move targets to a nearby reachable tile when the requested tile is blocked", () => {
     const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
 
@@ -411,6 +448,39 @@ describe("Game", () => {
     expect(game.getState().players[0].resources.credits).toBe(210);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.state).toBe("idle");
+  });
+
+  it("harvest_loop keeps a worker shuttling between resource and HQ", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+
+    runtimeWorker.x = 2;
+    runtimeWorker.y = 7;
+
+    game.queueCommand({
+      id: "worker_harvest_loop",
+      type: "harvest_loop",
+      unitId: worker.id,
+      position: { x: 2, y: 7 },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect(runtimeWorker.intent?.type).toBe("harvest_loop");
+
+    game.start();
+    for (let i = 0; i < 12; i++) {
+      game.tickUpdate();
+    }
+    game.stop();
+
+    expect(game.getState().players[0].resources.credits).toBe(300);
+    expect(runtimeWorker.carryingCredits).toBe(0);
+    expect(runtimeWorker.intent?.type).toBe("harvest_loop");
+    expect(runtimeWorker.intent).toMatchObject({ targetX: 2, targetY: 7 });
   });
 
   it("keeps snapshot history without mutating earlier snapshots", () => {

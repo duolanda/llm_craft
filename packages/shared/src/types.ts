@@ -72,6 +72,56 @@ export interface GameObject {
   exists: boolean;
 }
 
+export type UnitIntent =
+  | {
+      type: "move";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    }
+  | {
+      type: "attack";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    }
+  | {
+      type: "attack_move";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    }
+  | {
+      type: "harvest_loop";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+    }
+  | {
+      type: "hold";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    }
+  | {
+      type: "gather";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    }
+  | {
+      type: "deposit";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
+      targetPriority?: string[];
+    };
+
 export interface Unit extends GameObject {
   type: UnitType;
   hp: number;
@@ -83,13 +133,7 @@ export interface Unit extends GameObject {
   carryingCredits: number;
   carryCapacity: number;
   // 意图显示
-  intent?: {
-    type: 'move' | 'attack' | 'hold' | 'gather' | 'deposit';
-    targetX?: number;
-    targetY?: number;
-    targetId?: string;
-    targetPriority?: string[];
-  };
+  intent?: UnitIntent;
   // 寻路路径缓存
   path?: Array<{ x: number; y: number }>;
   // 寻路目标
@@ -230,6 +274,7 @@ export interface AIPromptPayload {
       state?: UnitState;
       carryingCredits?: number;
       carryCapacity?: number;
+      intent?: UnitIntent | null;
     }>;
     myBuildingChanges: Array<{
       id: string;
@@ -312,6 +357,7 @@ export interface TickDeltaRecord {
       attackRange?: number;
       carryingCredits?: number;
       carryCapacity?: number;
+      intent?: UnitIntent | null;
     }>;
     buildings: Array<{
       id: string;

@@ -58,6 +58,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       attackRange: change.attackRange ?? 0,
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
+      intent: change.intent ?? undefined,
     };
     player.units.push(createdUnit);
     return;
@@ -75,6 +76,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     attackRange: change.attackRange ?? current.attackRange,
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
+    intent: "intent" in change ? change.intent ?? undefined : current.intent,
   };
 }
 
@@ -192,6 +194,19 @@ function findAttackTargetFromDelta(
   return null;
 }
 
+function hasPersistedIntentChange(
+  delta: TickDeltaRecord,
+  playerId: string,
+  unitId: string
+) {
+  const playerDelta = delta.players.find((entry) => entry.playerId === playerId);
+  if (!playerDelta) {
+    return false;
+  }
+
+  return playerDelta.units.some((change) => change.id === unitId && "intent" in change);
+}
+
 function applyCommandIntentsForTick(
   state: GameState,
   delta: TickDeltaRecord,
@@ -206,6 +221,22 @@ function applyCommandIntentsForTick(
 
     const unit = getUnitById(state, command.unitId);
     if (!unit) {
+      continue;
+    }
+
+    if (hasPersistedIntentChange(delta, command.playerId, command.unitId)) {
+      if (
+        (unit.intent?.type === "move" || unit.intent?.type === "attack_move") &&
+        unit.intent.targetX !== undefined &&
+        unit.intent.targetY !== undefined
+      ) {
+        unit.pathTarget = {
+          x: unit.intent.targetX,
+          y: unit.intent.targetY,
+        };
+      } else {
+        delete unit.pathTarget;
+      }
       continue;
     }
 
@@ -243,6 +274,29 @@ function applyCommandIntentsForTick(
         targetId: target?.targetId,
         targetX: target?.x,
         targetY: target?.y,
+      };
+      continue;
+    }
+
+    if (command.type === "attack_move") {
+      const target = resolveMoveTarget(command, delta.newLogs) ?? command.position ?? null;
+      if (target) {
+        unit.intent = {
+          type: "attack_move",
+          targetX: target.x,
+          targetY: target.y,
+          targetPriority: command.targetPriority,
+        };
+        unit.pathTarget = target;
+      }
+      continue;
+    }
+
+    if (command.type === "harvest_loop") {
+      unit.intent = {
+        type: "harvest_loop",
+        targetX: command.position?.x,
+        targetY: command.position?.y,
       };
       continue;
     }

@@ -44,6 +44,28 @@ function buildAPI(playerId, state) {
         playerId,
       });
     },
+    attackMoveTo: (pos, targetPriority) => {
+      commands.push({
+        id: generateId(),
+        type: "attack_move",
+        unitId: unit.id,
+        position: pos,
+        targetPriority:
+          targetPriority && targetPriority.length > 0
+            ? targetPriority.map((value) => String(value))
+            : [...DEFAULT_ATTACK_PRIORITY],
+        playerId,
+      });
+    },
+    harvestLoop: (pos) => {
+      commands.push({
+        id: generateId(),
+        type: "harvest_loop",
+        unitId: unit.id,
+        position: pos,
+        playerId,
+      });
+    },
     holdPosition: () => {
       commands.push({
         id: generateId(),

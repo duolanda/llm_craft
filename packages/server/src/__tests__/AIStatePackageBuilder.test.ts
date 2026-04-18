@@ -86,6 +86,33 @@ describe("AIStatePackageBuilder", () => {
     expect(aiState.my.units[0]).toHaveProperty("carryCapacity", 100);
   });
 
+  it("includes sustained intent changes in delta payloads", () => {
+    const game = new Game();
+    const previous = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const worker = game.getState().players[0].units[0];
+
+    game.queueCommand({
+      id: "start_harvest_loop",
+      type: "harvest_loop",
+      unitId: worker.id,
+      position: { x: 2, y: 7 },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const current = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const payload = AIStatePackageBuilder.buildPromptPayload(current, previous, false);
+    const workerChange = payload.delta?.myUnitChanges.find((change) => change.id === worker.id);
+
+    expect(payload.mode).toBe("delta");
+    expect(workerChange?.change).toBe("updated");
+    expect(workerChange?.intent).toMatchObject({
+      type: "harvest_loop",
+      targetX: 2,
+      targetY: 7,
+    });
+  });
+
   it("filters feedback by the last successful AI tick", () => {
     const game = new Game();
     game.start();

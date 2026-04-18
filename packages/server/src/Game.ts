@@ -1,5 +1,6 @@
 import {
   Unit,
+  UnitIntent,
   Building,
   Player,
   PlayerId,
@@ -44,8 +45,23 @@ type AttackIntent = {
   targetPriority?: string[];
 };
 
-type RuntimeUnit = Unit & {
-  intent?: Unit["intent"] | AttackIntent;
+type AttackMoveIntent = {
+  type: "attack_move";
+  targetX?: number;
+  targetY?: number;
+  targetId?: string;
+  targetPriority?: string[];
+};
+
+type HarvestLoopIntent = {
+  type: "harvest_loop";
+  targetX?: number;
+  targetY?: number;
+  targetId?: string;
+};
+
+type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
+  intent?: UnitIntent | AttackIntent | AttackMoveIntent | HarvestLoopIntent;
   lastAttackTick?: number;
 };
 
@@ -426,6 +442,202 @@ export class Game {
         break;
       }
 
+      case "attack_move": {
+        if (command.unitId && command.position) {
+          const attacker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
+          if (attacker && attacker.playerId === command.playerId) {
+            const blockedPositions = this.buildingManager.getOccupiedPositions();
+            const result = this.unitManager.setMoveTarget(
+              attacker,
+              command.position.x,
+              command.position.y,
+              this.tiles,
+              blockedPositions
+            );
+
+            if (result === RESULT_CODES.OK) {
+              const resolvedTarget = attacker.pathTarget;
+              attacker.intent = {
+                type: "attack_move",
+                targetX: resolvedTarget?.x ?? command.position.x,
+                targetY: resolvedTarget?.y ?? command.position.y,
+                targetPriority: command.targetPriority,
+              };
+
+              if (
+                resolvedTarget &&
+                (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
+              ) {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Unit ${command.unitId} attack-moving via (${resolvedTarget.x}, ${resolvedTarget.y})`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.MOVE_ADJUSTED,
+                    result_data: {
+                      x: resolvedTarget.x,
+                      y: resolvedTarget.y,
+                      requestedX: command.position.x,
+                      requestedY: command.position.y,
+                      hint: "Attack-move target tile was blocked, so a nearby reachable tile was chosen.",
+                    },
+                  },
+                  {
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
+                    level: LOG_LEVELS.WARNING,
+                  }
+                );
+              } else {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Unit ${command.unitId} attack-moving to (${command.position.x}, ${command.position.y})`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.ATTACK_MOVE_SUCCESS,
+                    result_data: {},
+                  },
+                  {
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
+                  }
+                );
+              }
+            } else {
+              const failure = this.describeMoveFailure(attacker.id, command.position.x, command.position.y) ?? {
+                type: "move_unreachable",
+                hint: "No reachable nearby tile found.",
+              };
+              this.addLog(
+                LOG_TYPES.COMMAND_RESULT,
+                `Unit ${command.unitId} cannot attack-move to (${command.position.x}, ${command.position.y})`,
+                {
+                  command,
+                  result_code: result,
+                  type: RESULT_TYPES.MOVE_BLOCKED,
+                  result_data: {
+                    x: command.position.x,
+                    y: command.position.y,
+                    requestedX: command.position.x,
+                    requestedY: command.position.y,
+                    hint: failure.hint,
+                    type: failure.type,
+                  },
+                },
+                {
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
+                  level: LOG_LEVELS.WARNING,
+                }
+              );
+            }
+          } else {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Attack-move command failed: unit ${command.unitId} not found or does not belong to player`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Check that the unit exists and belongs to your player.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+          }
+        }
+        break;
+      }
+
+      case "harvest_loop": {
+        if (command.unitId) {
+          const worker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
+          if (!worker || worker.playerId !== command.playerId || worker.type !== UNIT_TYPES.WORKER) {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Harvest-loop command failed: worker ${command.unitId} not found or invalid`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Only friendly workers can start harvest loops.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+            break;
+          }
+
+          const resourceTarget = this.resolveHarvestResourceTarget(worker, command.position);
+          if (!resourceTarget) {
+            const fallbackX = command.position?.x ?? worker.x;
+            const fallbackY = command.position?.y ?? worker.y;
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Harvest-loop command failed: invalid resource target for ${command.unitId}`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.MOVE_BLOCKED,
+                result_data: {
+                  x: fallbackX,
+                  y: fallbackY,
+                  requestedX: fallbackX,
+                  requestedY: fallbackY,
+                  hint: "Choose a reachable resource tile, or omit the target to auto-pick the nearest resource.",
+                  type: "move_bad_target",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+            break;
+          }
+
+          worker.intent = {
+            type: "harvest_loop",
+            targetX: resourceTarget.x,
+            targetY: resourceTarget.y,
+          };
+          this.unitManager.clearPath(worker);
+          this.addLog(
+            LOG_TYPES.COMMAND_RESULT,
+            `Worker ${command.unitId} harvesting in a loop from (${resourceTarget.x}, ${resourceTarget.y})`,
+            {
+              command,
+              result_code: RESULT_CODES.OK,
+              type: RESULT_TYPES.HARVEST_LOOP_SUCCESS,
+              result_data: {
+                targetX: resourceTarget.x,
+                targetY: resourceTarget.y,
+              },
+            },
+            {
+              owner: command.playerId,
+              feedbackTarget: command.playerId,
+            }
+          );
+        }
+        break;
+      }
+
       case "hold": {
         if (command.unitId) {
           const unit = this.unitManager.getUnit(command.unitId);
@@ -703,10 +915,20 @@ export class Game {
     return RESULT_CODES.OK;
   }
 
+  private executeAttackTarget(
+    attacker: RuntimeUnit,
+    target: Unit | Building,
+    kind: "unit" | "building"
+  ): ResultCode {
+    return kind === "unit"
+      ? this.unitManager.attackUnit(attacker, target as Unit)
+      : this.attackBuilding(attacker, target as Building);
+  }
+
   private executeAttackIntent(
     attacker: RuntimeUnit,
     playerId: PlayerId,
-    intent: AttackIntent | Unit["intent"]
+    intent: AttackIntent | UnitIntent
   ): ResultCode {
     if (!attacker.exists || !intent || intent.type !== "attack") {
       return RESULT_CODES.ERR_INVALID_TARGET;
@@ -718,16 +940,14 @@ export class Game {
       const unitTarget = this.unitManager.getUnit(intent.targetId);
       const buildingTarget = this.buildingManager.getBuilding(intent.targetId);
       result = unitTarget
-        ? this.unitManager.attackUnit(attacker, unitTarget)
+        ? this.executeAttackTarget(attacker, unitTarget, "unit")
         : buildingTarget
-          ? this.attackBuilding(attacker, buildingTarget)
+          ? this.executeAttackTarget(attacker, buildingTarget, "building")
           : RESULT_CODES.ERR_INVALID_TARGET;
     } else {
       const prioritizedTarget = this.findPrioritizedAttackTarget(attacker, playerId, intent.targetPriority);
       result = prioritizedTarget
-        ? prioritizedTarget.kind === "unit"
-          ? this.unitManager.attackUnit(attacker, prioritizedTarget.target)
-          : this.attackBuilding(attacker, prioritizedTarget.target)
+        ? this.executeAttackTarget(attacker, prioritizedTarget.target, prioritizedTarget.kind)
         : RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
@@ -747,6 +967,72 @@ export class Game {
     return result;
   }
 
+  private processAttackMoveIntents(): void {
+    for (const unit of this.unitManager.getAllUnits()) {
+      const runtimeUnit = unit as RuntimeUnit;
+      if (!runtimeUnit.exists || runtimeUnit.intent?.type !== "attack_move") {
+        continue;
+      }
+
+      const attackMoveIntent = runtimeUnit.intent;
+      if (runtimeUnit.lastAttackTick !== this.tick) {
+        const prioritizedTarget = this.findPrioritizedAttackTarget(
+          runtimeUnit,
+          runtimeUnit.playerId,
+          attackMoveIntent.targetPriority
+        );
+
+        if (prioritizedTarget) {
+          const result = this.executeAttackTarget(runtimeUnit, prioritizedTarget.target, prioritizedTarget.kind);
+          if (result === RESULT_CODES.OK) {
+            runtimeUnit.intent = {
+              ...attackMoveIntent,
+              targetId: prioritizedTarget.target.id,
+            };
+            runtimeUnit.lastAttackTick = this.tick;
+            this.unitManager.clearPath(runtimeUnit);
+            continue;
+          }
+        }
+      }
+
+      delete attackMoveIntent.targetId;
+      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
+        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
+        : null;
+      if (!moveTarget) {
+        runtimeUnit.state = UNIT_STATES.IDLE;
+        continue;
+      }
+
+      const alreadyAtTarget = runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y;
+      const alreadyPathing =
+        runtimeUnit.pathTarget?.x === moveTarget.x &&
+        runtimeUnit.pathTarget?.y === moveTarget.y;
+      if (!alreadyAtTarget && !alreadyPathing) {
+        const blockedPositions = this.buildingManager.getOccupiedPositions();
+        const result = this.unitManager.setMoveTarget(
+          runtimeUnit,
+          moveTarget.x,
+          moveTarget.y,
+          this.tiles,
+          blockedPositions
+        );
+        if (result === RESULT_CODES.OK) {
+          runtimeUnit.intent = {
+            ...attackMoveIntent,
+            targetX: runtimeUnit.pathTarget?.x ?? moveTarget.x,
+            targetY: runtimeUnit.pathTarget?.y ?? moveTarget.y,
+          };
+        }
+      }
+
+      if (!runtimeUnit.pathTarget && runtimeUnit.lastAttackTick !== this.tick) {
+        runtimeUnit.state = UNIT_STATES.IDLE;
+      }
+    }
+  }
+
   private processAttackIntents(): void {
     for (const unit of this.unitManager.getAllUnits()) {
       if (!unit.exists || unit.intent?.type !== "attack") {
@@ -759,12 +1045,80 @@ export class Game {
         continue;
       }
 
-      const result = this.executeAttackIntent(runtimeUnit, runtimeUnit.playerId, runtimeUnit.intent);
+      const result = this.executeAttackIntent(runtimeUnit, runtimeUnit.playerId, runtimeUnit.intent as AttackIntent);
       if (result === RESULT_CODES.ERR_INVALID_TARGET && runtimeUnit.intent?.targetId) {
         runtimeUnit.intent = { type: "hold" };
         runtimeUnit.state = UNIT_STATES.IDLE;
       } else if (result !== RESULT_CODES.OK && runtimeUnit.intent?.targetId) {
         runtimeUnit.state = UNIT_STATES.IDLE;
+      }
+    }
+  }
+
+  private processHarvestLoopIntents(): void {
+    for (const unit of this.unitManager.getAllUnits()) {
+      const runtimeUnit = unit as RuntimeUnit;
+      if (
+        !runtimeUnit.exists ||
+        runtimeUnit.intent?.type !== "harvest_loop" ||
+        runtimeUnit.type !== UNIT_TYPES.WORKER
+      ) {
+        continue;
+      }
+
+      const harvestIntent = runtimeUnit.intent;
+      const hq = this.buildingManager
+        .getBuildingsByPlayer(runtimeUnit.playerId)
+        .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+      if (!hq) {
+        continue;
+      }
+
+      const resourceTarget = this.resolveHarvestResourceTarget(runtimeUnit, {
+        x: harvestIntent.targetX ?? runtimeUnit.x,
+        y: harvestIntent.targetY ?? runtimeUnit.y,
+      });
+      if (!resourceTarget) {
+        continue;
+      }
+
+      runtimeUnit.intent = {
+        type: "harvest_loop",
+        targetX: resourceTarget.x,
+        targetY: resourceTarget.y,
+      };
+
+      if (runtimeUnit.carryingCredits >= runtimeUnit.carryCapacity) {
+        if (!this.isWithinDeliveryRange(runtimeUnit, hq) && !this.isPathingIntoDeliveryRange(runtimeUnit, hq)) {
+          const blockedPositions = this.buildingManager.getOccupiedPositions();
+          if (this.unitManager.setMoveTarget(runtimeUnit, hq.x, hq.y, this.tiles, blockedPositions) === RESULT_CODES.OK) {
+            runtimeUnit.intent = {
+              type: "harvest_loop",
+              targetX: resourceTarget.x,
+              targetY: resourceTarget.y,
+            };
+          }
+        }
+        continue;
+      }
+
+      const onResourceTile = runtimeUnit.x === resourceTarget.x && runtimeUnit.y === resourceTarget.y;
+      const pathingToResource =
+        runtimeUnit.pathTarget?.x === resourceTarget.x &&
+        runtimeUnit.pathTarget?.y === resourceTarget.y;
+
+      if (!onResourceTile && !pathingToResource) {
+        const blockedPositions = this.buildingManager.getOccupiedPositions();
+        if (
+          this.unitManager.setMoveTarget(runtimeUnit, resourceTarget.x, resourceTarget.y, this.tiles, blockedPositions) ===
+          RESULT_CODES.OK
+        ) {
+          runtimeUnit.intent = {
+            type: "harvest_loop",
+            targetX: resourceTarget.x,
+            targetY: resourceTarget.y,
+          };
+        }
       }
     }
   }
@@ -816,6 +1170,49 @@ export class Game {
     return null;
   }
 
+  private resolveHarvestResourceTarget(
+    worker: Unit,
+    requestedPosition?: { x: number; y: number }
+  ): { x: number; y: number } | null {
+    if (
+      requestedPosition &&
+      requestedPosition.x >= 0 &&
+      requestedPosition.x < MAP_WIDTH &&
+      requestedPosition.y >= 0 &&
+      requestedPosition.y < MAP_HEIGHT &&
+      this.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
+    ) {
+      return requestedPosition;
+    }
+
+    if (requestedPosition) {
+      return null;
+    }
+
+    let best: { x: number; y: number; distance: number } | null = null;
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        if (this.tiles[y][x] !== TILE_TYPES.RESOURCE) {
+          continue;
+        }
+        const distance = Math.abs(worker.x - x) + Math.abs(worker.y - y);
+        if (!best || distance < best.distance || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))) {
+          best = { x, y, distance };
+        }
+      }
+    }
+
+    return best ? { x: best.x, y: best.y } : null;
+  }
+
+  private isPathingIntoDeliveryRange(unit: RuntimeUnit, hq: Building): boolean {
+    return Boolean(
+      unit.pathTarget &&
+      Math.abs(unit.pathTarget.x - hq.x) <= ECONOMY_RULES.HQ_DELIVERY_RANGE &&
+      Math.abs(unit.pathTarget.y - hq.y) <= ECONOMY_RULES.HQ_DELIVERY_RANGE
+    );
+  }
+
   checkWinCondition(): boolean {
     for (const player of this.players) {
       const buildings = this.buildingManager.getBuildingsByPlayer(player.id);
@@ -855,6 +1252,10 @@ export class Game {
 
       // Process worker economy loop: gather on resource tiles, then deliver near HQ
       this.processWorkerEconomy();
+
+      // Sustain harvest loops and attack-move intents.
+      this.processHarvestLoopIntents();
+      this.processAttackMoveIntents();
 
       // Sustain attack intents every tick so units keep attacking in range.
       this.processAttackIntents();
@@ -1001,6 +1402,7 @@ export class Game {
           continue;
         }
 
+        const preserveHarvestLoop = unit.intent?.type === "harvest_loop" ? unit.intent : null;
         const onResourceTile = this.tiles[unit.y]?.[unit.x] === TILE_TYPES.RESOURCE;
         const isNearFriendlyHQ = this.isWithinDeliveryRange(unit, hq);
         let economyActionTaken = false;
@@ -1014,7 +1416,7 @@ export class Game {
           if (gatheredCredits > 0) {
             unit.carryingCredits += gatheredCredits;
             unit.state = UNIT_STATES.GATHERING;
-            unit.intent = { type: "gather", targetX: unit.x, targetY: unit.y };
+            unit.intent = preserveHarvestLoop ?? { type: "gather", targetX: unit.x, targetY: unit.y };
             this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
               unitId: unit.id,
               amount: gatheredCredits,
@@ -1029,7 +1431,7 @@ export class Game {
           player.resources.credits += deliveredCredits;
           unit.carryingCredits = 0;
           unit.state = UNIT_STATES.IDLE;
-          unit.intent = { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
+          unit.intent = preserveHarvestLoop ?? { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
           this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
             unitId: unit.id,
             buildingId: hq.id,

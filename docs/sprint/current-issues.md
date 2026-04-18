@@ -99,6 +99,14 @@
   - ✅ 沙箱 JS 错误会在 `errorType` 中原样透传 `error.name`，例如 `SyntaxError` / `ReferenceError`
   - ✅ OpenAI-compatible provider 将默认 `max_tokens` 从 1024 提升到 2048，并在响应因长度截断时写入 provider feedback
 
+### 3.8 持续意图在 delta / live canvas / replay 间不一致 ✅ 已修复
+- **原问题**: `attack_move` / `harvest_loop` 一度只在服务端部分生效，后续 AI delta 看不到持续 intent，live canvas 也不画，回放还原仍依赖旧命令反推。
+- **已完成内容**:
+  - ✅ `AIPromptPayload.delta.myUnitChanges` 现在会显式携带 `intent`
+  - ✅ live canvas 新增 `attack_move` / `harvest_loop` 可视化
+  - ✅ replay 重建优先使用记录里的单位 `intent`，并兼容新命令类型
+  - ✅ 新增 `attackMoveTo()` / `harvestLoop()` 沙箱 API，并补了服务端持续行为测试
+
 ## 中优先级
 
 ### 4. 观赏性改进 - 数据面板 ✅ 已完成

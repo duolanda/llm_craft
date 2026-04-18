@@ -70,6 +70,7 @@ export const RESULT_TYPES = {
   ATTACK_OUT_OF_RANGE: "attack_out_of_range",
   ATTACK_NO_TARGET_IN_RANGE: "attack_no_target_in_range",
   ATTACK_INVALID_TARGET: "attack_invalid_target",
+  ATTACK_MOVE_SUCCESS: "attack_move_success",
 
   // 建造相关
   BUILDING_CONSTRUCTED: "building_constructed",
@@ -84,6 +85,7 @@ export const RESULT_TYPES = {
 
   // 暂停相关
   HOLD_SUCCESS: "hold_success",
+  HARVEST_LOOP_SUCCESS: "harvest_loop_success",
 
   // 通用错误
   INVALID_UNIT: "invalid_unit",
@@ -123,6 +125,7 @@ export interface CommandResultExtraDataMap {
   [RESULT_TYPES.ATTACK_INVALID_TARGET]: {
     hint: string;
   };
+  [RESULT_TYPES.ATTACK_MOVE_SUCCESS]: Record<string, never>;
   [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
     buildingId: string;
     buildingType: string;
@@ -164,6 +167,10 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.HOLD_SUCCESS]: {
     unitId: string;
+  };
+  [RESULT_TYPES.HARVEST_LOOP_SUCCESS]: {
+    targetX: number;
+    targetY: number;
   };
   [RESULT_TYPES.INVALID_UNIT]: {
     unitId: string;

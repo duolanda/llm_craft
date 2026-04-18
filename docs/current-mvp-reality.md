@@ -259,6 +259,8 @@ me = {
 unit.moveTo({ x, y })
 unit.attack(targetId)
 unit.attackInRange(targetPriority?)
+unit.attackMoveTo({ x, y }, targetPriority?)
+unit.harvestLoop(resourcePos?)
 unit.holdPosition()
 unit.build("barracks", { x, y })
 ```
@@ -275,6 +277,8 @@ building.spawnUnit("worker" | "soldier")
 - 读取单位位置、血量、状态、攻击范围
 - 让单位移动、攻击、待命
 - 让单位在执行时按优先级自动攻击当前射程内的对象
+- 让士兵持续 attack-move 推进并沿途自动接敌
+- 让 Worker 持续进行采集-交付循环
 - 让 Worker 建兵营
 - 让建筑产兵
 - 直接把 `moveTo` 指到建筑格或拥堵格，系统会自动尝试改到附近可达格
@@ -284,6 +288,8 @@ building.spawnUnit("worker" | "soldier")
 - `unit.attack(targetId)` 是指定具体目标 ID
 - `unit.attackInRange(targetPriority?)` 是到执行时再按优先级挑当前射程内目标
 - `unit.attackInRange()` 默认优先级是 `["hq", "soldier", "worker", "barracks"]`
+- `unit.attackMoveTo({ x, y }, targetPriority?)` 会保持持续 `attack_move` 意图，直到被后续命令覆盖
+- `unit.harvestLoop(resourcePos?)` 会保持持续 `harvest_loop` 意图，让 Worker 在资源点和己方 HQ 之间自动往返
 
 当前不能做的事：
 
@@ -394,6 +400,8 @@ utils = {
 - 生产 Worker / Soldier
 - 控制单位移动到指定目标点
 - 让 Soldier 攻击目标
+- 让 Soldier 用持续 `attack_move` 命令推进并接敌
+- 让 Worker 用持续 `harvest_loop` 命令自动采集和回交
 - 让 Worker 建造 Barracks
 - 基于 `enemyBuildings` 直接冲敌方 HQ
 - 基于 `enemies` 进行最近目标选择
@@ -443,7 +451,7 @@ utils = {
 - 可直接导入本地 `match-*.json`
 - 可播放、暂停、拖动进度条、切换倍速
 - 会同步显示该 tick 的战场状态、日志、AI 输出
-- 会尽量恢复单位的移动目标点和攻击目标/攻击落点
+- 会尽量恢复单位的移动目标点、攻击目标/攻击落点，以及 `attack_move` / `harvest_loop` 这类持续意图
 
 当前服务端额外暴露两个回放读取接口：
 
@@ -468,11 +476,9 @@ utils = {
   - 回放里这类信息只能按需要做近似恢复，不能视为原始运行时快照
 
 - `intent` 的完整历史
-  - 保存记录不会在每个 tick 直接保存所有单位的完整 `intent`
-  - 回放里的移动目标、攻击目标，主要是根据 `commandResults`、`tickDeltas`、日志和状态变化反推出来的
-  - `move` 通常能较稳定恢复目标格
-  - `attack(targetId)` 通常能较稳定恢复目标对象
-  - `attackInRange(priority)` 只能根据该 tick 的受伤/移除变化推断实际命中目标；如果同 tick 内有多个可能候选，回放展示可能只是最合理近似
+  - 当前保存记录会在单位 delta 中同步记录 `intent`
+  - 因此 `move`、`attack`、`attack_move`、`harvest_loop` 这类持续意图通常可以直接还原
+  - `attackInRange(priority)` 仍然属于“执行时再挑目标”的命令；如果同 tick 内有多个可能候选，回放展示仍可能只是最合理近似
 
 - tick 内部执行顺序的细粒度中间态
   - 当前记录适合重建“每个 tick 结束后状态”

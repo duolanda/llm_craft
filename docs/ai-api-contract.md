@@ -332,6 +332,15 @@ interface AIPromptPayload {
       hp?: number;
       maxHp?: number;
       state?: string;
+      carryingCredits?: number;
+      carryCapacity?: number;
+      intent?: {
+        type: "move" | "attack" | "attack_move" | "harvest_loop" | "hold" | "gather" | "deposit";
+        targetX?: number;
+        targetY?: number;
+        targetId?: string;
+        targetPriority?: string[];
+      } | null;
     }>;
     myBuildingChanges: Array<{
       id: string;
@@ -360,8 +369,7 @@ interface AIPromptPayload {
       hp?: number;
       maxHp?: number;
     }>;
-    events: GameLog[];
-    aiFeedback: AIFeedback[];
+    aiFeedback: GameLog[];
   } | null;
 }
 ```
@@ -418,8 +426,16 @@ interface AIStatePackage {
     worker: UnitStats;
     soldier: UnitStats;
   };
-  eventsSinceLastCall: GameLog[];
-  aiFeedbackSinceLastCall: AIFeedback[];
+  buildingStats: {
+    hq: BuildingStats;
+    barracks: BuildingStats;
+  };
+  economy: {
+    workerCarryCapacity: number;
+    workerGatherRate: number;
+    hqDeliveryRange: number;
+  };
+  aiFeedbackSinceLastCall: GameLog[];
   gameTimeRemaining: number;
 }
 ```
@@ -429,7 +445,7 @@ interface AIStatePackage {
 - `enemies` 在输入 JSON 中只包含敌方单位
 - `enemyBuildings` 单独包含敌方建筑
 - `map.tiles` 当前只包含非空地块，也就是障碍物和资源点
-- `eventsSinceLastCall` 和 `aiFeedbackSinceLastCall` 是最近切片，不是严格一次性消费队列
+- `aiFeedbackSinceLastCall` 是最近切片，不是严格一次性消费队列
 
 ## 3. 沙箱全局对象
 
@@ -503,6 +519,8 @@ const me: {
 unit.moveTo(pos: { x: number; y: number }): void;
 unit.attack(targetId: string): void;
 unit.attackInRange(targetPriority?: string[]): void;
+unit.attackMoveTo(pos: { x: number; y: number }, targetPriority?: string[]): void;
+unit.harvestLoop(pos?: { x: number; y: number }): void;
 unit.holdPosition(): void;
 unit.build(buildingType: "barracks", pos: { x: number; y: number }): void;
 ```
@@ -534,9 +552,9 @@ const enemies: Array<{
 
 说明：
 
-- 沙箱里的 `enemies` 是“敌方单位 + 敌方建筑”的合并列表
-- 输入 JSON 的 `enemies` 和沙箱里的 `enemies` 不是同一个语义层次
-- 如果只要敌方单位，需要按 `type` 自己筛选
+- 沙箱里的 `enemies` 只包含敌方单位
+- 敌方建筑单独出现在 `enemyBuildings`
+- 如果只想找敌方 HQ / barracks，应从 `enemyBuildings` 读取
 
 ### 4.4 `enemyBuildings`
 
@@ -636,6 +654,8 @@ const utils: {
 - `unit.attackInRange(targetPriority?)` 会在命令真正执行时，按优先级重新选择当前射程内目标
 - `unit.attackInRange()` 的默认优先级是 `["hq", "soldier", "worker", "barracks"]`
 - `unit.attackInRange(["hq", "soldier", "worker"])` 适合在 AI 返回延迟较大时减少目标过期
+- `unit.attackMoveTo(...)` 会设置持续 `attack_move` 意图，单位会沿途推进，并在每个 tick 自动攻击当前射程内符合优先级的敌人，直到被后续命令覆盖
+- `unit.harvestLoop(...)` 会设置持续 `harvest_loop` 意图，让 Worker 在资源点和己方 HQ 之间持续往返；省略参数时会自动选择最近资源点
 - 当前攻击范围按 8 邻域计算；对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
 - `unit.holdPosition()` 会下发待命命令
 - `unit.build("barracks", ...)` 会下发建造兵营命令
@@ -674,7 +694,7 @@ if (enemyHQ) {
     if (inRange) {
       s.attackInRange(["hq", "soldier", "worker", "barracks"]);
     } else {
-      s.moveTo({ x: enemyHQ.x, y: enemyHQ.y });
+      s.attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ["hq", "soldier", "worker", "barracks"]);
     }
   });
 }
@@ -682,4 +702,4 @@ if (enemyHQ) {
 
 说明：
 
-- 上面示例里的 `moveTo({ x: enemyHQ.x, y: enemyHQ.y })` 是允许的；如果目标是建筑格，系统会自动吸附到附近可站格
+- 上面示例里的 `attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ...)` 会沿途自动接敌；如果目标是建筑格，系统会自动吸附到附近可站格

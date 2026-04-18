@@ -247,6 +247,29 @@ function applyCommandIntentsForTick(
       continue;
     }
 
+    if (command.type === "attack_move") {
+      const target = resolveMoveTarget(command, delta.newLogs);
+      unit.intent = {
+        type: "attack_move",
+        targetX: target?.x,
+        targetY: target?.y,
+        targetPriority: command.targetPriority,
+      };
+      if (target) {
+        unit.pathTarget = target;
+      }
+      continue;
+    }
+
+    if (command.type === "harvest_loop") {
+      unit.intent = {
+        type: "harvest_loop",
+        targetX: command.position?.x,
+        targetY: command.position?.y,
+      };
+      continue;
+    }
+
     if (command.type === "hold") {
       unit.intent = { type: "hold" };
       continue;

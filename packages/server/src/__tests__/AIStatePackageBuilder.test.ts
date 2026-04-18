@@ -135,4 +135,29 @@ describe("AIStatePackageBuilder", () => {
 
     expect(payload.summary).toContain("Alert: our HQ is under attack.");
   });
+
+  it("includes sustained unit intent changes in delta payloads", () => {
+    const game = new Game();
+    const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
+    const previous = AIStatePackageBuilder.build("player_1", game.getState(), game);
+
+    game.queueCommand({
+      id: "harvest_loop_worker",
+      type: "harvest_loop",
+      unitId: worker.id,
+      position: { x: 2, y: 7 },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const current = AIStatePackageBuilder.build("player_1", game.getState(), game);
+    const payload = AIStatePackageBuilder.buildPromptPayload(current, previous, false);
+    const changedWorker = payload.delta?.myUnitChanges.find((change) => change.id === worker.id);
+
+    expect(changedWorker?.intent).toMatchObject({
+      type: "harvest_loop",
+      targetX: 2,
+      targetY: 7,
+    });
+  });
 });

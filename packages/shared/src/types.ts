@@ -230,6 +230,7 @@ export interface AIPromptPayload {
       state?: UnitState;
       carryingCredits?: number;
       carryCapacity?: number;
+      intent?: Unit["intent"];
     }>;
     myBuildingChanges: Array<{
       id: string;
@@ -312,6 +313,7 @@ export interface TickDeltaRecord {
       attackRange?: number;
       carryingCredits?: number;
       carryCapacity?: number;
+      intent?: Unit["intent"];
     }>;
     buildings: Array<{
       id: string;

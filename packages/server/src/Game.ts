@@ -472,12 +472,77 @@ export class Game {
           const unit = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
           if (unit && unit.playerId === command.playerId) {
             const result = this.issueAttackMove(unit, command.position, command.targetPriority);
-            this.recordCommandResult(
-              command,
-              result,
-              result === RESULT_CODES.OK,
-              result === RESULT_CODES.OK ? "Attack-move command processed" : "Attack-move command failed"
-            );
+            if (result === RESULT_CODES.OK) {
+              const resolvedTarget = unit.pathTarget;
+              if (
+                resolvedTarget &&
+                (resolvedTarget.x !== command.position.x || resolvedTarget.y !== command.position.y)
+              ) {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Unit ${command.unitId} attack-moving toward (${resolvedTarget.x}, ${resolvedTarget.y})`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.MOVE_ADJUSTED,
+                    result_data: {
+                      x: resolvedTarget.x,
+                      y: resolvedTarget.y,
+                      requestedX: command.position.x,
+                      requestedY: command.position.y,
+                      hint: "Target tile was blocked, so a nearby reachable tile was chosen.",
+                    },
+                  },
+                  {
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
+                    level: LOG_LEVELS.WARNING,
+                  }
+                );
+              } else {
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Unit ${command.unitId} attack-moving to (${command.position.x}, ${command.position.y})`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.MOVE_SUCCESS,
+                    result_data: {},
+                  },
+                  {
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
+                  }
+                );
+              }
+            } else {
+              const failure = this.describeMoveFailure(unit.id, command.position.x, command.position.y) ?? {
+                type: "move_unreachable",
+                hint: "No reachable nearby tile found.",
+              };
+              this.addLog(
+                LOG_TYPES.COMMAND_RESULT,
+                `Unit ${command.unitId} cannot attack-move to (${command.position.x}, ${command.position.y})`,
+                {
+                  command,
+                  result_code: result,
+                  type: RESULT_TYPES.MOVE_BLOCKED,
+                  result_data: {
+                    x: command.position.x,
+                    y: command.position.y,
+                    requestedX: command.position.x,
+                    requestedY: command.position.y,
+                    hint: failure.hint,
+                    type: failure.type,
+                  },
+                },
+                {
+                  owner: command.playerId,
+                  feedbackTarget: command.playerId,
+                  level: LOG_LEVELS.WARNING,
+                }
+              );
+            }
           }
         }
         break;
@@ -487,7 +552,24 @@ export class Game {
         if (command.unitId) {
           const unit = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
           if (!unit || unit.playerId !== command.playerId || unit.type !== UNIT_TYPES.WORKER) {
-            this.recordCommandResult(command, RESULT_CODES.ERR_INVALID_TARGET, false, "Only a friendly worker can harvest");
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              "Harvest-loop command failed: only a friendly worker can harvest",
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "Use harvestLoop only on one of your workers.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
             break;
           }
 
@@ -497,7 +579,20 @@ export class Game {
             targetY: command.position?.y,
           };
           this.unitManager.clearPath(unit);
-          this.recordCommandResult(command, RESULT_CODES.OK, true, "Harvest-loop command processed");
+          this.addLog(
+            LOG_TYPES.COMMAND_RESULT,
+            `Worker ${command.unitId} entered harvest loop`,
+            {
+              command,
+              result_code: RESULT_CODES.OK,
+              type: RESULT_TYPES.MOVE_SUCCESS,
+              result_data: {},
+            },
+            {
+              owner: command.playerId,
+              feedbackTarget: command.playerId,
+            }
+          );
         }
         break;
       }

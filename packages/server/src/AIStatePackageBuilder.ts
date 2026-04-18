@@ -181,6 +181,7 @@ export class AIStatePackageBuilder {
           state: item.state,
           carryingCredits: item.carryingCredits,
           carryCapacity: item.carryCapacity,
+          intent: item.intent,
         });
         continue;
       }
@@ -189,8 +190,9 @@ export class AIStatePackageBuilder {
       const damaged = oldItem.hp !== item.hp;
       const stateChanged = movable && oldItem.state !== item.state;
       const carryingChanged = movable && oldItem.carryingCredits !== item.carryingCredits;
+      const intentChanged = movable && JSON.stringify(oldItem.intent ?? null) !== JSON.stringify(item.intent ?? null);
 
-      if (moved || damaged || stateChanged || carryingChanged) {
+      if (moved || damaged || stateChanged || carryingChanged || intentChanged) {
         changes.push({
           id: item.id,
           type: item.type,
@@ -202,6 +204,7 @@ export class AIStatePackageBuilder {
           state: item.state,
           carryingCredits: item.carryingCredits,
           carryCapacity: item.carryCapacity,
+          intent: item.intent,
         });
       }
     }

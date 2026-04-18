@@ -268,25 +268,37 @@ export function GameCanvas({ state }: GameCanvasProps) {
           ctx.lineWidth = 2;
           ctx.setLineDash([4, 4]);
 
-          if (unit.intent.type === 'move' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
+          if (
+            (unit.intent.type === 'move' || unit.intent.type === 'attack_move' || unit.intent.type === 'harvest_loop') &&
+            unit.intent.targetX !== undefined &&
+            unit.intent.targetY !== undefined
+          ) {
             // 移动意图：虚线连接到目标位置
+            const targetX = BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2;
+            const targetY = BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2;
             ctx.beginPath();
             ctx.moveTo(cx, cy);
-            ctx.lineTo(
-              BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
-              BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2
-            );
+            ctx.lineTo(targetX, targetY);
             ctx.stroke();
 
-            // 目标位置标记
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.arc(
-              BOARD_OFFSET_X + unit.intent.targetX * TILE_SIZE + TILE_SIZE / 2,
-              BOARD_OFFSET_Y + unit.intent.targetY * TILE_SIZE + TILE_SIZE / 2,
-              4, 0, Math.PI * 2
-            );
-            ctx.fill();
+            if (unit.intent.type === 'attack_move') {
+              ctx.strokeStyle = '#ff7043';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(targetX, targetY, 6, 0, Math.PI * 2);
+              ctx.stroke();
+            } else if (unit.intent.type === 'harvest_loop') {
+              ctx.strokeStyle = '#ffd54f';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([]);
+              ctx.strokeRect(targetX - 5, targetY - 5, 10, 10);
+            } else {
+              // 目标位置标记
+              ctx.fillStyle = color;
+              ctx.beginPath();
+              ctx.arc(targetX, targetY, 4, 0, Math.PI * 2);
+              ctx.fill();
+            }
           } else if (unit.intent.type === 'attack' && unit.intent.targetX !== undefined && unit.intent.targetY !== undefined) {
             // 攻击意图：虚线连接到攻击目标
             ctx.beginPath();

@@ -483,6 +483,35 @@ describe("Game", () => {
     expect(runtimeWorker.intent).toMatchObject({ targetX: 2, targetY: 7 });
   });
 
+  it("harvest_loop auto-picks the nearest resource by Chebyshev distance", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+
+    runtimeWorker.x = 0;
+    runtimeWorker.y = 1;
+
+    game.queueCommand({
+      id: "worker_harvest_loop_auto_pick",
+      type: "harvest_loop",
+      unitId: worker.id,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect(runtimeWorker.intent).toMatchObject({
+      type: "harvest_loop",
+      targetX: 2,
+      targetY: 7,
+    });
+    expect(((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_data as { targetX: number; targetY: number })).toMatchObject({
+      targetX: 2,
+      targetY: 7,
+    });
+  });
+
   it("keeps snapshot history without mutating earlier snapshots", () => {
     game.start();
     game.tickUpdate();

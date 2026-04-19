@@ -157,7 +157,6 @@ interface AgentRunInput {
   tick: number;
   tickIntervalMs: number;
   summary: string;
-  resumeNote?: string;
 }
 ```
 
@@ -166,35 +165,22 @@ interface AgentRunInput {
 - `playerId`: 当前 AI 的阵营
 - `tick`: 当前游戏 tick
 - `tickIntervalMs`: tick 时长
-- `summary`: 简短全局说明，包含当前目标、当前局面抽象、是否冷启动
-- `resumeNote`: 仅在 run 被暂停后恢复时提供的简短补充
+- `summary`: 从上次 run 结束到现在的关键变化，以及当前最值得关注的现状摘要
 
 输入设计原则：
 
 - 模型不依赖单独的 `full/delta` 状态快照
 - 模型通过工具自己拉取局部信息
-- `resumeNote` 只用于降低恢复成本，不替代工具查询
 
 ### `summary` 内容要求
 
-`summary` 必须简短且稳定，建议包含：
+`summary` 必须简短且稳定，建议只包含：
 
-- 本方目标：摧毁敌方 HQ
-- 当前玩家 id
-- 当前 tick
-- 是否是新会话或压缩后恢复
+- 从上次 run 到现在最关键的变化
+- 当前需要优先关注的威胁、机会或资源状态
+- 当前仍在生效的重要计划或刚刚失效的重要计划
 
-禁止在 `summary` 中重复塞入完整地图、完整单位列表、完整变化列表。
-
-### `resumeNote` 内容要求
-
-`resumeNote` 是可选的短摘要，只描述上次 run 结束后到本次恢复前最关键的变化，例如：
-
-- 哪些计划仍在生效
-- 新增了哪些关键单位或建筑
-- 是否发生了重大受损或胜负态变化
-
-它不承担完整状态同步职责。
+禁止在 `summary` 中重复塞入完整地图、完整单位列表或完整原始事件流。
 
 ## 工具体系
 
@@ -208,9 +194,8 @@ interface AgentRunInput {
 
 - `get_match_overview`
 - `get_map_region`
-- `get_my_economy`
+- `get_my_state`
 - `get_my_units`
-- `get_my_buildings`
 - `get_enemy_units`
 - `get_enemy_buildings`
 - `get_active_plans`
@@ -221,6 +206,55 @@ interface AgentRunInput {
 - 返回局部、按需、结构化数据
 - 避免单个工具一次返回整局所有细节
 - 允许模型自主多次查询
+
+#### `get_match_overview`
+
+这个工具对应当前 `AIStatePackage` 里最上层、最常被反复读取的战略概览，但不返回完整地图和完整实体清单。
+
+建议返回：
+
+- 当前 `tick`
+- 我方和敌方的 credits
+- 我方和敌方单位数量摘要
+- 我方和敌方建筑数量摘要
+- 我方 HQ 与敌方 HQ 的当前血量
+- 当前是否已有胜者
+- 当前激活计划数量
+
+它的作用是让模型先快速判断“现在是经济期、战斗期还是防守期”，而不是一上来就拉整张地图。
+
+#### `get_map_region`
+
+这个工具对应当前 `AIStatePackage.map` 加局部实体信息的按需切片版本。
+
+建议入参支持：
+
+- 一个矩形区域：`x1, y1, x2, y2`
+- 或一个中心点加半径：`centerX, centerY, radius`
+
+建议返回：
+
+- 区域内 tile 信息
+- 区域内我方单位
+- 区域内敌方单位
+- 区域内我方建筑
+- 区域内敌方建筑
+
+它的作用是替代当前一次性把整张地图和所有实体都塞给模型的做法，让模型只在需要时查看局部战场。
+
+#### `get_my_state`
+
+这个工具把原本拆开的经济和建筑信息合并，作为“我方整体状态”的主入口。
+
+建议返回：
+
+- 当前 credits
+- 我方 HQ 摘要
+- 我方建筑列表
+- 我方建筑队列摘要
+- 可建造/可生产的关键能力提示
+
+它的作用是让模型一次就能判断“我现在有没有兵营、能不能补工人、能不能补兵、基地是否危险”。
 
 ### 2. 即时动作工具
 
@@ -444,7 +478,6 @@ interface OrchestratePlanResult {
 现有记录围绕“生成的 JS 代码和沙箱执行结果”。重构后应改为记录“agent 行为”：
 
 - 本次 run 的 `summary`
-- 本次 run 的 `resumeNote`
 - assistant 文本输出
 - 工具调用序列
 - 每个工具的参数、结果摘要、错误状态

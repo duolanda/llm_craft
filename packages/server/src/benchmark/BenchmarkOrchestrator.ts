@@ -1,4 +1,5 @@
 import {
+  AITerminalEvent,
   BuiltinCPURuntimeConfig,
   CPUStrategyType,
   GameState,
@@ -88,6 +89,13 @@ export class BenchmarkOrchestrator {
 
   getGame() {
     return this.currentOrchestrator?.getGame() ?? EMPTY_GAME;
+  }
+
+  getAITerminalFeed(): { sessionId: string; events: AITerminalEvent[] } {
+    return this.currentOrchestrator?.getAITerminalFeed?.() ?? {
+      sessionId: "benchmark-idle",
+      events: [],
+    };
   }
 
   private async run(): Promise<void> {

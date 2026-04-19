@@ -865,6 +865,7 @@ export class Game {
             },
           }, {
             owner: command.playerId,
+            feedbackTarget: command.playerId,
           });
         }
         break;
@@ -1277,7 +1278,10 @@ export class Game {
               this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
               this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
                 unitType,
-              }, { owner: playerId });
+              }, {
+                owner: playerId,
+                feedbackTarget: playerId,
+              });
             } else {
               this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
                 unitType,
@@ -1421,7 +1425,10 @@ export class Game {
               unitId: unit.id,
               amount: gatheredCredits,
               carryingCredits: unit.carryingCredits,
-            }, { owner: player.id });
+            }, {
+              owner: player.id,
+              feedbackTarget: player.id,
+            });
             economyActionTaken = true;
           }
         }
@@ -1437,7 +1444,10 @@ export class Game {
             buildingId: hq.id,
             amount: deliveredCredits,
             credits: player.resources.credits,
-          }, { owner: player.id });
+          }, {
+            owner: player.id,
+            feedbackTarget: player.id,
+          });
           economyActionTaken = true;
         }
 

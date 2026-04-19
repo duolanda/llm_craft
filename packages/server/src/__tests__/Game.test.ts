@@ -450,6 +450,36 @@ describe("Game", () => {
     expect(runtimeWorker.state).toBe("idle");
   });
 
+  it("marks a unit idle after it finishes a move path", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+
+    game.queueCommand({
+      id: "move_worker_once",
+      type: "move",
+      unitId: worker.id,
+      position: { x: worker.x + 1, y: worker.y },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect(runtimeWorker.intent).toMatchObject({ type: "move", targetX: worker.x + 1, targetY: worker.y });
+
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    expect(runtimeWorker.x).toBe(worker.x + 1);
+    expect(runtimeWorker.y).toBe(worker.y);
+    expect(runtimeWorker.state).toBe("idle");
+    expect(runtimeWorker.intent).toBeUndefined();
+    expect(runtimeWorker.path).toBeUndefined();
+    expect(runtimeWorker.pathTarget).toBeUndefined();
+  });
+
   it("harvest_loop keeps a worker shuttling between resource and HQ", () => {
     const worker = game
       .getState()

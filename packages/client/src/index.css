@@ -790,6 +790,127 @@ body {
   white-space: pre-wrap;
 }
 
+.ai-terminal-stream {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.ai-terminal-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.ai-terminal-divider::before,
+.ai-terminal-divider::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.14), transparent);
+}
+
+.ai-terminal-divider-label {
+  white-space: nowrap;
+}
+
+.ai-terminal-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-terminal-detail-label {
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.ai-terminal-entry-text,
+.ai-terminal-detail-code {
+  margin: 0;
+  padding: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-terminal-tool {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.02);
+}
+
+.ai-terminal-tool[open] {
+  background: rgba(255,255,255,0.03);
+}
+
+.ai-terminal-tool-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+.ai-terminal-tool-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-terminal-tool-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,229,255,0.28);
+  background: rgba(0,229,255,0.08);
+  color: var(--accent-cyan);
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+
+.ai-terminal-tool-badge.red {
+  border-color: rgba(255,42,74,0.28);
+  background: rgba(255,42,74,0.08);
+  color: var(--accent-red);
+}
+
+.ai-terminal-tool-badge.cyan {
+  border-color: rgba(0,229,255,0.28);
+  background: rgba(0,229,255,0.08);
+  color: var(--accent-cyan);
+}
+
+.ai-terminal-tool-details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.ai-terminal-detail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* Winner modal */
 .winner-overlay {
   position: fixed;

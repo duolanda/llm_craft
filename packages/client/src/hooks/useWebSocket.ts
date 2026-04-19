@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AITerminalEvent,
   ClientMessage,
   GameState,
   GameSnapshot,
@@ -11,6 +12,7 @@ import {
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
+  const [aiTerminalEvents, setAiTerminalEvents] = useState<AITerminalEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
@@ -60,6 +62,10 @@ export function useWebSocket(url: string) {
             setLiveEnabled(parsed.liveEnabled);
             break;
 
+          case "ai_terminal_events":
+            setAiTerminalEvents((current) => (parsed.reset ? parsed.events : current.concat(parsed.events)));
+            break;
+
           case "error":
             setServerMessage(parsed.message);
             break;
@@ -99,6 +105,7 @@ export function useWebSocket(url: string) {
   return {
     state,
     snapshots,
+    aiTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,

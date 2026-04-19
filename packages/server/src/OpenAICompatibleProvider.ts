@@ -1,21 +1,28 @@
 import OpenAI from "openai";
-import { AIPromptPayload } from "@llmcraft/shared";
-import { LLMProvider, OpenAIProviderConfig } from "./LLMProvider";
+import {
+  AgentRunInput,
+  AgentToolCallRecord,
+} from "@llmcraft/shared";
+import {
+  AgentToolExecutionResult,
+  LLMProvider,
+  OpenAIProviderConfig,
+  RunAgentOptions,
+  RunAgentResult,
+} from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
+import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
+const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
+const ABORT_STOP_REASON = "aborted";
 
 export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
   private baseURL?: string;
-  private history: Array<{
-    mode: AIPromptPayload["mode"];
-    user: string;
-    assistant: string;
-  }> = [];
-  private maxTurns = 20;
+  private history: any[] = [];
 
   constructor(config: OpenAIProviderConfig) {
     this.client = new OpenAI({
@@ -26,60 +33,139 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.baseURL = config.baseURL;
   }
 
-  shouldForceFullState(): boolean {
-    const retainedHistory = this.history.length >= this.maxTurns ? this.history.slice(1) : this.history;
-    return retainedHistory.every((turn) => turn.mode !== "full");
-  }
-
-  async generateCode(payload: AIPromptPayload): Promise<{
-    code: string;
-    rawResponse: string;
-    requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
-    errorMessage?: string;
-  }> {
-    const userPrompt = JSON.stringify(payload, null, 2);
-    const requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+  async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
+    const messages: any[] = [
       { role: "system", content: SYSTEM_PROMPT },
-      ...this.history.flatMap((turn) => [
-        { role: "user" as const, content: turn.user },
-        { role: "assistant" as const, content: turn.assistant },
-      ]),
-      { role: "user", content: userPrompt },
+      ...this.history,
+      { role: "user", content: JSON.stringify(input, null, 2) },
     ];
+    const persistentHistory = messages.slice(1);
+    const assistantMessages: string[] = [];
+    const toolCalls: AgentToolCallRecord[] = [];
+    let modelRequests = 0;
+    let consecutiveReadOnlyToolCalls = 0;
+    let stopReason = "model_stopped";
+    let lastRuntimeAlertSignature: string | null = null;
 
-    try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages: requestMessages,
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: DEFAULT_MAX_TOKENS,
-      });
+    while (true) {
+      if (options.signal?.aborted) {
+        stopReason = ABORT_STOP_REASON;
+        break;
+      }
+      lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
+
+      let response;
+      try {
+        response = await this.client.chat.completions.create({
+          model: this.model,
+          messages,
+          tools: options.tools.map((tool) => ({
+            type: "function",
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            },
+          })),
+          tool_choice: "auto",
+          temperature: DEFAULT_TEMPERATURE,
+          max_tokens: DEFAULT_MAX_TOKENS,
+          signal: options.signal,
+        } as any);
+      } catch (error) {
+        if (this.isAbortError(error, options.signal)) {
+          stopReason = ABORT_STOP_REASON;
+          break;
+        }
+        throw error;
+      }
+      modelRequests++;
 
       const choice = response.choices[0];
-      const rawResponse = choice?.message?.content || "";
-      const cleanedCode = this.cleanCode(rawResponse);
-      const errorMessage =
-        choice?.finish_reason === "length"
-          ? `LLM response was truncated by max_tokens (${DEFAULT_MAX_TOKENS}); generated code may be incomplete.`
-          : undefined;
-      this.history.push({
-        mode: payload.mode,
-        user: userPrompt,
-        assistant: cleanedCode,
-      });
-      if (this.history.length > this.maxTurns) {
-        this.history = this.history.slice(-this.maxTurns);
+      const assistantMessage = choice?.message;
+      if (!assistantMessage) {
+        stopReason = "empty_response";
+        break;
       }
-      return { code: cleanedCode, rawResponse, requestMessages, errorMessage };
-    } catch (e) {
-      console.error("OpenAI API 错误:", e);
-      return {
-        code: "// AI 生成失败",
-        rawResponse: "",
-        requestMessages,
-        errorMessage: e instanceof Error ? e.message : String(e),
-      };
+
+      messages.push(assistantMessage);
+      persistentHistory.push(assistantMessage);
+
+      const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
+      if (assistantText) {
+        assistantMessages.push(assistantText);
+        options.onAssistantMessage?.(assistantText);
+      }
+
+      const requestedToolCalls = assistantMessage.tool_calls ?? [];
+      if (requestedToolCalls.length === 0) {
+        stopReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+        break;
+      }
+
+      let shouldStopForStall = false;
+      for (const toolCall of requestedToolCalls) {
+        const args = this.parseToolArgs(toolCall.function.arguments);
+        let execution: AgentToolExecutionResult;
+        try {
+          execution = await options.executeTool(toolCall.function.name, args);
+        } catch (error) {
+          execution = {
+            effect: "read",
+            result: { ok: false, error: error instanceof Error ? error.message : String(error) },
+          };
+        }
+
+        if (execution.effect === "read") {
+          consecutiveReadOnlyToolCalls++;
+        } else {
+          consecutiveReadOnlyToolCalls = 0;
+        }
+        const toolCallRecord = {
+          toolCallId: toolCall.id,
+          toolName: toolCall.function.name,
+          args,
+          result: execution.result,
+          isError: execution.result instanceof Object && "ok" in (execution.result as Record<string, unknown>)
+            ? (execution.result as Record<string, unknown>).ok === false
+            : false,
+        };
+        toolCalls.push(toolCallRecord);
+        options.onToolCall?.(toolCallRecord);
+
+        const toolMessage = {
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(execution.result),
+          name: toolCall.function.name,
+        };
+        messages.push(toolMessage);
+        persistentHistory.push(toolMessage);
+
+        if (consecutiveReadOnlyToolCalls > MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS) {
+          stopReason = "stall_detected";
+          shouldStopForStall = true;
+          break;
+        }
+      }
+
+      if (shouldStopForStall) {
+        break;
+      }
     }
+
+    this.history = persistentHistory;
+    return {
+      assistantMessages,
+      toolCalls,
+      plans: [],
+      stopReason,
+      metrics: {
+        modelRequests,
+        toolCalls: toolCalls.length,
+        stallDetected: stopReason === "stall_detected",
+      },
+    };
   }
 
   getModel(): string {
@@ -90,11 +176,42 @@ export class OpenAICompatibleProvider implements LLMProvider {
     return this.baseURL;
   }
 
-  private cleanCode(code: string): string {
-    return code
-      .replace(/^```javascript\n?/m, "")
-      .replace(/^```js\n?/m, "")
-      .replace(/```$/m, "")
-      .trim();
+  private parseToolArgs(raw: string): unknown {
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {
+    const alert = getHQUnderAttackAlertFromRuntimeState(runtimeState);
+    if (!alert) {
+      return null;
+    }
+
+    if (alert !== previousSignature) {
+      messages.push({
+        role: "user",
+        content: alert,
+      });
+    }
+
+    return alert;
+  }
+
+  private isAbortError(error: unknown, signal?: AbortSignal): boolean {
+    if (signal?.aborted) {
+      return true;
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      return true;
+    }
+    return Boolean(
+      error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: unknown }).name === "AbortError"
+    );
   }
 }

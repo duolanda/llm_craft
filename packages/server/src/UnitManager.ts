@@ -221,9 +221,19 @@ export class UnitManager {
     );
 
     // 保存路径和目标
+    if (path.length === 0) {
+      unit.path = undefined;
+      unit.pathTarget = undefined;
+      unit.state = UNIT_STATES.IDLE;
+      if (unit.intent?.type === "move") {
+        unit.intent = undefined;
+      }
+      return RESULT_CODES.OK;
+    }
+
     unit.path = path;
     unit.pathTarget = { x: resolvedTarget.x, y: resolvedTarget.y };
-    unit.intent = { type: 'move', targetX: resolvedTarget.x, targetY: resolvedTarget.y };
+    unit.intent = { type: "move", targetX: resolvedTarget.x, targetY: resolvedTarget.y };
 
     return RESULT_CODES.OK;
   }
@@ -282,6 +292,10 @@ export class UnitManager {
     if (unit.path.length === 0) {
       unit.path = undefined;
       unit.pathTarget = undefined;
+      unit.state = UNIT_STATES.IDLE;
+      if (unit.intent?.type === "move") {
+        unit.intent = undefined;
+      }
     }
 
     return RESULT_CODES.OK;

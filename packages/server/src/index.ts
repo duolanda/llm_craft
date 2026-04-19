@@ -4,6 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AITerminalEvent,
   ClientMessage,
   ClientStartBenchmarkMessage,
   CreateLLMPresetRequest,
@@ -44,6 +45,7 @@ interface OrchestratorLike {
   start(): Promise<void>;
   stop(): void;
   saveRecord(): Promise<string>;
+  getAITerminalFeed?: () => { sessionId: string; events: AITerminalEvent[] };
   getGame(): {
     getState(): GameState | null;
     getSnapshots(): GameSnapshot[];
@@ -105,6 +107,13 @@ type StateMessagePayload = {
   liveEnabled: boolean;
 };
 
+type AITerminalMessagePayload = {
+  type: "ai_terminal_events";
+  sessionId: string | null;
+  reset: boolean;
+  events: AITerminalEvent[];
+};
+
 async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
   const presets = await state.presetStore.list();
   state.liveEnabled = presets.length > 0;
@@ -121,6 +130,19 @@ export function buildStateMessagePayload(state: ServerState): StateMessagePayloa
     state: game?.getState() ?? null,
     snapshots: Array.isArray(latestSnapshot) ? latestSnapshot : latestSnapshot ? [latestSnapshot] : [],
     liveEnabled: Boolean(state.liveEnabled),
+  };
+}
+
+function buildAITerminalMessagePayload(
+  sessionId: string | null,
+  reset: boolean,
+  events: AITerminalEvent[]
+): AITerminalMessagePayload {
+  return {
+    type: "ai_terminal_events",
+    sessionId,
+    reset,
+    events,
   };
 }
 
@@ -526,6 +548,8 @@ function createServer(state: ServerState) {
   wss.on("connection", (ws) => {
     console.log("客户端已连接");
     let isSendingState = false;
+    let lastAITerminalSessionId: string | null = null;
+    let lastAITerminalEventCount = 0;
 
     const sendState = async () => {
       if (isSendingState) {
@@ -542,9 +566,30 @@ function createServer(state: ServerState) {
       }
     };
 
+    const sendAITerminalEvents = () => {
+      const feed = state.orchestrator?.getAITerminalFeed?.() ?? null;
+      const sessionId = feed?.sessionId ?? null;
+      const events = feed?.events ?? [];
+
+      if (sessionId !== lastAITerminalSessionId) {
+        lastAITerminalSessionId = sessionId;
+        lastAITerminalEventCount = events.length;
+        ws.send(JSON.stringify(buildAITerminalMessagePayload(sessionId, true, events)));
+        return;
+      }
+
+      if (events.length > lastAITerminalEventCount) {
+        const nextEvents = events.slice(lastAITerminalEventCount);
+        lastAITerminalEventCount = events.length;
+        ws.send(JSON.stringify(buildAITerminalMessagePayload(sessionId, false, nextEvents)));
+      }
+    };
+
     void sendState();
+    sendAITerminalEvents();
     const interval = setInterval(() => {
       void sendState();
+      sendAITerminalEvents();
     }, 100);
 
     ws.on("message", (data) => {

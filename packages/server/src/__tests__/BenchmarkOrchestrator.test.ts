@@ -7,6 +7,19 @@ function createFakeRound(params: {
   recordPath?: string;
   transcriptPath?: string;
 }) {
+  const aiFeed = {
+    sessionId: `session-${params.tick}`,
+    events: [
+      {
+        id: `evt-${params.tick}`,
+        kind: "request",
+        playerId: "player_1",
+        requestNumber: 1,
+        requestTick: 0,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+  };
   const game = {
     getWinner: () => params.winner,
     getState: () => ({ tick: params.tick }),
@@ -20,6 +33,7 @@ function createFakeRound(params: {
     saveRecord: vi.fn(async () => params.recordPath ?? `logs/records/round-${params.tick}.json`),
     getGame: vi.fn(() => game),
     getTranscriptFilePath: vi.fn(() => params.transcriptPath ?? null),
+    getAITerminalFeed: vi.fn(() => aiFeed),
   };
 }
 
@@ -92,5 +106,29 @@ describe("BenchmarkOrchestrator", () => {
       winner: "llm",
       transcriptPath: "logs/llm-debug/round-2.log",
     });
+  });
+
+  it("proxies AI terminal feed from the current round orchestrator", () => {
+    const round = createFakeRound({ winner: null, tick: 120 });
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "gpt-4.1-mini",
+        },
+        cpuStrategy: "rush",
+        rounds: 1,
+        recordReplay: false,
+      },
+      null,
+      () => round as any
+    );
+
+    (orchestrator as any).currentOrchestrator = round;
+
+    expect(orchestrator.getAITerminalFeed()).toEqual(round.getAITerminalFeed());
   });
 });

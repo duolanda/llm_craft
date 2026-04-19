@@ -216,110 +216,128 @@ export interface BuildingStats {
   cost: number;
 }
 
-export interface AIStatePackage {
-  tick: number;
-  my: {
-    resources: Resources;
-    units: Unit[];
-    buildings: Building[];
-  };
-  enemies: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  enemyBuildings: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  map: {
-    width: number;
-    height: number;
-    tiles: Tile[]; // 所有地块信息（MVP：全图可见）
-  };
-  unitStats: Record<UnitType, UnitStats>; // 单位属性表
-  buildingStats: Record<BuildingType, BuildingStats>;
-  economy: {
-    workerCarryCapacity: number;
-    workerGatherRate: number;
-    hqDeliveryRange: number;
-  };
-  aiFeedbackSinceLastCall: GameLog[];
-  gameTimeRemaining: number;
-}
-
-export interface AIPromptPayload {
-  mode: "full" | "delta";
+export interface AgentRunInput {
+  playerId: PlayerId;
   tick: number;
   tickIntervalMs: number;
   summary: string;
-  state: AIStatePackage | null;
-  delta: {
-    creditsChanged?: number;
-    myUnitChanges: Array<{
-      id: string;
-      type: UnitType;
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-      state?: UnitState;
-      carryingCredits?: number;
-      carryCapacity?: number;
-      intent?: UnitIntent | null;
-    }>;
-    myBuildingChanges: Array<{
-      id: string;
-      type: BuildingType;
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyUnitChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyBuildingChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    aiFeedback: GameLog[];
-  } | null;
+}
+
+export interface AgentToolCallRecord {
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  result: unknown;
+  isError: boolean;
+}
+
+export interface AgentMapStateUnit {
+  id: string;
+  type: UnitType;
+  hp: number;
+  state: UnitState;
+  relation: "self" | "enemy";
+}
+
+export interface AgentMapStateBuilding {
+  id: string;
+  type: BuildingType;
+  hp: number;
+  maxHp: number;
+  relation: "self" | "enemy";
+}
+
+export interface AgentMapStateCell {
+  x: number;
+  y: number;
+  tile: TileType;
+  unit?: AgentMapStateUnit;
+  building?: AgentMapStateBuilding;
+}
+
+export interface AgentMapState {
+  width: number;
+  height: number;
+  cells: AgentMapStateCell[];
+}
+
+interface AITerminalEventBase {
+  id: string;
+  playerId: PlayerId;
+  requestNumber: number;
+  requestTick: number;
+  createdAt: string;
+}
+
+export interface AITerminalRequestEvent extends AITerminalEventBase {
+  kind: "request";
+}
+
+export interface AITerminalAssistantEvent extends AITerminalEventBase {
+  kind: "assistant";
+  text: string;
+}
+
+export interface AITerminalToolCallEvent extends AITerminalEventBase {
+  kind: "tool_call";
+  toolCall: AgentToolCallRecord;
+}
+
+export type AITerminalEvent =
+  | AITerminalRequestEvent
+  | AITerminalAssistantEvent
+  | AITerminalToolCallEvent;
+
+export type PlanCondition =
+  | "cargo_full"
+  | "cargo_empty"
+  | "hq_in_range"
+  | "enemy_in_range"
+  | { all: PlanCondition[] }
+  | { any: PlanCondition[] }
+  | { not: PlanCondition };
+
+export type PlanStep =
+  | { do: "move_to"; x: number; y: number; formation?: "direct" | "spread" }
+  | { do: "attack_in_range"; priority?: Array<"hq" | "soldier" | "worker" | "barracks"> }
+  | { do: "hold_position" }
+  | { do: "wait_until"; condition: PlanCondition; maxTicks?: number }
+  | { do: "branch"; if: PlanCondition; then: PlanStep[]; else?: PlanStep[] }
+  | { do: "stop" };
+
+export interface OrchestratePlanInput {
+  unitIds: string[];
+  replaceExisting?: boolean;
+  loop?: number;
+  steps: PlanStep[];
+}
+
+export interface AgentPlanRecord {
+  planId: string;
+  unitIds: string[];
+  loop: number;
+  steps: PlanStep[];
+  currentStepIndex: number;
+  status: "active" | "completed" | "interrupted" | "failed";
+}
+
+export interface AgentRunMetrics {
+  modelRequests: number;
+  toolCalls: number;
+  stallDetected: boolean;
 }
 
 export interface AITurnRecord {
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
-  requestMessages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string;
-  }>;
-  promptPayload: AIPromptPayload;
-  response: string;
+  runInput: AgentRunInput;
+  assistantMessages: string[];
+  toolCalls: AgentToolCallRecord[];
+  plans: AgentPlanRecord[];
   commands: Command[];
-  errorType?: string;
-  errorMessage?: string;
+  stopReason: string;
+  metrics: AgentRunMetrics;
   model: string;
   baseURL?: string;
   createdAt: string;
@@ -329,12 +347,13 @@ export interface SavedAITurnRecord {
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
-  windowMessageCount: number;
-  promptPayload: AIPromptPayload;
-  response: string;
+  runInput: AgentRunInput;
+  assistantMessages: string[];
+  toolCalls: AgentToolCallRecord[];
+  plans: AgentPlanRecord[];
   commands: Command[];
-  errorType?: string;
-  errorMessage?: string;
+  stopReason: string;
+  metrics: AgentRunMetrics;
   model: string;
   baseURL?: string;
   createdAt: string;

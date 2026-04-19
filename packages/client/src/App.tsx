@@ -39,6 +39,7 @@ function App() {
   const {
     state,
     snapshots,
+    aiTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,
@@ -372,6 +373,8 @@ function App() {
     }
     return snapshots;
   }, [mode, replayFrameIndex, replaySnapshots, snapshots]);
+  const displayAITerminalEvents = mode === "replay" ? replayFrame?.terminalEvents ?? [] : aiTerminalEvents;
+  const terminalAutoScroll = mode === "replay" ? replayPlaying : (isPlaying || benchmarkRunning);
 
   const replayProgress = replayFrames.length > 1
     ? replayFrameIndex / (replayFrames.length - 1)
@@ -694,7 +697,11 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
               </div>
-              <AIOutputPanel snapshots={displaySnapshots} />
+              <AIOutputPanel
+                snapshots={displaySnapshots}
+                events={displayAITerminalEvents}
+                autoScroll={terminalAutoScroll}
+              />
             </div>
           </div>
         </div>

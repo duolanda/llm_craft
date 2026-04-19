@@ -1,4 +1,4 @@
-import { CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions } from "./types";
+import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -65,6 +65,13 @@ export interface ServerStateMessage {
   liveEnabled: boolean;
 }
 
+export interface ServerAITerminalEventsMessage {
+  type: "ai_terminal_events";
+  sessionId: string | null;
+  reset: boolean;
+  events: AITerminalEvent[];
+}
+
 /** 错误通知 */
 export interface ServerErrorMessage {
   type: "error";
@@ -114,6 +121,7 @@ export interface ServerBenchmarkCompleteMessage {
 /** 所有服务端发送的消息联合类型 */
 export type ServerMessage =
   | ServerStateMessage
+  | ServerAITerminalEventsMessage
   | ServerErrorMessage
   | ServerRecordSavedMessage
   | ServerBenchmarkProgressMessage

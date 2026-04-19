@@ -1,202 +1,55 @@
 # Sprint - 当前问题清单
 
-> 记录 MVP 测试中发现的问题和待改进项
+> 记录当前 MVP 中仍然存在的真实问题和待改进项
 
 ## 高优先级
 
-### 1. Token 消耗过快
-- **描述**: AI 每 5 ticks (2.5 秒) 调用一次 API，3 分钟消耗 50w+ tokens
-- **影响**: 成本极高，无法长时间运行
-- **MVP 防沉迷 / 防烧 token 机制**:
-  - 默认只保留最近 20 次 AI 对话窗口，超出后按滑动窗口裁剪旧历史，避免历史无限膨胀
-  - 默认优先发送增量状态；当滑动窗口即将失去最后一条 `full` 基线时，再补发新的完整基线 JSON
-  - 单局应设置最大 tick 上限，达到后自动暂停并提示用户决定是否继续
-  - 单局应设置 token 预算或请求次数预算，达到阈值后自动暂停
-  - 连续多轮无效命令 / 无变化僵局时自动暂停，避免空转烧 token
-  - 暂停时必须允许用户立即保存当前记录，便于离线复盘后再决定是否继续
-  - UI 侧需要明确显示当前模型、调用频率、记录状态与保存入口，降低误触发长局的概率
+### 1. WebSocket 状态同步仍是定时推送
+- **描述**: 当前 `state` 仍然是每连接 `100ms` 固定推送一次，不是严格事件驱动
+- **影响**: 有额外序列化和无效推送开销，后续做更细粒度同步会受限
 
-### 2. 碰撞检测与寻路系统 ✅ 已完成
-- **描述**: 多个单位可以占据同一个格子，缺乏碰撞检测；单位可瞬移、穿墙、出界；AI 无法绕过障碍物
-- **影响**: 游戏真实性降低，单位堆叠导致视觉混乱，AI 被墙挡住无法到达目标
-- **已完成内容**:
-  - ✅ 单位-单位碰撞检测（禁止移动到已有单位的位置）
-  - ✅ 单位-障碍物碰撞检测（禁止移动到 obstacle 地块）
-  - ✅ 地图边界检查（禁止移出 0-19 范围）
-  - ✅ 整数坐标验证（禁止小数坐标如 5.5）
-  - ✅ 速度限制（移动距离 ≤ unitStats[type].speed）
-  - ✅ **A* 自动寻路**：AI 只需指定目标，系统自动绕过障碍物
-    - 支持动态重新寻路（路径被阻挡时自动重算）
-    - 多单位自动寻路与动态重算支持
+### 2. tool-calling runtime 缺少更细的行为指标下发
+- **描述**: 服务端内部已记录 `modelRequests / toolCalls / stallDetected`，但 benchmark 对外消息还没有把这些指标完整暴露到前端
+- **影响**: 能做离线分析，但前端实时面板还看不到完整的 agent 行为统计
 
-### 3. 支持双方使用不同 API/模型 ✅ 已完成
-- **原问题**: 双方 AI 曾经共用同一套 API Key / Base URL / 模型，无法对比不同模型策略
-- **已完成内容**:
-  - ✅ 服务端新增模型预设库与加密存储
-  - ✅ 前端新增预设设置面板，可增删改查预设
-  - ✅ 红方和蓝方现在可以分别选择不同预设启动同一局对战
-  - ✅ 实时对局启动协议改为显式传递 `player1PresetId` / `player2PresetId`
+### 3. `summary` 仍然是字符串拼装
+- **描述**: 当前 `summary` 已经取代旧 `full/delta` 主输入，但仍是服务端拼接文本
+- **影响**: 可工作，但结构化程度不高，不利于后续精细优化
 
-### 3.1 HQ 邻接资源点导致交付异常 ✅ 已完成
-- **描述**: 旧固定地图布局中，资源点可能贴住 HQ 1 格交付圈，导致刷出的 Worker 在资源格上满载后无法自动交付
-- **已完成内容**:
-  - ✅ 默认地图改为 `21x21`
-  - ✅ 固定 HQ / 资源点 / 中轴障碍坐标同步平移
-  - ✅ 资源点不再落入 HQ 周围 1 格交付圈
-
-### 3.2 实时状态推送拖慢沙箱执行 ✅ 已完成
-- **原问题**: 服务端曾在每次 WebSocket `state` 推送时重复读取 preset 存储，并附带最近 100 个 snapshots；当主线程变慢时，父进程 watchdog 会把这类调度/IPC 延迟误记成 `sandbox timed out after 200ms`
-- **已完成内容**:
-  - ✅ `liveEnabled` 改为服务端缓存值，不再在每次状态推送时读 preset 文件
-  - ✅ 实时 `state` 推送只附带最近 1 个 snapshot，用于展示最新 AI 输出
-  - ✅ 状态推送增加重入保护，避免上一次发送未完成时继续叠加
-  - ✅ 沙箱错误新增 `errorType`，区分 `parent_timeout` 与 `vm_timeout`
-
-### 3.3 WebSocket 状态同步仍是定时推送
-- **描述**: 当前实时 `state` 虽然走的是 WebSocket，但服务端在每个连接建立后都会启动一个 `100ms` 的 `setInterval` 固定推送状态，本质上仍是“WebSocket 包装下的时间驱动轮询”，而不是由 game tick / 状态变更触发的事件驱动同步
-- **影响**:
-  - 连接数增加时，每个连接各自维护一个定时器，广播模型不清晰
-  - 即使状态没有变化，也会持续序列化和发送完整 payload，带来无效 CPU / IPC / 网络开销
-  - 语义上不够干净，后续如果要做更细粒度的增量推送、订阅分层或观战扩展，会被当前实现拖住
-- **建议方向**:
-  - 由游戏主循环 / orchestrator 在 tick 完成或状态变化后主动广播
-  - 区分“首次全量同步”和“后续增量更新”，减少空推送
-  - 把连接管理从“每连接一个发送定时器”改成“服务端统一事件源 + 广播”
-
-### 3.4 WebSocket 协议类型已收敛到 shared ✅ 已完成
-- **原问题**: 早期只有 `start` / `reset` 等部分客户端消息定义在 `packages/shared`，而 `state`、`error`、`record_saved` 等服务端消息仍在 server/client 本地重复声明
-- **已完成内容**:
-  - ✅ 在 `packages/shared/src/ws-messages.ts` 中统一定义 WebSocket 共享协议
-  - ✅ 客户端消息已统一纳入 `ClientMessage`：`start` / `reset` / `stop` / `save_record`
-  - ✅ 服务端消息已统一纳入 `ServerMessage`：`state` / `error` / `record_saved`
-  - ✅ server/client 均直接依赖 shared 中的协议类型与类型守卫，移除本地重复声明
-
-### 3.5 Benchmark 结果面板需增加 LLM 反应时长统计
-- **描述**: 当前 Benchmark 结束面板只显示胜率、平均 tick 时长等宏观指标，缺少 LLM 每次决策的响应耗时统计
-- **影响**: 无法评估不同模型/配置的实际推理速度，难以分析性能瓶颈
-- **需求**:
-  - 在每局对局中记录每次 LLM 调用的响应时长（从请求发出到收到响应的毫秒数）
-  - Benchmark 结束面板除胜率外，显示 LLM 反应时长的**平均数**和**中位数**
-  - 逐局结果中可展开查看每局的响应时长明细
-
-### 3.6 预设需支持 temperature 配置
-- **描述**: 当前预设仅支持 baseURL、model、rpm 等基础配置，缺少 temperature 参数
-- **影响**: 无法通过预设调整 LLM 输出的随机性/确定性，所有调用均使用硬编码默认值
-- **需求**:
-  - 预设存储（`PresetStore` / `llm-presets.json`）增加 `temperature` 字段
-  - 预设创建/编辑/查看界面增加 temperature 输入（范围 0-2，步长 0.1）
-  - LLM Provider 调用时使用预设中配置的 temperature 而非硬编码默认值
-  - 历史预设缺失 temperature 时默认使用 0.7
-
-### 3.7 慢 LLM 响应期间的反馈被误标为已读 ✅ 已修复
-- **原问题**: AI 请求发出后，服务端会在响应返回时用“执行时最新状态”更新 `lastAIState`。如果 LLM 响应较慢，中间 tick 产生的命令结果、资源变化或沙箱错误会被标记为已读，但实际上从未进入过该轮 prompt。
-- **影响**: 模型会连续收到“无变化”的 delta，错过 `Insufficient credits`、`Unexpected end of input` 等关键反馈，容易重复空命令或陷入截断代码循环；高延迟模型受影响更严重。
-- **已完成内容**:
-  - ✅ `lastAIState` 改为记录“请求时实际发送给 LLM 的状态”
-  - ✅ 响应期间产生的状态变化和反馈会进入下一轮 prompt
-  - ✅ 沙箱成功但无命令时写入 AI feedback，提示下一轮必须产出有效指令
-  - ✅ 沙箱错误和空命令反馈不再把完整生成源码塞进 `aiFeedbackSinceLastCall.code`
-  - ✅ 沙箱 JS 错误会在 `errorType` 中原样透传 `error.name`，例如 `SyntaxError` / `ReferenceError`
-  - ✅ OpenAI-compatible provider 将默认 `max_tokens` 从 1024 提升到 2048，并在响应因长度截断时写入 provider feedback
-
-### 3.8 持续意图在 delta / live canvas / replay 间不一致 ✅ 已修复
-- **原问题**: `attack_move` / `harvest_loop` 一度只在服务端部分生效，后续 AI delta 看不到持续 intent，live canvas 也不画，回放还原仍依赖旧命令反推。
-- **已完成内容**:
-  - ✅ `AIPromptPayload.delta.myUnitChanges` 现在会显式携带 `intent`
-  - ✅ live canvas 新增 `attack_move` / `harvest_loop` 可视化
-  - ✅ replay 重建优先使用记录里的单位 `intent`，并兼容新命令类型
-  - ✅ 新增 `attackMoveTo()` / `harvestLoop()` 沙箱 API，并补了服务端持续行为测试
+### 4. 计划推进与 tick 执行之间仍有轻微延迟
+- **描述**: 当前计划推进由 orchestrator 轮询观察 tick 后再入队
+- **影响**: 相比直接嵌入 tick 前阶段，存在轻微的一 tick 级延迟风险
 
 ## 中优先级
 
-### 4. 观赏性改进 - 数据面板 ✅ 已完成
-- **描述**: 无法直观看到双方单位数量、资源数量、摧毁/死亡统计
-- **已完成内容**:
-  - 左侧数据面板实时显示:
-    - 双方单位数量 (Worker/Soldier/Scout 分别统计，带图例)
-    - 当前能量值和每 tick 产能
-    - 建筑数量 (HQ / 发电 / 兵营)
-    - 游戏时间和 tick 数
-  - 增加单位编制颜色图例，提升可读性
+### 5. 预设仍缺少 temperature
+- **描述**: 当前预设只有 baseURL、model、rpm，没有 temperature
+- **影响**: 无法用预设层面调整模型稳定性/随机性
 
-### 5. 观赏性改进 - 视觉反馈 ✅ 部分完成
-- **描述**: 攻击、摧毁等动作缺乏视觉反馈，单位外观无法区分类型
-- **已完成内容**:
-  - ✅ 单位形状区分：Worker(小圆+中心点)、Soldier(大圆)、Scout(菱形)
-  - ✅ 意图可视化：移动虚线+目标点、攻击红线+X标记、待命盾牌标记
-- **待完成**:
-  - 单位死亡时显示爆炸/消失动画
-  - 建筑被摧毁时视觉提示
-  - 添加战斗日志高亮
+### 6. 查询类工具仍然偏碎，后续需要收敛
+- **描述**: 当前只读工具拆成了 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
+- **影响**: 对 agent 来说查询入口偏多，后续需要收敛到 `3` 个（查地图、查自己、recent）或 `2` 个（查所有、recent）工具，并主要通过简单参数完成过滤，而不是继续增加新读工具
 
-### 6. AI 战场感知接口 ✅ 已完成
-- **描述**: AI 无法获取地图信息（障碍物、资源点）、单位属性、敌方建筑位置
-- **影响**: AI 瞎打，无法规划路径、不知道资源在哪、看不到敌方 HQ
-- **已完成内容**:
-  - ✅ 新增 `map.tiles` - 所有非空地块（障碍物、资源点）坐标和类型
-  - ✅ 新增 `map.getTile(x, y)` - 查询指定位置的地块
-  - ✅ 新增 `enemyBuildings` - 敌方建筑列表（HQ、兵营、发电站）
-  - ✅ 新增 `unitStats` - 单位属性表：speed/attack/attackRange/cost/hp
-  - ✅ 更新 SystemPrompt，告知 AI 如何使用新接口
+### 7. 高级编排层仍然偏扁平，后续需要探索更灵活的管道式表达
+- **描述**: 当前 `orchestrate_plan` 还是 `steps + loop + branch + wait_until` 的扁平 DSL
+- **影响**: 能覆盖基础长期任务，但表达力仍有限；后续需要评估是否升级到类似 bash 管道的组合方式，例如 `A | B | C` 这样的串联/筛选/执行模型，以提升灵活性
 
-### 6.1 shared 改动后下游脚本缺少自动预构建护栏
-- **描述**: `packages/shared/src/*` 变更后，`server/client` 当前依赖的是 shared 的 `dist` 产物；如果直接跑 `pnpm --filter @llmcraft/server test|typecheck` 或 `pnpm --filter @llmcraft/client build|typecheck`，很容易继续读取旧的 shared 输出
-- **影响**:
-  - 容易出现“代码已经改了，但下游类型/协议还没生效”的假象
-  - 排查成本高，尤其是改 `types.ts`、`ws-messages.ts` 这类共享契约时
-  - 该问题对 agent 和人工开发都会反复踩坑
-- **建议方向**:
-  - 在 `packages/server/package.json` 增加 `pretest` / `pretypecheck` / `prebuild`，先执行 `pnpm --filter @llmcraft/shared build`
-  - 在 `packages/client/package.json` 增加 `pretypecheck` / `prebuild`，先执行 `pnpm --filter @llmcraft/shared build`
-  - 保留根脚本里的 shared 构建步骤，但不要只依赖根脚本约束
-
-## 低优先级
-
-### 7. 前端 UI 改进 ✅ 已完成
-- **描述**: 当前前端过于简陋，纯 CSS 内联样式难以维护
-- **已完成内容**:
-  - 全面重设计为工业科幻终端 HUD 风格
-  - 引入 `Chakra Petch` / `Rajdhani` / `JetBrains Mono` 字体
-  - 玻璃拟态面板 + 四角 HUD 装饰 + 扫描线效果
-  - 三栏响应式布局（数据 | 画面 | AI 终端）
-  - 增加战术图例面板，解释 Canvas 中所有图案含义
-  - 统一 CSS 变量管理，移除内联样式
-
-### 8. 对局记录 / 回放基础
-- **描述**: 当前更紧急的不是完整播放器，而是先把每局对战过程可靠记录下来
-- **MVP 范围**:
-  - 保存每个 tick 的状态快照
-  - 保存每次 LLM 收到的消息、返回代码、沙箱执行结果、命令执行结果
-  - 保存双方模型、Base URL、窗口大小、AI 调用间隔等元数据
-  - 即使对局未结束，也允许在暂停后手动保存当前记录
-- **后续扩展**:
-  - 基于记录文件增加回放控制面板（播放 / 暂停 / 拖动 / 倍速）
-  - 支持从任意 tick 载入回放
-
-### 9. 数据面板 - 建造序列显示
-- **描述**: 左侧战场数据面板目前只显示静态统计，无法看到双方正在建造/生产的队列
-- **影响**: 难以判断双方的战略意图和经济投入方向
-- **可能的解决方案**:
-  - 在 StatsPanel 的建筑设施区域增加”正在建造”列表
-  - 显示每个建筑的当前生产进度条和剩余 tick
-  - 区分红蓝双方队列，按Worker/Soldier/Scout分类汇总
-
-### 10. 对局日志 JSON 过于松散
-- **描述**: 当前保存出的日志 JSON 空行较多，结构不够紧凑
-- **影响**: 降低人工查看效率，也会让日志文件体积偏大
-- **可能的解决方案**:
-  - 调整日志序列化格式，去掉多余空行和重复留白
-  - 在保证可读性的前提下统一缩进和换行策略
-  - 区分“机器存档格式”和“人工查看格式”，避免一个格式同时承担两种用途
+### 8. Benchmark 面板还没消费新 runtime 细节
+- **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
+- **影响**: 回放已经能看到 tool-driven agent 行为，但 benchmark 视角仍不够完整
 
 ## 已完成 ✅
 
-- [x] 基础游戏循环和单位系统
-- [x] AI 沙箱和 OpenAI 集成
-- [x] WebSocket 实时通信
-- [x] Canvas 地图渲染
-- [x] 支持自定义 OpenAI API 地址和模型
+- [x] 移除 `AISandbox` 与 `Node vm` 主链路
+- [x] live match 切到 tool-calling agent runtime
+- [x] benchmark 切到同一套 tool-calling runtime
+- [x] 只读工具统一为 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
+- [x] 引入 `orchestrate_plan` 扁平 DSL
+- [x] 回放与 transcript 改为记录 tool calls / plans / commands / stop reason
+- [x] 修复 action tool 命令要等整轮 agent run 结束后才入队，导致长链 tool-calling 期间单位表面“无动作”的时序问题
+- [x] 清理 `AIStatePackageBuilder` 与 `AIPromptPayload(full/delta)` 兼容残留
+- [x] 修复单位走到目标后仍保留 `moving` 状态与一次性 `move` intent，导致 agent 误判单位还在移动
 
 ---
 
-*最后更新: 2026-04-15*
+*最后更新: 2026-04-19*

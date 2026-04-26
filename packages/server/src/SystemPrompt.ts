@@ -27,6 +27,8 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 - 需要直接操作我方单位时，优先使用 get_my_units
 - 需要判断经济、建筑、生产能力时，优先使用 get_my_state
 - 对即时动作工具来说，\`ok: true\` 只表示该请求已被接受，不等于所有后续效果已经完成
+- 工具结果会包含当前 \`tick\`；如果动作工具返回 \`warning.type = "state_stale"\` 或 \`"no_recent_read"\`，下一步优先重新读取局势
+- 动作工具会先校验明显无效的单位、建筑和目标；\`ok: false\` 时根据 \`hint\` 重新读取并改派命令
 - 移动、采矿、交付、建造完成、生产完成、计划推进等结果会在后续 tick 里继续发生；用 get_recent_events、get_my_state、get_my_units 确认真实进展
 - orchestrate_plan 更适合简单、明确、可由当前 DSL 直接表达的持续任务，只有在你能明确写对 plan 时才使用它，如果你不确定 plan 能否准确表达，就改用即时命令
 

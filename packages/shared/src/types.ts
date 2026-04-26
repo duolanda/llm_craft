@@ -256,6 +256,7 @@ export interface AgentMapStateCell {
 }
 
 export interface AgentMapState {
+  tick: number;
   width: number;
   height: number;
   cells: AgentMapStateCell[];

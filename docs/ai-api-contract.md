@@ -248,6 +248,7 @@ interface AgentRunInput {
 
 ```ts
 {
+  tick: number;
   width: number;
   height: number;
   cells: Array<{
@@ -286,6 +287,7 @@ interface AgentRunInput {
 
 ```ts
 {
+  tick: number;
   credits: number;
   hq: Building | null;
   buildings: Building[];
@@ -301,7 +303,10 @@ interface AgentRunInput {
 返回我方可直接操作单位：
 
 ```ts
-Array<Unit & { hasActivePlan: boolean }>
+{
+  tick: number;
+  units: Array<Unit & { hasActivePlan: boolean }>;
+}
 ```
 
 #### `get_active_plans`
@@ -309,13 +314,9 @@ Array<Unit & { hasActivePlan: boolean }>
 返回当前仍在生效的高层计划：
 
 ```ts
-interface AgentPlanRecord {
-  planId: string;
-  unitIds: string[];
-  loop: number;
-  steps: PlanStep[];
-  currentStepIndex: number;
-  status: "active" | "completed" | "interrupted" | "failed";
+{
+  tick: number;
+  plans: AgentPlanRecord[];
 }
 ```
 
@@ -324,7 +325,10 @@ interface AgentPlanRecord {
 返回最近的 AI-facing 反馈和关键事件：
 
 ```ts
-GameLog[]
+{
+  tick: number;
+  events: GameLog[];
+}
 ```
 
 ### 2.2 即时动作工具
@@ -388,6 +392,28 @@ GameLog[]
 ```ts
 {
   unitId: string;
+}
+```
+
+这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。
+
+成功和失败结果都会带当前 `tick`。如果本轮最后一次只读工具调用距离当前超过 10 ticks，或本轮还没有调用过只读工具，动作/计划工具会附带 `warning`，但不会仅因为 warning 拒绝入队：
+
+```ts
+{
+  tick: number;
+  ok: boolean;
+  commandId?: string;
+  error?: string;
+  hint?: string;
+  warning?: {
+    type: "state_stale" | "no_recent_read";
+    message: string;
+    currentTick: number;
+    lastReadTick?: number;
+    ageTicks?: number;
+    staleAfterTicks: number;
+  };
 }
 ```
 

@@ -37,6 +37,8 @@
 - `get_active_plans`: 当前高层计划
 - `get_recent_events`: 近期 AI-facing 反馈
 
+只读工具结果都会带当前 `tick`。其中 `get_my_units` 返回 `{ tick, units }`，`get_active_plans` 返回 `{ tick, plans }`，`get_recent_events` 返回 `{ tick, events }`。
+
 模型通过工具改变局面：
 
 - `move_unit`
@@ -46,6 +48,8 @@
 - `build_structure`
 - `hold_unit`
 - `orchestrate_plan`
+
+动作/计划工具会先做明显无效请求的即时校验；单位、建筑或敌方目标不存在时直接返回 `ok: false` 和 `hint`，不会入队。所有动作/计划结果都会带当前 `tick`，如果本轮没有读取过局势或最后一次读取已超过 10 ticks，会额外返回 stale warning，但 warning 本身不阻止命令入队。
 
 ## 3. 当前高层计划能力
 

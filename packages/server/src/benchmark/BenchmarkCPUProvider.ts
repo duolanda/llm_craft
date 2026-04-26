@@ -48,7 +48,8 @@ export class BenchmarkCPUProvider implements LLMProvider {
 
     const runtime = options.getRuntimeState();
     const myState = (runtime.myState ?? {}) as any;
-    const myUnits = Array.isArray(runtime.myUnits) ? runtime.myUnits : [];
+    const myUnitsPayload = (runtime.myUnits ?? {}) as any;
+    const myUnits = Array.isArray(myUnitsPayload) ? myUnitsPayload : Array.isArray(myUnitsPayload.units) ? myUnitsPayload.units : [];
     const mapState = (runtime.mapState ?? {}) as any;
 
     const credits = typeof myState?.credits === "number" ? myState.credits : 0;

@@ -47,9 +47,10 @@
 - [x] 引入 `orchestrate_plan` 扁平 DSL
 - [x] 回放与 transcript 改为记录 tool calls / plans / commands / stop reason
 - [x] 修复 action tool 命令要等整轮 agent run 结束后才入队，导致长链 tool-calling 期间单位表面“无动作”的时序问题
+- [x] 为 tool-calling runtime 增加工具结果 tick、动作预校验和 stale-read warning，减少长 run 使用过期单位/建筑 ID 的无效命令
 - [x] 清理 `AIStatePackageBuilder` 与 `AIPromptPayload(full/delta)` 兼容残留
 - [x] 修复单位走到目标后仍保留 `moving` 状态与一次性 `move` intent，导致 agent 误判单位还在移动
 
 ---
 
-*最后更新: 2026-04-19*
+*最后更新: 2026-04-26*

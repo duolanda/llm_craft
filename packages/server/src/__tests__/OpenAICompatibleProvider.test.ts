@@ -341,6 +341,187 @@ describe("OpenAICompatibleProvider", () => {
     expect(alertCount).toBe(0);
   });
 
+  it("expires older read tool results when the same read tool and args are called again", async () => {
+    const responses = [
+      {
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: "",
+              tool_calls: [
+                {
+                  id: "call_old",
+                  function: {
+                    name: "get_map_state",
+                    arguments: "{\"includeEmptyTiles\":false}",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: "refreshing map",
+              tool_calls: [
+                {
+                  id: "call_new",
+                  function: {
+                    name: "get_map_state",
+                    arguments: "{\"includeEmptyTiles\":false}",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: "done",
+              tool_calls: [],
+            },
+          },
+        ],
+      },
+    ];
+
+    const { provider, create } = createProviderWithResponses(responses);
+    let toolReadCount = 0;
+    await provider.runAgent(createInput(), {
+      tools: [],
+      executeTool: async () => {
+        toolReadCount++;
+        return {
+          effect: "read" as const,
+          result: toolReadCount === 1
+            ? { tick: 10, cells: [{ marker: "OLD_MAP_SHOULD_EXPIRE" }] }
+            : { tick: 20, cells: [{ marker: "NEW_MAP_SHOULD_REMAIN" }] },
+        };
+      },
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    });
+
+    const createCalls = create.mock.calls as unknown as Array<Array<{ messages: Array<{ role: string; content: string; name?: string }> }>>;
+    const thirdCall = createCalls[2];
+    if (!thirdCall?.[0]) {
+      throw new Error("expected third OpenAI request");
+    }
+
+    const serializedMessages = JSON.stringify(thirdCall[0].messages);
+    expect(serializedMessages).not.toContain("OLD_MAP_SHOULD_EXPIRE");
+    expect(serializedMessages).toContain("NEW_MAP_SHOULD_REMAIN");
+    expect(serializedMessages).toContain("superseded_by_new_read");
+    const oldToolMessage = thirdCall[0].messages.find((message) => message.role === "tool" && message.name === "get_map_state");
+    expect(oldToolMessage).toBeDefined();
+    expect(JSON.parse(String(oldToolMessage?.content))).toMatchObject({
+      expired: true,
+      reason: "superseded_by_new_read",
+      observedTick: 10,
+    });
+  });
+
+  it("keeps older read tool results when the same read tool is called with different args", async () => {
+    const responses = [
+      {
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: "",
+              tool_calls: [
+                {
+                  id: "call_full",
+                  function: {
+                    name: "get_map_state",
+                    arguments: "{\"includeEmptyTiles\":true}",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: "checking slim map",
+              tool_calls: [
+                {
+                  id: "call_slim",
+                  function: {
+                    name: "get_map_state",
+                    arguments: "{\"includeEmptyTiles\":false}",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: "done",
+              tool_calls: [],
+            },
+          },
+        ],
+      },
+    ];
+
+    const { provider, create } = createProviderWithResponses(responses);
+    let toolReadCount = 0;
+    await provider.runAgent(createInput(), {
+      tools: [],
+      executeTool: async () => {
+        toolReadCount++;
+        return {
+          effect: "read" as const,
+          result: toolReadCount === 1
+            ? { tick: 10, cells: [{ marker: "FULL_MAP_SHOULD_REMAIN" }] }
+            : { tick: 20, cells: [{ marker: "SLIM_MAP_SHOULD_REMAIN" }] },
+        };
+      },
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    });
+
+    const createCalls = create.mock.calls as unknown as Array<Array<{ messages: Array<{ role: string; content: string; name?: string }> }>>;
+    const thirdCall = createCalls[2];
+    if (!thirdCall?.[0]) {
+      throw new Error("expected third OpenAI request");
+    }
+
+    const serializedMessages = JSON.stringify(thirdCall[0].messages);
+    expect(serializedMessages).toContain("FULL_MAP_SHOULD_REMAIN");
+    expect(serializedMessages).toContain("SLIM_MAP_SHOULD_REMAIN");
+    expect(serializedMessages).not.toContain("superseded_by_new_read");
+  });
+
   it("aborts the in-flight OpenAI request when the signal is cancelled", async () => {
     const provider = new OpenAICompatibleProvider({
       providerType: "openai-compatible",

@@ -17,6 +17,13 @@ const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
+const REPLACEABLE_READ_TOOL_NAMES = new Set([
+  "get_map_state",
+  "get_my_state",
+  "get_my_units",
+  "get_active_plans",
+  "get_recent_events",
+]);
 
 export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
@@ -118,6 +125,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
         if (execution.effect === "read") {
           consecutiveReadOnlyToolCalls++;
+          this.expireSupersededReadToolResults(messages, toolCall.id, toolCall.function.name, args);
         } else {
           consecutiveReadOnlyToolCalls = 0;
         }
@@ -198,6 +206,114 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
 
     return alert;
+  }
+
+  private expireSupersededReadToolResults(messages: any[], currentToolCallId: string, toolName: string, args: unknown): void {
+    if (!REPLACEABLE_READ_TOOL_NAMES.has(toolName)) {
+      return;
+    }
+
+    const currentArgsKey = this.normalizeToolArgs(args);
+    for (const message of messages) {
+      if (
+        message?.role !== "tool" ||
+        message.tool_call_id === currentToolCallId ||
+        message.name !== toolName ||
+        this.isExpiredObservation(message)
+      ) {
+        continue;
+      }
+
+      const previousCall = this.findToolCall(messages, message.tool_call_id);
+      if (!previousCall || previousCall.toolName !== toolName || previousCall.argsKey !== currentArgsKey) {
+        continue;
+      }
+
+      const observedTick = this.getToolResultTick(message);
+      message.content = JSON.stringify({
+        expired: true,
+        reason: "superseded_by_new_read",
+        toolName,
+        args: this.normalizeToolArgsForDisplay(args),
+        observedTick,
+        message: "This older read result was replaced by a newer read of the same tool and args. Do not rely on old positions, HP, resources, or unit states from it.",
+      });
+    }
+  }
+
+  private findToolCall(messages: any[], toolCallId: string | undefined): { toolName: string; argsKey: string } | null {
+    if (!toolCallId) {
+      return null;
+    }
+
+    for (const message of messages) {
+      const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+      for (const toolCall of toolCalls) {
+        if (toolCall?.id !== toolCallId) {
+          continue;
+        }
+
+        return {
+          toolName: String(toolCall.function?.name ?? ""),
+          argsKey: this.normalizeToolArgs(this.parseToolArgs(String(toolCall.function?.arguments ?? ""))),
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private isExpiredObservation(message: any): boolean {
+    if (typeof message?.content !== "string") {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(message.content);
+      return parsed?.expired === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private getToolResultTick(message: any): number | null {
+    if (typeof message?.content !== "string") {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(message.content);
+      return typeof parsed?.tick === "number" ? parsed.tick : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeToolArgs(args: unknown): string {
+    return JSON.stringify(this.normalizeValue(args ?? {}));
+  }
+
+  private normalizeToolArgsForDisplay(args: unknown): unknown {
+    return this.normalizeValue(args ?? {});
+  }
+
+  private normalizeValue(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.normalizeValue(item));
+    }
+
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return Object.keys(record)
+        .filter((key) => record[key] !== undefined)
+        .sort()
+        .reduce<Record<string, unknown>>((normalized, key) => {
+          normalized[key] = this.normalizeValue(record[key]);
+          return normalized;
+        }, {});
+    }
+
+    return value;
   }
 
   private isAbortError(error: unknown, signal?: AbortSignal): boolean {

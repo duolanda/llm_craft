@@ -281,6 +281,23 @@ interface AgentRunInput {
 - 默认只返回“有信息量”的格子：资源、障碍、单位、建筑；只有传 `includeEmptyTiles=true` 时才返回完整格子信息（包括 empty）
 - `unit` 是精简视图，不返回 `my / playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段
 
+### 2.1.1 旧读取结果折叠
+
+在同一个长 run 中，新的同名同参数读取会替代旧读取结果。provider 不删除 assistant 文本，也不删除 tool-call 配对；只会把旧 read tool result 的大 JSON 折叠成 tombstone：
+
+```ts
+{
+  expired: true;
+  reason: "superseded_by_new_read";
+  toolName: string;
+  args: unknown;
+  observedTick: number | null;
+  message: string;
+}
+```
+
+折叠粒度是 `toolName + normalizedArgs`。例如新的 `get_map_state({ includeEmptyTiles: false })` 只会折叠旧的同参数 `get_map_state`，不会折叠 `includeEmptyTiles: true` 的旧结果。动作工具结果不会被该机制折叠。
+
 #### `get_my_state`
 
 返回我方经济与建筑状态：

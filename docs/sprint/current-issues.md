@@ -38,6 +38,10 @@
 - **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
 - **影响**: 回放已经能看到 tool-driven agent 行为，但 benchmark 视角仍不够完整
 
+### 9. 日志文件名时间戳仍使用 UTC 时间
+- **描述**: 当前对局日志/回放等文件名里的时间戳使用 UTC 时间，与本地开发和排查时常用的北京时间不一致
+- **影响**: 按文件名定位具体对局时需要额外换算时区，容易和控制台、本地观察时间产生偏差；后续可评估改为北京时间或在文件名中显式标注时区
+
 ## 已完成 ✅
 
 - [x] 移除 `AISandbox` 与 `Node vm` 主链路
@@ -51,7 +55,12 @@
 - [x] 为 OpenAI-compatible provider 增加同名同参数 read tool result 折叠，保留 assistant 文本但淘汰旧观察大 JSON
 - [x] 清理 `AIStatePackageBuilder` 与 `AIPromptPayload(full/delta)` 兼容残留
 - [x] 修复单位走到目标后仍保留 `moving` 状态与一次性 `move` intent，导致 agent 误判单位还在移动
+- [x] 将 `get_map_state` 默认响应压缩为 ASCII 小地图 + 实体列表，并把逐格 `cells` 改为显式请求
+- [x] 暴露内建 `start_harvest_loop` 工具，避免 agent 用 `orchestrate_plan` 手写采矿往返
+- [x] 增加 `analyze:record` 离线回放分析脚本，用于统计囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机
+- [x] 暴露默认只自动攻击单位的 `attack_move_unit`，让士兵前压时不会无视路上敌军，同时保留攻击 HQ / barracks 必须显式下令的战略约束
+- [x] 用高层 `attack(unitId, targetId)` 替代 LLM 暴露面的 `attack_unit` / `attack_in_range`，由 bridge 负责追击、持续攻击和目标死亡后的最后位置移动
 
 ---
 
-*最后更新: 2026-04-26*
+*最后更新: 2026-05-02*

@@ -1,6 +1,6 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-04-19
+日期: 2026-05-02
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
@@ -31,7 +31,7 @@
 
 模型通过工具读取局面：
 
-- `get_map_state`: 全图可见战场信息
+- `get_map_state`: 全图可见战场信息；默认返回无坐标轴 ASCII 小地图、单位列表和建筑列表，需要逐格地形时才请求 `cells`
 - `get_my_state`: 我方经济、HQ、建筑、生产能力
 - `get_my_units`: 我方可直接控制单位
 - `get_active_plans`: 当前高层计划
@@ -44,14 +44,21 @@
 模型通过工具改变局面：
 
 - `move_unit`
-- `attack_unit`
-- `attack_in_range`
+- `attack`
+- `attack_move_unit`
 - `spawn_unit`
 - `build_structure`
+- `start_harvest_loop`
 - `hold_unit`
 - `orchestrate_plan`
 
-动作/计划工具会先做明显无效请求的即时校验；单位、建筑或敌方目标不存在时直接返回 `ok: false` 和 `hint`，不会入队。所有动作/计划结果都会带当前 `tick`，如果本轮没有读取过局势或最后一次读取已超过 10 ticks，会额外返回 stale warning，但 warning 本身不阻止命令入队。
+动作/计划工具会先做明显无效请求的即时校验；单位、建筑或敌方目标不存在时通常返回 `ok: false` 和 `hint`，不会入队。`attack` 是例外：如果目标曾被看见但当前已不存在，会自动降级为移动到目标最后已知位置。所有动作/计划结果都会带当前 `tick`，如果本轮没有读取过局势或最后一次读取已超过 10 ticks，会额外返回 stale warning，但 warning 本身不阻止命令入队。
+
+`start_harvest_loop` 是暴露给 agent 的内建 worker 采矿循环；常规采矿不需要再用 `orchestrate_plan` 手写资源点和 HQ 之间的往返路线。
+
+`attack` 是暴露给 agent 的标准 RTS 点目标攻击命令：agent 只传己方单位 ID 和敌方目标 ID。目标仍存在时，系统会移动到射程内并持续攻击；目标已死亡但曾被看见过时，系统会移动到目标最后已知位置，避免失败后反复重读局势。
+
+`attack_move_unit` 是暴露给 agent 的区域战斗推进命令：士兵会向目标点移动并自动攻击路上的敌方单位。它不用于指定攻击建筑或某个目标；拆 HQ、拆 barracks、点杀敌军应使用 `attack`。
 
 ## 3. 当前高层计划能力
 
@@ -64,7 +71,6 @@
 - `wait_until`
 - `branch`
 - `move_to`
-- `attack_in_range`
 - `hold_position`
 - `stop`
 
@@ -92,6 +98,8 @@
 - commands
 - plans
 - metrics
+
+服务端提供 `pnpm --filter @llmcraft/server analyze:record <record.json> [--debug <llm-debug.log>]`，用于离线统计回放里的囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机；传入 debug log 时还会补充工具调用分布和粗略 token 体量。
 
 ## 5. 当前 MVP 规则
 

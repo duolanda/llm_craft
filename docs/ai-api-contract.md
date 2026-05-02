@@ -251,20 +251,45 @@ interface AgentRunInput {
   tick: number;
   width: number;
   height: number;
-  cells: Array<{
+  asciiMap: string;
+  units: Array<{
+    id: string;
+    type: UnitType;
+    x: number;
+    y: number;
+    hp: number;
+    maxHp: number;
+    state: UnitState;
+    relation: "self" | "enemy";
+  }>;
+  buildings: Array<{
+    id: string;
+    type: BuildingType;
+    x: number;
+    y: number;
+    hp: number;
+    maxHp: number;
+    relation: "self" | "enemy";
+  }>;
+  cells?: Array<{
     x: number;
     y: number;
     tile: TileType;
     unit?: {
       id: string;
       type: UnitType;
+      x: number;
+      y: number;
       hp: number;
+      maxHp: number;
       state: UnitState;
       relation: "self" | "enemy";
     };
     building?: {
       id: string;
       type: BuildingType;
+      x: number;
+      y: number;
       hp: number;
       maxHp: number;
       relation: "self" | "enemy";
@@ -275,10 +300,24 @@ interface AgentRunInput {
 
 说明：
 
-- 当前地图很小，且没有战争迷雾，所以直接返回全图可见信息
-- 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
+- 当前地图很小，且没有战争迷雾，所以默认返回全图可见的压缩信息
+- `asciiMap` 是无坐标轴的符号小地图，用于快速读取空间关系
+- 精确坐标默认看 `units` 和 `buildings`；只有需要逐格地形时才传 `includeCells=true`
+- `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
 - 单位和建筑子项带 `relation` 字段，表示是己方还是敌方
-- 默认只返回“有信息量”的格子：资源、障碍、单位、建筑；只有传 `includeEmptyTiles=true` 时才返回完整格子信息（包括 empty）
+
+默认符号约定：
+
+```text
+. empty
+# obstacle
+* resource
+H/B/S/W self hq/barracks/soldier/worker
+h/b/s/w enemy hq/barracks/soldier/worker
+```
+- 默认不返回 `cells`，以降低上下文体积
+- 传 `includeCells=true` 时只返回“有信息量”的格子：资源、障碍、单位、建筑
+- 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整格子信息（包括 empty）
 - `unit` 是精简视图，不返回 `my / playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段
 
 ### 2.1.1 旧读取结果折叠
@@ -296,7 +335,7 @@ interface AgentRunInput {
 }
 ```
 
-折叠粒度是 `toolName + normalizedArgs`。例如新的 `get_map_state({ includeEmptyTiles: false })` 只会折叠旧的同参数 `get_map_state`，不会折叠 `includeEmptyTiles: true` 的旧结果。动作工具结果不会被该机制折叠。
+折叠粒度是 `toolName + normalizedArgs`。例如新的 `get_map_state({})` 只会折叠旧的同参数 `get_map_state`，不会折叠 `includeCells: true` 或 `includeEmptyTiles: true` 的旧结果。动作工具结果不会被该机制折叠。
 
 #### `get_my_state`
 
@@ -360,7 +399,25 @@ interface AgentRunInput {
 }
 ```
 
-#### `attack_unit`
+#### `attack_move_unit`
+
+```ts
+{
+  unitId: string;
+  x: number;
+  y: number;
+  priority?: Array<"soldier" | "worker">;
+}
+```
+
+说明：
+
+- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- 单位会向目标点移动，并在移动途中自动攻击范围内的敌方单位
+- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks 应使用 `attack`
+- 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
+
+#### `attack`
 
 ```ts
 {
@@ -369,14 +426,13 @@ interface AgentRunInput {
 }
 ```
 
-#### `attack_in_range`
+说明：
 
-```ts
-{
-  unitId: string;
-  priority?: Array<"hq" | "soldier" | "worker" | "barracks">;
-}
-```
+- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- `targetId` 必须来自最近的可见敌方单位或建筑 ID
+- 目标仍存在时，系统会让单位向目标移动，进入射程后持续攻击
+- 目标已经消失但曾被看见过时，系统会自动降级为移动到该目标最后已知位置；调用方不需要也不能传坐标
+- 目标从未被看见过时，返回 `ok: false` 和 `hint`
 
 #### `spawn_unit`
 
@@ -403,6 +459,24 @@ interface AgentRunInput {
 - 当前只允许建造 `barracks`
 - 兵营必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
 - 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
+
+#### `start_harvest_loop`
+
+```ts
+{
+  unitId: string;
+  x?: number;
+  y?: number;
+}
+```
+
+说明：
+
+- 只接受己方 `worker`
+- 让 worker 进入内建采矿循环，在资源点和己方 HQ 之间自动往返
+- 省略 `x/y` 时，游戏会自动选择最近资源点
+- 常规采矿应优先使用这个工具，不要用 `orchestrate_plan` 手写 worker 往返路线
+- 已经处于 `harvest_loop` 的 worker 默认视为已有任务，除非被堵、资源选择错误或需要改派，不要每轮重复调用
 
 #### `hold_unit`
 
@@ -452,7 +526,6 @@ interface OrchestratePlanInput {
 ```ts
 type PlanStep =
   | { do: "move_to"; x: number; y: number; formation?: "direct" | "spread" }
-  | { do: "attack_in_range"; priority?: Array<"hq" | "soldier" | "worker" | "barracks"> }
   | { do: "hold_position" }
   | { do: "wait_until"; condition: PlanCondition; maxTicks?: number }
   | { do: "branch"; if: PlanCondition; then: PlanStep[]; else?: PlanStep[] }
@@ -475,6 +548,8 @@ type PlanCondition =
 - `orchestrate_plan` 只注册计划，不会在一次 tool call 内跑完整段脚本
 - 计划会在后续 tick 自动推进
 - 即时动作会打断相关单位的当前计划
+- 常规采矿不应使用 `orchestrate_plan`，应使用 `start_harvest_loop`
+- 如果单位已有合适的 active plan，不要每个 run 都重复注册同一个计划
 
 ## 3. 记录格式
 

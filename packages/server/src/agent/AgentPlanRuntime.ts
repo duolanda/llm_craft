@@ -35,7 +35,6 @@ interface InternalPlan {
 
 interface PlanCommandFactory {
   move(unitId: string, position: Position): Command;
-  attackInRange(unitId: string, priority?: Array<"hq" | "soldier" | "worker" | "barracks">): Command;
   hold(unitId: string): Command;
 }
 
@@ -161,12 +160,6 @@ export class AgentPlanRuntime {
           }
 
           return [this.commandFactory.move(unit.id, target)];
-        }
-
-        case "attack_in_range": {
-          state.currentStepIndex++;
-          state.waitStartedTick = undefined;
-          return [this.commandFactory.attackInRange(unit.id, step.priority)];
         }
 
         case "hold_position": {

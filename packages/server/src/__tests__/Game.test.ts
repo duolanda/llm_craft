@@ -322,6 +322,26 @@ describe("Game", () => {
     expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
   });
 
+  it("attack_in_range does not fall back to buildings when priority is explicit", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
+
+    game.queueCommand({
+      id: "attack_in_range_unit_only_priority",
+      type: "attack_in_range",
+      unitId: attacker.id,
+      targetPriority: [UNIT_TYPES.WORKER],
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect(enemyHq.hp).toBe(enemyHq.maxHp);
+  });
+
   it("attack_in_range fails cleanly when nothing is in range", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");

@@ -29,7 +29,8 @@ describe("BenchmarkCPUProvider", () => {
           ],
           mapState: {
             width: 21,
-            cells: [{ x: 2, y: 10, tile: "empty", building: { id: "enemy-hq", relation: "enemy", type: "hq" } }],
+            units: [],
+            buildings: [{ id: "enemy-hq", x: 2, y: 10, hp: 1000, maxHp: 1000, relation: "enemy", type: "hq" }],
           },
           activePlans: null,
           recentEvents: null,

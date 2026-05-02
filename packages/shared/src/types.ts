@@ -234,7 +234,10 @@ export interface AgentToolCallRecord {
 export interface AgentMapStateUnit {
   id: string;
   type: UnitType;
+  x: number;
+  y: number;
   hp: number;
+  maxHp: number;
   state: UnitState;
   relation: "self" | "enemy";
 }
@@ -242,6 +245,8 @@ export interface AgentMapStateUnit {
 export interface AgentMapStateBuilding {
   id: string;
   type: BuildingType;
+  x: number;
+  y: number;
   hp: number;
   maxHp: number;
   relation: "self" | "enemy";
@@ -259,7 +264,10 @@ export interface AgentMapState {
   tick: number;
   width: number;
   height: number;
-  cells: AgentMapStateCell[];
+  asciiMap: string;
+  units: AgentMapStateUnit[];
+  buildings: AgentMapStateBuilding[];
+  cells?: AgentMapStateCell[];
 }
 
 interface AITerminalEventBase {
@@ -300,7 +308,6 @@ export type PlanCondition =
 
 export type PlanStep =
   | { do: "move_to"; x: number; y: number; formation?: "direct" | "spread" }
-  | { do: "attack_in_range"; priority?: Array<"hq" | "soldier" | "worker" | "barracks"> }
   | { do: "hold_position" }
   | { do: "wait_until"; condition: PlanCondition; maxTicks?: number }
   | { do: "branch"; if: PlanCondition; then: PlanStep[]; else?: PlanStep[] }

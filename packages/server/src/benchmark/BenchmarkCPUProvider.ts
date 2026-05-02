@@ -60,10 +60,13 @@ export class BenchmarkCPUProvider implements LLMProvider {
     const workers = myUnits.filter((unit: any) => unit.type === "worker");
     const soldiers = myUnits.filter((unit: any) => unit.type === "soldier");
     const mapCells = Array.isArray(mapState?.cells) ? mapState.cells : [];
-    const enemyHQ = mapCells
-      .filter((cell: any) => cell?.building?.relation === "enemy" && cell.building.type === "hq")
-      .map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.building }))[0] ?? null;
-    const resourceTiles = mapCells.filter((cell: any) => cell?.tile === "resource");
+    const mapBuildings = Array.isArray(mapState?.buildings)
+      ? mapState.buildings
+      : mapCells.filter((cell: any) => cell?.building).map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.building }));
+    const mapUnits = Array.isArray(mapState?.units)
+      ? mapState.units
+      : mapCells.filter((cell: any) => cell?.unit).map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.unit }));
+    const enemyHQ = mapBuildings.find((building: any) => building?.relation === "enemy" && building.type === "hq") ?? null;
 
     const canBuildBarracks = credits >= 120;
     const canSpawnWorker = credits >= 50;
@@ -71,19 +74,8 @@ export class BenchmarkCPUProvider implements LLMProvider {
 
     const issueWorkerEconomy = async () => {
       for (const worker of workers) {
-        const carryingFull = worker.carryingCredits >= worker.carryCapacity;
-        if (carryingFull && hq) {
-          await callTool("move_unit", { unitId: worker.id, x: hq.x, y: hq.y });
-          continue;
-        }
-        if (worker.state === "idle" && resourceTiles.length > 0) {
-          const nearestResource = resourceTiles.reduce((best: any, tile: any) => {
-            if (!best) return tile;
-            return chebyshevDistance(worker, tile) < chebyshevDistance(worker, best) ? tile : best;
-          }, null);
-          if (nearestResource) {
-            await callTool("move_unit", { unitId: worker.id, x: nearestResource.x, y: nearestResource.y });
-          }
+        if (worker.intent?.type !== "harvest_loop" && worker.state === "idle") {
+          await callTool("start_harvest_loop", { unitId: worker.id });
         }
       }
     };
@@ -128,11 +120,11 @@ export class BenchmarkCPUProvider implements LLMProvider {
             }
           } else {
             for (const soldier of soldiers) {
-              await callTool("move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
+              await callTool("attack_move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
               if (shouldAttackThisTurn) {
-                await callTool("attack_in_range", {
+                await callTool("attack", {
                   unitId: soldier.id,
-                  priority: ["hq", "soldier", "worker", "barracks"],
+                  targetId: enemyHQ.id,
                 });
               }
             }
@@ -140,9 +132,7 @@ export class BenchmarkCPUProvider implements LLMProvider {
         }
       }
     } else {
-      const enemyUnits = mapCells
-        .filter((cell: any) => cell?.unit?.relation === "enemy")
-        .map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.unit }));
+      const enemyUnits = mapUnits.filter((unit: any) => unit?.relation === "enemy");
       const isHQUnderPressure = hq
         ? enemyUnits.some((enemy: any) => chebyshevDistance(enemy, hq) <= 2)
         : false;
@@ -179,36 +169,36 @@ export class BenchmarkCPUProvider implements LLMProvider {
           if (closestThreat) {
             const inRange = chebyshevDistance(soldier, closestThreat) <= soldier.attackRange;
             if (inRange) {
-              await callTool("attack_in_range", {
+              await callTool("attack", {
                 unitId: soldier.id,
-                priority: ["soldier", "worker", "barracks", "hq"],
+                targetId: closestThreat.id,
               });
             } else {
-              await callTool("move_unit", { unitId: soldier.id, x: closestThreat.x, y: closestThreat.y });
+              await callTool("attack_move_unit", { unitId: soldier.id, x: closestThreat.x, y: closestThreat.y });
             }
             continue;
           }
           if (enemyHQ) {
-            await callTool("move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
+            await callTool("attack_move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
           }
         }
       } else {
         for (const soldier of soldiers) {
           if (!enemyHQ) {
-            await callTool("attack_in_range", {
-              unitId: soldier.id,
-              priority: ["soldier", "worker", "barracks", "hq"],
-            });
+            const closestEnemy = enemyUnits[0];
+            if (closestEnemy) {
+              await callTool("attack", { unitId: soldier.id, targetId: closestEnemy.id });
+            }
             continue;
           }
           const inRange = chebyshevDistance(soldier, enemyHQ) <= soldier.attackRange;
           if (inRange) {
-            await callTool("attack_in_range", {
+            await callTool("attack", {
               unitId: soldier.id,
-              priority: ["hq", "soldier", "worker", "barracks"],
+              targetId: enemyHQ.id,
             });
           } else {
-            await callTool("move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
+            await callTool("attack_move_unit", { unitId: soldier.id, x: enemyHQ.x, y: enemyHQ.y });
           }
         }
       }

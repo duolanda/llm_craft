@@ -17,15 +17,21 @@ type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
 const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "get_map_state",
-    description: "Read the full visible battlefield as map cells grouped by coordinate. Each returned cell includes x/y, the tile type, and optional unit/building occupants. By default only non-empty/interesting cells are returned; set includeEmptyTiles=true when you explicitly need the full grid including empty and obstacle tiles.",
+    description:
+      "Read the full visible battlefield. By default returns a compact no-axis ASCII tactical map plus visible unit/building lists with coordinates. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need the full grid including empty cells.",
     parameters: {
       type: "object",
       properties: {
+        includeCells: { type: "boolean" },
         includeEmptyTiles: { type: "boolean" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.getMapState({ includeEmptyTiles: args?.includeEmptyTiles === true }),
+    execute: (bridge, args) =>
+      bridge.getMapState({
+        includeCells: args?.includeCells === true,
+        includeEmptyTiles: args?.includeEmptyTiles === true,
+      }),
   },
   {
     name: "get_my_state",
@@ -53,7 +59,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "move_unit",
-    description: "Queue a move command for one unit.",
+    description: "Queue a move command for one unit. Use this for workers or precise repositioning; for combat advances through enemy units, prefer attack_move_unit.",
     parameters: {
       type: "object",
       required: ["unitId", "x", "y"],
@@ -67,8 +73,30 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     execute: (bridge, args) => bridge.moveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }),
   },
   {
-    name: "attack_unit",
-    description: "Queue a direct attack command for one unit against one target id.",
+    name: "attack_move_unit",
+    description:
+      "Queue an area combat move for one combat unit: move toward x/y while automatically attacking enemy units encountered. This is for crossing contested ground, not for focusing a specific target or attacking buildings.",
+    parameters: {
+      type: "object",
+      required: ["unitId", "x", "y"],
+      properties: {
+        unitId: { type: "string" },
+        x: { type: "integer" },
+        y: { type: "integer" },
+        priority: {
+          type: "array",
+          items: { type: "string", enum: ["soldier", "worker"] },
+        },
+      },
+      additionalProperties: false,
+    },
+    execute: (bridge, args) =>
+      bridge.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
+  },
+  {
+    name: "attack",
+    description:
+      "Order one combat unit to attack one enemy target id. If the target is alive, the unit will move toward it until in range and then attack. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
     parameters: {
       type: "object",
       required: ["unitId", "targetId"],
@@ -78,24 +106,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.attackUnit(String(args.unitId), String(args.targetId)),
-  },
-  {
-    name: "attack_in_range",
-    description: "Queue an attack-in-range command for one unit, optionally with a priority list. Recommended priority when pushing to finish the game: [\"hq\", \"soldier\", \"worker\", \"barracks\"].",
-    parameters: {
-      type: "object",
-      required: ["unitId"],
-      properties: {
-        unitId: { type: "string" },
-        priority: {
-          type: "array",
-          items: { type: "string", enum: ["hq", "soldier", "worker", "barracks"] },
-        },
-      },
-      additionalProperties: false,
-    },
-    execute: (bridge, args) => bridge.attackInRange(String(args.unitId), args.priority),
+    execute: (bridge, args) => bridge.attackTarget(String(args.unitId), String(args.targetId)),
   },
   {
     name: "spawn_unit",
@@ -129,6 +140,30 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       bridge.buildStructure(String(args.unitId), args.buildingType, { x: Number(args.x), y: Number(args.y) }),
   },
   {
+    name: "start_harvest_loop",
+    description:
+      "Assign one friendly worker to the built-in mining loop. Prefer this for routine economy instead of hand-writing mining with orchestrate_plan. Omit x/y to auto-pick the nearest resource; once accepted, do not repeatedly reissue it unless the worker is idle, blocked, or needs reassignment.",
+    parameters: {
+      type: "object",
+      required: ["unitId"],
+      properties: {
+        unitId: { type: "string" },
+        x: { type: "integer" },
+        y: { type: "integer" },
+      },
+      additionalProperties: false,
+    },
+    execute: (bridge, args) => {
+      const hasX = args?.x !== undefined;
+      const hasY = args?.y !== undefined;
+      const position = hasX && hasY ? { x: Number(args.x), y: Number(args.y) } : undefined;
+      if (hasX !== hasY) {
+        return bridge.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
+      }
+      return bridge.startHarvestLoop(String(args.unitId), position);
+    },
+  },
+  {
     name: "hold_unit",
     description: "Queue a hold-position command for one unit.",
     parameters: {
@@ -149,21 +184,22 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "Rules:",
       "- The plan is a flat steps list, not code.",
       "- Every step must use the new { do: ... } shape, never legacy { type: ... }.",
-      "- Supported steps only: move_to, attack_in_range, hold_position, wait_until, branch, stop.",
+      "- Supported steps only: move_to, hold_position, wait_until, branch, stop.",
       "- Supported conditions only: cargo_full, cargo_empty, hq_in_range, enemy_in_range.",
       "- Do not invent hidden APIs, extra step kinds, or old DSL keywords such as move_to_resource, move_to_hq, deliver_credits, spawn_soldier.",
+      "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
+      "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
       "- wait_until can only wait for supported fixed conditions.",
       "- branch can only use a supported condition and then/else step arrays.",
-      "Mining example:",
+      "Combat pressure example:",
       JSON.stringify({
-        unitIds: ["unit_1"],
-        loop: -1,
+        unitIds: ["soldier_1", "soldier_2"],
+        loop: 3,
         steps: [
-          { do: "move_to", x: 2, y: 7 },
-          { do: "wait_until", condition: "cargo_full" },
-          { do: "move_to", x: 2, y: 9 },
-          { do: "wait_until", condition: "cargo_empty" },
+          { do: "move_to", x: 17, y: 10, formation: "spread" },
+          { do: "wait_until", condition: "enemy_in_range", maxTicks: 4 },
+          { do: "hold_position" },
         ],
       }),
     ].join("\n"),
@@ -182,15 +218,11 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             properties: {
               do: {
                 type: "string",
-                enum: ["move_to", "attack_in_range", "hold_position", "wait_until", "branch", "stop"],
+                enum: ["move_to", "hold_position", "wait_until", "branch", "stop"],
               },
               x: { type: "integer" },
               y: { type: "integer" },
               formation: { type: "string", enum: ["direct", "spread"] },
-              priority: {
-                type: "array",
-                items: { type: "string", enum: ["hq", "soldier", "worker", "barracks"] },
-              },
               condition: {},
               maxTicks: { type: "integer" },
               if: {},

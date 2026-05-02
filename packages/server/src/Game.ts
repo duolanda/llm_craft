@@ -1129,10 +1129,10 @@ export class Game {
     playerId: PlayerId,
     targetPriority?: string[]
   ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
-    const priority = (targetPriority && targetPriority.length > 0
-      ? targetPriority
-      : ["hq", "soldier", "worker", "barracks"]
-    ).map((value) => String(value).toLowerCase());
+    const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
+    const priority = (hasExplicitPriority ? targetPriority! : ["hq", "soldier", "worker", "barracks"]).map((value) =>
+      String(value).toLowerCase()
+    );
 
     const enemyUnits = this.unitManager
       .getAllUnits()
@@ -1159,6 +1159,10 @@ export class Game {
       if (buildingTarget) {
         return { kind: "building", target: buildingTarget };
       }
+    }
+
+    if (hasExplicitPriority) {
+      return null;
     }
 
     if (fallbackBuildings.length > 0) {

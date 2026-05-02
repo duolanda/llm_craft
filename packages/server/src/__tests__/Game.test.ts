@@ -19,7 +19,7 @@ describe("Game", () => {
     expect(player1.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(2);
     expect(player2.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(2);
     expect(player1.units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(0);
-    expect(player1.resources.credits).toBe(200);
+    expect(player1.resources.credits).toBe(400);
     expect(player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: 2, y: centerY });
     expect(player2.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: MAP_WIDTH - 3, y: centerY });
   });
@@ -55,7 +55,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getState().players[0].resources.credits).toBe(150);
+    expect(game.getState().players[0].resources.credits).toBe(350);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
@@ -75,7 +75,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
-    expect(game.getState().players[0].resources.credits).toBe(200);
+    expect(game.getState().players[0].resources.credits).toBe(400);
   });
 
   it("allows a worker to build a barracks on a valid tile", () => {
@@ -97,7 +97,7 @@ describe("Game", () => {
 
     const state = game.getState();
     expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS)).toHaveLength(1);
-    expect(state.players[0].resources.credits).toBe(80);
+    expect(state.players[0].resources.credits).toBe(280);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
@@ -361,16 +361,16 @@ describe("Game", () => {
     expect((game.getAIFeedback("player_1").at(-1)?.data as Record<string, unknown>)?.type).toBe("attack_no_target_in_range");
   });
 
-  it("attack_move keeps advancing and attacking until overridden", () => {
+  it("attack_move engages enemies before reaching the destination until overridden", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
-    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 7, 5, "player_2");
 
     game.queueCommand({
       id: "attack_move_push",
       type: "attack_move",
       unitId: attacker.id,
-      position: { x: 8, y: 5 },
+      position: { x: 9, y: 5 },
       targetPriority: [UNIT_TYPES.SOLDIER],
       playerId: "player_1",
     });
@@ -379,12 +379,12 @@ describe("Game", () => {
     game.tickUpdate();
     expect(attacker.intent?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);
-    expect(target.hp).toBe(target.maxHp);
+    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
 
     game.tickUpdate();
     expect(attacker.intent?.type).toBe("attack_move");
-    expect(attacker.x).toBe(7);
-    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
+    expect(attacker.x).toBe(6);
+    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack * 2);
 
     game.queueCommand({
       id: "override_attack_move",
@@ -396,6 +396,30 @@ describe("Game", () => {
     game.stop();
 
     expect(attacker.intent?.type).toBe("hold");
+  });
+
+  it("attack_move stops auto-attacking after reaching its destination", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 7, 5, "player_2");
+
+    game.queueCommand({
+      id: "attack_move_to_stop",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: 6, y: 5 },
+      targetPriority: [UNIT_TYPES.SOLDIER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    game.tickUpdate();
+    game.stop();
+
+    expect(attacker.x).toBe(6);
+    expect(attacker.intent?.type).toBe("hold");
+    expect(target.hp).toBe(target.maxHp);
   });
 
   it("adjusts move targets to a nearby reachable tile when the requested tile is blocked", () => {
@@ -455,7 +479,7 @@ describe("Game", () => {
     game.start();
     game.tickUpdate();
 
-    expect(game.getState().players[0].resources.credits).toBe(200);
+    expect(game.getState().players[0].resources.credits).toBe(400);
     expect(runtimeWorker.carryingCredits).toBe(10);
     expect(runtimeWorker.state).toBe("gathering");
 
@@ -465,7 +489,7 @@ describe("Game", () => {
     game.tickUpdate();
     game.stop();
 
-    expect(game.getState().players[0].resources.credits).toBe(210);
+    expect(game.getState().players[0].resources.credits).toBe(410);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.state).toBe("idle");
   });
@@ -527,7 +551,7 @@ describe("Game", () => {
     }
     game.stop();
 
-    expect(game.getState().players[0].resources.credits).toBe(300);
+    expect(game.getState().players[0].resources.credits).toBe(500);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.intent?.type).toBe("harvest_loop");
     expect(runtimeWorker.intent).toMatchObject({ targetX: 2, targetY: 7 });

@@ -60,6 +60,8 @@
 - [x] 增加 `analyze:record` 离线回放分析脚本，用于统计囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机
 - [x] 暴露默认只自动攻击单位的 `attack_move_unit`，让士兵前压时不会无视路上敌军，同时保留攻击 HQ / barracks 必须显式下令的战略约束
 - [x] 用高层 `attack(unitId, targetId)` 替代 LLM 暴露面的 `attack_unit` / `attack_in_range`，由 bridge 负责追击、持续攻击和目标死亡后的最后位置移动
+- [x] 限制 `attack_move_unit` 到达目标点后结束，避免士兵在敌方基地永久自动清理后续新单位
+- [x] 明确 `attack` 是有目标 ID 时的默认战斗命令，避免 LLM 把 `attack_move_unit` 当成拆 HQ / barracks 的替代品
 
 ---
 

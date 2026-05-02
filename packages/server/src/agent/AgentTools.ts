@@ -59,7 +59,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "move_unit",
-    description: "Queue a move command for one unit. Use this for workers or precise repositioning; for combat advances through enemy units, prefer attack_move_unit.",
+    description:
+      "Queue a move command for one unit. Use this for workers or precise repositioning. For combat units, use attack when you know a target id; use attack_move_unit only when you need to cross dangerous ground without a specific target.",
     parameters: {
       type: "object",
       required: ["unitId", "x", "y"],
@@ -75,7 +76,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_unit",
     description:
-      "Queue an area combat move for one combat unit: move toward x/y while automatically attacking enemy units encountered. This is for crossing contested ground, not for focusing a specific target or attacking buildings.",
+      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking enemy units encountered before arrival. Once the unit reaches the destination, this order ends. If an enemy HQ, barracks, or specific unit id is visible, prefer attack instead.",
     parameters: {
       type: "object",
       required: ["unitId", "x", "y"],
@@ -96,7 +97,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack",
     description:
-      "Order one combat unit to attack one enemy target id. If the target is alive, the unit will move toward it until in range and then attack. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
+      "Order one combat unit to attack one enemy target id. This is the default combat command whenever a visible target id exists, including far-away HQ or barracks targets: the unit will move toward the target until in range and then keep attacking. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
     parameters: {
       type: "object",
       required: ["unitId", "targetId"],

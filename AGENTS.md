@@ -140,6 +140,7 @@ game.start();
 - 优先使用显式类型而非 `any`
 - 使用 `@llmcraft/shared` 中的常量（UNIT_TYPES, BUILDING_TYPES 等）
 - 结果码：OK = 0，错误为负数（定义在 shared/src/constants.ts）
+- 只是调整代码时，用 `rg` 搜索应排除历史日志目录：`packages/server/logs/`，例如加 `-g '!packages/server/logs/**'`，避免对局记录污染搜索结果
 
 ## 包特定约定
 

@@ -399,6 +399,11 @@ h/b/s/w enemy hq/barracks/soldier/worker
 }
 ```
 
+说明：
+
+- 主要用于 worker 移动或 combat unit 精确换位
+- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
+
 #### `attack_move_unit`
 
 ```ts
@@ -413,7 +418,9 @@ h/b/s/w enemy hq/barracks/soldier/worker
 说明：
 
 - 只接受有攻击能力的己方单位，当前主要是 `soldier`
-- 单位会向目标点移动，并在移动途中自动攻击范围内的敌方单位
+- 单位会向目标点移动，并在到达前自动攻击范围内的敌方单位
+- 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
+- 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
 - 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks 应使用 `attack`
 - 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
 
@@ -430,7 +437,8 @@ h/b/s/w enemy hq/barracks/soldier/worker
 
 - 只接受有攻击能力的己方单位，当前主要是 `soldier`
 - `targetId` 必须来自最近的可见敌方单位或建筑 ID
-- 目标仍存在时，系统会让单位向目标移动，进入射程后持续攻击
+- 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
+- 攻击敌方 HQ、barracks 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
 - 目标已经消失但曾被看见过时，系统会自动降级为移动到该目标最后已知位置；调用方不需要也不能传坐标
 - 目标从未被看见过时，返回 `ok: false` 和 `hint`
 

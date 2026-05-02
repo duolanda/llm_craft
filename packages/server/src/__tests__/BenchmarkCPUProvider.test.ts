@@ -20,7 +20,7 @@ describe("BenchmarkCPUProvider", () => {
         executeTool: async () => ({ effect: "action" as const, result: { ok: true } }),
         getRuntimeState: () => ({
           myState: {
-            credits: 200,
+            credits: 400,
             hq: { id: "hq-1", x: 18, y: 10 },
             buildings: [],
           },

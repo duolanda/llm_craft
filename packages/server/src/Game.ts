@@ -65,6 +65,8 @@ type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
   lastAttackTick?: number;
 };
 
+const STARTING_CREDITS = 400;
+
 export class Game {
   private tick = 0;
   private unitManager = new UnitManager();
@@ -97,13 +99,13 @@ export class Game {
         id: "player_1",
         units: [],
         buildings: [],
-        resources: { credits: 200 },
+        resources: { credits: STARTING_CREDITS },
       },
       {
         id: "player_2",
         units: [],
         buildings: [],
-        resources: { credits: 200 },
+        resources: { credits: STARTING_CREDITS },
       },
     ];
 
@@ -976,6 +978,17 @@ export class Game {
       }
 
       const attackMoveIntent = runtimeUnit.intent;
+      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
+        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
+        : null;
+
+      if (!moveTarget || (runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y)) {
+        this.unitManager.clearPath(runtimeUnit);
+        runtimeUnit.intent = { type: "hold" };
+        runtimeUnit.state = UNIT_STATES.IDLE;
+        continue;
+      }
+
       if (runtimeUnit.lastAttackTick !== this.tick) {
         const prioritizedTarget = this.findPrioritizedAttackTarget(
           runtimeUnit,
@@ -998,19 +1011,10 @@ export class Game {
       }
 
       delete attackMoveIntent.targetId;
-      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
-        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
-        : null;
-      if (!moveTarget) {
-        runtimeUnit.state = UNIT_STATES.IDLE;
-        continue;
-      }
-
-      const alreadyAtTarget = runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y;
       const alreadyPathing =
         runtimeUnit.pathTarget?.x === moveTarget.x &&
         runtimeUnit.pathTarget?.y === moveTarget.y;
-      if (!alreadyAtTarget && !alreadyPathing) {
+      if (!alreadyPathing) {
         const blockedPositions = this.buildingManager.getOccupiedPositions();
         const result = this.unitManager.setMoveTarget(
           runtimeUnit,

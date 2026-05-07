@@ -1,5 +1,5 @@
 import { AgentRunInput } from "@llmcraft/shared";
-import { LLMProvider, RunAgentOptions, RunAgentResult } from "./LLMProvider";
+import { LLMConnectionTestResult, LLMProvider, RunAgentOptions, RunAgentResult } from "./LLMProvider";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -39,41 +39,20 @@ export class RateLimitedLLMProvider implements LLMProvider {
       return this.inner.runAgent(input, options);
     }
 
-    const intervalMs = 60000 / this.rpm;
-    const run = async () => {
-      if (options.signal?.aborted) {
-        return createAbortedResult();
-      }
+    const result = await this.runWithRateLimit(options.signal, () => this.inner.runAgent(input, options));
+    return result ?? createAbortedResult();
+  }
 
-      const now = Date.now();
-      const waitMs = Math.max(0, this.nextAvailableAt - now);
-      if (waitMs > 0) {
-        await Promise.race([
-          sleep(waitMs),
-          new Promise<never>((_, reject) => {
-            options.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
-          }),
-        ]);
-      }
-
-      if (options.signal?.aborted) {
-        return createAbortedResult();
-      }
-
-      this.nextAvailableAt = Math.max(this.nextAvailableAt, Date.now()) + intervalMs;
-      return this.inner.runAgent(input, options);
-    };
-
-    const pending = this.chain.then(run, run);
-    this.chain = pending.then(() => undefined, () => undefined);
-    try {
-      return await pending;
-    } catch (error) {
-      if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-        return createAbortedResult();
-      }
-      throw error;
+  async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
+    if (!this.rpm) {
+      return this.inner.testConnection(signal);
     }
+
+    const result = await this.runWithRateLimit(signal, () => this.inner.testConnection(signal));
+    if (!result) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    return result;
   }
 
   getModel(): string {
@@ -82,5 +61,43 @@ export class RateLimitedLLMProvider implements LLMProvider {
 
   getBaseURL(): string | undefined {
     return this.inner.getBaseURL();
+  }
+
+  private async runWithRateLimit<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T | null> {
+    const intervalMs = this.rpm ? 60000 / this.rpm : 0;
+    const run = async () => {
+      if (signal?.aborted) {
+        return null;
+      }
+
+      const now = Date.now();
+      const waitMs = Math.max(0, this.nextAvailableAt - now);
+      if (waitMs > 0) {
+        await Promise.race([
+          sleep(waitMs),
+          new Promise<never>((_, reject) => {
+            signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          }),
+        ]);
+      }
+
+      if (signal?.aborted) {
+        return null;
+      }
+
+      this.nextAvailableAt = Math.max(this.nextAvailableAt, Date.now()) + intervalMs;
+      return operation();
+    };
+
+    const pending = this.chain.then(run, run);
+    this.chain = pending.then(() => undefined, () => undefined);
+    try {
+      return await pending;
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+        return null;
+      }
+      throw error;
+    }
   }
 }

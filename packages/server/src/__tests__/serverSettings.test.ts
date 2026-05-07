@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameState } from "@llmcraft/shared";
 import { PresetStore } from "../PresetStore";
+import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 import {
   buildStateMessagePayload,
   createPresetStore,
@@ -523,6 +524,43 @@ describe("server settings", () => {
         debug: { recordLLMTranscript: true },
       })
     );
+  });
+
+  it("tests a preset API connection without exposing the saved api key", async () => {
+    const presetStore = await createStore();
+    const preset = await presetStore.create({
+      name: "Preset A",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.com/v1",
+      model: "gpt-4o-mini",
+      apiKey: "secret-token",
+    });
+    const state = createServerState(presetStore);
+    const response = createResponseCapture();
+    const testSpy = vi
+      .spyOn(OpenAICompatibleProvider.prototype, "testConnection")
+      .mockResolvedValue({ responseText: "OK" });
+
+    await handleHttpRequest(
+      createRequest({
+        method: "POST",
+        url: "/api/settings/presets/test",
+        body: JSON.stringify({
+          presetId: preset.id,
+          providerType: "openai-compatible",
+          baseURL: "https://api.example.com/v1",
+          model: "gpt-4o-mini",
+        }),
+      }),
+      response.res,
+      state
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(testSpy).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(response.payload) as { ok: boolean; responseText: string; model: string };
+    expect(body).toMatchObject({ ok: true, responseText: "OK", model: "gpt-4o-mini" });
+    expect(response.payload).not.toContain("secret-token");
   });
 
   it("starts benchmark orchestration with the selected preset and cpu strategy", async () => {

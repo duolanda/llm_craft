@@ -45,8 +45,13 @@ export interface RunAgentResult {
   metrics: AgentRunMetrics;
 }
 
+export interface LLMConnectionTestResult {
+  responseText: string;
+}
+
 export interface LLMProvider {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
+  testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
   getModel(): string;
   getBaseURL(): string | undefined;
 }

@@ -7,6 +7,7 @@ import {
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
+  TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
@@ -19,7 +20,7 @@ import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { createPreset, deletePreset, listPresets, updatePreset } from "./lib/settingsApi";
+import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
 
 type AppMode = "live" | "replay";
@@ -362,6 +363,10 @@ function App() {
   const handleDeletePreset = async (presetId: string) => {
     await deletePreset(API_BASE_URL, presetId);
     await refreshPresets();
+  };
+
+  const handleTestPreset = async (input: TestLLMPresetRequest) => {
+    return await testPreset(API_BASE_URL, input);
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
@@ -719,6 +724,7 @@ function App() {
             onCreate={handleCreatePreset}
             onUpdate={handleUpdatePreset}
             onDelete={handleDeletePreset}
+            onTest={handleTestPreset}
           />
         </SettingsOverlay>
 

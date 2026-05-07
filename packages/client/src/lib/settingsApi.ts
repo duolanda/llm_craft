@@ -1,6 +1,8 @@
 import {
   CreateLLMPresetRequest,
   LLMPresetSummary,
+  TestLLMPresetRequest,
+  TestLLMPresetResponse,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 
@@ -75,5 +77,15 @@ export async function updatePreset(
 export async function deletePreset(apiBaseUrl: string, presetId: string): Promise<void> {
   await requestJson<{ ok: boolean }>(`${apiBaseUrl}/api/settings/presets/${encodeURIComponent(presetId)}`, {
     method: "DELETE",
+  });
+}
+
+export async function testPreset(
+  apiBaseUrl: string,
+  input: TestLLMPresetRequest
+): Promise<TestLLMPresetResponse> {
+  return await requestJson<TestLLMPresetResponse>(`${apiBaseUrl}/api/settings/presets/test`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }

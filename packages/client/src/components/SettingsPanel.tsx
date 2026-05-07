@@ -3,6 +3,8 @@ import {
   CreateLLMPresetRequest,
   LLMPresetSummary,
   OpenAICompatibleReasoningEffort,
+  TestLLMPresetRequest,
+  TestLLMPresetResponse,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 
@@ -27,6 +29,7 @@ interface SettingsPanelProps {
   onCreate: (input: CreateLLMPresetRequest) => Promise<void>;
   onUpdate: (presetId: string, input: UpdateLLMPresetRequest) => Promise<void>;
   onDelete: (presetId: string) => Promise<void>;
+  onTest: (input: TestLLMPresetRequest) => Promise<TestLLMPresetResponse>;
 }
 
 const DEFAULT_FORM: PresetFormState = {
@@ -75,12 +78,14 @@ export function SettingsPanel({
   onCreate,
   onUpdate,
   onDelete,
+  onTest,
 }: SettingsPanelProps) {
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [selectionInitialized, setSelectionInitialized] = useState(false);
   const [form, setForm] = useState<PresetFormState>(DEFAULT_FORM);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -140,64 +145,79 @@ export function SettingsPanel({
     }
   };
 
+  const readValidatedProviderFields = (options: { requireName: boolean; requireApiKey: boolean }) => {
+    if (options.requireName && !form.name.trim()) {
+      throw new Error("名称不能为空。");
+    }
+    if (!form.baseURL.trim() || !form.model.trim()) {
+      throw new Error("Base URL 和模型名称不能为空。");
+    }
+    if (options.requireApiKey && !form.apiKey.trim()) {
+      throw new Error("新建预设或测试未保存配置时必须填写 API Key。");
+    }
+    const trimmedRpm = form.rpm.trim();
+    const parsedRpm = trimmedRpm ? Number(trimmedRpm) : null;
+    if (trimmedRpm && (parsedRpm === null || !Number.isInteger(parsedRpm) || parsedRpm <= 0)) {
+      throw new Error("RPM 必须是正整数，留空表示不限制。");
+    }
+    const rpm = parsedRpm;
+    const extraRequestParams = parseExtraRequestParams(form.extraRequestParams);
+    const reasoningEffort = form.reasoningEffort || null;
+
+    return {
+      providerType: form.providerType,
+      baseURL: form.baseURL.trim(),
+      model: form.model.trim(),
+      apiKey: form.apiKey.trim(),
+      rpm,
+      reasoningEffort,
+      extraRequestParams,
+    };
+  };
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLocalError(null);
     setStatusMessage(null);
 
-    if (!form.name.trim() || !form.baseURL.trim() || !form.model.trim()) {
-      setLocalError("名称、Base URL 和模型名称不能为空。");
-      return;
-    }
-
-    if (!selectedPresetId && !form.apiKey.trim()) {
-      setLocalError("新建预设时必须填写 API Key。");
-      return;
-    }
-
-    const trimmedRpm = form.rpm.trim();
-    const parsedRpm = trimmedRpm ? Number(trimmedRpm) : null;
-    if (trimmedRpm && (parsedRpm === null || !Number.isInteger(parsedRpm) || parsedRpm <= 0)) {
-      setLocalError("RPM 必须是正整数，留空表示不限制。");
-      return;
-    }
-    const rpm = parsedRpm;
-    let extraRequestParams: Record<string, unknown> | null;
+    let fields: ReturnType<typeof readValidatedProviderFields>;
     try {
-      extraRequestParams = parseExtraRequestParams(form.extraRequestParams);
-    } catch (parseError) {
-      setLocalError(parseError instanceof Error ? parseError.message : String(parseError));
+      fields = readValidatedProviderFields({
+        requireName: true,
+        requireApiKey: !selectedPresetId,
+      });
+    } catch (validationError) {
+      setLocalError(validationError instanceof Error ? validationError.message : String(validationError));
       return;
     }
-    const reasoningEffort = form.reasoningEffort || null;
 
     setSaving(true);
     try {
       if (selectedPresetId) {
         const payload: UpdateLLMPresetRequest = {
           name: form.name.trim(),
-          providerType: form.providerType,
-          baseURL: form.baseURL.trim(),
-          model: form.model.trim(),
-          rpm,
-          reasoningEffort,
-          extraRequestParams,
+          providerType: fields.providerType,
+          baseURL: fields.baseURL,
+          model: fields.model,
+          rpm: fields.rpm,
+          reasoningEffort: fields.reasoningEffort,
+          extraRequestParams: fields.extraRequestParams,
         };
-        if (form.apiKey.trim()) {
-          payload.apiKey = form.apiKey.trim();
+        if (fields.apiKey) {
+          payload.apiKey = fields.apiKey;
         }
         await onUpdate(selectedPresetId, payload);
         setStatusMessage("预设已更新。");
       } else {
         await onCreate({
           name: form.name.trim(),
-          providerType: form.providerType,
-          baseURL: form.baseURL.trim(),
-          model: form.model.trim(),
-          apiKey: form.apiKey.trim(),
-          rpm,
-          reasoningEffort,
-          extraRequestParams,
+          providerType: fields.providerType,
+          baseURL: fields.baseURL,
+          model: fields.model,
+          apiKey: fields.apiKey,
+          rpm: fields.rpm,
+          reasoningEffort: fields.reasoningEffort,
+          extraRequestParams: fields.extraRequestParams,
         });
         resetForm({ clearStatus: false });
         setStatusMessage("预设已创建。");
@@ -228,6 +248,42 @@ export function SettingsPanel({
     }
   };
 
+  const handleTest = async () => {
+    setLocalError(null);
+    setStatusMessage(null);
+
+    let fields: ReturnType<typeof readValidatedProviderFields>;
+    try {
+      fields = readValidatedProviderFields({
+        requireName: false,
+        requireApiKey: !selectedPresetId,
+      });
+    } catch (validationError) {
+      setLocalError(validationError instanceof Error ? validationError.message : String(validationError));
+      return;
+    }
+
+    setTesting(true);
+    try {
+      const result = await onTest({
+        presetId: selectedPresetId || undefined,
+        providerType: fields.providerType,
+        baseURL: fields.baseURL,
+        model: fields.model,
+        apiKey: fields.apiKey || undefined,
+        rpm: fields.rpm,
+        reasoningEffort: fields.reasoningEffort,
+        extraRequestParams: fields.extraRequestParams,
+      });
+      const responsePreview = result.responseText ? ` · ${result.responseText.slice(0, 80)}` : "";
+      setStatusMessage(`API 测试通过，耗时 ${result.latencyMs}ms${responsePreview}`);
+    } catch (testError) {
+      setLocalError(testError instanceof Error ? testError.message : String(testError));
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const effectiveError = localError ?? error;
 
   return (
@@ -254,7 +310,7 @@ export function SettingsPanel({
             ))}
           </select>
         </label>
-        <button className="hud-btn hud-btn-ghost" onClick={() => void onRefresh()} disabled={loading || saving || deleting}>
+        <button className="hud-btn hud-btn-ghost" onClick={() => void onRefresh()} disabled={loading || saving || deleting || testing}>
           {loading ? "刷新中" : "刷新"}
         </button>
       </div>
@@ -388,14 +444,22 @@ export function SettingsPanel({
         )}
 
         <div className="settings-actions">
-          <button className="hud-btn hud-btn-start" type="submit" disabled={saving || deleting}>
+          <button className="hud-btn hud-btn-start" type="submit" disabled={saving || deleting || testing}>
             {saving ? "提交中" : selectedPresetId ? "更新预设" : "创建预设"}
           </button>
           <button
             className="hud-btn hud-btn-ghost"
             type="button"
+            onClick={() => void handleTest()}
+            disabled={saving || deleting || testing}
+          >
+            {testing ? "测试中" : "测试 API"}
+          </button>
+          <button
+            className="hud-btn hud-btn-ghost"
+            type="button"
             onClick={() => resetForm()}
-            disabled={saving || deleting}
+            disabled={saving || deleting || testing}
           >
             清空
           </button>
@@ -403,7 +467,7 @@ export function SettingsPanel({
             className="hud-btn hud-btn-stop"
             type="button"
             onClick={() => void handleDelete()}
-            disabled={!selectedPresetId || saving || deleting}
+            disabled={!selectedPresetId || saving || deleting || testing}
           >
             {deleting ? "删除中" : "删除预设"}
           </button>

@@ -70,6 +70,25 @@ export interface UpdateLLMPresetRequest {
   extraRequestParams?: Record<string, unknown> | null;
 }
 
+export interface TestLLMPresetRequest {
+  presetId?: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+  rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
+}
+
+export interface TestLLMPresetResponse {
+  ok: true;
+  model: string;
+  baseURL?: string;
+  latencyMs: number;
+  responseText: string;
+}
+
 export interface Position {
   x: number;
   y: number;

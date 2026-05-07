@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-04-19
+日期: 2026-05-08
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -70,7 +70,38 @@ interface UpdateLLMPresetRequest {
 - 合并顺序是先写入 `reasoningEffort` 对应的 `reasoning_effort`，再合并 `extraRequestParams`；因此 `extraRequestParams.reasoning_effort` 会覆盖 `reasoningEffort` 快捷字段。
 - `extraRequestParams` 不能覆盖核心字段：`model`、`messages`、`tools`、`tool_choice`、`stream`、`signal`。
 
-### 0.4 WebSocket `start`
+### 0.4 `POST /api/settings/presets/test`
+
+测试当前预设配置是否能连通 OpenAI-compatible chat completions API。可用于已保存预设，也可用于尚未保存的新配置：
+
+```ts
+interface TestLLMPresetRequest {
+  presetId?: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+  rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
+}
+
+interface TestLLMPresetResponse {
+  ok: true;
+  model: string;
+  baseURL?: string;
+  latencyMs: number;
+  responseText: string;
+}
+```
+
+说明：
+
+- 如果 `presetId` 指向已保存预设，且请求体未传 `apiKey`，服务端会使用该预设已保存的 API Key。
+- 如果没有 `presetId`，必须传 `apiKey`。
+- 响应不会返回明文 API Key。
+
+### 0.5 WebSocket `start`
 
 ```json
 {
@@ -89,7 +120,7 @@ interface UpdateLLMPresetRequest {
 - 服务端会按两个 preset 分别创建两套独立 provider
 - `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
 
-### 0.5 WebSocket `reset`
+### 0.6 WebSocket `reset`
 
 ```json
 {
@@ -102,7 +133,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-### 0.6 WebSocket `stop`
+### 0.7 WebSocket `stop`
 
 ```json
 {
@@ -110,7 +141,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-### 0.7 WebSocket `save_record`
+### 0.8 WebSocket `save_record`
 
 ```json
 {
@@ -118,7 +149,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-### 0.8 WebSocket `state`
+### 0.9 WebSocket `state`
 
 ```ts
 interface ServerStateMessage {
@@ -129,7 +160,7 @@ interface ServerStateMessage {
 }
 ```
 
-### 0.9 WebSocket `error`
+### 0.10 WebSocket `error`
 
 ```ts
 interface ServerErrorMessage {
@@ -138,7 +169,7 @@ interface ServerErrorMessage {
 }
 ```
 
-### 0.10 WebSocket `ai_terminal_events`
+### 0.11 WebSocket `ai_terminal_events`
 
 右侧 AI 指挥终端使用增量事件流，不复用 `state.snapshots[].aiOutputs`。
 
@@ -188,7 +219,7 @@ type AITerminalEvent =
 - `tool_call` 事件显示工具 badge；其参数和结果在展开后查看
 - `request_error` 和 `request_finished` 不进入终端正文，错误仍通过 `error` 或游戏日志查看
 
-### 0.11 WebSocket `record_saved`
+### 0.12 WebSocket `record_saved`
 
 ```ts
 interface ServerRecordSavedMessage {
@@ -197,7 +228,7 @@ interface ServerRecordSavedMessage {
 }
 ```
 
-### 0.12 WebSocket `start_benchmark`
+### 0.13 WebSocket `start_benchmark`
 
 ```json
 {

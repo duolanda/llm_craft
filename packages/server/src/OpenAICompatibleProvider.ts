@@ -5,6 +5,7 @@ import {
 } from "@llmcraft/shared";
 import {
   AgentToolExecutionResult,
+  LLMConnectionTestResult,
   LLMProvider,
   OpenAIProviderConfig,
   RunAgentOptions,
@@ -15,6 +16,7 @@ import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
+const CONNECTION_TEST_MAX_TOKENS = 8;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
@@ -43,6 +45,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.baseURL = config.baseURL;
     this.reasoningEffort = config.reasoningEffort ?? null;
     this.extraRequestParams = config.extraRequestParams ?? null;
+  }
+
+  async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages: [
+          {
+            role: "user",
+            content: "Reply with exactly: OK",
+          },
+        ],
+        temperature: 0,
+        max_tokens: CONNECTION_TEST_MAX_TOKENS,
+        ...this.buildOptionalRequestParams(),
+      } as any,
+      { signal },
+    );
+    const text = response.choices
+      .map((choice) => typeof choice.message?.content === "string" ? choice.message.content : "")
+      .join("\n")
+      .trim();
+
+    return {
+      responseText: text,
+    };
   }
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
@@ -355,4 +383,5 @@ export class OpenAICompatibleProvider implements LLMProvider {
       (error as { name?: unknown }).name === "AbortError"
     );
   }
+
 }

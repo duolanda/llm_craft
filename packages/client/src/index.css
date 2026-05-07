@@ -1120,6 +1120,12 @@ body {
   font-size: 12px;
 }
 
+.settings-help {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .settings-field.compact {
   gap: 4px;
 }
@@ -1143,6 +1149,12 @@ body {
 
 .settings-input::placeholder {
   color: rgba(138, 150, 168, 0.85);
+}
+
+.settings-textarea {
+  min-height: 118px;
+  resize: vertical;
+  line-height: 1.45;
 }
 
 .settings-input:focus,

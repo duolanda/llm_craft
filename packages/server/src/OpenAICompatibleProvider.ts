@@ -17,6 +17,7 @@ const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
+const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_map_state",
   "get_my_state",
@@ -29,6 +30,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
   private baseURL?: string;
+  private reasoningEffort?: OpenAIProviderConfig["reasoningEffort"];
+  private extraRequestParams?: Record<string, unknown> | null;
   private history: any[] = [];
 
   constructor(config: OpenAIProviderConfig) {
@@ -38,6 +41,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
     });
     this.model = config.model || "gpt-4o-mini";
     this.baseURL = config.baseURL;
+    this.reasoningEffort = config.reasoningEffort ?? null;
+    this.extraRequestParams = config.extraRequestParams ?? null;
   }
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
@@ -63,22 +68,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
       let response;
       try {
-        response = await this.client.chat.completions.create({
-          model: this.model,
-          messages,
-          tools: options.tools.map((tool) => ({
-            type: "function",
-            function: {
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.parameters,
-            },
-          })),
-          tool_choice: "auto",
-          temperature: DEFAULT_TEMPERATURE,
-          max_tokens: DEFAULT_MAX_TOKENS,
-          signal: options.signal,
-        } as any);
+        response = await this.client.chat.completions.create(
+          {
+            model: this.model,
+            messages,
+            tools: options.tools.map((tool) => ({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              },
+            })),
+            tool_choice: "auto",
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            ...this.buildOptionalRequestParams(),
+          } as any,
+          { signal: options.signal },
+        );
       } catch (error) {
         if (this.isAbortError(error, options.signal)) {
           stopReason = ABORT_STOP_REASON;
@@ -190,6 +198,23 @@ export class OpenAICompatibleProvider implements LLMProvider {
     } catch {
       return {};
     }
+  }
+
+  private buildOptionalRequestParams(): Record<string, unknown> {
+    const params: Record<string, unknown> = {};
+    if (this.reasoningEffort) {
+      params.reasoning_effort = this.reasoningEffort;
+    }
+
+    if (this.extraRequestParams) {
+      for (const [key, value] of Object.entries(this.extraRequestParams)) {
+        if (!FORBIDDEN_EXTRA_REQUEST_PARAMS.has(key)) {
+          params[key] = value;
+        }
+      }
+    }
+
+    return params;
   }
 
   private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {

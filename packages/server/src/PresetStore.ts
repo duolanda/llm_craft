@@ -16,6 +16,8 @@ interface StoredPresetRecord {
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleRuntimeConfig["reasoningEffort"];
+  extraRequestParams?: OpenAICompatibleRuntimeConfig["extraRequestParams"];
   apiKeyEncrypted: string;
   createdAt: string;
   updatedAt: string;
@@ -52,6 +54,8 @@ export class PresetStore {
         baseURL: input.baseURL,
         model: input.model,
         rpm: input.rpm ?? null,
+        reasoningEffort: input.reasoningEffort ?? null,
+        extraRequestParams: input.extraRequestParams ?? null,
         apiKeyEncrypted: encryptString(input.apiKey, this.options.encryptionSecret),
         createdAt: now,
         updatedAt: now,
@@ -76,6 +80,8 @@ export class PresetStore {
       preset.baseURL = input.baseURL;
       preset.model = input.model;
       preset.rpm = input.rpm ?? null;
+      preset.reasoningEffort = input.reasoningEffort ?? null;
+      preset.extraRequestParams = input.extraRequestParams ?? null;
       if (input.apiKey?.trim()) {
         preset.apiKeyEncrypted = encryptString(input.apiKey, this.options.encryptionSecret);
       }
@@ -119,6 +125,8 @@ export class PresetStore {
         baseURL: preset.baseURL,
         model: preset.model,
         rpm: preset.rpm ?? null,
+        reasoningEffort: preset.reasoningEffort ?? null,
+        extraRequestParams: preset.extraRequestParams ?? null,
       };
     });
   }
@@ -155,6 +163,8 @@ export class PresetStore {
       baseURL: preset.baseURL,
       model: preset.model,
       rpm: preset.rpm ?? null,
+      reasoningEffort: preset.reasoningEffort ?? null,
+      extraRequestParams: preset.extraRequestParams ?? null,
       hasApiKey: Boolean(preset.apiKeyEncrypted),
       createdAt: preset.createdAt,
       updatedAt: preset.updatedAt,

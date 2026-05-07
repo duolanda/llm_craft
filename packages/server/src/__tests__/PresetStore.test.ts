@@ -65,6 +65,39 @@ describe("PresetStore", () => {
     expect(runtime.model).toBe("gpt-4.1-mini");
   });
 
+  it("persists reasoning and extra request params in summaries and runtime config", async () => {
+    const store = await createStore();
+    const created = await store.create({
+      name: "Preset A",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.com/v1",
+      model: "gpt-4o-mini",
+      apiKey: "plain-secret-token",
+      reasoningEffort: "high",
+      extraRequestParams: {
+        thinking: { type: "disabled" },
+        max_tokens: 512,
+      },
+    });
+
+    const presets = await store.list();
+    expect(presets[0]).toMatchObject({
+      id: created.id,
+      reasoningEffort: "high",
+      extraRequestParams: {
+        thinking: { type: "disabled" },
+        max_tokens: 512,
+      },
+    });
+
+    const runtime = await store.getRuntimeConfig(created.id);
+    expect(runtime.reasoningEffort).toBe("high");
+    expect(runtime.extraRequestParams).toEqual({
+      thinking: { type: "disabled" },
+      max_tokens: 512,
+    });
+  });
+
   it("serializes concurrent writes so two overlapping creates are both preserved", async () => {
     const store = await createStore();
     const originalReadAll = (store as any).readAll.bind(store) as () => Promise<unknown[]>;

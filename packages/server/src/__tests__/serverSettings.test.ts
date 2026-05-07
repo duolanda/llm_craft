@@ -188,6 +188,11 @@ describe("server settings", () => {
           baseURL: "https://api.example.com/v1",
           model: "gpt-4o-mini",
           apiKey: "secret-token",
+          reasoningEffort: "medium",
+          extraRequestParams: {
+            thinking: { type: "disabled" },
+            max_tokens: 512,
+          },
         }),
       }),
       createResponse.res,
@@ -218,6 +223,8 @@ describe("server settings", () => {
     const runtime = await presetStore.getRuntimeConfig(presetId);
     expect(runtime.apiKey).toBe("secret-token");
     expect(runtime.model).toBe("gpt-4.1-mini");
+    expect(runtime.reasoningEffort).toBeNull();
+    expect(runtime.extraRequestParams).toBeNull();
 
     const deleteResponse = createResponseCapture();
     await handleHttpRequest(
@@ -263,6 +270,34 @@ describe("server settings", () => {
 
     expect(missingPresetResponse.statusCode).toBe(404);
     expect(missingPresetResponse.payload).toContain("指定的预设不存在");
+  });
+
+  it("rejects extra request params that override core request fields", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+
+    const response = createResponseCapture();
+    await handleHttpRequest(
+      createRequest({
+        method: "POST",
+        url: "/api/settings/presets",
+        body: JSON.stringify({
+          name: "Preset A",
+          providerType: "openai-compatible",
+          baseURL: "https://api.example.com/v1",
+          model: "gpt-4o-mini",
+          apiKey: "secret-token",
+          extraRequestParams: {
+            model: "other-model",
+          },
+        }),
+      }),
+      response.res,
+      state
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(response.payload).toContain("高级请求参数不能覆盖 model");
   });
 
   it("rejects start when a preset id is missing", async () => {

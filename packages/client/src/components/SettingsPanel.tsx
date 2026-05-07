@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   CreateLLMPresetRequest,
   LLMPresetSummary,
+  OpenAICompatibleReasoningEffort,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 
@@ -14,6 +15,8 @@ interface PresetFormState {
   model: string;
   apiKey: string;
   rpm: string;
+  reasoningEffort: "" | OpenAICompatibleReasoningEffort;
+  extraRequestParams: string;
 }
 
 interface SettingsPanelProps {
@@ -33,7 +36,36 @@ const DEFAULT_FORM: PresetFormState = {
   model: "",
   apiKey: "",
   rpm: "",
+  reasoningEffort: "",
+  extraRequestParams: "",
 };
+
+const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
+
+function formatExtraRequestParams(params: Record<string, unknown> | null | undefined): string {
+  return params && Object.keys(params).length > 0 ? JSON.stringify(params, null, 2) : "";
+}
+
+function parseExtraRequestParams(raw: string): Record<string, unknown> | null {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("高级请求参数必须是 JSON object。");
+  }
+
+  const params = parsed as Record<string, unknown>;
+  for (const key of Object.keys(params)) {
+    if (FORBIDDEN_EXTRA_REQUEST_PARAMS.has(key)) {
+      throw new Error(`高级请求参数不能覆盖 ${key}。`);
+    }
+  }
+
+  return Object.keys(params).length > 0 ? params : null;
+}
 
 export function SettingsPanel({
   presets,
@@ -93,6 +125,8 @@ export function SettingsPanel({
       model: selectedPreset.model,
       apiKey: "",
       rpm: selectedPreset.rpm ? String(selectedPreset.rpm) : "",
+      reasoningEffort: selectedPreset.reasoningEffort ?? "",
+      extraRequestParams: formatExtraRequestParams(selectedPreset.extraRequestParams),
     });
   }, [selectedPreset]);
 
@@ -128,6 +162,14 @@ export function SettingsPanel({
       return;
     }
     const rpm = parsedRpm;
+    let extraRequestParams: Record<string, unknown> | null;
+    try {
+      extraRequestParams = parseExtraRequestParams(form.extraRequestParams);
+    } catch (parseError) {
+      setLocalError(parseError instanceof Error ? parseError.message : String(parseError));
+      return;
+    }
+    const reasoningEffort = form.reasoningEffort || null;
 
     setSaving(true);
     try {
@@ -138,6 +180,8 @@ export function SettingsPanel({
           baseURL: form.baseURL.trim(),
           model: form.model.trim(),
           rpm,
+          reasoningEffort,
+          extraRequestParams,
         };
         if (form.apiKey.trim()) {
           payload.apiKey = form.apiKey.trim();
@@ -152,6 +196,8 @@ export function SettingsPanel({
           model: form.model.trim(),
           apiKey: form.apiKey.trim(),
           rpm,
+          reasoningEffort,
+          extraRequestParams,
         });
         resetForm({ clearStatus: false });
         setStatusMessage("预设已创建。");
@@ -283,6 +329,42 @@ export function SettingsPanel({
               placeholder="留空表示不限制"
             />
           </label>
+
+          <label className="settings-field">
+            <span>reasoning_effort</span>
+            <select
+              className="settings-select"
+              value={form.reasoningEffort}
+              onChange={(event) => setForm((current) => ({
+                ...current,
+                reasoningEffort: event.target.value as PresetFormState["reasoningEffort"],
+              }))}
+            >
+              <option value="">不传 reasoning_effort</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+            <small className="settings-help">
+              OpenAI-compatible 快捷字段；高级 JSON 中的 reasoning_effort 会覆盖这里。
+            </small>
+          </label>
+
+          <label className="settings-field settings-field-wide">
+            <span>高级请求参数 JSON（保存为 extraRequestParams）</span>
+            <textarea
+              className="settings-input settings-textarea"
+              value={form.extraRequestParams}
+              onChange={(event) => setForm((current) => ({ ...current, extraRequestParams: event.target.value }))}
+              placeholder={'例如 {"thinking":{"type":"disabled"},"max_tokens":512}'}
+              rows={5}
+            />
+            <small className="settings-help">
+              发送时会展开进 chat completions 请求体，相当于 Python SDK 的 extra_body 内容。可覆盖 reasoning_effort、max_tokens、temperature、thinking 等；不能覆盖 model、messages、tools、tool_choice、stream、signal。
+            </small>
+          </label>
         </div>
 
         <div className="settings-meta">
@@ -290,6 +372,8 @@ export function SettingsPanel({
             <>
               <span className="replay-meta-chip">已保存 Key: {selectedPreset.hasApiKey ? "YES" : "NO"}</span>
               <span className="replay-meta-chip">RPM: {selectedPreset.rpm ?? "UNLIMITED"}</span>
+              <span className="replay-meta-chip">reasoning: {selectedPreset.reasoningEffort ?? "DEFAULT"}</span>
+              <span className="replay-meta-chip">extra: {selectedPreset.extraRequestParams ? "YES" : "NO"}</span>
               <span className="replay-meta-chip">更新于: {new Date(selectedPreset.updatedAt).toLocaleString()}</span>
             </>
           )}

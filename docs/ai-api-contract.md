@@ -25,6 +25,8 @@ interface LLMPresetSummary {
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -41,6 +43,8 @@ interface CreateLLMPresetRequest {
   model: string;
   apiKey: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 ```
 
@@ -54,8 +58,17 @@ interface UpdateLLMPresetRequest {
   model: string;
   apiKey?: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 ```
+
+说明：
+
+- `reasoningEffort` 是 OpenAI-compatible 通用 `reasoning_effort` 入口；留空表示不显式传递 `reasoning_effort`。
+- `extraRequestParams` 会合并到 chat completions 请求体；它是 LLMCraft 配置里的字段名，语义等价于 Python SDK 的 `extra_body` 内容，但不会在实际 HTTP body 外再包一层 `extra_body`。可用于 provider-specific 参数，例如 DeepSeek 的 `thinking`、`reasoning_effort` 或自定义 `max_tokens`。
+- 合并顺序是先写入 `reasoningEffort` 对应的 `reasoning_effort`，再合并 `extraRequestParams`；因此 `extraRequestParams.reasoning_effort` 会覆盖 `reasoningEffort` 快捷字段。
+- `extraRequestParams` 不能覆盖核心字段：`model`、`messages`、`tools`、`tool_choice`、`stream`、`signal`。
 
 ### 0.4 WebSocket `start`
 

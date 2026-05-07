@@ -5,12 +5,16 @@ export type LLMProviderType = "openai-compatible";
 
 export type CPUStrategyType = "random" | "rush";
 
+export type OpenAICompatibleReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface OpenAICompatibleRuntimeConfig {
   providerType: "openai-compatible";
   apiKey: string;
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 
 export interface BuiltinCPURuntimeConfig {
@@ -37,6 +41,8 @@ export interface LLMPresetSummary {
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -49,6 +55,8 @@ export interface CreateLLMPresetRequest {
   model: string;
   apiKey: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 
 export interface UpdateLLMPresetRequest {
@@ -58,6 +66,8 @@ export interface UpdateLLMPresetRequest {
   model: string;
   apiKey?: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 
 export interface Position {

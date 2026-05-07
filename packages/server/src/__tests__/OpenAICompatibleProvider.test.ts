@@ -39,6 +39,66 @@ function createProviderWithResponses(responses: unknown[]) {
 }
 
 describe("OpenAICompatibleProvider", () => {
+  it("adds generic reasoning effort and merges allowed extra request params", async () => {
+    const provider = new OpenAICompatibleProvider({
+      providerType: "openai-compatible",
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      model: "test-model",
+      reasoningEffort: "medium",
+      extraRequestParams: {
+        reasoning_effort: "high",
+        thinking: { type: "enabled" },
+        max_tokens: 512,
+        temperature: 0,
+        model: "do-not-override",
+        messages: [],
+        tool_choice: "none",
+      },
+    });
+
+    const create = vi.fn(async (_request: unknown) => ({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: {
+            content: "done",
+            tool_calls: [],
+          },
+        },
+      ],
+    }));
+
+    (provider as any).client = {
+      chat: {
+        completions: {
+          create,
+        },
+      },
+    };
+
+    await provider.runAgent(createInput(), {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: { ok: true } }),
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    });
+
+    const request = create.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(request.model).toBe("test-model");
+    expect(request.messages).toBeInstanceOf(Array);
+    expect(request.tool_choice).toBe("auto");
+    expect(request.reasoning_effort).toBe("high");
+    expect(request.thinking).toEqual({ type: "enabled" });
+    expect(request.max_tokens).toBe(512);
+    expect(request.temperature).toBe(0);
+  });
+
   it("does not mark exactly ten consecutive read-only tool calls as stalled", async () => {
     const responses = Array.from({ length: 10 }, (_, index) => ({
       choices: [
@@ -532,10 +592,10 @@ describe("OpenAICompatibleProvider", () => {
     const controller = new AbortController();
     let receivedSignal: AbortSignal | undefined;
 
-    const create = vi.fn((request: { signal?: AbortSignal }) => {
-      receivedSignal = request.signal;
+    const create = vi.fn((_request: unknown, requestOptions?: { signal?: AbortSignal }) => {
+      receivedSignal = requestOptions?.signal;
       return new Promise((_, reject) => {
-        request.signal?.addEventListener("abort", () => {
+        requestOptions?.signal?.addEventListener("abort", () => {
           const error = new Error("aborted");
           error.name = "AbortError";
           reject(error);

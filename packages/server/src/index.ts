@@ -31,6 +31,8 @@ const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LIVE_STATE_SNAPSHOT_LIMIT = 1;
+const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 
 export function getDefaultPresetPaths() {
   return {
@@ -181,6 +183,40 @@ function normalizePresetRpm(value: unknown): number | null | undefined {
   return value;
 }
 
+function normalizeReasoningEffort(value: unknown): CreateLLMPresetRequest["reasoningEffort"] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string" || !VALID_REASONING_EFFORTS.has(value)) {
+    throw new Error("reasoning_effort 必须是 minimal、low、medium、high、xhigh 或留空。");
+  }
+  return value as CreateLLMPresetRequest["reasoningEffort"];
+}
+
+function normalizeExtraRequestParams(value: unknown): Record<string, unknown> | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("高级请求参数必须是 JSON object。");
+  }
+
+  const params = value as Record<string, unknown>;
+  for (const key of Object.keys(params)) {
+    if (FORBIDDEN_EXTRA_REQUEST_PARAMS.has(key)) {
+      throw new Error(`高级请求参数不能覆盖 ${key}。`);
+    }
+  }
+
+  return Object.keys(params).length > 0 ? params : null;
+}
+
 function validateCreatePresetRequest(body: CreateLLMPresetRequest): CreateLLMPresetRequest {
   if (!body.name?.trim()) {
     throw new Error("预设名称不能为空。");
@@ -205,6 +241,8 @@ function validateCreatePresetRequest(body: CreateLLMPresetRequest): CreateLLMPre
     model: body.model.trim(),
     apiKey: body.apiKey.trim(),
     rpm: normalizePresetRpm(body.rpm),
+    reasoningEffort: normalizeReasoningEffort(body.reasoningEffort),
+    extraRequestParams: normalizeExtraRequestParams(body.extraRequestParams),
   };
 }
 
@@ -229,6 +267,8 @@ function validateUpdatePresetRequest(body: UpdateLLMPresetRequest): UpdateLLMPre
     model: body.model.trim(),
     apiKey: body.apiKey?.trim(),
     rpm: normalizePresetRpm(body.rpm),
+    reasoningEffort: normalizeReasoningEffort(body.reasoningEffort),
+    extraRequestParams: normalizeExtraRequestParams(body.extraRequestParams),
   };
 }
 

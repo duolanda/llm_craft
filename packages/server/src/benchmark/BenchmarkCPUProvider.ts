@@ -1,5 +1,11 @@
 import { AgentRunInput, AgentToolCallRecord, BuiltinCPURuntimeConfig } from "@llmcraft/shared";
-import { LLMConnectionTestResult, LLMProvider, RunAgentOptions, RunAgentResult } from "../LLMProvider";
+import {
+  LLMConnectionTestResult,
+  LLMProvider,
+  RunAgentOptions,
+  RunAgentResult,
+  WarmupAgentResult,
+} from "../LLMProvider";
 
 function chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
@@ -11,6 +17,24 @@ function chooseRandom<T>(items: readonly T[]): T {
 
 export class BenchmarkCPUProvider implements LLMProvider {
   constructor(private readonly config: BuiltinCPURuntimeConfig) {}
+
+  async warmupAgent(_input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
+    if (options.signal?.aborted) {
+      return {
+        assistantMessages: [],
+        stopReason: "aborted",
+        hasPendingToolCalls: false,
+        metrics: { modelRequests: 0 },
+      };
+    }
+
+    return {
+      assistantMessages: [],
+      stopReason: "cpu_warmup_complete",
+      hasPendingToolCalls: false,
+      metrics: { modelRequests: 0 },
+    };
+  }
 
   async testConnection(): Promise<LLMConnectionTestResult> {
     return {

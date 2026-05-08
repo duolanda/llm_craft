@@ -1,5 +1,11 @@
 import { AgentRunInput } from "@llmcraft/shared";
-import { LLMConnectionTestResult, LLMProvider, RunAgentOptions, RunAgentResult } from "./LLMProvider";
+import {
+  LLMConnectionTestResult,
+  LLMProvider,
+  RunAgentOptions,
+  RunAgentResult,
+  WarmupAgentResult,
+} from "./LLMProvider";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -17,6 +23,17 @@ function createAbortedResult(): RunAgentResult {
       modelRequests: 0,
       toolCalls: 0,
       stallDetected: false,
+    },
+  };
+}
+
+function createAbortedWarmupResult(): WarmupAgentResult {
+  return {
+    assistantMessages: [],
+    stopReason: "aborted",
+    hasPendingToolCalls: false,
+    metrics: {
+      modelRequests: 0,
     },
   };
 }
@@ -53,6 +70,19 @@ export class RateLimitedLLMProvider implements LLMProvider {
       throw new DOMException("Aborted", "AbortError");
     }
     return result;
+  }
+
+  async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
+    if (options.signal?.aborted) {
+      return createAbortedWarmupResult();
+    }
+
+    if (!this.rpm) {
+      return this.inner.warmupAgent(input, options);
+    }
+
+    const result = await this.runWithRateLimit(options.signal, () => this.inner.warmupAgent(input, options));
+    return result ?? createAbortedWarmupResult();
   }
 
   getModel(): string {

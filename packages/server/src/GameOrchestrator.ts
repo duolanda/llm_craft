@@ -34,6 +34,7 @@ const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
+export const MATCH_START_ABORTED = "MATCH_START_ABORTED";
 
 type RuntimeMap = Record<PlayerId, AgentRuntime>;
 type BridgeMap = Record<PlayerId, GameAgentBridge>;
@@ -65,9 +66,11 @@ export class GameOrchestrator {
   private aiIntervals = { player_1: 5, player_2: 5 };
   private isRunningAI = { player_1: false, player_2: false };
   private activeRunControllers: Partial<Record<PlayerId, AbortController>> = {};
+  private warmupController: AbortController | null = null;
   private aiDirty = { player_1: true, player_2: true };
   private lastObservedTick = -1;
   private isPolling = false;
+  private isPreparing = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private runSession = 0;
   private startedAt = new Date().toISOString();
@@ -83,6 +86,7 @@ export class GameOrchestrator {
   private aiTerminalEvents: AITerminalEvent[] = [];
   private aiTerminalEventSequence = 0;
   private aiRequestCounts = { player_1: 0, player_2: 0 };
+  private warmupRequestNumbers: Partial<Record<PlayerId, number>> = {};
 
   constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
@@ -137,9 +141,12 @@ export class GameOrchestrator {
       const runtime = this.runtimeByPlayer[playerId];
       const controller = new AbortController();
       this.activeRunControllers[playerId] = controller;
-      const requestNumber = ++this.aiRequestCounts[playerId];
+      const warmupRequestNumber = this.warmupRequestNumbers[playerId];
+      const requestNumber = warmupRequestNumber ?? ++this.aiRequestCounts[playerId];
       const transcriptRunId = `tx_${++this.transcriptSequence}`;
-      this.appendTerminalRequestEvent(playerId, requestNumber, state.tick);
+      if (warmupRequestNumber === undefined) {
+        this.appendTerminalRequestEvent(playerId, requestNumber, state.tick);
+      }
       await this.writeTranscriptRequestStart(transcriptRunId, playerId, state.tick, runInput);
       const result = await runtime.run(runInput, {
         onAssistantMessage: (message) => {
@@ -218,6 +225,7 @@ export class GameOrchestrator {
         ].join("\n")
       );
     } finally {
+      delete this.warmupRequestNumbers[playerId];
       delete this.activeRunControllers[playerId];
       this.isRunningAI[playerId] = false;
     }
@@ -229,6 +237,7 @@ export class GameOrchestrator {
     }
 
     this.runSession++;
+    const sessionId = this.runSession;
     this.isPolling = true;
     this.lastObservedTick = -1;
     this.aiDirty = { player_1: true, player_2: true };
@@ -275,7 +284,9 @@ export class GameOrchestrator {
 
   stop(): void {
     this.isPolling = false;
+    this.isPreparing = false;
     this.runSession++;
+    this.warmupController?.abort();
     this.activeRunControllers.player_1?.abort();
     this.activeRunControllers.player_2?.abort();
     if (this.pollTimeout) {
@@ -283,6 +294,76 @@ export class GameOrchestrator {
       this.pollTimeout = null;
     }
     this.game.stop();
+  }
+
+  async prepare(warmup: Partial<Record<PlayerId, boolean>>): Promise<void> {
+    if (this.isPolling) {
+      throw new Error("MATCH_ALREADY_RUNNING");
+    }
+    if (this.isPreparing) {
+      return;
+    }
+
+    this.runSession++;
+    const sessionId = this.runSession;
+    this.isPreparing = true;
+    try {
+      await this.runWarmups(sessionId, warmup);
+    } finally {
+      if (sessionId === this.runSession) {
+        this.isPreparing = false;
+      }
+    }
+  }
+
+  private async runWarmups(sessionId: number, warmup: Partial<Record<PlayerId, boolean>>): Promise<void> {
+    const warmupPlayers = [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2].filter(
+      (playerId) => warmup[playerId]
+    );
+    if (warmupPlayers.length === 0) {
+      return;
+    }
+
+    const controller = new AbortController();
+    this.warmupController = controller;
+    try {
+      await Promise.all(warmupPlayers.map((playerId) => this.runWarmup(playerId, sessionId, controller.signal)));
+    } finally {
+      if (this.warmupController === controller) {
+        this.warmupController = null;
+      }
+    }
+  }
+
+  private async runWarmup(playerId: PlayerId, sessionId: number, signal: AbortSignal): Promise<void> {
+    if (!this.isPreparing || sessionId !== this.runSession || signal.aborted) {
+      throw new Error(MATCH_START_ABORTED);
+    }
+
+    const requestNumber = ++this.aiRequestCounts[playerId];
+    this.warmupRequestNumbers[playerId] = requestNumber;
+    const runInput = this.buildRunInput(playerId, this.game.getState());
+    this.appendTerminalRequestEvent(playerId, requestNumber, 0);
+    try {
+      const result = await this.runtimeByPlayer[playerId].warmup(
+        runInput,
+        {
+          onAssistantMessage: (message) => {
+            this.appendTerminalAssistantEvent(playerId, requestNumber, 0, message);
+          },
+        },
+        signal
+      );
+      if (result.stopReason === "aborted" || !this.isPreparing || sessionId !== this.runSession) {
+        throw new Error(MATCH_START_ABORTED);
+      }
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.message === MATCH_START_ABORTED)) {
+        throw new Error(MATCH_START_ABORTED);
+      }
+
+      throw new Error(`模型准备失败（${playerId === PLAYER_IDS.PLAYER_1 ? "红方" : "蓝方"}）: ${this.formatErrorMessage(error)}`);
+    }
   }
 
   async saveRecord(): Promise<string> {
@@ -446,6 +527,10 @@ export class GameOrchestrator {
 
   private getProvider(playerId: PlayerId): LLMProvider {
     return playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private buildTickDeltas(snapshots: Array<{ tick: number; state: GameState; aiOutputs: Record<string, string> }>): TickDeltaRecord[] {

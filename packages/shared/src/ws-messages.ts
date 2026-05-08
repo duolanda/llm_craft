@@ -1,4 +1,5 @@
-import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions } from "./types";
+import { PlayerId } from "./constants";
+import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -13,6 +14,15 @@ export interface ClientStartMatchMessage {
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
+}
+
+/** 赛前准备指定 AI：发送首个真实 agent 请求，但不启动游戏 tick */
+export interface ClientPrepareMatchMessage {
+  type: "prepare";
+  player1PresetId: string;
+  player2PresetId: string;
+  debug?: MatchDebugOptions;
+  warmup?: MatchWarmupOptions;
 }
 
 /** 重置当前对局（需指定红蓝双方 LLM 预设） */
@@ -47,6 +57,7 @@ export interface ClientStartBenchmarkMessage {
 /** 所有客户端发送的消息联合类型 */
 export type ClientMessage =
   | ClientStartMatchMessage
+  | ClientPrepareMatchMessage
   | ClientResetMatchMessage
   | ClientStopMessage
   | ClientSaveRecordMessage
@@ -118,6 +129,14 @@ export interface ServerBenchmarkCompleteMessage {
   rounds: ServerBenchmarkRoundResult[];
 }
 
+export type MatchPrepareState = "idle" | "preparing" | "ready" | "error";
+
+export interface ServerPrepareStatusMessage {
+  type: "prepare_status";
+  statuses: Partial<Record<PlayerId, MatchPrepareState>>;
+  message?: string;
+}
+
 /** 所有服务端发送的消息联合类型 */
 export type ServerMessage =
   | ServerStateMessage
@@ -125,7 +144,8 @@ export type ServerMessage =
   | ServerErrorMessage
   | ServerRecordSavedMessage
   | ServerBenchmarkProgressMessage
-  | ServerBenchmarkCompleteMessage;
+  | ServerBenchmarkCompleteMessage
+  | ServerPrepareStatusMessage;
 
 /** 服务端消息类型字符串（用于路由） */
 export type ServerMessageType = ServerMessage["type"];

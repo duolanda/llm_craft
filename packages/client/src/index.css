@@ -241,6 +241,57 @@ body {
   flex-wrap: wrap;
 }
 
+.preset-select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.match-prepare-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+.match-prepare-btn.prepare-ready {
+  border-color: rgba(255, 179, 0, 0.42);
+  background: rgba(255, 179, 0, 0.09);
+  color: var(--accent-amber);
+}
+
+.match-prepare-btn.prepare-preparing {
+  border-color: rgba(0, 229, 255, 0.36);
+  background: rgba(0, 229, 255, 0.08);
+  color: var(--accent-cyan);
+}
+
+.match-prepare-btn.prepare-error {
+  border-color: rgba(255, 42, 74, 0.42);
+  background: rgba(255, 42, 74, 0.08);
+  color: var(--accent-red);
+}
+
+.match-prepare-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .settings-overlay {
   position: fixed;
   inset: 0;
@@ -1265,6 +1316,14 @@ body {
 
   .match-preset-bar .settings-field.compact {
     flex: 1 1 220px;
+  }
+
+  .preset-select-row {
+    align-items: stretch;
+  }
+
+  .match-prepare-btn {
+    min-height: 36px;
   }
 
   .settings-overlay {

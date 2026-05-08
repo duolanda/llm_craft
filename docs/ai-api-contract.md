@@ -101,7 +101,32 @@ interface TestLLMPresetResponse {
 - 如果没有 `presetId`，必须传 `apiKey`。
 - 响应不会返回明文 API Key。
 
-### 0.5 WebSocket `start`
+### 0.5 WebSocket `prepare`
+
+```json
+{
+  "type": "prepare",
+  "player1PresetId": "preset-red",
+  "player2PresetId": "preset-blue",
+  "debug": {
+    "recordLLMTranscript": true
+  },
+  "warmup": {
+    "player_1": true,
+    "player_2": false
+  }
+}
+```
+
+说明：
+
+- 红蓝双方必须都选择预设
+- 服务端会按两个 preset 创建或复用一套待开战 orchestrator
+- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
+- `warmup.player_1/player_2 = true` 时，对应模型会在游戏 tick 启动前先收到首个真实 `AgentRunInput + tools` 请求。服务端只等待模型返回第一条 assistant message；如果该 message 包含 tool calls，会先挂起，不执行工具、不返回 tool result。
+- 服务端会发送 `prepare_status`，告知前端准备中、已准备或失败。用户仍需另外发送 `start` 才会启动游戏时间。
+
+### 0.6 WebSocket `start`
 
 ```json
 {
@@ -116,11 +141,10 @@ interface TestLLMPresetResponse {
 
 说明：
 
-- 红蓝双方必须都选择预设
-- 服务端会按两个 preset 分别创建两套独立 provider
-- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
+- 如果同一组预设和 debug 选项已有待开战 prepared orchestrator，`start` 会直接复用它并开始 tick；已挂起的首个 assistant/tool calls 会在正式开局后继续执行。
+- 如果没有匹配的 prepared orchestrator，`start` 会创建普通实时对局并立即开始 tick。
 
-### 0.6 WebSocket `reset`
+### 0.7 WebSocket `reset`
 
 ```json
 {
@@ -133,7 +157,7 @@ interface TestLLMPresetResponse {
 }
 ```
 
-### 0.7 WebSocket `stop`
+### 0.8 WebSocket `stop`
 
 ```json
 {
@@ -141,7 +165,7 @@ interface TestLLMPresetResponse {
 }
 ```
 
-### 0.8 WebSocket `save_record`
+### 0.9 WebSocket `save_record`
 
 ```json
 {
@@ -149,7 +173,7 @@ interface TestLLMPresetResponse {
 }
 ```
 
-### 0.9 WebSocket `state`
+### 0.10 WebSocket `state`
 
 ```ts
 interface ServerStateMessage {
@@ -160,7 +184,7 @@ interface ServerStateMessage {
 }
 ```
 
-### 0.10 WebSocket `error`
+### 0.11 WebSocket `error`
 
 ```ts
 interface ServerErrorMessage {
@@ -169,7 +193,19 @@ interface ServerErrorMessage {
 }
 ```
 
-### 0.11 WebSocket `ai_terminal_events`
+### 0.12 WebSocket `prepare_status`
+
+```ts
+type MatchPrepareState = "idle" | "preparing" | "ready" | "error";
+
+interface ServerPrepareStatusMessage {
+  type: "prepare_status";
+  statuses: Partial<Record<"player_1" | "player_2", MatchPrepareState>>;
+  message?: string;
+}
+```
+
+### 0.13 WebSocket `ai_terminal_events`
 
 右侧 AI 指挥终端使用增量事件流，不复用 `state.snapshots[].aiOutputs`。
 
@@ -219,7 +255,7 @@ type AITerminalEvent =
 - `tool_call` 事件显示工具 badge；其参数和结果在展开后查看
 - `request_error` 和 `request_finished` 不进入终端正文，错误仍通过 `error` 或游戏日志查看
 
-### 0.12 WebSocket `record_saved`
+### 0.14 WebSocket `record_saved`
 
 ```ts
 interface ServerRecordSavedMessage {
@@ -228,7 +264,7 @@ interface ServerRecordSavedMessage {
 }
 ```
 
-### 0.13 WebSocket `start_benchmark`
+### 0.15 WebSocket `start_benchmark`
 
 ```json
 {

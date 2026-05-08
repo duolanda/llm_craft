@@ -45,12 +45,22 @@ export interface RunAgentResult {
   metrics: AgentRunMetrics;
 }
 
+export interface WarmupAgentResult {
+  assistantMessages: string[];
+  stopReason: string;
+  hasPendingToolCalls: boolean;
+  metrics: {
+    modelRequests: number;
+  };
+}
+
 export interface LLMConnectionTestResult {
   responseText: string;
 }
 
 export interface LLMProvider {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
+  warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult>;
   testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
   getModel(): string;
   getBaseURL(): string | undefined;

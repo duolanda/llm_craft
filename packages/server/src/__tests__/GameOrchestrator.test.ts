@@ -89,6 +89,42 @@ describe("GameOrchestrator", () => {
     orchestrator.stop();
   });
 
+  it("prepares selected first turns before the game clock starts", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");
+    const warmupSpy = vi.fn(async () => {
+      expect(gameStartSpy).not.toHaveBeenCalled();
+      return {
+        assistantMessages: ["thinking"],
+        stopReason: "tool_calls",
+        hasPendingToolCalls: true,
+        metrics: { modelRequests: 1 },
+      };
+    });
+    const runSpy = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    (orchestrator as any).runtimeByPlayer.player_1.warmup = warmupSpy;
+    (orchestrator as any).runtimeByPlayer.player_1.run = runSpy;
+    (orchestrator as any).runtimeByPlayer.player_2.run = runSpy;
+
+    await orchestrator.prepare({ player_1: true });
+    await orchestrator.start();
+
+    expect(warmupSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        playerId: "player_1",
+        tick: 0,
+        summary: expect.stringContaining("tick=0"),
+      }),
+      expect.objectContaining({
+        onAssistantMessage: expect.any(Function),
+      }),
+      expect.any(AbortSignal)
+    );
+    expect(gameStartSpy).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getGame().getState().tick).toBe(0);
+    orchestrator.stop();
+  });
+
   it("stops scheduling runs after stop is called", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const run1 = vi.fn(async (_input: AgentRunInput) => createRunResult());

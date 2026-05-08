@@ -526,6 +526,58 @@ describe("server settings", () => {
     );
   });
 
+  it("prepares selected players before start and reports status", async () => {
+    const presetStore = await createStore();
+    const player1Preset = await presetStore.create({
+      name: "Red",
+      providerType: "openai-compatible",
+      baseURL: "https://api.one.test/v1",
+      model: "model-one",
+      apiKey: "token-one",
+    });
+    const player2Preset = await presetStore.create({
+      name: "Blue",
+      providerType: "openai-compatible",
+      baseURL: "https://api.two.test/v1",
+      model: "model-two",
+      apiKey: "token-two",
+    });
+    const prepare = vi.fn(async () => undefined);
+    const createOrchestrator = vi.fn(() => ({
+      prepare,
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(() => undefined),
+      saveRecord: vi.fn(async () => "logs/records/mock.json"),
+      getGame: vi.fn(() => ({
+        getState: () => null,
+        getSnapshots: () => [],
+      })),
+    }));
+    const state = createServerState(presetStore, createOrchestrator);
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "prepare",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+        warmup: { player_1: true, player_2: false },
+      }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(createOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        player1: expect.objectContaining({ model: "model-one" }),
+        player2: expect.objectContaining({ model: "model-two" }),
+      })
+    );
+    expect(prepare).toHaveBeenCalledWith({ player_1: true, player_2: false });
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"prepare_status"'));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"player_1":"ready"'));
+  });
+
   it("tests a preset API connection without exposing the saved api key", async () => {
     const presetStore = await createStore();
     const preset = await presetStore.create({

@@ -10,6 +10,7 @@ import {
   OpenAIProviderConfig,
   RunAgentOptions,
   RunAgentResult,
+  WarmupAgentResult,
 } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
@@ -28,6 +29,13 @@ const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_recent_events",
 ]);
 
+interface PreparedTurn {
+  input: AgentRunInput;
+  assistantMessage: any;
+  assistantText: string;
+  finishReason: string;
+}
+
 export class OpenAICompatibleProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
@@ -35,6 +43,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private reasoningEffort?: OpenAIProviderConfig["reasoningEffort"];
   private extraRequestParams?: Record<string, unknown> | null;
   private history: any[] = [];
+  private preparedTurn: PreparedTurn | null = null;
 
   constructor(config: OpenAIProviderConfig) {
     this.client = new OpenAI({
@@ -45,6 +54,63 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.baseURL = config.baseURL;
     this.reasoningEffort = config.reasoningEffort ?? null;
     this.extraRequestParams = config.extraRequestParams ?? null;
+  }
+
+  async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
+    if (options.signal?.aborted) {
+      return this.createAbortedWarmupResult();
+    }
+
+    const messages: any[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...this.history,
+      { role: "user", content: JSON.stringify(input, null, 2) },
+    ];
+    const persistentHistory = messages.slice(1);
+    this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), null);
+
+    try {
+      const response = await this.createAgentCompletion(messages, options);
+      const choice = response.choices[0];
+      const assistantMessage = choice?.message;
+      if (!assistantMessage) {
+        this.history = persistentHistory;
+        this.preparedTurn = null;
+        return {
+          assistantMessages: [],
+          stopReason: "empty_response",
+          hasPendingToolCalls: false,
+          metrics: { modelRequests: 1 },
+        };
+      }
+
+      messages.push(assistantMessage);
+      persistentHistory.push(assistantMessage);
+      this.history = persistentHistory;
+      const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
+      if (assistantText) {
+        options.onAssistantMessage?.(assistantText);
+      }
+      const finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+      this.preparedTurn = {
+        input,
+        assistantMessage,
+        assistantText,
+        finishReason,
+      };
+
+      return {
+        assistantMessages: assistantText ? [assistantText] : [],
+        stopReason: finishReason,
+        hasPendingToolCalls: (assistantMessage.tool_calls ?? []).length > 0,
+        metrics: { modelRequests: 1 },
+      };
+    } catch (error) {
+      if (this.isAbortError(error, options.signal)) {
+        return this.createAbortedWarmupResult();
+      }
+      throw error;
+    }
   }
 
   async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
@@ -74,75 +140,75 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
-    const messages: any[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      ...this.history,
-      { role: "user", content: JSON.stringify(input, null, 2) },
-    ];
+    const preparedTurn = this.takePreparedTurn(input);
+    const messages: any[] = preparedTurn
+      ? [{ role: "system", content: SYSTEM_PROMPT }, ...this.history]
+      : [
+          { role: "system", content: SYSTEM_PROMPT },
+          ...this.history,
+          { role: "user", content: JSON.stringify(input, null, 2) },
+        ];
     const persistentHistory = messages.slice(1);
-    const assistantMessages: string[] = [];
+    const assistantMessages: string[] = preparedTurn?.assistantText ? [preparedTurn.assistantText] : [];
     const toolCalls: AgentToolCallRecord[] = [];
     let modelRequests = 0;
     let consecutiveReadOnlyToolCalls = 0;
     let stopReason = "model_stopped";
     let lastRuntimeAlertSignature: string | null = null;
+    let pendingAssistantMessage = preparedTurn?.assistantMessage ?? null;
+    let pendingFinishReason = preparedTurn?.finishReason ?? null;
 
     while (true) {
       if (options.signal?.aborted) {
         stopReason = ABORT_STOP_REASON;
         break;
       }
-      lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
 
-      let response;
-      try {
-        response = await this.client.chat.completions.create(
-          {
-            model: this.model,
-            messages,
-            tools: options.tools.map((tool) => ({
-              type: "function",
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              },
-            })),
-            tool_choice: "auto",
-            temperature: DEFAULT_TEMPERATURE,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            ...this.buildOptionalRequestParams(),
-          } as any,
-          { signal: options.signal },
-        );
-      } catch (error) {
-        if (this.isAbortError(error, options.signal)) {
-          stopReason = ABORT_STOP_REASON;
+      let assistantMessage: any;
+      let finishReason: string | null;
+      const shouldEmitAssistant = !pendingAssistantMessage;
+
+      if (pendingAssistantMessage) {
+        assistantMessage = pendingAssistantMessage;
+        finishReason = pendingFinishReason;
+        pendingAssistantMessage = null;
+        pendingFinishReason = null;
+      } else {
+        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
+
+        let response;
+        try {
+          response = await this.createAgentCompletion(messages, options);
+        } catch (error) {
+          if (this.isAbortError(error, options.signal)) {
+            stopReason = ABORT_STOP_REASON;
+            break;
+          }
+          throw error;
+        }
+        modelRequests++;
+
+        const choice = response.choices[0];
+        assistantMessage = choice?.message;
+        if (!assistantMessage) {
+          stopReason = "empty_response";
           break;
         }
-        throw error;
-      }
-      modelRequests++;
+        finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
 
-      const choice = response.choices[0];
-      const assistantMessage = choice?.message;
-      if (!assistantMessage) {
-        stopReason = "empty_response";
-        break;
+        messages.push(assistantMessage);
+        persistentHistory.push(assistantMessage);
       }
-
-      messages.push(assistantMessage);
-      persistentHistory.push(assistantMessage);
 
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
-      if (assistantText) {
+      if (assistantText && shouldEmitAssistant) {
         assistantMessages.push(assistantText);
         options.onAssistantMessage?.(assistantText);
       }
 
       const requestedToolCalls = assistantMessage.tool_calls ?? [];
       if (requestedToolCalls.length === 0) {
-        stopReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+        stopReason = finishReason ?? "model_stopped";
         break;
       }
 
@@ -243,6 +309,38 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
 
     return params;
+  }
+
+  private async createAgentCompletion(messages: any[], options: RunAgentOptions) {
+    return await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages,
+        tools: options.tools.map((tool) => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          },
+        })),
+        tool_choice: "auto",
+        temperature: DEFAULT_TEMPERATURE,
+        max_tokens: DEFAULT_MAX_TOKENS,
+        ...this.buildOptionalRequestParams(),
+      } as any,
+      { signal: options.signal },
+    );
+  }
+
+  private takePreparedTurn(input: AgentRunInput): PreparedTurn | null {
+    if (!this.preparedTurn || this.preparedTurn.input.playerId !== input.playerId) {
+      return null;
+    }
+
+    const preparedTurn = this.preparedTurn;
+    this.preparedTurn = null;
+    return preparedTurn;
   }
 
   private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {
@@ -384,4 +482,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
     );
   }
 
+  private createAbortedWarmupResult(): WarmupAgentResult {
+    return {
+      assistantMessages: [],
+      stopReason: ABORT_STOP_REASON,
+      hasPendingToolCalls: false,
+      metrics: {
+        modelRequests: 0,
+      },
+    };
+  }
 }

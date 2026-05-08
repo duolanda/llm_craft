@@ -29,6 +29,14 @@ function createResult(): RunAgentResult {
 function createProvider(runAgent: LLMProvider["runAgent"]): LLMProvider {
   return {
     runAgent,
+    warmupAgent: vi.fn(async () => ({
+      assistantMessages: ["READY"],
+      stopReason: "done",
+      hasPendingToolCalls: false,
+      metrics: {
+        modelRequests: 1,
+      },
+    })),
     testConnection: vi.fn(async () => ({ responseText: "OK" })),
     getModel: () => "test-model",
     getBaseURL: () => "http://test.local",

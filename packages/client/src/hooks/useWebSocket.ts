@@ -4,6 +4,8 @@ import {
   ClientMessage,
   GameState,
   GameSnapshot,
+  MatchPrepareState,
+  PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
   isServerMessage,
@@ -19,6 +21,8 @@ export function useWebSocket(url: string) {
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
   const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
+  const [prepareStatuses, setPrepareStatuses] = useState<Partial<Record<PlayerId, MatchPrepareState>>>({});
+  const [prepareMessage, setPrepareMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const send = useCallback((message: ClientMessage) => {
@@ -82,6 +86,14 @@ export function useWebSocket(url: string) {
             setBenchmarkProgress(null);
             setBenchmarkResult(parsed);
             break;
+
+          case "prepare_status":
+            setPrepareStatuses((current) => ({
+              ...current,
+              ...parsed.statuses,
+            }));
+            setPrepareMessage(parsed.message ?? null);
+            break;
         }
       } catch (e) {
         console.error("消息解析错误:", e);
@@ -112,6 +124,10 @@ export function useWebSocket(url: string) {
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
+    prepareStatuses,
+    prepareMessage,
+    setPrepareStatuses,
+    setPrepareMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,

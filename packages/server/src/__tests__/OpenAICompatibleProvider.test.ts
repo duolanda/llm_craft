@@ -39,6 +39,90 @@ function createProviderWithResponses(responses: unknown[]) {
 }
 
 describe("OpenAICompatibleProvider", () => {
+  it("prepares the first real turn and defers tool execution until runAgent continues it", async () => {
+    const { provider, create } = createProviderWithResponses([
+      {
+        choices: [
+          {
+            finish_reason: "tool_calls",
+            message: {
+              content: "thinking",
+              tool_calls: [
+                {
+                  id: "call_1",
+                  function: {
+                    name: "get_map_state",
+                    arguments: "{}",
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: "done",
+              tool_calls: [],
+            },
+          },
+        ],
+      },
+    ]);
+    const warmupExecuteTool = vi.fn(async () => ({ effect: "read" as const, result: { ok: true } }));
+    const runExecuteTool = vi.fn(async () => ({ effect: "read" as const, result: { tick: 0, ok: true } }));
+    const warmupAssistant = vi.fn();
+    const runAssistant = vi.fn();
+
+    const options = {
+      tools: [
+        {
+          name: "get_map_state",
+          description: "Read map",
+          parameters: {},
+        },
+      ],
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    };
+    const warmupResult = await provider.warmupAgent(createInput(), {
+      ...options,
+      executeTool: warmupExecuteTool,
+      onAssistantMessage: warmupAssistant,
+    });
+    const runResult = await provider.runAgent(createInput(), {
+      ...options,
+      executeTool: runExecuteTool,
+      onAssistantMessage: runAssistant,
+    });
+
+    expect(warmupResult.assistantMessages).toEqual(["thinking"]);
+    expect(warmupResult.hasPendingToolCalls).toBe(true);
+    expect(warmupExecuteTool).not.toHaveBeenCalled();
+    expect(runExecuteTool).toHaveBeenCalledTimes(1);
+    expect(runResult.assistantMessages).toEqual(["thinking", "done"]);
+    expect(warmupAssistant).toHaveBeenCalledWith("thinking");
+    expect(runAssistant).toHaveBeenCalledWith("done");
+    expect(runAssistant).not.toHaveBeenCalledWith("thinking");
+
+    const createCalls = create.mock.calls as unknown as Array<Array<unknown>>;
+    const warmupRequest = createCalls[0]?.[0] as Record<string, unknown>;
+    expect(warmupRequest.tools).toBeInstanceOf(Array);
+    expect(JSON.stringify(warmupRequest.messages)).toContain("provider stall test");
+    const continuationRequest = createCalls[1]?.[0] as { messages: Array<{ role: string; content: string }> };
+    expect(JSON.stringify(continuationRequest.messages)).toContain("thinking");
+    expect(JSON.stringify(continuationRequest.messages)).toContain("\"role\":\"tool\"");
+    expect(JSON.stringify(continuationRequest.messages).match(/provider stall test/g)).toHaveLength(1);
+  });
+
   it("adds generic reasoning effort and merges allowed extra request params", async () => {
     const provider = new OpenAICompatibleProvider({
       providerType: "openai-compatible",

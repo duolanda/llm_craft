@@ -28,6 +28,11 @@ export interface MatchDebugOptions {
   recordLLMTranscript?: boolean;
 }
 
+export interface MatchWarmupOptions {
+  player_1?: boolean;
+  player_2?: boolean;
+}
+
 export interface MatchLLMConfig {
   player1: MatchPlayerLLMConfig;
   player2: MatchPlayerLLMConfig;

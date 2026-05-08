@@ -7,6 +7,8 @@ import {
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
+  MatchPrepareState,
+  PlayerId,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
@@ -47,6 +49,10 @@ function App() {
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
+    prepareStatuses,
+    prepareMessage,
+    setPrepareStatuses,
+    setPrepareMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,
@@ -227,6 +233,11 @@ function App() {
     setPlayer2PresetId((current) => (current && presetIds.has(current) ? current : presets[1]?.id ?? presets[0]?.id ?? ""));
   }, [presets]);
 
+  useEffect(() => {
+    setPrepareStatuses({});
+    setPrepareMessage(null);
+  }, [player1PresetId, player2PresetId, recordLLMTranscript, setPrepareMessage, setPrepareStatuses]);
+
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
     const builtSnapshots = buildReplaySnapshots(frames);
@@ -300,6 +311,7 @@ function App() {
     }
 
     clearServerMessage();
+    setPrepareMessage(null);
     setStartPending(true);
     setStartBaselineTick(state?.tick ?? -1);
     setIsPlaying(false);
@@ -308,6 +320,29 @@ function App() {
       player1PresetId,
       player2PresetId,
       debug: buildMatchDebugOptions(recordLLMTranscript),
+    });
+  };
+
+  const handlePrepare = (playerId: PlayerId) => {
+    if (!player1PresetId || !player2PresetId) {
+      return;
+    }
+
+    clearServerMessage();
+    setPrepareStatuses((current) => ({
+      ...current,
+      [playerId]: "preparing",
+    }));
+    setPrepareMessage(null);
+    send({
+      type: "prepare",
+      player1PresetId,
+      player2PresetId,
+      debug: buildMatchDebugOptions(recordLLMTranscript),
+      warmup: {
+        player_1: playerId === "player_1",
+        player_2: playerId === "player_2",
+      },
     });
   };
 
@@ -394,6 +429,7 @@ function App() {
     && Boolean(player1PresetId)
     && Boolean(player2PresetId);
   const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
+  const isPreparing = prepareStatuses.player_1 === "preparing" || prepareStatuses.player_2 === "preparing";
 
   return (
     <>
@@ -425,38 +461,58 @@ function App() {
             {mode === "live" && (
               <>
                 <div className="match-preset-bar">
-                  <label className="settings-field compact">
+                  <div className="settings-field compact">
                     <span>红方预设</span>
-                    <select
-                      className="settings-select live-preset-select red"
-                      value={player1PresetId}
-                      onChange={(event) => setPlayer1PresetId(event.target.value)}
-                      disabled={presetsLoading || presets.length === 0}
-                    >
-                      <option value="">选择红方预设</option>
-                      {presets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="settings-field compact">
+                    <div className="preset-select-row">
+                      <select
+                        className="settings-select live-preset-select red"
+                        value={player1PresetId}
+                        onChange={(event) => setPlayer1PresetId(event.target.value)}
+                        disabled={presetsLoading || presets.length === 0}
+                      >
+                        <option value="">选择红方预设</option>
+                        {presets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_1)}`}
+                        onClick={() => handlePrepare("player_1")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_1 === "preparing"}
+                      >
+                        {getPrepareButtonLabel(prepareStatuses.player_1)}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-field compact">
                     <span>蓝方预设</span>
-                    <select
-                      className="settings-select live-preset-select blue"
-                      value={player2PresetId}
-                      onChange={(event) => setPlayer2PresetId(event.target.value)}
-                      disabled={presetsLoading || presets.length === 0}
-                    >
-                      <option value="">选择蓝方预设</option>
-                      {presets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                    <div className="preset-select-row">
+                      <select
+                        className="settings-select live-preset-select blue"
+                        value={player2PresetId}
+                        onChange={(event) => setPlayer2PresetId(event.target.value)}
+                        disabled={presetsLoading || presets.length === 0}
+                      >
+                        <option value="">选择蓝方预设</option>
+                        {presets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_2)}`}
+                        onClick={() => handlePrepare("player_2")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_2 === "preparing"}
+                      >
+                        {getPrepareButtonLabel(prepareStatuses.player_2)}
+                      </button>
+                    </div>
+                  </div>
                   <label className="settings-field compact live-debug-toggle">
                     <span>LLM Debug</span>
                     <input
@@ -487,7 +543,7 @@ function App() {
                 </button>
                 <button
                   onClick={isPlaying ? handleStop : handleStart}
-                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
+                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isPreparing || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                 >
                   {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
@@ -523,9 +579,10 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || prepareMessage || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
+            {prepareMessage && <span>{prepareMessage}</span>}
             {(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary)) && (
               <span>
                 Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: {benchmarkProgress?.completedRounds ?? 0} / {benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0}
@@ -784,4 +841,21 @@ export default App;
 
 function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
   return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+}
+
+function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
+  if (status === "preparing") {
+    return "准备中";
+  }
+  if (status === "ready") {
+    return "已准备";
+  }
+  if (status === "error") {
+    return "重试";
+  }
+  return "准备";
+}
+
+function getPrepareStatusClass(status: MatchPrepareState | undefined): string {
+  return status ? `prepare-${status}` : "prepare-idle";
 }

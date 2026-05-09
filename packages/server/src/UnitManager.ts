@@ -185,7 +185,8 @@ export class UnitManager {
     targetX: number,
     targetY: number,
     tiles: TileType[][],
-    blockedPositions?: Set<string>
+    blockedPositions?: Set<string>,
+    keepResolvedTargetWhenAlreadyThere = false
   ): ResultCode {
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
@@ -223,7 +224,11 @@ export class UnitManager {
     // 保存路径和目标
     if (path.length === 0) {
       unit.path = undefined;
-      unit.pathTarget = undefined;
+      const alreadyAtResolvedTarget = unit.x === resolvedTarget.x && unit.y === resolvedTarget.y;
+      unit.pathTarget =
+        keepResolvedTargetWhenAlreadyThere && alreadyAtResolvedTarget
+          ? { x: resolvedTarget.x, y: resolvedTarget.y }
+          : undefined;
       unit.state = UNIT_STATES.IDLE;
       if (unit.intent?.type === "move") {
         unit.intent = undefined;

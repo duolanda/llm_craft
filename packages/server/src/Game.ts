@@ -454,7 +454,8 @@ export class Game {
               command.position.x,
               command.position.y,
               this.tiles,
-              blockedPositions
+              blockedPositions,
+              true
             );
 
             if (result === RESULT_CODES.OK) {
@@ -1021,7 +1022,8 @@ export class Game {
           moveTarget.x,
           moveTarget.y,
           this.tiles,
-          blockedPositions
+          blockedPositions,
+          true
         );
         if (result === RESULT_CODES.OK) {
           runtimeUnit.intent = {

@@ -81,7 +81,7 @@ describe("GameAgentBridge", () => {
     expect(bridge.takeIssuedCommands()).toHaveLength(0);
   });
 
-  it("rejects legacy orchestrate_plan steps instead of registering a stuck plan", () => {
+  it("rejects old non-call orchestrate_plan steps instead of registering a stuck plan", () => {
     const bridge = new GameAgentBridge(new Game(), "player_2");
 
     const result = bridge.orchestratePlan({
@@ -93,7 +93,131 @@ describe("GameAgentBridge", () => {
       ok: false,
       error: "invalid_plan",
     });
-    expect((result.result as { hint: string }).hint).toContain("new { do: ... } format");
+    expect((result.result as { hint: string }).hint).toContain("{ call: existing_tool");
+    expect(bridge.getActivePlans()).toHaveLength(0);
+  });
+
+  it("registers call-step plans that attack-move near a target and then attack it", () => {
+    const game = new Game();
+    game.start();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const soldier = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 10, "player_1");
+    const enemyHQ = game.getState().players[1].buildings.find((building) => building.type === "hq")!;
+
+    const result = bridge.orchestratePlan({
+      unitIds: [soldier.id],
+      steps: [
+        {
+          call: "attack_move_unit",
+          args: { unitId: "$unitId", x: enemyHQ.x, y: enemyHQ.y },
+          until: { condition: "near_position", x: enemyHQ.x, y: enemyHQ.y, distance: 1 },
+          maxTicks: 40,
+        },
+        {
+          call: "attack",
+          args: { unitId: "$unitId", targetId: enemyHQ.id },
+          until: { condition: "target_destroyed", targetId: enemyHQ.id },
+          retry: true,
+        },
+      ],
+    });
+
+    expect(result.result).toMatchObject({ ok: true });
+    expect(bridge.advancePlans()).toEqual([
+      expect.objectContaining({
+        type: "attack_move",
+        unitId: soldier.id,
+        position: { x: enemyHQ.x, y: enemyHQ.y },
+      }),
+    ]);
+
+    soldier.x = enemyHQ.x - 1;
+    soldier.y = enemyHQ.y;
+    expect(bridge.advancePlans()).toEqual([
+      expect.objectContaining({
+        type: "attack",
+        unitId: soldier.id,
+        targetId: enemyHQ.id,
+      }),
+    ]);
+    game.stop();
+  });
+
+  it("runs mixed-scope opening plans for harvesting, building, and production", () => {
+    const game = new Game();
+    game.start();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
+
+    const result = bridge.orchestratePlan({
+      unitIds: [worker1.id, worker2.id],
+      steps: [
+        { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
+        {
+          call: "build_structure",
+          args: { unitId: worker1.id, buildingType: "barracks", x: 4, y: 10 },
+          scope: "global",
+          when: { condition: "credits_at_least", amount: 120 },
+          until: { condition: "building_exists", buildingType: "barracks" },
+          retry: true,
+        },
+        {
+          call: "spawn_unit",
+          args: { buildingId: "$barracks", unitType: "soldier" },
+          scope: "global",
+          when: { condition: "production_queue_empty", buildingType: "barracks" },
+          until: { condition: "unit_count_at_least", unitType: "soldier", count: 1 },
+          retry: true,
+        },
+      ],
+    });
+
+    expect(result.result).toMatchObject({ ok: true });
+    expect(bridge.advancePlans()).toEqual([
+      expect.objectContaining({ type: "harvest_loop", unitId: worker1.id }),
+      expect.objectContaining({ type: "harvest_loop", unitId: worker2.id }),
+    ]);
+
+    const buildCommands = bridge.advancePlans();
+    expect(buildCommands).toEqual([
+      expect.objectContaining({
+        type: "build",
+        unitId: worker1.id,
+        buildingType: "barracks",
+        position: { x: 4, y: 10 },
+      }),
+    ]);
+    for (const command of buildCommands) {
+      game.queueCommand(command);
+    }
+    game.tickUpdate();
+
+    expect(bridge.advancePlans()).toEqual([
+      expect.objectContaining({
+        type: "spawn",
+        unitType: "soldier",
+      }),
+    ]);
+    game.stop();
+  });
+
+  it("rejects unsupported call-step plan tools", () => {
+    const bridge = new GameAgentBridge(new Game(), "player_2");
+
+    const result = bridge.orchestratePlan({
+      unitIds: ["unit_3"],
+      steps: [
+        {
+          call: "spawn_unit",
+          args: { unitId: "$unitId" },
+        } as any,
+      ],
+    });
+
+    expect(result.result).toMatchObject({
+      ok: false,
+      error: "invalid_plan",
+    });
     expect(bridge.getActivePlans()).toHaveLength(0);
   });
 
@@ -102,7 +226,7 @@ describe("GameAgentBridge", () => {
 
     const result = bridge.orchestratePlan({
       unitIds: ["building_2"],
-      steps: [{ do: "hold_position" }],
+      steps: [{ call: "hold_unit", args: { unitId: "$unitId" } }],
     });
 
     expect(result.result).toMatchObject({

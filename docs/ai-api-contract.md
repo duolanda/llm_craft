@@ -606,29 +606,51 @@ h/b/s/w enemy hq/barracks/soldier/worker
 interface OrchestratePlanInput {
   unitIds: string[];
   replaceExisting?: boolean;
+  scope?: PlanStepScope;
   loop?: number; // -1 表示无限循环
   steps: PlanStep[];
 }
 ```
 
 ```ts
-type PlanStep =
-  | { do: "move_to"; x: number; y: number; formation?: "direct" | "spread" }
-  | { do: "hold_position" }
-  | { do: "wait_until"; condition: PlanCondition; maxTicks?: number }
-  | { do: "branch"; if: PlanCondition; then: PlanStep[]; else?: PlanStep[] }
-  | { do: "stop" };
+interface PlanStep {
+  call: PlanCallToolName;
+  args: Record<string, unknown>;
+  scope?: PlanStepScope;
+  when?: PlanStepCondition;
+  until?: PlanStepCondition;
+  retry?: boolean;
+  maxTicks?: number;
+}
 ```
 
 ```ts
-type PlanCondition =
-  | "cargo_full"
-  | "cargo_empty"
-  | "hq_in_range"
-  | "enemy_in_range"
-  | { all: PlanCondition[] }
-  | { any: PlanCondition[] }
-  | { not: PlanCondition };
+type PlanCallToolName =
+  | "move_unit"
+  | "attack_move_unit"
+  | "attack"
+  | "spawn_unit"
+  | "build_structure"
+  | "start_harvest_loop"
+  | "hold_unit";
+```
+
+```ts
+type PlanStepScope = "global" | "per_unit";
+```
+
+```ts
+type PlanStepCondition =
+  | { condition: "arrived" }
+  | { condition: "enemy_in_range" }
+  | { condition: "hq_in_range" }
+  | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "target_in_range"; targetId: string }
+  | { condition: "target_destroyed"; targetId: string }
+  | { condition: "credits_at_least"; amount: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
 ```
 
 说明：
@@ -636,8 +658,64 @@ type PlanCondition =
 - `orchestrate_plan` 只注册计划，不会在一次 tool call 内跑完整段脚本
 - 计划会在后续 tick 自动推进
 - 即时动作会打断相关单位的当前计划
-- 常规采矿不应使用 `orchestrate_plan`，应使用 `start_harvest_loop`
 - 如果单位已有合适的 active plan，不要每个 run 都重复注册同一个计划
+- `steps` 只接受 call step，把现有动作工具调用注册成持续计划
+- `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开；`scope = "global"` 只执行一次
+- `when` 是执行前置条件，未满足时等待；`until` 是完成条件，满足后推进到下一 step
+- `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
+- `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"` 或 `"$barracks"`，在执行时解析为当前友方建筑
+- `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
+
+示例：开局让两个 worker 挂矿，等钱够后造兵营，再持续造到 4 个 soldier。
+
+```json
+{
+  "unitIds": ["unit_1", "unit_2"],
+  "loop": 1,
+  "steps": [
+    { "call": "start_harvest_loop", "args": { "unitId": "$unitId" }, "scope": "per_unit" },
+    {
+      "call": "build_structure",
+      "args": { "unitId": "unit_1", "buildingType": "barracks", "x": 4, "y": 10 },
+      "scope": "global",
+      "when": { "condition": "credits_at_least", "amount": 120 },
+      "until": { "condition": "building_exists", "buildingType": "barracks" },
+      "retry": true
+    },
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$barracks", "unitType": "soldier" },
+      "scope": "global",
+      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
+      "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 4 },
+      "retry": true
+    }
+  ]
+}
+```
+
+示例：一队士兵先移动攻击到敌方 HQ 附近，再集火 HQ。
+
+```json
+{
+  "unitIds": ["unit_5", "unit_6"],
+  "loop": 1,
+  "steps": [
+    {
+      "call": "attack_move_unit",
+      "args": { "unitId": "$unitId", "x": 18, "y": 10 },
+      "until": { "condition": "near_position", "x": 18, "y": 10, "distance": 2 },
+      "maxTicks": 40
+    },
+    {
+      "call": "attack",
+      "args": { "unitId": "$unitId", "targetId": "building_2" },
+      "until": { "condition": "target_destroyed", "targetId": "building_2" },
+      "retry": true
+    }
+  ]
+}
+```
 
 ## 3. 记录格式
 

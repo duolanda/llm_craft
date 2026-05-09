@@ -422,6 +422,34 @@ describe("Game", () => {
     expect(target.hp).toBe(target.maxHp);
   });
 
+  it("attack_move ends when a blocked requested target resolves to the unit's current tile", () => {
+    const unitManager = game.getUnitManager();
+    const enemyHq = game.getState().players[1].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, enemyHq.x - 1, enemyHq.y, "player_1");
+
+    game.queueCommand({
+      id: "attack_move_to_blocked_hq_from_adjacent_tile",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: enemyHq.x, y: enemyHq.y },
+      targetPriority: [UNIT_TYPES.SOLDIER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    expect(attacker.x).toBe(enemyHq.x - 1);
+    expect(attacker.y).toBe(enemyHq.y);
+    expect(attacker.intent?.type).toBe("hold");
+    expect(attacker.intent).not.toMatchObject({
+      type: "attack_move",
+      targetX: enemyHq.x,
+      targetY: enemyHq.y,
+    });
+  });
+
   it("adjusts move targets to a nearby reachable tile when the requested tile is blocked", () => {
     const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
 

@@ -430,6 +430,11 @@ function App() {
     && Boolean(player2PresetId);
   const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
   const isPreparing = prepareStatuses.player_1 === "preparing" || prepareStatuses.player_2 === "preparing";
+  const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
+  const benchmarkTotalRounds = benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0;
+  const benchmarkCurrentRound = benchmarkTotalRounds > 0
+    ? Math.min((benchmarkProgress?.completedRounds ?? 0) + 1, benchmarkTotalRounds)
+    : 0;
 
   return (
     <>
@@ -579,13 +584,13 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || prepareMessage || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
             {prepareMessage && <span>{prepareMessage}</span>}
-            {(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary)) && (
+            {benchmarkStatusVisible && (
               <span>
-                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: {benchmarkProgress?.completedRounds ?? 0} / {benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0}
+                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 当前第 {benchmarkCurrentRound} / {benchmarkTotalRounds} 局
                 {" · "}
                 LLM / CPU / 平 {benchmarkProgress?.llmWins ?? 0} / {benchmarkProgress?.cpuWins ?? 0} / {benchmarkProgress?.draws ?? 0}
               </span>

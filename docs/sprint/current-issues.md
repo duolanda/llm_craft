@@ -30,9 +30,9 @@
 - **描述**: 当前只读工具拆成了 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
 - **影响**: 对 agent 来说查询入口偏多，后续需要收敛到 `3` 个（查地图、查自己、recent）或 `2` 个（查所有、recent）工具，并主要通过简单参数完成过滤，而不是继续增加新读工具
 
-### 7. 高级编排层仍然偏扁平，后续需要探索更灵活的管道式表达
-- **描述**: 当前 `orchestrate_plan` 还是 `steps + loop + branch + wait_until` 的扁平 DSL
-- **影响**: 能覆盖基础长期任务，但表达力仍有限；后续需要评估是否升级到类似 bash 管道的组合方式，例如 `A | B | C` 这样的串联/筛选/执行模型，以提升灵活性
+### 7. 高级编排层仍需验证 LLM 实际使用效果
+- **描述**: `orchestrate_plan` 已支持基于现有动作工具的 call steps，但还缺少 benchmark/transcript 数据验证模型是否会稳定使用
+- **影响**: 表达力已比旧 DSL 更贴近工具调用心智模型，但是否能显著减少微操和提高胜率仍需实测
 
 ### 8. Benchmark 面板还没消费新 runtime 细节
 - **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
@@ -48,7 +48,7 @@
 - [x] live match 切到 tool-calling agent runtime
 - [x] benchmark 切到同一套 tool-calling runtime
 - [x] 只读工具统一为 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
-- [x] 引入 `orchestrate_plan` 扁平 DSL
+- [x] 引入 `orchestrate_plan` 扁平 call-step 计划
 - [x] 回放与 transcript 改为记录 tool calls / plans / commands / stop reason
 - [x] 修复 action tool 命令要等整轮 agent run 结束后才入队，导致长链 tool-calling 期间单位表面“无动作”的时序问题
 - [x] 为 tool-calling runtime 增加工具结果 tick、动作预校验和 stale-read warning，减少长 run 使用过期单位/建筑 ID 的无效命令
@@ -62,7 +62,8 @@
 - [x] 用高层 `attack(unitId, targetId)` 替代 LLM 暴露面的 `attack_unit` / `attack_in_range`，由 bridge 负责追击、持续攻击和目标死亡后的最后位置移动
 - [x] 限制 `attack_move_unit` 到达目标点后结束，避免士兵在敌方基地永久自动清理后续新单位
 - [x] 明确 `attack` 是有目标 ID 时的默认战斗命令，避免 LLM 把 `attack_move_unit` 当成拆 HQ / barracks 的替代品
+- [x] 为 `orchestrate_plan` 增加 `{ call, args, scope, when, until, retry }` steps，让计划能复用现有动作工具表达开局、生产和连续作战意图
 
 ---
 
-*最后更新: 2026-05-02*
+*最后更新: 2026-05-09*

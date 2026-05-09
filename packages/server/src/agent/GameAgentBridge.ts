@@ -8,8 +8,9 @@ import {
   BUILDING_TYPES,
   Command,
   OrchestratePlanInput,
-  PlanCondition,
+  PlanCallToolName,
   PlanStep,
+  PlanStepScope,
   PlayerId,
   Position,
   TILE_TYPES,
@@ -17,7 +18,7 @@ import {
   UNIT_TYPES,
 } from "@llmcraft/shared";
 import { Game } from "../Game";
-import { AgentPlanRuntime } from "./AgentPlanRuntime";
+import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
 
 type ToolEffect = "read" | "action" | "plan";
 
@@ -27,8 +28,27 @@ export interface ExecutedToolResult {
 }
 
 const STALE_READ_WARNING_TICKS = 10;
-const PLAN_STEP_KINDS = ["move_to", "hold_position", "wait_until", "branch", "stop"] as const;
-const PLAN_CONDITION_KINDS = ["cargo_full", "cargo_empty", "hq_in_range", "enemy_in_range"] as const;
+const PLAN_CALL_TOOL_NAMES = [
+  "move_unit",
+  "attack_move_unit",
+  "attack",
+  "spawn_unit",
+  "build_structure",
+  "start_harvest_loop",
+  "hold_unit",
+] as const satisfies readonly PlanCallToolName[];
+const PLAN_UNTIL_CONDITIONS = [
+  "arrived",
+  "enemy_in_range",
+  "hq_in_range",
+  "near_position",
+  "target_in_range",
+  "target_destroyed",
+  "credits_at_least",
+  "building_exists",
+  "unit_count_at_least",
+  "production_queue_empty",
+] as const;
 
 type CachedEnemyTarget = {
   id: string;
@@ -48,14 +68,13 @@ export class GameAgentBridge {
   private commandCounter = 0;
   private lastReadTick: number | null = null;
   private planRuntime: AgentPlanRuntime;
+  private readonly planToolHandlers: PlanToolHandlers;
   private targetMemory = new Map<string, CachedEnemyTarget>();
   private attackOrders = new Map<string, { unitId: string; targetId: string }>();
 
   constructor(private readonly game: Game, private readonly playerId: PlayerId) {
-    this.planRuntime = new AgentPlanRuntime({
-      move: (unitId, position) => this.createCommand("move", { unitId, position }),
-      hold: (unitId) => this.createCommand("hold", { unitId }),
-    });
+    this.planToolHandlers = this.createPlanToolHandlers();
+    this.planRuntime = new AgentPlanRuntime(this.planToolHandlers);
   }
 
   beginRun(): void {
@@ -171,6 +190,149 @@ export class GameAgentBridge {
       effect: "read",
       result,
     };
+  }
+
+  private createPlanToolHandlers(): PlanToolHandlers {
+    return {
+      move_unit: {
+        defaultScope: "per_unit",
+        validateArgs: (args) => this.hasOptionalPlanUnitId(args) && Number.isInteger(args.x) && Number.isInteger(args.y),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          return unitId && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
+            ? this.createCommand("move", { unitId, position: { x: Number(context.args.x), y: Number(context.args.y) } })
+            : null;
+        },
+      },
+      attack_move_unit: {
+        defaultScope: "per_unit",
+        validateArgs: (args) =>
+          this.hasOptionalPlanUnitId(args) && Number.isInteger(args.x) && Number.isInteger(args.y) && this.isOptionalTargetPriority(args.priority),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          if (!unitId || !Number.isInteger(context.args.x) || !Number.isInteger(context.args.y)) {
+            return null;
+          }
+          return this.createCommand("attack_move", {
+            unitId,
+            position: { x: Number(context.args.x), y: Number(context.args.y) },
+            targetPriority: this.resolveTargetPriority(context.args.priority),
+          });
+        },
+      },
+      attack: {
+        defaultScope: "per_unit",
+        defaultRetry: true,
+        validateArgs: (args) => this.hasOptionalPlanUnitId(args) && typeof args.targetId === "string",
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          if (!unitId || typeof context.args.targetId !== "string") {
+            return null;
+          }
+          const resolution = this.resolveAttackOrderCommand(unitId, context.args.targetId);
+          return resolution.ok ? resolution.command : null;
+        },
+      },
+      spawn_unit: {
+        defaultScope: "global",
+        defaultRetry: true,
+        validateArgs: (args) =>
+          (args.buildingId === undefined || typeof args.buildingId === "string") &&
+          (args.buildingType === undefined || args.buildingType === BUILDING_TYPES.HQ || args.buildingType === BUILDING_TYPES.BARRACKS) &&
+          (args.unitType === UNIT_TYPES.WORKER || args.unitType === UNIT_TYPES.SOLDIER),
+        createCommand: (context) => {
+          const unitType = context.args.unitType;
+          if (unitType !== UNIT_TYPES.WORKER && unitType !== UNIT_TYPES.SOLDIER) {
+            return null;
+          }
+          const buildingId = this.resolvePlanBuildingId(context, unitType === UNIT_TYPES.WORKER ? BUILDING_TYPES.HQ : BUILDING_TYPES.BARRACKS);
+          return buildingId ? this.createCommand("spawn", { buildingId, unitType }) : null;
+        },
+      },
+      build_structure: {
+        defaultScope: "global",
+        defaultRetry: true,
+        validateArgs: (args) =>
+          this.hasOptionalPlanUnitId(args) &&
+          args.buildingType === BUILDING_TYPES.BARRACKS &&
+          Number.isInteger(args.x) &&
+          Number.isInteger(args.y),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          return unitId && context.args.buildingType === BUILDING_TYPES.BARRACKS && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
+            ? this.createCommand("build", {
+                unitId,
+                buildingType: BUILDING_TYPES.BARRACKS,
+                position: { x: Number(context.args.x), y: Number(context.args.y) },
+              })
+            : null;
+        },
+      },
+      start_harvest_loop: {
+        defaultScope: "per_unit",
+        validateArgs: (args) =>
+          this.hasOptionalPlanUnitId(args) &&
+          ((args.x === undefined && args.y === undefined) || (Number.isInteger(args.x) && Number.isInteger(args.y))),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          if (!unitId) {
+            return null;
+          }
+          const hasPosition = Number.isInteger(context.args.x) && Number.isInteger(context.args.y);
+          return this.createCommand("harvest_loop", {
+            unitId,
+            position: hasPosition ? { x: Number(context.args.x), y: Number(context.args.y) } : undefined,
+          });
+        },
+      },
+      hold_unit: {
+        defaultScope: "per_unit",
+        validateArgs: (args) => this.hasOptionalPlanUnitId(args),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          return unitId ? this.createCommand("hold", { unitId }) : null;
+        },
+      },
+    };
+  }
+
+  private hasOptionalPlanUnitId(args: Record<string, unknown>): boolean {
+    return args.unitId === undefined || args.unitId === "$unitId" || typeof args.unitId === "string";
+  }
+
+  private resolvePlanUnitId(context: PlanToolContext): string | null {
+    const requested = context.args.unitId;
+    if (typeof requested === "string" && requested !== "$unitId") {
+      return requested;
+    }
+    if (context.unit) {
+      return context.unit.id;
+    }
+    return context.planUnitIds.find((unitId) => context.snapshot.myUnits.some((unit) => unit.id === unitId && unit.exists)) ?? null;
+  }
+
+  private resolvePlanBuildingId(context: PlanToolContext, fallbackType: "hq" | "barracks"): string | null {
+    const requested = context.args.buildingId;
+    if (typeof requested === "string" && requested !== "$hq" && requested !== "$barracks") {
+      return requested;
+    }
+    const type =
+      requested === "$hq"
+        ? BUILDING_TYPES.HQ
+        : requested === "$barracks"
+          ? BUILDING_TYPES.BARRACKS
+          : context.args.buildingType === BUILDING_TYPES.HQ || context.args.buildingType === BUILDING_TYPES.BARRACKS
+            ? context.args.buildingType
+            : fallbackType;
+    return context.snapshot.myBuildings.find((building) => building.type === type && building.exists)?.id ?? null;
+  }
+
+  private resolveTargetPriority(value: unknown): Array<"soldier" | "worker"> | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const priority = value.filter((entry): entry is "soldier" | "worker" => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER);
+    return priority.length > 0 ? priority : undefined;
   }
 
   private renderAsciiMap(state: ReturnType<Game["getState"]>): string {
@@ -585,8 +747,8 @@ export class GameAgentBridge {
           ok: false,
           error: "invalid_plan",
           hint: validated.hint,
-          supportedSteps: [...PLAN_STEP_KINDS],
-          supportedConditions: [...PLAN_CONDITION_KINDS],
+          supportedCallTools: [...PLAN_CALL_TOOL_NAMES],
+          supportedUntilConditions: [...PLAN_UNTIL_CONDITIONS],
         }),
       };
     }
@@ -791,6 +953,7 @@ export class GameAgentBridge {
     const me = state.players.find((player) => player.id === this.playerId)!;
     return {
       tick: state.tick,
+      myCredits: me.resources.credits,
       myUnits: me.units.filter((unit) => unit.exists),
       myBuildings: me.buildings.filter((building) => building.exists),
       visibleUnits: state.players.flatMap((player) =>
@@ -907,10 +1070,11 @@ export class GameAgentBridge {
       return { ok: false, hint: "steps must contain at least one supported plan step." };
     }
 
-    if (!input.steps.every((step) => this.isPlanStep(step))) {
+    const allowedPlanUnitIds = new Set(normalizedUnitIds);
+    if (!input.steps.every((step) => this.isPlanStep(step, allowedPlanUnitIds))) {
       return {
         ok: false,
-        hint: "Unsupported plan DSL. Each step must use the new { do: ... } format, not legacy { type: ... } steps.",
+        hint: "Unsupported plan step. Each step must use { call: existing_tool, args, until?, retry?, maxTicks? }.",
       };
     }
 
@@ -918,61 +1082,118 @@ export class GameAgentBridge {
       return { ok: false, hint: "loop must be an integer and cannot be 0." };
     }
 
+    if (input.scope !== undefined && !this.isPlanScope(input.scope)) {
+      return { ok: false, hint: "scope must be either global or per_unit." };
+    }
+
     return {
       ok: true,
       value: {
         unitIds: normalizedUnitIds,
         replaceExisting: input.replaceExisting,
+        scope: input.scope,
         loop: input.loop,
         steps: structuredClone(input.steps),
       },
     };
   }
 
-  private isPlanStep(value: unknown): value is PlanStep {
-    if (!this.isRecord(value) || typeof value.do !== "string") {
-      return false;
-    }
-
-    switch (value.do) {
-      case "move_to":
-        return Number.isInteger(value.x) && Number.isInteger(value.y) && (value.formation === undefined || value.formation === "direct" || value.formation === "spread");
-      case "hold_position":
-      case "stop":
-        return true;
-      case "wait_until":
-        return (
-          this.isPlanCondition(value.condition) &&
-          (value.maxTicks === undefined || (typeof value.maxTicks === "number" && Number.isInteger(value.maxTicks) && value.maxTicks >= 0))
-        );
-      case "branch":
-        return (
-          this.isPlanCondition(value.if) &&
-          Array.isArray(value.then) &&
-          value.then.every((entry) => this.isPlanStep(entry)) &&
-          (value.else === undefined || (Array.isArray(value.else) && value.else.every((entry) => this.isPlanStep(entry))))
-        );
-      default:
-        return false;
-    }
-  }
-
-  private isPlanCondition(value: unknown): value is PlanCondition {
-    if (typeof value === "string") {
-      return PLAN_CONDITION_KINDS.includes(value as (typeof PLAN_CONDITION_KINDS)[number]);
-    }
-
+  private isPlanStep(value: unknown, allowedUnitIds?: Set<string>): value is PlanStep {
     if (!this.isRecord(value)) {
       return false;
     }
 
-    if (Array.isArray(value.all)) {
-      return value.all.every((entry) => this.isPlanCondition(entry));
+    return typeof value.call === "string" && this.isPlanCallStep(value, allowedUnitIds);
+  }
+
+  private isPlanCallStep(value: Record<string, unknown>, allowedUnitIds?: Set<string>): boolean {
+    const call = value.call as PlanCallToolName;
+    const handler = this.planToolHandlers[call];
+    if (!PLAN_CALL_TOOL_NAMES.includes(call) || !handler) {
+      return false;
     }
-    if (Array.isArray(value.any)) {
-      return value.any.every((entry) => this.isPlanCondition(entry));
+    if (!this.isRecord(value.args)) {
+      return false;
     }
-    return value.not !== undefined && this.isPlanCondition(value.not);
+    if (value.scope !== undefined && !this.isPlanScope(value.scope)) {
+      return false;
+    }
+    if (value.retry !== undefined && typeof value.retry !== "boolean") {
+      return false;
+    }
+    if (value.maxTicks !== undefined && (!Number.isInteger(value.maxTicks) || Number(value.maxTicks) < 0)) {
+      return false;
+    }
+    if (value.when !== undefined && !this.isPlanStepCondition(value.when)) {
+      return false;
+    }
+    if (value.until !== undefined && !this.isPlanStepCondition(value.until)) {
+      return false;
+    }
+
+    const args = value.args;
+    const hasValidUnitId =
+      args.unitId === undefined ||
+      args.unitId === "$unitId" ||
+      (typeof args.unitId === "string" && (allowedUnitIds === undefined || allowedUnitIds.has(args.unitId)));
+    if (!hasValidUnitId) {
+      return false;
+    }
+
+    return handler.validateArgs(args);
+  }
+
+  private isPlanScope(value: unknown): value is PlanStepScope {
+    return value === "global" || value === "per_unit";
+  }
+
+  private isPlanStepCondition(value: unknown): boolean {
+    if (!this.isRecord(value) || typeof value.condition !== "string") {
+      return false;
+    }
+    if (!PLAN_UNTIL_CONDITIONS.includes(value.condition as (typeof PLAN_UNTIL_CONDITIONS)[number])) {
+      return false;
+    }
+
+    switch (value.condition) {
+      case "near_position":
+        return (
+          Number.isInteger(value.x) &&
+          Number.isInteger(value.y) &&
+          (value.distance === undefined || (Number.isInteger(value.distance) && Number(value.distance) >= 0))
+        );
+      case "target_in_range":
+      case "target_destroyed":
+        return typeof value.targetId === "string";
+      case "credits_at_least":
+        return typeof value.amount === "number" && Number.isInteger(value.amount) && value.amount >= 0;
+      case "building_exists":
+        return (
+          (value.buildingType === BUILDING_TYPES.HQ || value.buildingType === BUILDING_TYPES.BARRACKS) &&
+          (value.count === undefined || (Number.isInteger(value.count) && Number(value.count) > 0))
+        );
+      case "unit_count_at_least":
+        return (
+          (value.unitType === UNIT_TYPES.WORKER || value.unitType === UNIT_TYPES.SOLDIER) &&
+          Number.isInteger(value.count) &&
+          Number(value.count) >= 0
+        );
+      case "production_queue_empty":
+        return (
+          (value.buildingId === undefined || typeof value.buildingId === "string") &&
+          (value.buildingType === undefined || value.buildingType === BUILDING_TYPES.HQ || value.buildingType === BUILDING_TYPES.BARRACKS) &&
+          (value.buildingId !== undefined || value.buildingType !== undefined)
+        );
+      default:
+        return true;
+    }
+  }
+
+  private isOptionalTargetPriority(value: unknown): boolean {
+    return (
+      value === undefined ||
+      (Array.isArray(value) && value.every((entry) => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER))
+    );
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

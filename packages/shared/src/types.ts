@@ -331,25 +331,43 @@ export type AITerminalEvent =
   | AITerminalAssistantEvent
   | AITerminalToolCallEvent;
 
-export type PlanCondition =
-  | "cargo_full"
-  | "cargo_empty"
-  | "hq_in_range"
-  | "enemy_in_range"
-  | { all: PlanCondition[] }
-  | { any: PlanCondition[] }
-  | { not: PlanCondition };
+export type PlanCallToolName =
+  | "move_unit"
+  | "attack_move_unit"
+  | "attack"
+  | "spawn_unit"
+  | "build_structure"
+  | "start_harvest_loop"
+  | "hold_unit";
 
-export type PlanStep =
-  | { do: "move_to"; x: number; y: number; formation?: "direct" | "spread" }
-  | { do: "hold_position" }
-  | { do: "wait_until"; condition: PlanCondition; maxTicks?: number }
-  | { do: "branch"; if: PlanCondition; then: PlanStep[]; else?: PlanStep[] }
-  | { do: "stop" };
+export type PlanStepScope = "global" | "per_unit";
+
+export type PlanStepCondition =
+  | { condition: "arrived" }
+  | { condition: "enemy_in_range" }
+  | { condition: "hq_in_range" }
+  | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "target_in_range"; targetId: string }
+  | { condition: "target_destroyed"; targetId: string }
+  | { condition: "credits_at_least"; amount: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
+
+export interface PlanStep {
+  call: PlanCallToolName;
+  args: Record<string, unknown>;
+  scope?: PlanStepScope;
+  when?: PlanStepCondition;
+  until?: PlanStepCondition;
+  retry?: boolean;
+  maxTicks?: number;
+}
 
 export interface OrchestratePlanInput {
   unitIds: string[];
   replaceExisting?: boolean;
+  scope?: PlanStepScope;
   loop?: number;
   steps: PlanStep[];
 }
@@ -357,6 +375,7 @@ export interface OrchestratePlanInput {
 export interface AgentPlanRecord {
   planId: string;
   unitIds: string[];
+  scope?: PlanStepScope;
   loop: number;
   steps: PlanStep[];
   currentStepIndex: number;

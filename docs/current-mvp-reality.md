@@ -1,6 +1,6 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-05-02
+日期: 2026-05-09
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
@@ -62,17 +62,16 @@
 
 ## 3. 当前高层计划能力
 
-`orchestrate_plan` 采用扁平 steps DSL。
+`orchestrate_plan` 采用扁平 steps 列表，且只支持 `{ call, args, scope, when, until, retry }` 形态：把已有动作工具调用注册成后续 tick 自动推进的持续计划。
 
 当前支持：
 
 - 顺序执行
 - `loop = -1` 无限循环
-- `wait_until`
-- `branch`
-- `move_to`
-- `hold_position`
-- `stop`
+- call steps: `move_unit`、`attack_move_unit`、`attack`、`spawn_unit`、`build_structure`、`start_harvest_loop`、`hold_unit`
+- step / plan `scope`: `per_unit` 对 `unitIds` 中每个单位展开，`global` 只执行一次
+- call step 的 `when` / `until`: `arrived`、`enemy_in_range`、`hq_in_range`、`near_position`、`target_in_range`、`target_destroyed`、`credits_at_least`、`building_exists`、`unit_count_at_least`、`production_queue_empty`
+- `spawn_unit` 在 plan 中可用 `buildingId: "$hq"` 或 `"$barracks"` 延迟解析当前友方建筑
 
 即时动作会打断同一单位的当前计划。
 

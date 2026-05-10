@@ -552,20 +552,33 @@ export async function handleHttpRequest(
         return;
       }
       const game = new Game();
-      game.start();
+      // Don't start ticking yet — wait for both players
       state.orchestrator = {
         getGame: () => game,
         stop: () => game.stop(),
         start: () => Promise.resolve(),
         saveRecord: () => Promise.resolve(""),
-      };
+      } as any;
+      // Store ready flags on orchestrator for lobby sync
+      (state.orchestrator as any)._game = game;
+      (state.orchestrator as any)._p1Ready = false;
+      (state.orchestrator as any)._p2Ready = false;
       sendJson(res, 201, {
         ok: true,
-        tick: game.getState().tick,
+        tick: 0,
         kind: "state",
-        data: { status: "started" },
+        data: { status: "waiting_for_players" },
       });
       return;
+    }
+
+    const tryStartGame = (): void => {
+      const o = state.orchestrator as any;
+      if (o?._p1Ready && o?._p2Ready && !o?._started) {
+        o._started = true;
+        o.getGame().start();
+        console.log("Both players ready — game started");
+      }
     }
 
     if (req.method === "POST" && url.pathname === "/api/control/sessions") {
@@ -581,9 +594,20 @@ export async function handleHttpRequest(
       }
 
       const game = state.orchestrator.getGame() as unknown as Game;
-      const gameId = body.gameId || "default";
-      const session = state.controlSessions.create(game, gameId, body.playerId);
+
+      // Mark player as ready
+      if (body.playerId === PLAYER_IDS.PLAYER_1) {
+        (state.orchestrator as any)._p1Ready = true;
+      } else {
+        (state.orchestrator as any)._p2Ready = true;
+      }
+
+      const session = state.controlSessions.create(game, body.gameId || "default", body.playerId);
       const serverTick = game.getState()?.tick ?? 0;
+
+      // Try to start — only fires when both are ready
+      tryStartGame();
+
       sendJson(res, 201, {
         ok: true,
         tick: serverTick,

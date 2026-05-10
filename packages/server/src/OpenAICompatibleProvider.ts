@@ -10,6 +10,7 @@ import {
   OpenAIProviderConfig,
   RunAgentOptions,
   RunAgentResult,
+  SubAgentParentContext,
   WarmupAgentResult,
 } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
@@ -174,6 +175,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
         pendingAssistantMessage = null;
         pendingFinishReason = null;
       } else {
+        this.injectSubAgentNotifications(messages, persistentHistory, options);
         lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
 
         let response;
@@ -216,13 +218,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
       for (const toolCall of requestedToolCalls) {
         const args = this.parseToolArgs(toolCall.function.arguments);
         let execution: AgentToolExecutionResult;
-        try {
-          execution = await options.executeTool(toolCall.function.name, args);
-        } catch (error) {
-          execution = {
-            effect: "read",
-            result: { ok: false, error: error instanceof Error ? error.message : String(error) },
-          };
+        if (toolCall.function.name === "spawn_agent") {
+          if (options.spawnSubAgent) {
+            const parentContext: SubAgentParentContext = {
+              playerId: input.playerId,
+              input,
+              messages: [...messages],
+              runtimeState: options.getRuntimeState(),
+              tools: options.tools,
+              executeTool: options.executeTool,
+            };
+            execution = options.spawnSubAgent(args, parentContext);
+          } else {
+            execution = {
+              effect: "read",
+              result: { ok: false, error: "spawn_agent_unavailable" },
+            };
+          }
+        } else {
+          try {
+            execution = await options.executeTool(toolCall.function.name, args);
+          } catch (error) {
+            execution = {
+              effect: "read",
+              result: { ok: false, error: error instanceof Error ? error.message : String(error) },
+            };
+          }
         }
 
         if (execution.effect === "read") {
@@ -341,6 +362,18 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const preparedTurn = this.preparedTurn;
     this.preparedTurn = null;
     return preparedTurn;
+  }
+
+  private injectSubAgentNotifications(messages: any[], persistentHistory: any[], options: RunAgentOptions): void {
+    if (!options.drainSubAgentNotifications) {
+      return;
+    }
+    const notifications = options.drainSubAgentNotifications();
+    for (const notification of notifications) {
+      const userMessage = { role: "user", content: notification };
+      messages.push(userMessage);
+      persistentHistory.push(userMessage);
+    }
   }
 
   private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {

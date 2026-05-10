@@ -9,6 +9,7 @@ import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, 
 import { handleNearest, handleTarget } from "./commands/transform.js";
 import { handlePlan, handleOrchestrate } from "./commands/plan.js";
 import { handleWait } from "./commands/wait.js";
+import { handlePlay } from "./commands/play.js";
 
 const VERSION = "0.1.0";
 
@@ -107,6 +108,7 @@ function printHelp(): void {
     "  plan               Generate a plan (economy/defend/attack-hq/custom)",
     "  orchestrate        Execute a plan or batch of actions from stdin",
     "  wait               Wait for N game ticks",
+    "  play               Start a game against a CPU opponent (play --vs random)",
     "",
     "Plan flags:",
     "  --file <path>      Path to custom plan JSON (plan custom only)",
@@ -275,6 +277,13 @@ async function main(): Promise<void> {
       return;
     }
     exit(ExitCode.ArgError, `Unknown session subcommand: ${parsed.subcommand || "(none)"}`);
+  }
+
+  // Play command: start a game vs CPU
+  if (parsed.command === "play") {
+    const client = new ControlClient(globalBaseUrl);
+    await handlePlay(client, parsed.flags);
+    return;
   }
 
   // Phase 3: Read state and selectors

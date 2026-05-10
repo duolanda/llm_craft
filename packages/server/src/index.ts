@@ -32,6 +32,7 @@ import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager, executeControlTool, buildControlResponse, waitTicks } from "./ControlHandler";
+import { CpuPlayer } from "./CpuPlayer";
 import { Game } from "./Game";
 
 dotenv.config();
@@ -551,23 +552,46 @@ export async function handleHttpRequest(
         sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
         return;
       }
+      // Read optional body for cpu parameter
+      let cpu: string | undefined;
+      try {
+        const body = await readJsonBody<{ cpu?: string }>(req);
+        cpu = body.cpu;
+      } catch {
+        // no body / non-JSON body is fine
+      }
+
       const game = new Game();
+      let cpuPlayer: CpuPlayer | undefined;
+
+      if (cpu === "random" || cpu === "rush") {
+        // CPU 作为 player_2，人类作为 player_1
+        cpuPlayer = new CpuPlayer(game, "player_2", cpu);
+      }
+
       // Don't start ticking yet — wait for both players
       state.orchestrator = {
         getGame: () => game,
-        stop: () => game.stop(),
+        stop: () => {
+          game.stop();
+          cpuPlayer?.stop();
+        },
         start: () => Promise.resolve(),
         saveRecord: () => Promise.resolve(""),
       } as any;
       // Store ready flags on orchestrator for lobby sync
       (state.orchestrator as any)._game = game;
       (state.orchestrator as any)._p1Ready = false;
-      (state.orchestrator as any)._p2Ready = false;
+      (state.orchestrator as any)._p2Ready = !!cpuPlayer; // CPU is always "ready"
+      (state.orchestrator as any)._cpuPlayer = cpuPlayer;
       sendJson(res, 201, {
         ok: true,
         tick: 0,
         kind: "state",
-        data: { status: "waiting_for_players" },
+        data: {
+          status: "waiting_for_players",
+          ...(cpuPlayer ? { cpu: cpu, cpuPlayer: "player_2" } : {}),
+        },
       });
       return;
     }
@@ -577,6 +601,10 @@ export async function handleHttpRequest(
       if (o?._p1Ready && o?._p2Ready && !o?._started) {
         o._started = true;
         o.getGame().start();
+        // Start CPU player if present
+        if (o._cpuPlayer) {
+          o._cpuPlayer.start();
+        }
         console.log("Both players ready — game started");
       }
     }

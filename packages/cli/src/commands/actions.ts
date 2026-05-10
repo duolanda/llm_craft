@@ -262,7 +262,7 @@ export async function handleBuild(
   subcommand: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  if (!subcommand || subcommand === "barracks") {
+  if (!subcommand) {
     exit(ExitCode.ArgError, "build requires a building type (e.g., build barracks)");
   }
   const buildingType = subcommand;

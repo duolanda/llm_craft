@@ -5,12 +5,16 @@ export type LLMProviderType = "openai-compatible";
 
 export type CPUStrategyType = "random" | "rush";
 
+export type OpenAICompatibleReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface OpenAICompatibleRuntimeConfig {
   providerType: "openai-compatible";
   apiKey: string;
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 
 export interface BuiltinCPURuntimeConfig {
@@ -22,6 +26,11 @@ export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig | BuiltinCPURun
 
 export interface MatchDebugOptions {
   recordLLMTranscript?: boolean;
+}
+
+export interface MatchWarmupOptions {
+  player_1?: boolean;
+  player_2?: boolean;
 }
 
 export interface MatchLLMConfig {
@@ -37,6 +46,8 @@ export interface LLMPresetSummary {
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
@@ -49,6 +60,8 @@ export interface CreateLLMPresetRequest {
   model: string;
   apiKey: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 
 export interface UpdateLLMPresetRequest {
@@ -58,6 +71,27 @@ export interface UpdateLLMPresetRequest {
   model: string;
   apiKey?: string;
   rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
+}
+
+export interface TestLLMPresetRequest {
+  presetId?: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+  rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
+}
+
+export interface TestLLMPresetResponse {
+  ok: true;
+  model: string;
+  baseURL?: string;
+  latencyMs: number;
+  responseText: string;
 }
 
 export interface Position {
@@ -216,110 +250,155 @@ export interface BuildingStats {
   cost: number;
 }
 
-export interface AIStatePackage {
-  tick: number;
-  my: {
-    resources: Resources;
-    units: Unit[];
-    buildings: Building[];
-  };
-  enemies: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  enemyBuildings: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  map: {
-    width: number;
-    height: number;
-    tiles: Tile[]; // 所有地块信息（MVP：全图可见）
-  };
-  unitStats: Record<UnitType, UnitStats>; // 单位属性表
-  buildingStats: Record<BuildingType, BuildingStats>;
-  economy: {
-    workerCarryCapacity: number;
-    workerGatherRate: number;
-    hqDeliveryRange: number;
-  };
-  aiFeedbackSinceLastCall: GameLog[];
-  gameTimeRemaining: number;
-}
-
-export interface AIPromptPayload {
-  mode: "full" | "delta";
+export interface AgentRunInput {
+  playerId: PlayerId;
   tick: number;
   tickIntervalMs: number;
   summary: string;
-  state: AIStatePackage | null;
-  delta: {
-    creditsChanged?: number;
-    myUnitChanges: Array<{
-      id: string;
-      type: UnitType;
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-      state?: UnitState;
-      carryingCredits?: number;
-      carryCapacity?: number;
-      intent?: UnitIntent | null;
-    }>;
-    myBuildingChanges: Array<{
-      id: string;
-      type: BuildingType;
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyUnitChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyBuildingChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    aiFeedback: GameLog[];
-  } | null;
+}
+
+export interface AgentToolCallRecord {
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  result: unknown;
+  isError: boolean;
+}
+
+export interface AgentMapStateUnit {
+  id: string;
+  type: UnitType;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  state: UnitState;
+  relation: "self" | "enemy";
+}
+
+export interface AgentMapStateBuilding {
+  id: string;
+  type: BuildingType;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  relation: "self" | "enemy";
+}
+
+export interface AgentMapStateCell {
+  x: number;
+  y: number;
+  tile: TileType;
+  unit?: AgentMapStateUnit;
+  building?: AgentMapStateBuilding;
+}
+
+export interface AgentMapState {
+  tick: number;
+  width: number;
+  height: number;
+  asciiMap: string;
+  units: AgentMapStateUnit[];
+  buildings: AgentMapStateBuilding[];
+  cells?: AgentMapStateCell[];
+}
+
+interface AITerminalEventBase {
+  id: string;
+  playerId: PlayerId;
+  requestNumber: number;
+  requestTick: number;
+  createdAt: string;
+}
+
+export interface AITerminalRequestEvent extends AITerminalEventBase {
+  kind: "request";
+}
+
+export interface AITerminalAssistantEvent extends AITerminalEventBase {
+  kind: "assistant";
+  text: string;
+}
+
+export interface AITerminalToolCallEvent extends AITerminalEventBase {
+  kind: "tool_call";
+  toolCall: AgentToolCallRecord;
+}
+
+export type AITerminalEvent =
+  | AITerminalRequestEvent
+  | AITerminalAssistantEvent
+  | AITerminalToolCallEvent;
+
+export type PlanCallToolName =
+  | "move_unit"
+  | "attack_move_unit"
+  | "attack"
+  | "spawn_unit"
+  | "build_structure"
+  | "start_harvest_loop"
+  | "hold_unit";
+
+export type PlanStepScope = "global" | "per_unit";
+
+export type PlanStepCondition =
+  | { condition: "arrived" }
+  | { condition: "enemy_in_range" }
+  | { condition: "hq_in_range" }
+  | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "target_in_range"; targetId: string }
+  | { condition: "target_destroyed"; targetId: string }
+  | { condition: "credits_at_least"; amount: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
+
+export interface PlanStep {
+  call: PlanCallToolName;
+  args: Record<string, unknown>;
+  scope?: PlanStepScope;
+  when?: PlanStepCondition;
+  until?: PlanStepCondition;
+  retry?: boolean;
+  maxTicks?: number;
+}
+
+export interface OrchestratePlanInput {
+  unitIds: string[];
+  replaceExisting?: boolean;
+  scope?: PlanStepScope;
+  loop?: number;
+  steps: PlanStep[];
+}
+
+export interface AgentPlanRecord {
+  planId: string;
+  unitIds: string[];
+  scope?: PlanStepScope;
+  loop: number;
+  steps: PlanStep[];
+  currentStepIndex: number;
+  status: "active" | "completed" | "interrupted" | "failed";
+}
+
+export interface AgentRunMetrics {
+  modelRequests: number;
+  toolCalls: number;
+  stallDetected: boolean;
 }
 
 export interface AITurnRecord {
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
-  requestMessages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string;
-  }>;
-  promptPayload: AIPromptPayload;
-  response: string;
+  runInput: AgentRunInput;
+  assistantMessages: string[];
+  toolCalls: AgentToolCallRecord[];
+  plans: AgentPlanRecord[];
   commands: Command[];
-  errorType?: string;
-  errorMessage?: string;
+  stopReason: string;
+  metrics: AgentRunMetrics;
   model: string;
   baseURL?: string;
   createdAt: string;
@@ -329,12 +408,13 @@ export interface SavedAITurnRecord {
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
-  windowMessageCount: number;
-  promptPayload: AIPromptPayload;
-  response: string;
+  runInput: AgentRunInput;
+  assistantMessages: string[];
+  toolCalls: AgentToolCallRecord[];
+  plans: AgentPlanRecord[];
   commands: Command[];
-  errorType?: string;
-  errorMessage?: string;
+  stopReason: string;
+  metrics: AgentRunMetrics;
   model: string;
   baseURL?: string;
   createdAt: string;

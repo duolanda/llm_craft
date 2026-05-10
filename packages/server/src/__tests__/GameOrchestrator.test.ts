@@ -2,36 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AIPromptPayload, AIStatePackage } from "@llmcraft/shared";
+import { AgentRunInput, Command, TICK_INTERVAL_MS } from "@llmcraft/shared";
 import { GameOrchestrator } from "../GameOrchestrator";
-
-function createDeferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
-
-type GenerateCodeResult = {
-  code: string;
-  rawResponse: string;
-  requestMessages: Array<{
-    role: "system" | "user" | "assistant";
-    content: string;
-  }>;
-  errorMessage?: string;
-};
-
-function createEmptyGenerateCodeResult(): GenerateCodeResult {
-  return { code: "", rawResponse: "", requestMessages: [] };
-}
-
-type ExecuteCodeResult = {
-  commands: Array<Record<string, never>>;
-  errorMessage: string | undefined;
-  errorType?: string | undefined;
-};
 
 function createMatchConfig() {
   return {
@@ -46,6 +18,24 @@ function createMatchConfig() {
       apiKey: "test-key-2",
       baseURL: "https://api.two.test/v1",
       model: "test-model",
+    },
+  };
+}
+
+function createRunResult(overrides?: {
+  commands?: Command[];
+  stopReason?: string;
+}) {
+  return {
+    assistantMessages: ["thinking"],
+    toolCalls: [],
+    plans: [],
+    commands: overrides?.commands ?? [],
+    stopReason: overrides?.stopReason ?? "model_stopped",
+    metrics: {
+      modelRequests: 1,
+      toolCalls: 0,
+      stallDetected: overrides?.stopReason === "stall_detected",
     },
   };
 }
@@ -82,37 +72,12 @@ describe("GameOrchestrator", () => {
     expect((orchestrator as any).llm2.getBaseURL()).toBe("https://api.two.test/v1");
   });
 
-  it("should not start multiple polling loops when start is called twice", async () => {
+  it("does not start multiple polling loops when start is called twice", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-        async () => createEmptyGenerateCodeResult()
-      ),
-      getModel: () => "test-model",
-      getBaseURL: () => "https://api.one.test/v1",
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-        async () => createEmptyGenerateCodeResult()
-      ),
-      getModel: () => "test-model",
-      getBaseURL: () => "https://api.two.test/v1",
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
+    const runSpy = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    (orchestrator as any).runtimeByPlayer.player_1.run = runSpy;
+    (orchestrator as any).runtimeByPlayer.player_2.run = runSpy;
 
     await orchestrator.start();
     await orchestrator.start();
@@ -121,56 +86,60 @@ describe("GameOrchestrator", () => {
     await vi.runOnlyPendingTimersAsync();
 
     expect(gameStartSpy).toHaveBeenCalledTimes(1);
-
     orchestrator.stop();
   });
 
-  it("should stop scheduling polls after stop is called", async () => {
+  it("prepares selected first turns before the game clock starts", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
-    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
+    const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");
+    const warmupSpy = vi.fn(async () => {
+      expect(gameStartSpy).not.toHaveBeenCalled();
+      return {
+        assistantMessages: ["thinking"],
+        stopReason: "tool_calls",
+        hasPendingToolCalls: true,
+        metrics: { modelRequests: 1 },
+      };
+    });
+    const runSpy = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    (orchestrator as any).runtimeByPlayer.player_1.warmup = warmupSpy;
+    (orchestrator as any).runtimeByPlayer.player_1.run = runSpy;
+    (orchestrator as any).runtimeByPlayer.player_2.run = runSpy;
 
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: player1GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: player2GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
-
+    await orchestrator.prepare({ player_1: true });
     await orchestrator.start();
 
-    vi.advanceTimersByTime(150);
-    await vi.runOnlyPendingTimersAsync();
-    const callCountBeforeStop = player1GenerateCode.mock.calls.length + player2GenerateCode.mock.calls.length;
+    expect(warmupSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        playerId: "player_1",
+        tick: 0,
+        summary: expect.stringContaining("tick=0"),
+      }),
+      expect.objectContaining({
+        onAssistantMessage: expect.any(Function),
+      }),
+      expect.any(AbortSignal)
+    );
+    expect(gameStartSpy).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getGame().getState().tick).toBe(0);
+    orchestrator.stop();
+  });
+
+  it("stops scheduling runs after stop is called", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const run1 = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    const run2 = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    (orchestrator as any).runtimeByPlayer.player_1.run = run1;
+    (orchestrator as any).runtimeByPlayer.player_2.run = run2;
+
+    await orchestrator.start();
+    await vi.advanceTimersByTimeAsync(150);
+    const callCountBeforeStop = run1.mock.calls.length + run2.mock.calls.length;
 
     orchestrator.stop();
+    await vi.advanceTimersByTimeAsync(1000);
 
-    vi.advanceTimersByTime(500);
-    await vi.runOnlyPendingTimersAsync();
-
-    expect(player1GenerateCode.mock.calls.length + player2GenerateCode.mock.calls.length).toBe(callCountBeforeStop);
+    expect(run1.mock.calls.length + run2.mock.calls.length).toBe(callCountBeforeStop);
   });
 
   it("saveRecord preserves the true initial snapshot after long runs", async () => {
@@ -219,103 +188,54 @@ describe("GameOrchestrator", () => {
     await fs.rm(recordDir, { recursive: true, force: true });
   });
 
-  it("records structured sandbox error types in ai turn records", async () => {
+  it("records tool-runtime results in ai turn records", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
-    const game = orchestrator.getGame();
     (orchestrator as any).isPolling = true;
-
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
-        code: "while (true) {}",
-        rawResponse: "while (true) {}",
-        requestMessages: [],
-      })),
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-        async () => createEmptyGenerateCodeResult()
-      ),
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: "Sandbox vm timeout after 200ms",
-        errorType: "vm_timeout",
-      })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
+    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (input: AgentRunInput) =>
+      createRunResult({
+        commands: [
+          {
+            id: "cmd_1",
+            type: "hold",
+            unitId: "worker-1",
+            playerId: "player_1",
+          },
+        ],
+        stopReason: "stall_detected",
+      })
+    );
 
     await orchestrator.runAI("player_1");
 
     const turns = (orchestrator as any).aiTurns;
     expect(turns).toHaveLength(1);
-    expect(turns[0].errorType).toBe("vm_timeout");
-
-    const savedTurns = (orchestrator as any).buildSavedAITurns();
-    expect(savedTurns[0].errorType).toBe("vm_timeout");
-    expect(game.getAIFeedback("player_1")[0]?.message).toContain("Sandbox vm timeout after 200ms");
+    expect(turns[0].runInput.tick).toBe(0);
+    expect(turns[0].stopReason).toBe("stall_detected");
+    expect(turns[0].metrics.stallDetected).toBe(true);
+    expect(turns[0].commands).toHaveLength(1);
+    expect(orchestrator.getGame().getAIFeedback("player_1")[0]?.message).toContain("read-only tool use");
   });
 
-  it("dispatches the next AI turn immediately after a slow request finishes once the interval is already satisfied", async () => {
+  it("does not re-queue commands returned by the runtime after the run completes", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
-    const player1Deferred = createDeferred<GenerateCodeResult>();
-    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      () => player1Deferred.promise
+    const queueSpy = vi.spyOn(orchestrator.getGame(), "queueCommand");
+    (orchestrator as any).isPolling = true;
+    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput) =>
+      createRunResult({
+        commands: [
+          {
+            id: "cmd_1",
+            type: "hold",
+            unitId: "worker-1",
+            playerId: "player_1",
+          },
+        ],
+      })
     );
-    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
 
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: player1GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: player2GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
-    };
+    await orchestrator.runAI("player_1");
 
-    await orchestrator.start();
-
-    expect(player1GenerateCode).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(3100);
-    expect(player1GenerateCode).toHaveBeenCalledTimes(1);
-
-    player1Deferred.resolve(createEmptyGenerateCodeResult());
-    await Promise.resolve();
-
-    await vi.advanceTimersByTimeAsync(150);
-
-    expect(player1GenerateCode).toHaveBeenCalledTimes(2);
-    const secondCall = player1GenerateCode.mock.calls.at(1);
-    if (!secondCall) {
-      throw new Error("Expected second generateCode call");
-    }
-    expect(secondCall[0].tick).toBeGreaterThanOrEqual(5);
-
-    orchestrator.stop();
+    expect(queueSpy).not.toHaveBeenCalled();
   });
 
   it("supports different AI intervals per player", async () => {
@@ -328,217 +248,54 @@ describe("GameOrchestrator", () => {
         },
       },
     });
-    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: player1GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: player2GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn(async () => ({ commands: [], errorMessage: undefined })),
-    };
+    const run1 = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    const run2 = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    (orchestrator as any).runtimeByPlayer.player_1.run = run1;
+    (orchestrator as any).runtimeByPlayer.player_2.run = run2;
 
     await orchestrator.start();
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 6 + 200);
 
-    expect(player1GenerateCode).toHaveBeenCalledTimes(1);
-    expect(player2GenerateCode).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(2500);
-
-    expect(player1GenerateCode.mock.calls.length).toBeGreaterThan(player2GenerateCode.mock.calls.length);
-
+    expect(run1.mock.calls.length).toBeGreaterThan(run2.mock.calls.length);
     orchestrator.stop();
   });
 
-  it("executes generated code against the latest state snapshot after a slow LLM response", async () => {
+  it("prepends the HQ-under-attack alert to summary when enemy soldiers are already in range", () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
-    const player1Deferred = createDeferred<GenerateCodeResult>();
-    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      () => player1Deferred.promise
-    );
-    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-    const player1ExecuteCode = vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-      commands: [],
-      errorMessage: undefined,
-    }));
+    const game = orchestrator.getGame();
+    const enemySoldier = game.getUnitManager().createUnit("soldier", 3, 10, "player_2");
+    enemySoldier.attackRange = 1;
 
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: player1GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: player2GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: player1ExecuteCode,
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
+    const runInput = (orchestrator as any).buildRunInput("player_1", game.getState()) as AgentRunInput;
 
-    await orchestrator.start();
-
-    expect(player1GenerateCode).toHaveBeenCalledTimes(1);
-    const firstCall = player1GenerateCode.mock.calls.at(0);
-    if (!firstCall) {
-      throw new Error("Expected first generateCode call");
-    }
-    const requestTick = firstCall[0].tick;
-
-    await vi.advanceTimersByTimeAsync(3100);
-    player1Deferred.resolve(createEmptyGenerateCodeResult());
-    await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(50);
-
-    expect(player1ExecuteCode).toHaveBeenCalledTimes(1);
-    const executionCall = player1ExecuteCode.mock.calls.at(0);
-    if (!executionCall) {
-      throw new Error("Expected executeCode call");
-    }
-    const executionPackage = executionCall[1];
-    if (!executionPackage) {
-      throw new Error("Expected execution package");
-    }
-    expect(executionPackage.tick).toBeGreaterThan(requestTick);
-    expect((orchestrator as any).lastAIState.player_1.tick).toBe(requestTick);
-
-    const savedTurns = (orchestrator as any).buildSavedAITurns();
-    const savedTurn = savedTurns.find((turn: { playerId: string }) => turn.playerId === "player_1");
-    expect(savedTurn?.requestTick).toBe(requestTick);
-    expect(savedTurn?.executeTick).toBe(executionPackage.tick);
-    orchestrator.stop();
+    expect(runInput.summary.startsWith("Alert: our HQ is under attack.")).toBe(true);
   });
 
-  it("forces a full payload when the provider requests a fresh baseline", async () => {
+  it("aborts the active run when stop is called", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
-    const player1GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-    const player2GenerateCode = vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(
-      async () => createEmptyGenerateCodeResult()
-    );
-
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => true,
-      generateCode: player1GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).llm2 = {
-      shouldForceFullState: () => false,
-      generateCode: player2GenerateCode,
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
-    (orchestrator as any).ai2 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
-
-    await orchestrator.start();
-    await vi.advanceTimersByTimeAsync(150);
-
-    expect(player1GenerateCode).toHaveBeenCalled();
-    const firstCall = player1GenerateCode.mock.calls.at(0);
-    if (!firstCall) {
-      throw new Error("Expected first generateCode call");
-    }
-    expect(firstCall[0].mode).toBe("full");
-
-    orchestrator.stop();
-  });
-
-  it("feeds back when generated code produces no commands", async () => {
-    const orchestrator = new GameOrchestrator(createMatchConfig());
-
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
-        code: "const worker = me.workers[0];",
-        rawResponse: "const worker = me.workers[0];",
-        requestMessages: [],
-      })),
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
+    let capturedSignal: AbortSignal | undefined;
+    let resolveSignalReady: (() => void) | null = null;
+    const signalReady = new Promise<void>((resolve) => {
+      resolveSignalReady = resolve;
+    });
+    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(
+      async (_input: AgentRunInput, _callbacks?: unknown, signal?: AbortSignal) => {
+        capturedSignal = signal;
+        resolveSignalReady?.();
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return createRunResult({ stopReason: "aborted" });
+      }
+    );
 
-    await orchestrator.runAI("player_1");
+    const runPromise = orchestrator.runAI("player_1");
+    await signalReady;
+    orchestrator.stop();
+    await runPromise;
 
-    const feedback = orchestrator.getGame().getAIFeedback("player_1");
-    const noCommandFeedback = feedback.find((log) => log.message.includes("produced no commands"));
-    expect(noCommandFeedback).toBeTruthy();
-    expect(noCommandFeedback?.type).toBe("ai_execution_error");
-  });
-
-  it("does not include generated source code in sandbox error feedback", async () => {
-    const orchestrator = new GameOrchestrator(createMatchConfig());
-
-    (orchestrator as any).isPolling = true;
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
-        code: "This is not JavaScript\nconst worker = me.workers[0];",
-        rawResponse: "This is not JavaScript\nconst worker = me.workers[0];",
-        requestMessages: [],
-      })),
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: "Unexpected identifier 'is'",
-        errorType: "SyntaxError",
-      })),
-    };
-
-    await orchestrator.runAI("player_1");
-
-    const feedback = orchestrator.getGame().getAIFeedback("player_1");
-    const errorFeedback = feedback.find((log) => log.message.includes("Unexpected identifier"));
-    expect(errorFeedback).toBeTruthy();
-    expect(errorFeedback?.type).toBe("ai_execution_error");
+    expect(capturedSignal?.aborted).toBe(true);
   });
 
   it("writes a readable transcript file when per-match debug recording is enabled", async () => {
@@ -550,32 +307,94 @@ describe("GameOrchestrator", () => {
     });
 
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).llm1 = {
-      shouldForceFullState: () => false,
-      generateCode: vi.fn<[AIPromptPayload], Promise<GenerateCodeResult>>(async () => ({
-        code: "function main() {}",
-        rawResponse: "```javascript\nfunction main() {}\n```",
-        requestMessages: [{ role: "user", content: "{\"tick\":0}" }],
-      })),
-      getModel: () => "test-model",
-      getBaseURL: () => undefined,
-    };
-    (orchestrator as any).ai1 = {
-      executeCode: vi.fn<[string, AIStatePackage], Promise<ExecuteCodeResult>>(async () => ({
-        commands: [],
-        errorMessage: undefined,
-      })),
-    };
+    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput, callbacks?: {
+      onAssistantMessage?: (message: string) => void;
+      onToolCall?: (record: { toolCallId: string; toolName: string; args: unknown; result: unknown; isError: boolean }) => void;
+    }) => {
+      callbacks?.onAssistantMessage?.("scouted map");
+      callbacks?.onToolCall?.({
+        toolCallId: "tool_1",
+        toolName: "get_map_state",
+        args: {},
+        result: { width: 21 },
+        isError: false,
+      });
+      return {
+        ...createRunResult(),
+        assistantMessages: ["scouted map"],
+        toolCalls: [
+          {
+            toolCallId: "tool_1",
+            toolName: "get_map_state",
+            args: {},
+            result: { width: 21 },
+            isError: false,
+          },
+        ],
+      };
+    });
 
     await orchestrator.runAI("player_1");
 
     expect(mkdirSpy).toHaveBeenCalled();
-    expect(appendFileSpy).toHaveBeenCalledTimes(1);
-    const transcript = appendFileSpy.mock.calls[0]?.[1];
-    expect(String(transcript)).toContain("player=player_1");
-    expect(String(transcript)).toContain("--- request ---");
-    expect(String(transcript)).toContain("--- response ---");
-    expect(String(transcript)).toContain("function main() {}");
+    expect(appendFileSpy.mock.calls.length).toBeGreaterThanOrEqual(4);
+    const transcript = appendFileSpy.mock.calls.map((call) => String(call[1])).join("");
+    expect(transcript).toContain("(system)");
+    expect(transcript).toContain("(user)");
+    expect(transcript).toContain("player=player_1");
+    expect(transcript).toContain("--- summary ---");
+    expect(transcript).toContain("[assistant transcript=tx_1 player=player_1 requestTick=0]");
+    expect(transcript).toContain("[tool_call transcript=tx_1 player=player_1 requestTick=0]");
+    expect(transcript).toContain("[result transcript=tx_1 player=player_1 requestTick=0]");
+    expect(transcript).toContain("get_map_state");
+  });
+
+  it("streams transcript entries before a stopped run is discarded", async () => {
+    const appendFileSpy = vi.spyOn(fs, "appendFile").mockResolvedValue(undefined);
+    vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as never);
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      debug: { recordLLMTranscript: true },
+    });
+
+    (orchestrator as any).isPolling = true;
+    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(
+      async (_input: AgentRunInput, callbacks?: {
+        onAssistantMessage?: (message: string) => void;
+        onToolCall?: (record: { toolCallId: string; toolName: string; args: unknown; result: unknown; isError: boolean }) => void;
+      }) => {
+        callbacks?.onAssistantMessage?.("opening move");
+        callbacks?.onToolCall?.({
+          toolCallId: "tool_2",
+          toolName: "get_my_units",
+          args: {},
+          result: [{ id: "unit_1" }],
+          isError: false,
+        });
+        orchestrator.stop();
+        return {
+          ...createRunResult(),
+          assistantMessages: ["opening move"],
+          toolCalls: [
+            {
+              toolCallId: "tool_2",
+              toolName: "get_my_units",
+              args: {},
+              result: [{ id: "unit_1" }],
+              isError: false,
+            },
+          ],
+        };
+      }
+    );
+
+    await orchestrator.runAI("player_1");
+
+    const transcript = appendFileSpy.mock.calls.map((call) => String(call[1])).join("");
+    expect(transcript).toContain("opening move");
+    expect(transcript).toContain("get_my_units");
+    expect(transcript).toContain("--- result ---");
+    expect(transcript).toContain("[assistant transcript=tx_1 player=player_1 requestTick=0]");
+    expect(transcript).toContain("[tool_call transcript=tx_1 player=player_1 requestTick=0]");
   });
 });
-

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameState } from "@llmcraft/shared";
 import { PresetStore } from "../PresetStore";
+import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 import {
   buildStateMessagePayload,
   createPresetStore,
@@ -188,6 +189,11 @@ describe("server settings", () => {
           baseURL: "https://api.example.com/v1",
           model: "gpt-4o-mini",
           apiKey: "secret-token",
+          reasoningEffort: "medium",
+          extraRequestParams: {
+            thinking: { type: "disabled" },
+            max_tokens: 512,
+          },
         }),
       }),
       createResponse.res,
@@ -218,6 +224,8 @@ describe("server settings", () => {
     const runtime = await presetStore.getRuntimeConfig(presetId);
     expect(runtime.apiKey).toBe("secret-token");
     expect(runtime.model).toBe("gpt-4.1-mini");
+    expect(runtime.reasoningEffort).toBeNull();
+    expect(runtime.extraRequestParams).toBeNull();
 
     const deleteResponse = createResponseCapture();
     await handleHttpRequest(
@@ -263,6 +271,34 @@ describe("server settings", () => {
 
     expect(missingPresetResponse.statusCode).toBe(404);
     expect(missingPresetResponse.payload).toContain("指定的预设不存在");
+  });
+
+  it("rejects extra request params that override core request fields", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+
+    const response = createResponseCapture();
+    await handleHttpRequest(
+      createRequest({
+        method: "POST",
+        url: "/api/settings/presets",
+        body: JSON.stringify({
+          name: "Preset A",
+          providerType: "openai-compatible",
+          baseURL: "https://api.example.com/v1",
+          model: "gpt-4o-mini",
+          apiKey: "secret-token",
+          extraRequestParams: {
+            model: "other-model",
+          },
+        }),
+      }),
+      response.res,
+      state
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(response.payload).toContain("高级请求参数不能覆盖 model");
   });
 
   it("rejects start when a preset id is missing", async () => {
@@ -488,6 +524,95 @@ describe("server settings", () => {
         debug: { recordLLMTranscript: true },
       })
     );
+  });
+
+  it("prepares selected players before start and reports status", async () => {
+    const presetStore = await createStore();
+    const player1Preset = await presetStore.create({
+      name: "Red",
+      providerType: "openai-compatible",
+      baseURL: "https://api.one.test/v1",
+      model: "model-one",
+      apiKey: "token-one",
+    });
+    const player2Preset = await presetStore.create({
+      name: "Blue",
+      providerType: "openai-compatible",
+      baseURL: "https://api.two.test/v1",
+      model: "model-two",
+      apiKey: "token-two",
+    });
+    const prepare = vi.fn(async () => undefined);
+    const createOrchestrator = vi.fn(() => ({
+      prepare,
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(() => undefined),
+      saveRecord: vi.fn(async () => "logs/records/mock.json"),
+      getGame: vi.fn(() => ({
+        getState: () => null,
+        getSnapshots: () => [],
+      })),
+    }));
+    const state = createServerState(presetStore, createOrchestrator);
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "prepare",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+        warmup: { player_1: true, player_2: false },
+      }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(createOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        player1: expect.objectContaining({ model: "model-one" }),
+        player2: expect.objectContaining({ model: "model-two" }),
+      })
+    );
+    expect(prepare).toHaveBeenCalledWith({ player_1: true, player_2: false });
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"prepare_status"'));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"player_1":"ready"'));
+  });
+
+  it("tests a preset API connection without exposing the saved api key", async () => {
+    const presetStore = await createStore();
+    const preset = await presetStore.create({
+      name: "Preset A",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.com/v1",
+      model: "gpt-4o-mini",
+      apiKey: "secret-token",
+    });
+    const state = createServerState(presetStore);
+    const response = createResponseCapture();
+    const testSpy = vi
+      .spyOn(OpenAICompatibleProvider.prototype, "testConnection")
+      .mockResolvedValue({ responseText: "OK" });
+
+    await handleHttpRequest(
+      createRequest({
+        method: "POST",
+        url: "/api/settings/presets/test",
+        body: JSON.stringify({
+          presetId: preset.id,
+          providerType: "openai-compatible",
+          baseURL: "https://api.example.com/v1",
+          model: "gpt-4o-mini",
+        }),
+      }),
+      response.res,
+      state
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(testSpy).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(response.payload) as { ok: boolean; responseText: string; model: string };
+    expect(body).toMatchObject({ ok: true, responseText: "OK", model: "gpt-4o-mini" });
+    expect(response.payload).not.toContain("secret-token");
   });
 
   it("starts benchmark orchestration with the selected preset and cpu strategy", async () => {

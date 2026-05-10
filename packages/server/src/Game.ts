@@ -65,6 +65,8 @@ type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
   lastAttackTick?: number;
 };
 
+const STARTING_CREDITS = 400;
+
 export class Game {
   private tick = 0;
   private unitManager = new UnitManager();
@@ -97,13 +99,13 @@ export class Game {
         id: "player_1",
         units: [],
         buildings: [],
-        resources: { credits: 200 },
+        resources: { credits: STARTING_CREDITS },
       },
       {
         id: "player_2",
         units: [],
         buildings: [],
-        resources: { credits: 200 },
+        resources: { credits: STARTING_CREDITS },
       },
     ];
 
@@ -452,7 +454,8 @@ export class Game {
               command.position.x,
               command.position.y,
               this.tiles,
-              blockedPositions
+              blockedPositions,
+              true
             );
 
             if (result === RESULT_CODES.OK) {
@@ -865,6 +868,7 @@ export class Game {
             },
           }, {
             owner: command.playerId,
+            feedbackTarget: command.playerId,
           });
         }
         break;
@@ -975,6 +979,17 @@ export class Game {
       }
 
       const attackMoveIntent = runtimeUnit.intent;
+      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
+        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
+        : null;
+
+      if (!moveTarget || (runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y)) {
+        this.unitManager.clearPath(runtimeUnit);
+        runtimeUnit.intent = { type: "hold" };
+        runtimeUnit.state = UNIT_STATES.IDLE;
+        continue;
+      }
+
       if (runtimeUnit.lastAttackTick !== this.tick) {
         const prioritizedTarget = this.findPrioritizedAttackTarget(
           runtimeUnit,
@@ -997,26 +1012,18 @@ export class Game {
       }
 
       delete attackMoveIntent.targetId;
-      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
-        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
-        : null;
-      if (!moveTarget) {
-        runtimeUnit.state = UNIT_STATES.IDLE;
-        continue;
-      }
-
-      const alreadyAtTarget = runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y;
       const alreadyPathing =
         runtimeUnit.pathTarget?.x === moveTarget.x &&
         runtimeUnit.pathTarget?.y === moveTarget.y;
-      if (!alreadyAtTarget && !alreadyPathing) {
+      if (!alreadyPathing) {
         const blockedPositions = this.buildingManager.getOccupiedPositions();
         const result = this.unitManager.setMoveTarget(
           runtimeUnit,
           moveTarget.x,
           moveTarget.y,
           this.tiles,
-          blockedPositions
+          blockedPositions,
+          true
         );
         if (result === RESULT_CODES.OK) {
           runtimeUnit.intent = {
@@ -1128,10 +1135,10 @@ export class Game {
     playerId: PlayerId,
     targetPriority?: string[]
   ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
-    const priority = (targetPriority && targetPriority.length > 0
-      ? targetPriority
-      : ["hq", "soldier", "worker", "barracks"]
-    ).map((value) => String(value).toLowerCase());
+    const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
+    const priority = (hasExplicitPriority ? targetPriority! : ["hq", "soldier", "worker", "barracks"]).map((value) =>
+      String(value).toLowerCase()
+    );
 
     const enemyUnits = this.unitManager
       .getAllUnits()
@@ -1158,6 +1165,10 @@ export class Game {
       if (buildingTarget) {
         return { kind: "building", target: buildingTarget };
       }
+    }
+
+    if (hasExplicitPriority) {
+      return null;
     }
 
     if (fallbackBuildings.length > 0) {
@@ -1277,7 +1288,10 @@ export class Game {
               this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
               this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
                 unitType,
-              }, { owner: playerId });
+              }, {
+                owner: playerId,
+                feedbackTarget: playerId,
+              });
             } else {
               this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
                 unitType,
@@ -1421,7 +1435,10 @@ export class Game {
               unitId: unit.id,
               amount: gatheredCredits,
               carryingCredits: unit.carryingCredits,
-            }, { owner: player.id });
+            }, {
+              owner: player.id,
+              feedbackTarget: player.id,
+            });
             economyActionTaken = true;
           }
         }
@@ -1437,7 +1454,10 @@ export class Game {
             buildingId: hq.id,
             amount: deliveredCredits,
             credits: player.resources.credits,
-          }, { owner: player.id });
+          }, {
+            owner: player.id,
+            feedbackTarget: player.id,
+          });
           economyActionTaken = true;
         }
 

@@ -1,39 +1,48 @@
 import {
-  AIStatePackage,
+  AgentRunInput,
+  AgentToolCallRecord,
+  AITerminalEvent,
   AITurnRecord,
   GameRecord,
   GameState,
-  MatchLLMConfig,
   MAP_HEIGHT,
   MAP_WIDTH,
+  MatchLLMConfig,
+  PlayerId,
+  PLAYER_IDS,
   SavedAITurnRecord,
   TickDeltaRecord,
   LOG_TYPES,
   LOG_LEVELS,
   LOG_DISPLAY_TARGETS,
-  PlayerId,
-  PLAYER_IDS,
-  AIFeedbackTarget
+  AIFeedbackTarget,
+  TICK_INTERVAL_MS,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AISandboxErrorType } from "./AISandbox";
 import { Game } from "./Game";
-import { AISandbox } from "./AISandbox";
-import { AIStatePackageBuilder } from "./AIStatePackageBuilder";
 import { createLLMProvider } from "./createLLMProvider";
 import { LLMProvider } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
+import { GameAgentBridge } from "./agent/GameAgentBridge";
+import { AgentRuntime, AgentRuntimeResult } from "./agent/AgentRuntime";
+import { getHQUnderAttackAlertFromGameState } from "./HQAlert";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
+export const MATCH_START_ABORTED = "MATCH_START_ABORTED";
 
-type RecordedAITurn = AITurnRecord & { errorType?: AISandboxErrorType };
-type SavedRecordedAITurn = SavedAITurnRecord & { errorType?: AISandboxErrorType };
+type RuntimeMap = Record<PlayerId, AgentRuntime>;
+type BridgeMap = Record<PlayerId, GameAgentBridge>;
+
+export interface AITerminalFeed {
+  sessionId: string;
+  events: AITerminalEvent[];
+}
 
 export interface GameOrchestratorRuntimeOptions {
   aiIntervalTicks?: number;
@@ -48,34 +57,39 @@ export type GameOrchestratorConfig = MatchLLMConfig & {
 
 export class GameOrchestrator {
   private game: Game;
-  private ai1: AISandbox;
-  private ai2: AISandbox;
   private llm1: LLMProvider;
   private llm2: LLMProvider;
+  private runtimeByPlayer: RuntimeMap;
+  private bridgeByPlayer: BridgeMap;
   private lastAIDispatchTick = { player_1: -100, player_2: -100 };
-  private aiInterval = 5; // 兼容记录格式，表示默认 AI 间隔
+  private aiInterval = 5;
   private aiIntervals = { player_1: 5, player_2: 5 };
-  private isRunningAI = { player_1: false, player_2: false }; // 防止并发调用
+  private isRunningAI = { player_1: false, player_2: false };
+  private activeRunControllers: Partial<Record<PlayerId, AbortController>> = {};
+  private warmupController: AbortController | null = null;
   private aiDirty = { player_1: true, player_2: true };
   private lastObservedTick = -1;
   private isPolling = false;
+  private isPreparing = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private runSession = 0;
   private startedAt = new Date().toISOString();
-  private lastAIState: Record<string, AIStatePackage | null> = { player_1: null, player_2: null };
-  private aiTurns: RecordedAITurn[] = [];
-  private aiWindowSize = 20;
+  private aiTurns: AITurnRecord[] = [];
   private readonly transcriptEnabled: boolean;
   private readonly transcriptFilePath: string | null;
   private readonly recordDir: string;
   private lastSavedRecordSignature: string | null = null;
   private lastSavedRecordPath: string | null = null;
   private transcriptWriteChain = Promise.resolve();
+  private transcriptSequence = 0;
+  private aiTerminalSessionId = `terminal-${this.startedAt.replace(/[:.]/g, "-")}`;
+  private aiTerminalEvents: AITerminalEvent[] = [];
+  private aiTerminalEventSequence = 0;
+  private aiRequestCounts = { player_1: 0, player_2: 0 };
+  private warmupRequestNumbers: Partial<Record<PlayerId, number>> = {};
 
   constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
-    this.ai1 = new AISandbox("player_1");
-    this.ai2 = new AISandbox("player_2");
     this.aiInterval = config.runtime?.aiIntervalTicks ?? 5;
     this.aiIntervals = {
       player_1: config.runtime?.aiIntervalTicksByPlayer?.player_1 ?? this.aiInterval,
@@ -88,6 +102,14 @@ export class GameOrchestrator {
       : null;
     this.llm1 = createLLMProvider(config.player1);
     this.llm2 = createLLMProvider(config.player2);
+    this.bridgeByPlayer = {
+      player_1: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1),
+      player_2: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
+    };
+    this.runtimeByPlayer = {
+      player_1: new AgentRuntime(this.llm1, this.bridgeByPlayer.player_1),
+      player_2: new AgentRuntime(this.llm2, this.bridgeByPlayer.player_2),
+    };
   }
 
   getGame(): Game {
@@ -98,178 +120,133 @@ export class GameOrchestrator {
     return this.transcriptFilePath;
   }
 
+  getAITerminalFeed(): AITerminalFeed {
+    return {
+      sessionId: this.aiTerminalSessionId,
+      events: structuredClone(this.aiTerminalEvents),
+    };
+  }
+
   async runAI(playerId: PlayerId, sessionId = this.runSession): Promise<void> {
-    // 防止并发调用
-    if (this.isRunningAI[playerId as keyof typeof this.isRunningAI]) return;
-    this.isRunningAI[playerId as keyof typeof this.isRunningAI] = true;
+    if (this.isRunningAI[playerId]) {
+      return;
+    }
+    this.isRunningAI[playerId] = true;
 
     try {
       const state = this.game.getState();
-      this.aiDirty[playerId as keyof typeof this.aiDirty] = false;
-      this.lastAIDispatchTick[playerId as keyof typeof this.lastAIDispatchTick] = state.tick;
-
-      const packageBuilder = AIStatePackageBuilder;
-      const aiPackage = packageBuilder.build(
-        playerId,
-        state,
-        this.game,
-        this.lastAIState[playerId]?.tick
-      );
-
-      const sandbox = playerId === PLAYER_IDS.PLAYER_1 ? this.ai1 : this.ai2;
-      const llm = playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
-      const shouldForceFullState = llm.shouldForceFullState();
-      const promptPayload = packageBuilder.buildPromptPayload(
-        aiPackage,
-        this.lastAIState[playerId],
-        shouldForceFullState
-      );
-      const { code, rawResponse, requestMessages, errorMessage: providerErrorMessage } =
-        await llm.generateCode(promptPayload);
-      if (providerErrorMessage) {
-        this.game.addLog(
-          LOG_TYPES.AI_GENERATION_ERROR,
-          providerErrorMessage,
-          undefined,
-          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
-        );
+      this.aiDirty[playerId] = false;
+      this.lastAIDispatchTick[playerId] = state.tick;
+      const runInput = this.buildRunInput(playerId, state);
+      const runtime = this.runtimeByPlayer[playerId];
+      const controller = new AbortController();
+      this.activeRunControllers[playerId] = controller;
+      const warmupRequestNumber = this.warmupRequestNumbers[playerId];
+      const requestNumber = warmupRequestNumber ?? ++this.aiRequestCounts[playerId];
+      const transcriptRunId = `tx_${++this.transcriptSequence}`;
+      if (warmupRequestNumber === undefined) {
+        this.appendTerminalRequestEvent(playerId, requestNumber, state.tick);
       }
+      await this.writeTranscriptRequestStart(transcriptRunId, playerId, state.tick, runInput);
+      const result = await runtime.run(runInput, {
+        onAssistantMessage: (message) => {
+          this.appendTerminalAssistantEvent(playerId, requestNumber, state.tick, message);
+          void this.writeTranscriptAssistantMessage(transcriptRunId, playerId, state.tick, message);
+        },
+        onToolCall: (record) => {
+          this.appendTerminalToolCallEvent(playerId, requestNumber, state.tick, record);
+          void this.writeTranscriptToolCall(transcriptRunId, playerId, state.tick, record);
+        },
+      }, controller.signal);
+      const latestState = this.game.getState();
+      await this.writeTranscriptRunComplete(transcriptRunId, playerId, state.tick, latestState.tick, result);
       if (!this.isPolling || sessionId !== this.runSession) {
-        await this.writeTranscript(
-          this.formatTranscriptEntry({
-            createdAt: new Date().toISOString(),
-            playerId,
-            requestTick: state.tick,
-            executeTick: undefined,
-            mode: promptPayload.mode,
-            model: llm.getModel(),
-            requestMessages,
-            rawResponse,
-            parsedCode: code,
-            providerErrorMessage,
-            commands: undefined,
-            sandboxErrorMessage: "本轮响应返回后，对局已停止，未执行沙箱。",
-            sandboxErrorType: undefined,
-          })
-        );
         return;
       }
 
-      const latestState = this.game.getState();
       if (latestState.winner) {
         return;
       }
 
-      const latestAIPackage = packageBuilder.build(
-        playerId,
-        latestState,
-        this.game,
-        this.lastAIState[playerId]?.tick
-      );
-
-      this.game.setAIOutput(playerId, code);
-
-      const { commands, errorType, errorMessage } = await sandbox.executeCode(code, latestAIPackage);
-      if (!this.isPolling || sessionId !== this.runSession) {
-        return;
-      }
-      if (errorMessage) {
+      if (result.stopReason === "stall_detected") {
         this.game.addLog(
-          LOG_TYPES.AI_EXECUTION_ERROR,
-          errorMessage,
-          { errorType: errorType ?? "unknown" },
-          { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
-        );
-      } else if (commands.length === 0) {
-        this.game.addLog(
-          LOG_TYPES.AI_EXECUTION_ERROR,
-          "Generated code executed successfully but produced no commands. Issue at least one build, spawn, move, attack, attackInRange, attackMoveTo, harvestLoop, or hold command when units or buildings can act.",
-          { errorType: "no_commands" },
-          { level: LOG_LEVELS.WARNING, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+          LOG_TYPES.AI_GENERATION_ERROR,
+          "Agent run stopped after repeated read-only tool use with no actionable progress.",
+          undefined,
+          {
+            level: LOG_LEVELS.WARNING,
+            owner: playerId,
+            feedbackTarget: playerId as AIFeedbackTarget,
+            displayTarget: LOG_DISPLAY_TARGETS.BACKEND,
+          }
         );
       }
-      for (const cmd of commands) {
-        this.game.queueCommand(cmd);
-      }
+
+      const assistantPreview = result.assistantMessages.at(-1) ?? `tool-calls=${result.toolCalls.length}`;
+      this.game.setAIOutput(playerId, assistantPreview);
+
       const createdAt = new Date().toISOString();
       this.aiTurns.push({
         playerId,
         requestTick: state.tick,
         executeTick: latestState.tick,
-        requestMessages,
-        promptPayload,
-        response: code,
-        commands,
-        errorType,
-        errorMessage,
-        model: llm.getModel(),
-        baseURL: llm.getBaseURL(),
+        runInput,
+        assistantMessages: result.assistantMessages,
+        toolCalls: result.toolCalls,
+        plans: result.plans,
+        commands: result.commands,
+        stopReason: result.stopReason,
+        metrics: result.metrics,
+        model: this.getProvider(playerId).getModel(),
+        baseURL: this.getProvider(playerId).getBaseURL(),
         createdAt,
       });
-      await this.writeTranscript(
-        this.formatTranscriptEntry({
-          createdAt,
-          playerId,
-          requestTick: state.tick,
-          executeTick: latestState.tick,
-          mode: promptPayload.mode,
-          model: llm.getModel(),
-          requestMessages,
-          rawResponse,
-          parsedCode: code,
-          providerErrorMessage,
-          commands,
-          sandboxErrorMessage: errorMessage,
-          sandboxErrorType: errorType,
-        })
-      );
-      // Track what the LLM actually saw, not the later state used for sandbox execution.
-      // Otherwise feedback/events that occur while a slow request is in flight are skipped
-      // from future prompts even though they were never sent to the model.
-      this.lastAIState[playerId] = aiPackage;
-    } catch (e) {
-      console.error(`AI 错误 ${playerId}:`, e);
-      const errorMessage = e instanceof Error ? e.message : String(e);
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       this.game.addLog(
         LOG_TYPES.AI_GENERATION_ERROR,
         errorMessage,
         undefined,
-        { level: LOG_LEVELS.ERROR, owner: playerId as PlayerId, feedbackTarget: playerId as AIFeedbackTarget, displayTarget: LOG_DISPLAY_TARGETS.BACKEND }
+        {
+          level: LOG_LEVELS.ERROR,
+          owner: playerId,
+          feedbackTarget: playerId as AIFeedbackTarget,
+          displayTarget: LOG_DISPLAY_TARGETS.BACKEND,
+        }
       );
       await this.writeTranscript(
-        this.formatTranscriptEntry({
-          createdAt: new Date().toISOString(),
-          playerId,
-          requestTick: this.game.getState().tick,
-          executeTick: undefined,
-          mode: "delta",
-          model: playerId === "player_1" ? this.llm1.getModel() : this.llm2.getModel(),
-          requestMessages: [],
-          rawResponse: "",
-          parsedCode: "",
-          providerErrorMessage: errorMessage,
-          commands: undefined,
-          sandboxErrorMessage: "AI 调度阶段抛出异常，未完成本轮执行。",
-          sandboxErrorType: undefined,
-        })
+        [
+          `[${new Date().toISOString()}] player=${playerId} requestTick=${this.game.getState().tick} stopReason=runtime_error`,
+          "--- error ---",
+          errorMessage,
+          "==========",
+          "",
+        ].join("\n")
       );
     } finally {
-      this.isRunningAI[playerId as keyof typeof this.isRunningAI] = false;
+      delete this.warmupRequestNumbers[playerId];
+      delete this.activeRunControllers[playerId];
+      this.isRunningAI[playerId] = false;
     }
   }
 
   async start(): Promise<void> {
-    if (this.isPolling) return;
+    if (this.isPolling) {
+      return;
+    }
 
     this.runSession++;
+    const sessionId = this.runSession;
     this.isPolling = true;
     this.lastObservedTick = -1;
     this.aiDirty = { player_1: true, player_2: true };
     this.game.start();
 
-    // 轮询 AI 更新
     const poll = async () => {
-      if (!this.isPolling) return;
+      if (!this.isPolling) {
+        return;
+      }
 
       const state = this.game.getState();
       if (state.winner) {
@@ -279,16 +256,21 @@ export class GameOrchestrator {
 
       if (state.tick !== this.lastObservedTick) {
         this.lastObservedTick = state.tick;
+        for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
+          const planCommands = this.runtimeByPlayer[playerId].advancePlans();
+          for (const command of planCommands) {
+            this.game.queueCommand(command);
+          }
+        }
         this.aiDirty.player_1 = true;
         this.aiDirty.player_2 = true;
       }
 
       for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
         if (
-          this.aiDirty[playerId as keyof typeof this.aiDirty] &&
-          !this.isRunningAI[playerId as keyof typeof this.isRunningAI] &&
-          state.tick - this.lastAIDispatchTick[playerId as keyof typeof this.lastAIDispatchTick] >=
-            this.aiIntervals[playerId as keyof typeof this.aiIntervals]
+          this.aiDirty[playerId] &&
+          !this.isRunningAI[playerId] &&
+          state.tick - this.lastAIDispatchTick[playerId] >= this.aiIntervals[playerId]
         ) {
           void this.runAI(playerId, this.runSession);
         }
@@ -302,12 +284,86 @@ export class GameOrchestrator {
 
   stop(): void {
     this.isPolling = false;
+    this.isPreparing = false;
     this.runSession++;
+    this.warmupController?.abort();
+    this.activeRunControllers.player_1?.abort();
+    this.activeRunControllers.player_2?.abort();
     if (this.pollTimeout) {
       clearTimeout(this.pollTimeout);
       this.pollTimeout = null;
     }
     this.game.stop();
+  }
+
+  async prepare(warmup: Partial<Record<PlayerId, boolean>>): Promise<void> {
+    if (this.isPolling) {
+      throw new Error("MATCH_ALREADY_RUNNING");
+    }
+    if (this.isPreparing) {
+      return;
+    }
+
+    this.runSession++;
+    const sessionId = this.runSession;
+    this.isPreparing = true;
+    try {
+      await this.runWarmups(sessionId, warmup);
+    } finally {
+      if (sessionId === this.runSession) {
+        this.isPreparing = false;
+      }
+    }
+  }
+
+  private async runWarmups(sessionId: number, warmup: Partial<Record<PlayerId, boolean>>): Promise<void> {
+    const warmupPlayers = [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2].filter(
+      (playerId) => warmup[playerId]
+    );
+    if (warmupPlayers.length === 0) {
+      return;
+    }
+
+    const controller = new AbortController();
+    this.warmupController = controller;
+    try {
+      await Promise.all(warmupPlayers.map((playerId) => this.runWarmup(playerId, sessionId, controller.signal)));
+    } finally {
+      if (this.warmupController === controller) {
+        this.warmupController = null;
+      }
+    }
+  }
+
+  private async runWarmup(playerId: PlayerId, sessionId: number, signal: AbortSignal): Promise<void> {
+    if (!this.isPreparing || sessionId !== this.runSession || signal.aborted) {
+      throw new Error(MATCH_START_ABORTED);
+    }
+
+    const requestNumber = ++this.aiRequestCounts[playerId];
+    this.warmupRequestNumbers[playerId] = requestNumber;
+    const runInput = this.buildRunInput(playerId, this.game.getState());
+    this.appendTerminalRequestEvent(playerId, requestNumber, 0);
+    try {
+      const result = await this.runtimeByPlayer[playerId].warmup(
+        runInput,
+        {
+          onAssistantMessage: (message) => {
+            this.appendTerminalAssistantEvent(playerId, requestNumber, 0, message);
+          },
+        },
+        signal
+      );
+      if (result.stopReason === "aborted" || !this.isPreparing || sessionId !== this.runSession) {
+        throw new Error(MATCH_START_ABORTED);
+      }
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.message === MATCH_START_ABORTED)) {
+        throw new Error(MATCH_START_ABORTED);
+      }
+
+      throw new Error(`模型准备失败（${playerId === PLAYER_IDS.PLAYER_1 ? "红方" : "蓝方"}）: ${this.formatErrorMessage(error)}`);
+    }
   }
 
   async saveRecord(): Promise<string> {
@@ -335,7 +391,7 @@ export class GameOrchestrator {
         status: recordStatus,
         winner: this.game.getWinner(),
         aiIntervalTicks: this.aiInterval,
-        aiContextWindowTurns: this.aiWindowSize,
+        aiContextWindowTurns: this.aiTurns.length,
         map: {
           width: MAP_WIDTH,
           height: MAP_HEIGHT,
@@ -371,21 +427,110 @@ export class GameOrchestrator {
     return filePath;
   }
 
-  private buildSavedAITurns(): SavedRecordedAITurn[] {
+  private buildSavedAITurns(): SavedAITurnRecord[] {
     return this.aiTurns.map((turn) => ({
       playerId: turn.playerId,
       requestTick: turn.requestTick,
       executeTick: turn.executeTick,
-      windowMessageCount: turn.requestMessages.length,
-      promptPayload: turn.promptPayload,
-      response: turn.response,
+      runInput: turn.runInput,
+      assistantMessages: turn.assistantMessages,
+      toolCalls: turn.toolCalls,
+      plans: turn.plans,
       commands: turn.commands,
-      errorType: turn.errorType,
-      errorMessage: turn.errorMessage,
+      stopReason: turn.stopReason,
+      metrics: turn.metrics,
       model: turn.model,
       baseURL: turn.baseURL,
       createdAt: turn.createdAt,
     }));
+  }
+
+  private buildRunInput(playerId: PlayerId, state: GameState): AgentRunInput {
+    const me = state.players.find((player) => player.id === playerId)!;
+    const enemy = state.players.find((player) => player.id !== playerId)!;
+    const myHQ = me.buildings.find((building) => building.type === "hq");
+    const enemyHQ = enemy.buildings.find((building) => building.type === "hq");
+    const recentFeedback = this.game
+      .getAIFeedback(playerId, this.lastAIDispatchTick[playerId])
+      .slice(-5)
+      .map((log) => log.message);
+
+    const summaryLines = [
+      `tick=${state.tick}, intervalMs=${TICK_INTERVAL_MS}`,
+      `myCredits=${me.resources.credits}, myWorkers=${me.units.filter((unit) => unit.type === "worker" && unit.exists).length}, mySoldiers=${me.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
+      `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemySoldiers=${enemy.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
+      myHQ ? `myHQHp=${myHQ.hp}/${myHQ.maxHp}` : "myHQMissing=true",
+      enemyHQ ? `enemyHQHp=${enemyHQ.hp}/${enemyHQ.maxHp}` : "enemyHQMissing=true",
+      `activePlans=${this.runtimeByPlayer[playerId].getActivePlans().length}`,
+    ];
+    const alert = getHQUnderAttackAlertFromGameState(state, playerId);
+    if (alert) {
+      summaryLines.unshift(alert);
+    }
+
+    if (recentFeedback.length > 0) {
+      summaryLines.push(`recentEvents=${recentFeedback.join(" | ")}`);
+    }
+
+    return {
+      playerId,
+      tick: state.tick,
+      tickIntervalMs: TICK_INTERVAL_MS,
+      summary: summaryLines.join("\n"),
+    };
+  }
+
+  private appendTerminalRequestEvent(playerId: PlayerId, requestNumber: number, requestTick: number): void {
+    this.aiTerminalEvents.push({
+      id: `evt_${++this.aiTerminalEventSequence}`,
+      kind: "request",
+      playerId,
+      requestNumber,
+      requestTick,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  private appendTerminalAssistantEvent(
+    playerId: PlayerId,
+    requestNumber: number,
+    requestTick: number,
+    text: string
+  ): void {
+    this.aiTerminalEvents.push({
+      id: `evt_${++this.aiTerminalEventSequence}`,
+      kind: "assistant",
+      playerId,
+      requestNumber,
+      requestTick,
+      createdAt: new Date().toISOString(),
+      text,
+    });
+  }
+
+  private appendTerminalToolCallEvent(
+    playerId: PlayerId,
+    requestNumber: number,
+    requestTick: number,
+    toolCall: AgentToolCallRecord
+  ): void {
+    this.aiTerminalEvents.push({
+      id: `evt_${++this.aiTerminalEventSequence}`,
+      kind: "tool_call",
+      playerId,
+      requestNumber,
+      requestTick,
+      createdAt: new Date().toISOString(),
+      toolCall: structuredClone(toolCall),
+    });
+  }
+
+  private getProvider(playerId: PlayerId): LLMProvider {
+    return playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private buildTickDeltas(snapshots: Array<{ tick: number; state: GameState; aiOutputs: Record<string, string> }>): TickDeltaRecord[] {
@@ -549,42 +694,111 @@ export class GameOrchestrator {
     return diff;
   }
 
-  private formatTranscriptEntry(input: {
-    createdAt: string;
-    playerId: PlayerId;
-    requestTick: number;
-    executeTick?: number;
-    mode: "full" | "delta";
-    model: string;
-    requestMessages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
-    rawResponse: string;
-    parsedCode: string;
-    providerErrorMessage?: string;
-    commands?: unknown[];
-    sandboxErrorMessage?: string;
-    sandboxErrorType?: string;
-  }): string {
+  private formatTranscriptRequestStart(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    input: AgentRunInput
+  ): string {
     return [
-      `[${input.createdAt}] player=${input.playerId} mode=${input.mode} requestTick=${input.requestTick} executeTick=${input.executeTick ?? "n/a"} model=${input.model}`,
+      `[${new Date().toISOString()}] transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick} model=${this.getProvider(playerId).getModel()}`,
       "--- request ---",
-      input.requestMessages.length > 0
-        ? input.requestMessages.map((message) => `(${message.role})\n${message.content}`).join("\n\n")
-        : "(none)",
-      "--- response ---",
-      input.rawResponse || "(empty)",
-      "--- parsed_code ---",
-      input.parsedCode || "(empty)",
-      "--- provider_error ---",
-      input.providerErrorMessage || "(none)",
+      "(system)",
+      SYSTEM_PROMPT,
+      "",
+      "(user)",
+      JSON.stringify(input, null, 2),
+      "--- summary ---",
+      input.summary,
+      "--- stream ---",
+      "",
+    ].join("\n");
+  }
+
+  private formatTranscriptAssistantMessage(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    message: string
+  ): string {
+    return [
+      `[assistant transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick}]`,
+      message,
+      "",
+    ].join("\n");
+  }
+
+  private formatTranscriptToolCall(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    toolCall: AgentToolCallRecord
+  ): string {
+    return [
+      `[tool_call transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick}]`,
+      JSON.stringify(toolCall, null, 2),
+      "",
+    ].join("\n");
+  }
+
+  private formatTranscriptRunComplete(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    executeTick: number,
+    result: AgentRuntimeResult
+  ): string {
+    return [
+      `[result transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick}]`,
+      "--- result ---",
+      `executeTick=${executeTick}`,
+      `stopReason=${result.stopReason}`,
       "--- commands ---",
-      input.commands && input.commands.length > 0 ? JSON.stringify(input.commands, null, 2) : "(none)",
-      "--- sandbox ---",
-      input.sandboxErrorMessage
-        ? `${input.sandboxErrorType ? `type=${input.sandboxErrorType}\n` : ""}${input.sandboxErrorMessage}`
-        : "(none)",
+      result.commands.length > 0 ? JSON.stringify(result.commands, null, 2) : "(none)",
+      "--- plans ---",
+      result.plans.length > 0 ? JSON.stringify(result.plans, null, 2) : "(none)",
+      "--- metrics ---",
+      JSON.stringify(result.metrics, null, 2),
       "==========",
       "",
     ].join("\n");
+  }
+
+  private async writeTranscriptRequestStart(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    input: AgentRunInput
+  ): Promise<void> {
+    await this.writeTranscript(this.formatTranscriptRequestStart(transcriptRunId, playerId, requestTick, input));
+  }
+
+  private async writeTranscriptAssistantMessage(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    message: string
+  ): Promise<void> {
+    await this.writeTranscript(this.formatTranscriptAssistantMessage(transcriptRunId, playerId, requestTick, message));
+  }
+
+  private async writeTranscriptToolCall(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    toolCall: AgentToolCallRecord
+  ): Promise<void> {
+    await this.writeTranscript(this.formatTranscriptToolCall(transcriptRunId, playerId, requestTick, toolCall));
+  }
+
+  private async writeTranscriptRunComplete(
+    transcriptRunId: string,
+    playerId: PlayerId,
+    requestTick: number,
+    executeTick: number,
+    result: AgentRuntimeResult
+  ): Promise<void> {
+    await this.writeTranscript(this.formatTranscriptRunComplete(transcriptRunId, playerId, requestTick, executeTick, result));
   }
 
   private async writeTranscript(content: string): Promise<void> {
@@ -593,7 +807,7 @@ export class GameOrchestrator {
     }
 
     this.transcriptWriteChain = this.transcriptWriteChain.then(async () => {
-      await fs.mkdir(LLM_DEBUG_DIR, { recursive: true });
+      await fs.mkdir(path.dirname(this.transcriptFilePath!), { recursive: true });
       await fs.appendFile(this.transcriptFilePath!, content, "utf8");
     });
 

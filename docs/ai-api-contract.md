@@ -1,15 +1,15 @@
 # LLMCraft AI API Contract
 
-日期: 2026-04-12
+日期: 2026-05-08
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
 它回答两个问题：
 
-- 每轮模型会收到什么消息
-- 生成的 JavaScript 在沙箱里能访问什么全局对象和方法
+- 每次 agent run 会收到什么输入
+- 当前可用的工具是什么、各自做什么
 
-不包含战术建议，不包含设计愿景，不包含未来计划。
+不包含战术建议，不包含未来计划。
 
 ## 0. 对局与设置接口
 
@@ -25,20 +25,15 @@ interface LLMPresetSummary {
   baseURL: string;
   model: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
   hasApiKey: boolean;
   createdAt: string;
   updatedAt: string;
 }
 ```
 
-说明：
-
-- 不返回明文 `apiKey`
-- `hasApiKey` 只表示服务端已保存可解密 token
-
 ### 0.2 `POST /api/settings/presets`
-
-创建一个 OpenAI-compatible 预设：
 
 ```ts
 interface CreateLLMPresetRequest {
@@ -48,12 +43,12 @@ interface CreateLLMPresetRequest {
   model: string;
   apiKey: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 ```
 
 ### 0.3 `PUT /api/settings/presets/:id`
-
-更新一个已有预设：
 
 ```ts
 interface UpdateLLMPresetRequest {
@@ -63,21 +58,75 @@ interface UpdateLLMPresetRequest {
   model: string;
   apiKey?: string;
   rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
 }
 ```
 
 说明：
 
-- `apiKey` 缺省或空串时，服务端保留旧 token
-- `rpm` 留空表示不限制；填写时必须为正整数
+- `reasoningEffort` 是 OpenAI-compatible 通用 `reasoning_effort` 入口；留空表示不显式传递 `reasoning_effort`。
+- `extraRequestParams` 会合并到 chat completions 请求体；它是 LLMCraft 配置里的字段名，语义等价于 Python SDK 的 `extra_body` 内容，但不会在实际 HTTP body 外再包一层 `extra_body`。可用于 provider-specific 参数，例如 DeepSeek 的 `thinking`、`reasoning_effort` 或自定义 `max_tokens`。
+- 合并顺序是先写入 `reasoningEffort` 对应的 `reasoning_effort`，再合并 `extraRequestParams`；因此 `extraRequestParams.reasoning_effort` 会覆盖 `reasoningEffort` 快捷字段。
+- `extraRequestParams` 不能覆盖核心字段：`model`、`messages`、`tools`、`tool_choice`、`stream`、`signal`。
 
-### 0.4 `DELETE /api/settings/presets/:id`
+### 0.4 `POST /api/settings/presets/test`
 
-删除指定预设。
+测试当前预设配置是否能连通 OpenAI-compatible chat completions API。可用于已保存预设，也可用于尚未保存的新配置：
 
-### 0.5 WebSocket `start`
+```ts
+interface TestLLMPresetRequest {
+  presetId?: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+  rpm?: number | null;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+  extraRequestParams?: Record<string, unknown> | null;
+}
 
-当前实时对局启动消息为：
+interface TestLLMPresetResponse {
+  ok: true;
+  model: string;
+  baseURL?: string;
+  latencyMs: number;
+  responseText: string;
+}
+```
+
+说明：
+
+- 如果 `presetId` 指向已保存预设，且请求体未传 `apiKey`，服务端会使用该预设已保存的 API Key。
+- 如果没有 `presetId`，必须传 `apiKey`。
+- 响应不会返回明文 API Key。
+
+### 0.5 WebSocket `prepare`
+
+```json
+{
+  "type": "prepare",
+  "player1PresetId": "preset-red",
+  "player2PresetId": "preset-blue",
+  "debug": {
+    "recordLLMTranscript": true
+  },
+  "warmup": {
+    "player_1": true,
+    "player_2": false
+  }
+}
+```
+
+说明：
+
+- 红蓝双方必须都选择预设
+- 服务端会按两个 preset 创建或复用一套待开战 orchestrator
+- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
+- `warmup.player_1/player_2 = true` 时，对应模型会在游戏 tick 启动前先收到首个真实 `AgentRunInput + tools` 请求。服务端只等待模型返回第一条 assistant message；如果该 message 包含 tool calls，会先挂起，不执行工具、不返回 tool result。
+- 服务端会发送 `prepare_status`，告知前端准备中、已准备或失败。用户仍需另外发送 `start` 才会启动游戏时间。
+
+### 0.6 WebSocket `start`
 
 ```json
 {
@@ -92,14 +141,10 @@ interface UpdateLLMPresetRequest {
 
 说明：
 
-- 红蓝双方必须都选择预设
-- 服务端会按两个 preset 分别解密并创建两套独立 provider
-- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 LLM 完整 transcript 到 `packages/server/logs/llm-debug/`
-- 若 preset 不存在、不可解密或启动失败，服务端会通过 `type = "error"` 返回可读错误消息
+- 如果同一组预设和 debug 选项已有待开战 prepared orchestrator，`start` 会直接复用它并开始 tick；已挂起的首个 assistant/tool calls 会在正式开局后继续执行。
+- 如果没有匹配的 prepared orchestrator，`start` 会创建普通实时对局并立即开始 tick。
 
-### 0.6 WebSocket `reset`
-
-当前实时对局重置消息为：
+### 0.7 WebSocket `reset`
 
 ```json
 {
@@ -112,16 +157,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-说明：
-
-- `reset` 会按当前红蓝预设创建一局新的初始状态
-- `debug.recordLLMTranscript` 会跟随这次重置后的新对局配置
-- `reset` 不会自动开始模拟
-- 用户需要随后再发送 `start` 才会开始新一局
-
-### 0.7 WebSocket `stop`
-
-当前实时对局暂停消息为：
+### 0.8 WebSocket `stop`
 
 ```json
 {
@@ -129,14 +165,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-说明：
-
-- `stop` 会停止当前 orchestrator 的实时模拟
-- 如果当前没有正在运行的实时对局，服务端不会额外返回成功消息
-
-### 0.8 WebSocket `save_record`
-
-当前实时对局保存消息为：
+### 0.9 WebSocket `save_record`
 
 ```json
 {
@@ -144,14 +173,7 @@ interface UpdateLLMPresetRequest {
 }
 ```
 
-说明：
-
-- 只有当前存在实时对局时才允许保存
-- 若当前没有可保存的实时对局，服务端会通过 `type = "error"` 返回错误消息
-
-### 0.9 WebSocket `state`
-
-服务端会持续推送当前实时状态：
+### 0.10 WebSocket `state`
 
 ```ts
 interface ServerStateMessage {
@@ -162,14 +184,7 @@ interface ServerStateMessage {
 }
 ```
 
-说明：
-
-- `snapshots` 在实时模式下当前只发送最近 1 帧，用于展示最新 AI 输出，不再传最近 100 帧
-- `liveEnabled` 是服务端缓存值，不会在每次状态推送时重新读取 preset 存储
-
-### 0.10 WebSocket `error`
-
-服务端错误消息为：
+### 0.11 WebSocket `error`
 
 ```ts
 interface ServerErrorMessage {
@@ -178,14 +193,69 @@ interface ServerErrorMessage {
 }
 ```
 
+### 0.12 WebSocket `prepare_status`
+
+```ts
+type MatchPrepareState = "idle" | "preparing" | "ready" | "error";
+
+interface ServerPrepareStatusMessage {
+  type: "prepare_status";
+  statuses: Partial<Record<"player_1" | "player_2", MatchPrepareState>>;
+  message?: string;
+}
+```
+
+### 0.13 WebSocket `ai_terminal_events`
+
+右侧 AI 指挥终端使用增量事件流，不复用 `state.snapshots[].aiOutputs`。
+
+```ts
+interface ServerAITerminalEventsMessage {
+  type: "ai_terminal_events";
+  sessionId: string | null;
+  reset: boolean;
+  events: AITerminalEvent[];
+}
+
+type AITerminalEvent =
+  | {
+      id: string;
+      kind: "request";
+      playerId: "player_1" | "player_2";
+      requestNumber: number;
+      requestTick: number;
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "assistant";
+      playerId: "player_1" | "player_2";
+      requestNumber: number;
+      requestTick: number;
+      createdAt: string;
+      text: string;
+    }
+  | {
+      id: string;
+      kind: "tool_call";
+      playerId: "player_1" | "player_2";
+      requestNumber: number;
+      requestTick: number;
+      createdAt: string;
+      toolCall: AgentToolCallRecord;
+    };
+```
+
 说明：
 
-- 当前所有实时对局相关的可读错误都会通过该消息返回
-- 典型场景包括：消息类型非法、未选择预设、预设不存在、API Key 无法解密、当前没有可保存对局等
+- `reset = true` 表示前端应清空当前终端历史，并用这条消息里的 `events` 作为新的基线
+- `reset = false` 表示 `events` 是增量追加
+- `request` 事件只用于在终端中画出 `Request #N · tick X` 分隔线
+- `assistant` 事件显示模型文本输出
+- `tool_call` 事件显示工具 badge；其参数和结果在展开后查看
+- `request_error` 和 `request_finished` 不进入终端正文，错误仍通过 `error` 或游戏日志查看
 
-### 0.11 WebSocket `record_saved`
-
-服务端保存成功消息为：
+### 0.14 WebSocket `record_saved`
 
 ```ts
 interface ServerRecordSavedMessage {
@@ -194,34 +264,7 @@ interface ServerRecordSavedMessage {
 }
 ```
 
-说明：
-
-- `filePath` 是服务端返回的实际保存路径
-- 当前前端会据此提示用户记录文件保存位置
-
-### 0.12 WebSocket 共享联合类型
-
-当前 WebSocket 协议已统一收敛到 `packages/shared/src/ws-messages.ts`：
-
-```ts
-type ClientMessage =
-  | StartMatchMessage
-  | ResetMatchMessage
-  | { type: "stop" }
-  | { type: "save_record" }
-  | ClientStartBenchmarkMessage;
-
-type ServerMessage =
-  | ServerStateMessage
-  | ServerErrorMessage
-  | ServerRecordSavedMessage
-  | ServerBenchmarkProgressMessage
-  | ServerBenchmarkCompleteMessage;
-```
-
-### 0.13 WebSocket `start_benchmark`
-
-当前 benchmark 启动消息为：
+### 0.15 WebSocket `start_benchmark`
 
 ```json
 {
@@ -240,466 +283,472 @@ type ServerMessage =
 说明：
 
 - benchmark 只支持 `LLM preset vs CPU strategy`
-- 当前 CPU 策略仅支持 `random` 和 `rush`
-- benchmark 会先停止当前 live 对局，再串行跑完整个批次
-- 每一局会交替让 LLM 处于红方 / 蓝方，用于减少出生位偏差
-- `decisionIntervalTicks` 只用于控制 benchmark 中 CPU 一侧的决策间隔，单位是 tick；LLM 一侧保持默认 5 tick 调度
-- `recordReplay = true` 时，每个已完成 round 会自动保存 1 份回放到 `packages/server/logs/benchmark-records/`
-- 同一已结束对局的重复保存会复用已生成文件，不应再额外创建重复回放文件
-- `debug.recordLLMTranscript = true` 时，每个已完成 round 会额外生成 1 份 LLM Debug 日志到 `packages/server/logs/benchmark-llm-debug/`
-- benchmark 回放与 transcript 目前都以时间戳命名；在当前串行执行模型下通常不会冲突，但命名并非强唯一
+- 当前 CPU 策略支持 `random` 和 `rush`
+- benchmark 与 live match 现在共用同一套 tool-calling runtime
 
-### 0.14 WebSocket `benchmark_progress`
+## 1. Agent Run 输入
 
-服务端在每局结束后推送当前汇总进度：
+每次 AI 被唤醒时，不再收到完整 `AIPromptPayload + JavaScript 执行环境`；旧 `full/delta` 兼容输入已从代码中移除。
 
-```ts
-interface ServerBenchmarkProgressMessage {
-  type: "benchmark_progress";
-  cpuStrategy: "random" | "rush";
-  completedRounds: number;
-  totalRounds: number;
-  llmWins: number;
-  cpuWins: number;
-  draws: number;
-}
-```
+当前模型收到的是：
 
-### 0.15 WebSocket `benchmark_complete`
-
-服务端在 benchmark 完成或被用户停止后推送最终结果：
+- 固定 `system prompt`
+- 持续对话历史
+- 当前新的 `user` 消息，内容是 `AgentRunInput`
 
 ```ts
-interface ServerBenchmarkCompleteMessage {
-  type: "benchmark_complete";
-  cpuStrategy: "random" | "rush";
-  presetId: string;
-  totalRounds: number;
-  completedRounds: number;
-  llmWins: number;
-  cpuWins: number;
-  draws: number;
-  llmWinRate: number;
-  averageDurationTicks: number;
-  stopped: boolean;
-  rounds: Array<{
-    round: number;
-    llmSide: "player_1" | "player_2";
-    winner: "llm" | "cpu" | "draw";
-    durationTicks: number;
-    recordPath?: string;
-    transcriptPath?: string;
-  }>;
-}
-```
-
-说明：
-
-- `stopped = true` 表示 benchmark 在全部局数完成前被用户中止
-- `rounds` 里只包含实际跑完的局，不包含中止时未完成的当前局
-
-## 1. 输入结构
-
-每次模型调用都会收到：
-
-- `system prompt`
-- 最近 20 次 AI 对话窗口内的历史 `user / assistant` 消息
-- 当前这一轮新的 `user` 消息
-
-当前新的 `user` 消息内容是：
-
-```ts
-JSON.stringify(AIPromptPayload, null, 2)
-```
-
-当前 `AIPromptPayload` 结构：
-
-```ts
-interface AIPromptPayload {
-  mode: "full" | "delta";
+interface AgentRunInput {
+  playerId: "player_1" | "player_2";
   tick: number;
   tickIntervalMs: number;
   summary: string;
-  state: AIStatePackage | null;
-  delta: {
-    creditsChanged?: number;
-    myUnitChanges: Array<{
-      id: string;
-      type: "worker" | "soldier";
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-      state?: string;
-      carryingCredits?: number;
-      carryCapacity?: number;
-      intent?: {
-        type: "move" | "attack" | "attack_move" | "harvest_loop" | "hold" | "gather" | "deposit";
-        targetX?: number;
-        targetY?: number;
-        targetId?: string;
-        targetPriority?: string[];
-      } | null;
-    }>;
-    myBuildingChanges: Array<{
-      id: string;
-      type: "hq" | "barracks";
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyUnitChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "moved" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    enemyBuildingChanges: Array<{
-      id: string;
-      type: string;
-      change: "created" | "removed" | "damaged" | "updated";
-      x?: number;
-      y?: number;
-      hp?: number;
-      maxHp?: number;
-    }>;
-    aiFeedback: GameLog[];
-  } | null;
 }
 ```
 
-说明：
+字段说明：
 
-- `mode = "full"` 时，`state` 为完整基线状态，`delta = null`
-- `mode = "delta"` 时，`state = null`，变化写在 `delta`
-- 对话历史采用滑动窗口，保留最近 20 轮 `user / assistant`
-- 当窗口滚动将导致历史里不再保留任何一条 `mode = "full"` 基线时，服务端会把当前轮升级为一次新的 `mode = "full"`
-- `summary` 不是纯固定文案；服务端可以在前面追加短告警行，用于强调当前高风险态势
-- 当前已实现的告警只有一条：当我方 HQ 已受损或本轮继续掉血时，会追加 `Alert: our HQ is under attack.`
+- `playerId`: 当前 AI 阵营
+- `tick`: 当前游戏 tick
+- `tickIntervalMs`: tick 时长，当前固定 `500`
+- `summary`: 从上次 run 到现在的关键变化，以及当前最值得关注的现状摘要
 
-## 2. `AIStatePackage`
+当我方 HQ 已处于敌方攻击范围内时，`summary` 会在最前面插入一行固定警告：
 
-完整基线状态的结构如下：
+- `Alert: our HQ is under attack.`
+
+当前 `summary` 不承载完整状态快照。模型应通过工具主动读取战场信息。
+
+## 2. 工具体系
+
+### 2.1 只读观察工具
+
+#### `get_map_state`
+
+返回当前全图可见信息：
 
 ```ts
-interface AIStatePackage {
+{
   tick: number;
-  my: {
-    resources: {
-      credits: number;
-    };
-    units: Unit[];
-    buildings: Building[];
-  };
-  enemies: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  enemyBuildings: Array<{
-    id: string;
-    type: string;
-    x: number;
-    y: number;
-    hp: number;
-    maxHp: number;
-  }>;
-  map: {
-    width: number;
-    height: number;
-    tiles: Array<{
-      x: number;
-      y: number;
-      type: "empty" | "obstacle" | "resource";
-    }>;
-  };
-  unitStats: {
-    worker: UnitStats;
-    soldier: UnitStats;
-  };
-  buildingStats: {
-    hq: BuildingStats;
-    barracks: BuildingStats;
-  };
-  economy: {
-    workerCarryCapacity: number;
-    workerGatherRate: number;
-    hqDeliveryRange: number;
-  };
-  aiFeedbackSinceLastCall: GameLog[];
-  gameTimeRemaining: number;
-}
-```
-
-说明：
-
-- `enemies` 在输入 JSON 中只包含敌方单位
-- `enemyBuildings` 单独包含敌方建筑
-- `map.tiles` 当前只包含非空地块，也就是障碍物和资源点
-- `aiFeedbackSinceLastCall` 是最近切片，不是严格一次性消费队列
-
-## 3. 沙箱全局对象
-
-AI 代码在子进程中的 Node `vm` 上下文里运行。
-
-当前仅保证以下全局对象存在：
-
-- `game`
-- `me`
-- `enemies`
-- `enemyBuildings`
-- `aiFeedbackSinceLastCall`
-- `map`
-- `unitStats`
-- `utils`
-
-不要假设存在其他全局变量。
-
-## 3.5 AI 执行记录中的错误字段
-
-实时对局保存的 `aiTurns` 记录中，当前会同时保存：
-
-```ts
-type AITurnErrorType = string;
-```
-
-说明：
-
-- `errorType = "vm_timeout"` 表示 AI 代码在子进程 `vm` 中执行超时
-- `errorType = "parent_timeout"` 表示父进程在等待子进程结果时超时，通常代表进程启动、IPC 或主线程调度异常偏慢
-- JS 编译/运行错误会保留原始 `error.name`，例如 `"SyntaxError"`、`"ReferenceError"`、`"TypeError"`
-- `errorMessage` 仍保留可直接阅读的文本，用于 UI 和日志展示
-
-当前默认固定布局为：
-
-- 地图尺寸: `21 x 21`
-- `HQ`: `(2,10)` / `(18,10)`
-- 左右资源点: `(2,7)`、`(2,13)`、`(18,7)`、`(18,13)`
-- 上下资源点: `(7,2)`、`(13,2)`、`(7,18)`、`(13,18)`
-- 中轴障碍: `x = 10`，`y = 8..12`
-
-## 4. 全局对象定义
-
-### 4.1 `game`
-
-```ts
-const game: {
-  tick: number;
-  timeRemaining: number;
-};
-```
-
-### 4.2 `me`
-
-```ts
-const me: {
-  units: WrappedUnit[];
-  buildings: WrappedBuilding[];
-  resources: {
-    credits: number;
-  };
-  hq: WrappedBuilding | null;
-  workers: WrappedUnit[];
-  soldiers: WrappedUnit[];
-};
-```
-
-`WrappedUnit` 在普通单位字段基础上，额外提供：
-
-```ts
-unit.moveTo(pos: { x: number; y: number }): void;
-unit.attack(targetId: string): void;
-unit.attackInRange(targetPriority?: string[]): void;
-unit.attackMoveTo(pos: { x: number; y: number }, targetPriority?: string[]): void;
-unit.harvestLoop(pos?: { x: number; y: number }): void;
-unit.holdPosition(): void;
-unit.build(buildingType: "barracks", pos: { x: number; y: number }): void;
-```
-
-`WrappedBuilding` 在普通建筑字段基础上，额外提供：
-
-```ts
-building.spawnUnit(unitType: "worker" | "soldier"): void;
-```
-
-规则说明：
-
-- `hq` 只能 `spawnUnit("worker")`
-- `barracks` 只能 `spawnUnit("soldier")`
-- `worker.build("barracks", ...)` 是当前唯一可建造的建筑命令
-
-### 4.3 `enemies`
-
-```ts
-const enemies: Array<{
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  hp: number;
-  maxHp: number;
-}>;
-```
-
-说明：
-
-- 沙箱里的 `enemies` 只包含敌方单位
-- 敌方建筑单独出现在 `enemyBuildings`
-- 如果只想找敌方 HQ / barracks，应从 `enemyBuildings` 读取
-
-### 4.4 `enemyBuildings`
-
-```ts
-const enemyBuildings: Array<{
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  hp: number;
-  maxHp: number;
-}>;
-```
-
-### 4.5 `aiFeedbackSinceLastCall`
-
-```ts
-const aiFeedbackSinceLastCall: Array<{
-  tick: number;
-  phase: "generation" | "execution" | "command";
-  severity: "error" | "warning";
-  message: string;
-  errorType?: string;
-  code?: string;
-  meta?: {
-    x?: number;
-    y?: number;
-    requestedX?: number;
-    requestedY?: number;
-    targetId?: string;
-    hint?: string;
-  };
-}>;
-```
-
-### 4.6 `map`
-
-```ts
-const map: {
   width: number;
   height: number;
-  tiles: Array<{
+  asciiMap: string;
+  units: Array<{
+    id: string;
+    type: UnitType;
     x: number;
     y: number;
-    type: "empty" | "obstacle" | "resource";
+    hp: number;
+    maxHp: number;
+    state: UnitState;
+    relation: "self" | "enemy";
   }>;
-  getTile(x: number, y: number): {
+  buildings: Array<{
+    id: string;
+    type: BuildingType;
     x: number;
     y: number;
-    type: "empty" | "obstacle" | "resource";
-  };
-};
+    hp: number;
+    maxHp: number;
+    relation: "self" | "enemy";
+  }>;
+  cells?: Array<{
+    x: number;
+    y: number;
+    tile: TileType;
+    unit?: {
+      id: string;
+      type: UnitType;
+      x: number;
+      y: number;
+      hp: number;
+      maxHp: number;
+      state: UnitState;
+      relation: "self" | "enemy";
+    };
+    building?: {
+      id: string;
+      type: BuildingType;
+      x: number;
+      y: number;
+      hp: number;
+      maxHp: number;
+      relation: "self" | "enemy";
+    };
+  }>;
+}
 ```
 
 说明：
 
-- `map.tiles` 只包含非空地块
-- `map.getTile(x, y)` 对空地返回 `{ x, y, type: "empty" }`
+- 当前地图很小，且没有战争迷雾，所以默认返回全图可见的压缩信息
+- `asciiMap` 是无坐标轴的符号小地图，用于快速读取空间关系
+- 精确坐标默认看 `units` 和 `buildings`；只有需要逐格地形时才传 `includeCells=true`
+- `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
+- 单位和建筑子项带 `relation` 字段，表示是己方还是敌方
 
-### 4.7 `unitStats`
+默认符号约定：
+
+```text
+. empty
+# obstacle
+* resource
+H/B/S/W self hq/barracks/soldier/worker
+h/b/s/w enemy hq/barracks/soldier/worker
+```
+- 默认不返回 `cells`，以降低上下文体积
+- 传 `includeCells=true` 时只返回“有信息量”的格子：资源、障碍、单位、建筑
+- 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整格子信息（包括 empty）
+- `unit` 是精简视图，不返回 `my / playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段
+
+### 2.1.1 旧读取结果折叠
+
+在同一个长 run 中，新的同名同参数读取会替代旧读取结果。provider 不删除 assistant 文本，也不删除 tool-call 配对；只会把旧 read tool result 的大 JSON 折叠成 tombstone：
 
 ```ts
-const unitStats: {
-  worker: {
-    hp: number;
-    speed: number;
-    attack: number;
-    cost: number;
-    attackRange: number;
-  };
-  soldier: {
-    hp: number;
-    speed: number;
-    attack: number;
-    cost: number;
-    attackRange: number;
-  };
-};
+{
+  expired: true;
+  reason: "superseded_by_new_read";
+  toolName: string;
+  args: unknown;
+  observedTick: number | null;
+  message: string;
+}
 ```
 
-### 4.8 `utils`
+折叠粒度是 `toolName + normalizedArgs`。例如新的 `get_map_state({})` 只会折叠旧的同参数 `get_map_state`，不会折叠 `includeCells: true` 或 `includeEmptyTiles: true` 的旧结果。动作工具结果不会被该机制折叠。
+
+#### `get_my_state`
+
+返回我方经济与建筑状态：
 
 ```ts
-const utils: {
-  getRange(a: { x: number; y: number }, b: { x: number; y: number }): number;
-  inRange(a: { x: number; y: number }, b: { x: number; y: number }, range: number): boolean;
-  findClosestByRange(from: { x: number; y: number }, targets: Array<{ x: number; y: number }>): any;
-};
+{
+  tick: number;
+  credits: number;
+  hq: Building | null;
+  buildings: Building[];
+  productionQueues: Array<{ buildingId: string; queue: UnitType[] }>;
+  canBuildBarracks: boolean;
+  canSpawnWorker: boolean;
+  canSpawnSoldier: boolean;
+}
 ```
 
-## 5. 当前保证的行为
+#### `get_my_units`
 
-- `unit.moveTo(...)` 会下发移动命令，实际移动由游戏系统逐 tick 执行
-- 如果 `moveTo` 的目标格不可站，系统会自动改到附近最近的可达格
-- 当 `moveTo` 被自动改点时，`aiFeedbackSinceLastCall` 会出现 `code = "move_adjusted"`，并在 `meta.x / meta.y` 返回实际目标格
-- `unit.attack(...)` 会下发攻击命令，目标需要在攻击范围内
-- `unit.attackInRange(targetPriority?)` 会在命令真正执行时，按优先级重新选择当前射程内目标
-- `unit.attackInRange()` 的默认优先级是 `["hq", "soldier", "worker", "barracks"]`
-- `unit.attackInRange(["hq", "soldier", "worker"])` 适合在 AI 返回延迟较大时减少目标过期
-- `unit.attackMoveTo(...)` 会设置持续 `attack_move` 意图，单位会沿途推进，并在每个 tick 自动攻击当前射程内符合优先级的敌人，直到被后续命令覆盖
-- `unit.harvestLoop(...)` 会设置持续 `harvest_loop` 意图，让 Worker 在资源点和己方 HQ 之间持续往返；省略参数时会自动选择最近资源点
-- 当前攻击范围按 8 邻域计算；对 `attackRange = 1` 的 Soldier，上下左右和四个斜角相邻格都算射程内
-- `unit.holdPosition()` 会下发待命命令
-- `unit.build("barracks", ...)` 会下发建造兵营命令
-- `building.spawnUnit(...)` 会下发产兵命令，但必须满足建筑类型权限
-- 沙箱运行时错误会被捕获并作为该轮 AI 失败返回，不应导致服务端进程退出
+返回我方可直接操作单位：
 
-补充规则：
-
-- `barracks` 不能紧贴己方 `HQ` 建造，至少要留出 1 格缓冲
-- 当前命令失败反馈会尽量给出短结构：`code + meta + hint`
-
-## 6. 当前不保证的行为
-
-- 不保证严格战争迷雾
-- 不保证 `eventsSinceLastCall` / `aiFeedbackSinceLastCall` 是严格单次消费
-- 不保证输入 JSON 和沙箱全局对象完全同构
-- 不保证存在未在本文列出的兼容变量名
-
-## 7. 最小示例
-
-```js
-const barracks = me.buildings.find(b => b.type === "barracks");
-const enemyHQ = enemyBuildings.find(b => b.type === "hq");
-
-if (!barracks && me.workers[0] && me.resources.credits >= unitStats.worker.cost + 120) {
-  me.workers[0].build("barracks", { x: me.hq.x + 2, y: me.hq.y });
+```ts
+{
+  tick: number;
+  units: Array<Unit & { hasActivePlan: boolean }>;
 }
+```
 
-if (barracks && me.resources.credits >= unitStats.soldier.cost) {
-  barracks.spawnUnit("soldier");
+#### `get_active_plans`
+
+返回当前仍在生效的高层计划：
+
+```ts
+{
+  tick: number;
+  plans: AgentPlanRecord[];
 }
+```
 
-if (enemyHQ) {
-  me.soldiers.forEach(s => {
-    const inRange = Math.max(Math.abs(s.x - enemyHQ.x), Math.abs(s.y - enemyHQ.y)) <= s.attackRange;
-    if (inRange) {
-      s.attackInRange(["hq", "soldier", "worker", "barracks"]);
-    } else {
-      s.attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ["hq", "soldier", "worker", "barracks"]);
+#### `get_recent_events`
+
+返回最近的 AI-facing 反馈和关键事件：
+
+```ts
+{
+  tick: number;
+  events: GameLog[];
+}
+```
+
+### 2.2 即时动作工具
+
+#### `move_unit`
+
+```ts
+{
+  unitId: string;
+  x: number;
+  y: number;
+}
+```
+
+说明：
+
+- 主要用于 worker 移动或 combat unit 精确换位
+- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
+
+#### `attack_move_unit`
+
+```ts
+{
+  unitId: string;
+  x: number;
+  y: number;
+  priority?: Array<"soldier" | "worker">;
+}
+```
+
+说明：
+
+- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- 单位会向目标点移动，并在到达前自动攻击范围内的敌方单位
+- 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
+- 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
+- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks 应使用 `attack`
+- 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
+
+#### `attack`
+
+```ts
+{
+  unitId: string;
+  targetId: string;
+}
+```
+
+说明：
+
+- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- `targetId` 必须来自最近的可见敌方单位或建筑 ID
+- 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
+- 攻击敌方 HQ、barracks 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
+- 目标已经消失但曾被看见过时，系统会自动降级为移动到该目标最后已知位置；调用方不需要也不能传坐标
+- 目标从未被看见过时，返回 `ok: false` 和 `hint`
+
+#### `spawn_unit`
+
+```ts
+{
+  buildingId: string;
+  unitType: "worker" | "soldier";
+}
+```
+
+#### `build_structure`
+
+```ts
+{
+  unitId: string;
+  buildingType: "barracks";
+  x: number;
+  y: number;
+}
+```
+
+说明：
+
+- 当前只允许建造 `barracks`
+- 兵营必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
+- 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
+
+#### `start_harvest_loop`
+
+```ts
+{
+  unitId: string;
+  x?: number;
+  y?: number;
+}
+```
+
+说明：
+
+- 只接受己方 `worker`
+- 让 worker 进入内建采矿循环，在资源点和己方 HQ 之间自动往返
+- 省略 `x/y` 时，游戏会自动选择最近资源点
+- 常规采矿应优先使用这个工具，不要用 `orchestrate_plan` 手写 worker 往返路线
+- 已经处于 `harvest_loop` 的 worker 默认视为已有任务，除非被堵、资源选择错误或需要改派，不要每轮重复调用
+
+#### `hold_unit`
+
+```ts
+{
+  unitId: string;
+}
+```
+
+这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。
+
+成功和失败结果都会带当前 `tick`。如果本轮最后一次只读工具调用距离当前超过 10 ticks，或本轮还没有调用过只读工具，动作/计划工具会附带 `warning`，但不会仅因为 warning 拒绝入队：
+
+```ts
+{
+  tick: number;
+  ok: boolean;
+  commandId?: string;
+  error?: string;
+  hint?: string;
+  warning?: {
+    type: "state_stale" | "no_recent_read";
+    message: string;
+    currentTick: number;
+    lastReadTick?: number;
+    ageTicks?: number;
+    staleAfterTicks: number;
+  };
+}
+```
+
+这些工具只负责把命令加入当前 tick 的 command queue。真正的移动、攻击、建造、产兵依然由 `Game` 逐 tick 结算。
+
+### 2.3 高层编排工具 `orchestrate_plan`
+
+这是当前唯一的高层计划工具。
+
+```ts
+interface OrchestratePlanInput {
+  unitIds: string[];
+  replaceExisting?: boolean;
+  scope?: PlanStepScope;
+  loop?: number; // -1 表示无限循环
+  steps: PlanStep[];
+}
+```
+
+```ts
+interface PlanStep {
+  call: PlanCallToolName;
+  args: Record<string, unknown>;
+  scope?: PlanStepScope;
+  when?: PlanStepCondition;
+  until?: PlanStepCondition;
+  retry?: boolean;
+  maxTicks?: number;
+}
+```
+
+```ts
+type PlanCallToolName =
+  | "move_unit"
+  | "attack_move_unit"
+  | "attack"
+  | "spawn_unit"
+  | "build_structure"
+  | "start_harvest_loop"
+  | "hold_unit";
+```
+
+```ts
+type PlanStepScope = "global" | "per_unit";
+```
+
+```ts
+type PlanStepCondition =
+  | { condition: "arrived" }
+  | { condition: "enemy_in_range" }
+  | { condition: "hq_in_range" }
+  | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "target_in_range"; targetId: string }
+  | { condition: "target_destroyed"; targetId: string }
+  | { condition: "credits_at_least"; amount: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
+```
+
+说明：
+
+- `orchestrate_plan` 只注册计划，不会在一次 tool call 内跑完整段脚本
+- 计划会在后续 tick 自动推进
+- 即时动作会打断相关单位的当前计划
+- 如果单位已有合适的 active plan，不要每个 run 都重复注册同一个计划
+- `steps` 只接受 call step，把现有动作工具调用注册成持续计划
+- `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开；`scope = "global"` 只执行一次
+- `when` 是执行前置条件，未满足时等待；`until` 是完成条件，满足后推进到下一 step
+- `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
+- `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"` 或 `"$barracks"`，在执行时解析为当前友方建筑
+- `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
+
+示例：开局让两个 worker 挂矿，等钱够后造兵营，再持续造到 4 个 soldier。
+
+```json
+{
+  "unitIds": ["unit_1", "unit_2"],
+  "loop": 1,
+  "steps": [
+    { "call": "start_harvest_loop", "args": { "unitId": "$unitId" }, "scope": "per_unit" },
+    {
+      "call": "build_structure",
+      "args": { "unitId": "unit_1", "buildingType": "barracks", "x": 4, "y": 10 },
+      "scope": "global",
+      "when": { "condition": "credits_at_least", "amount": 120 },
+      "until": { "condition": "building_exists", "buildingType": "barracks" },
+      "retry": true
+    },
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$barracks", "unitType": "soldier" },
+      "scope": "global",
+      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
+      "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 4 },
+      "retry": true
     }
-  });
+  ]
 }
 ```
 
-说明：
+示例：一队士兵先移动攻击到敌方 HQ 附近，再集火 HQ。
 
-- 上面示例里的 `attackMoveTo({ x: enemyHQ.x, y: enemyHQ.y }, ...)` 会沿途自动接敌；如果目标是建筑格，系统会自动吸附到附近可站格
+```json
+{
+  "unitIds": ["unit_5", "unit_6"],
+  "loop": 1,
+  "steps": [
+    {
+      "call": "attack_move_unit",
+      "args": { "unitId": "$unitId", "x": 18, "y": 10 },
+      "until": { "condition": "near_position", "x": 18, "y": 10, "distance": 2 },
+      "maxTicks": 40
+    },
+    {
+      "call": "attack",
+      "args": { "unitId": "$unitId", "targetId": "building_2" },
+      "until": { "condition": "target_destroyed", "targetId": "building_2" },
+      "retry": true
+    }
+  ]
+}
+```
+
+## 3. 记录格式
+
+当前 `aiTurns` 不再保存生成的 JavaScript 和沙箱错误，而是保存 agent 行为：
+
+```ts
+interface SavedAITurnRecord {
+  playerId: PlayerId;
+  requestTick: number;
+  executeTick: number;
+  runInput: AgentRunInput;
+  assistantMessages: string[];
+  toolCalls: AgentToolCallRecord[];
+  plans: AgentPlanRecord[];
+  commands: Command[];
+  stopReason: string;
+  metrics: {
+    modelRequests: number;
+    toolCalls: number;
+    stallDetected: boolean;
+  };
+  model: string;
+  baseURL?: string;
+  createdAt: string;
+}
+```
+
+transcript 当前记录：
+
+- summary
+- assistant text
+- tool calls
+- commands
+- plans
+- metrics
+- stop reason

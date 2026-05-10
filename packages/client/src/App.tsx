@@ -7,6 +7,9 @@ import {
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
+  MatchPrepareState,
+  PlayerId,
+  TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
@@ -19,7 +22,7 @@ import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { createPreset, deletePreset, listPresets, updatePreset } from "./lib/settingsApi";
+import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
 
 type AppMode = "live" | "replay";
@@ -39,12 +42,17 @@ function App() {
   const {
     state,
     snapshots,
+    aiTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
+    prepareStatuses,
+    prepareMessage,
+    setPrepareStatuses,
+    setPrepareMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,
@@ -225,6 +233,11 @@ function App() {
     setPlayer2PresetId((current) => (current && presetIds.has(current) ? current : presets[1]?.id ?? presets[0]?.id ?? ""));
   }, [presets]);
 
+  useEffect(() => {
+    setPrepareStatuses({});
+    setPrepareMessage(null);
+  }, [player1PresetId, player2PresetId, recordLLMTranscript, setPrepareMessage, setPrepareStatuses]);
+
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
     const builtSnapshots = buildReplaySnapshots(frames);
@@ -298,6 +311,7 @@ function App() {
     }
 
     clearServerMessage();
+    setPrepareMessage(null);
     setStartPending(true);
     setStartBaselineTick(state?.tick ?? -1);
     setIsPlaying(false);
@@ -306,6 +320,29 @@ function App() {
       player1PresetId,
       player2PresetId,
       debug: buildMatchDebugOptions(recordLLMTranscript),
+    });
+  };
+
+  const handlePrepare = (playerId: PlayerId) => {
+    if (!player1PresetId || !player2PresetId) {
+      return;
+    }
+
+    clearServerMessage();
+    setPrepareStatuses((current) => ({
+      ...current,
+      [playerId]: "preparing",
+    }));
+    setPrepareMessage(null);
+    send({
+      type: "prepare",
+      player1PresetId,
+      player2PresetId,
+      debug: buildMatchDebugOptions(recordLLMTranscript),
+      warmup: {
+        player_1: playerId === "player_1",
+        player_2: playerId === "player_2",
+      },
     });
   };
 
@@ -363,6 +400,10 @@ function App() {
     await refreshPresets();
   };
 
+  const handleTestPreset = async (input: TestLLMPresetRequest) => {
+    return await testPreset(API_BASE_URL, input);
+  };
+
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
   const displayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
   const displaySnapshots = useMemo(() => {
@@ -372,6 +413,8 @@ function App() {
     }
     return snapshots;
   }, [mode, replayFrameIndex, replaySnapshots, snapshots]);
+  const displayAITerminalEvents = mode === "replay" ? replayFrame?.terminalEvents ?? [] : aiTerminalEvents;
+  const terminalAutoScroll = mode === "replay" ? replayPlaying : (isPlaying || benchmarkRunning);
 
   const replayProgress = replayFrames.length > 1
     ? replayFrameIndex / (replayFrames.length - 1)
@@ -386,6 +429,12 @@ function App() {
     && Boolean(player1PresetId)
     && Boolean(player2PresetId);
   const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
+  const isPreparing = prepareStatuses.player_1 === "preparing" || prepareStatuses.player_2 === "preparing";
+  const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
+  const benchmarkTotalRounds = benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0;
+  const benchmarkCurrentRound = benchmarkTotalRounds > 0
+    ? Math.min((benchmarkProgress?.completedRounds ?? 0) + 1, benchmarkTotalRounds)
+    : 0;
 
   return (
     <>
@@ -417,38 +466,58 @@ function App() {
             {mode === "live" && (
               <>
                 <div className="match-preset-bar">
-                  <label className="settings-field compact">
+                  <div className="settings-field compact">
                     <span>红方预设</span>
-                    <select
-                      className="settings-select live-preset-select red"
-                      value={player1PresetId}
-                      onChange={(event) => setPlayer1PresetId(event.target.value)}
-                      disabled={presetsLoading || presets.length === 0}
-                    >
-                      <option value="">选择红方预设</option>
-                      {presets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="settings-field compact">
+                    <div className="preset-select-row">
+                      <select
+                        className="settings-select live-preset-select red"
+                        value={player1PresetId}
+                        onChange={(event) => setPlayer1PresetId(event.target.value)}
+                        disabled={presetsLoading || presets.length === 0}
+                      >
+                        <option value="">选择红方预设</option>
+                        {presets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_1)}`}
+                        onClick={() => handlePrepare("player_1")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_1 === "preparing"}
+                      >
+                        {getPrepareButtonLabel(prepareStatuses.player_1)}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="settings-field compact">
                     <span>蓝方预设</span>
-                    <select
-                      className="settings-select live-preset-select blue"
-                      value={player2PresetId}
-                      onChange={(event) => setPlayer2PresetId(event.target.value)}
-                      disabled={presetsLoading || presets.length === 0}
-                    >
-                      <option value="">选择蓝方预设</option>
-                      {presets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                    <div className="preset-select-row">
+                      <select
+                        className="settings-select live-preset-select blue"
+                        value={player2PresetId}
+                        onChange={(event) => setPlayer2PresetId(event.target.value)}
+                        disabled={presetsLoading || presets.length === 0}
+                      >
+                        <option value="">选择蓝方预设</option>
+                        {presets.map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_2)}`}
+                        onClick={() => handlePrepare("player_2")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_2 === "preparing"}
+                      >
+                        {getPrepareButtonLabel(prepareStatuses.player_2)}
+                      </button>
+                    </div>
+                  </div>
                   <label className="settings-field compact live-debug-toggle">
                     <span>LLM Debug</span>
                     <input
@@ -479,7 +548,7 @@ function App() {
                 </button>
                 <button
                   onClick={isPlaying ? handleStop : handleStart}
-                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || !canStartLiveMatch}
+                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isPreparing || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                 >
                   {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
@@ -515,12 +584,13 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
-            {(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary)) && (
+            {prepareMessage && <span>{prepareMessage}</span>}
+            {benchmarkStatusVisible && (
               <span>
-                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: {benchmarkProgress?.completedRounds ?? 0} / {benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0}
+                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 当前第 {benchmarkCurrentRound} / {benchmarkTotalRounds} 局
                 {" · "}
                 LLM / CPU / 平 {benchmarkProgress?.llmWins ?? 0} / {benchmarkProgress?.cpuWins ?? 0} / {benchmarkProgress?.draws ?? 0}
               </span>
@@ -694,7 +764,11 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
               </div>
-              <AIOutputPanel snapshots={displaySnapshots} />
+              <AIOutputPanel
+                snapshots={displaySnapshots}
+                events={displayAITerminalEvents}
+                autoScroll={terminalAutoScroll}
+              />
             </div>
           </div>
         </div>
@@ -712,6 +786,7 @@ function App() {
             onCreate={handleCreatePreset}
             onUpdate={handleUpdatePreset}
             onDelete={handleDeletePreset}
+            onTest={handleTestPreset}
           />
         </SettingsOverlay>
 
@@ -771,4 +846,21 @@ export default App;
 
 function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
   return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+}
+
+function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
+  if (status === "preparing") {
+    return "准备中";
+  }
+  if (status === "ready") {
+    return "已准备";
+  }
+  if (status === "error") {
+    return "重试";
+  }
+  return "准备";
+}
+
+function getPrepareStatusClass(status: MatchPrepareState | undefined): string {
+  return status ? `prepare-${status}` : "prepare-idle";
 }

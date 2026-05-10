@@ -1,4 +1,5 @@
 import {
+  AITerminalEvent,
   Building,
   Command,
   GameLog,
@@ -12,12 +13,14 @@ import {
   RESULT_TYPES,
   CommandResultData,
   RESULT_CODES,
+  SavedAITurnRecord,
 } from "@llmcraft/shared";
 
 export interface ReplayFrame {
   tick: number;
   state: GameState;
   aiOutputs: Record<string, string>;
+  terminalEvents: AITerminalEvent[];
 }
 
 function cloneState<T>(value: T): T {
@@ -308,9 +311,69 @@ function applyCommandIntentsForTick(
   }
 }
 
+function buildReplayTurnEvents(turns: SavedAITurnRecord[]): AITerminalEvent[] {
+  const events: AITerminalEvent[] = [];
+  const requestCounters = {
+    player_1: 0,
+    player_2: 0,
+  };
+  let eventId = 0;
+
+  for (const turn of turns) {
+    const requestNumber = ++requestCounters[turn.playerId];
+    const createdAt = turn.createdAt;
+
+    events.push({
+      id: `replay_evt_${++eventId}`,
+      kind: "request",
+      playerId: turn.playerId,
+      requestNumber,
+      requestTick: turn.requestTick,
+      createdAt,
+    });
+
+    for (const message of turn.assistantMessages) {
+      events.push({
+        id: `replay_evt_${++eventId}`,
+        kind: "assistant",
+        playerId: turn.playerId,
+        requestNumber,
+        requestTick: turn.requestTick,
+        createdAt,
+        text: message,
+      });
+    }
+
+    for (const toolCall of turn.toolCalls) {
+      events.push({
+        id: `replay_evt_${++eventId}`,
+        kind: "tool_call",
+        playerId: turn.playerId,
+        requestNumber,
+        requestTick: turn.requestTick,
+        createdAt,
+        toolCall,
+      });
+    }
+  }
+
+  return events;
+}
+
 export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
+  const replayTurns = [...record.aiTurns].sort((a, b) => {
+    if (a.executeTick !== b.executeTick) {
+      return a.executeTick - b.executeTick;
+    }
+    if (a.requestTick !== b.requestTick) {
+      return a.requestTick - b.requestTick;
+    }
+    return a.createdAt.localeCompare(b.createdAt);
+  });
+  const currentTerminalTurns: SavedAITurnRecord[] = [];
+  let replayTurnIndex = 0;
   clearTransientIntentState(currentState);
   const commandResultsByTick = new Map<number, GameLog[]>();
   for (const result of record.commandResults) {
@@ -324,6 +387,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
       tick: currentState.tick,
       state: cloneState(currentState),
       aiOutputs: {},
+      terminalEvents: [],
     },
   ];
 
@@ -363,10 +427,16 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
 
     applyCommandIntentsForTick(currentState, delta, commandResultsByTick.get(delta.tick) ?? []);
 
+    while (replayTurnIndex < replayTurns.length && replayTurns[replayTurnIndex]!.executeTick <= delta.tick) {
+      currentTerminalTurns.push(replayTurns[replayTurnIndex]!);
+      replayTurnIndex++;
+    }
+
     frames.push({
       tick: delta.tick,
       state: cloneState(currentState),
       aiOutputs: { ...currentAIOutputs },
+      terminalEvents: buildReplayTurnEvents(currentTerminalTurns),
     });
   }
 

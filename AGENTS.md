@@ -85,6 +85,11 @@ llmcraft/
 - 当前默认实现是 `OpenAICompatibleProvider`
 - 兼容 OpenAI 风格端点的模型接入应优先走 provider 层，而不是直接写进 orchestrator
 
+**Agent turn 与工具调用性能判断:**
+- 一个用户/游戏 turn 内连续执行多轮工具调用是标准 agent loop，本身不是问题：模型可一次返回多个 tool calls，本地执行 tool results，再继续下一次模型请求直到收敛。
+- 不要仅因为单个 turn 很长或工具调用次数多就判定设计有问题；性能分析应落到 turn 内每一次模型请求的 latency、finish_reason、visible output tokens、reasoning tokens、cache hit tokens，以及是否反复读取同类状态工具导致循环。
+- 慢 turn 的重点风险是某些内部模型请求异常变慢、hidden reasoning 膨胀、可见输出为空却打到 max_tokens，或工具选择陷入重复，而不是“一个 turn 里跑了工具”这个事实。
+
 **状态同步 (server/src/GameOrchestrator.ts):**
 - 维护 AI 对话窗口（最近 20 条消息）
 - 窗口重置时发送 "full" 完整状态，否则发送 "delta" 增量
@@ -140,6 +145,7 @@ game.start();
 - 优先使用显式类型而非 `any`
 - 使用 `@llmcraft/shared` 中的常量（UNIT_TYPES, BUILDING_TYPES 等）
 - 结果码：OK = 0，错误为负数（定义在 shared/src/constants.ts）
+- 只是调整代码时，用 `rg` 搜索应排除历史日志目录：`packages/server/logs/`，例如加 `-g '!packages/server/logs/**'`，避免对局记录污染搜索结果
 
 ## 包特定约定
 

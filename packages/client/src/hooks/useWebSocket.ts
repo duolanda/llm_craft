@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AITerminalEvent,
   ClientMessage,
   GameState,
   GameSnapshot,
+  MatchPrepareState,
+  PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
   isServerMessage,
@@ -11,12 +14,15 @@ import {
 export function useWebSocket(url: string) {
   const [state, setState] = useState<GameState | null>(null);
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
+  const [aiTerminalEvents, setAiTerminalEvents] = useState<AITerminalEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
   const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
+  const [prepareStatuses, setPrepareStatuses] = useState<Partial<Record<PlayerId, MatchPrepareState>>>({});
+  const [prepareMessage, setPrepareMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const send = useCallback((message: ClientMessage) => {
@@ -60,6 +66,10 @@ export function useWebSocket(url: string) {
             setLiveEnabled(parsed.liveEnabled);
             break;
 
+          case "ai_terminal_events":
+            setAiTerminalEvents((current) => (parsed.reset ? parsed.events : current.concat(parsed.events)));
+            break;
+
           case "error":
             setServerMessage(parsed.message);
             break;
@@ -75,6 +85,14 @@ export function useWebSocket(url: string) {
           case "benchmark_complete":
             setBenchmarkProgress(null);
             setBenchmarkResult(parsed);
+            break;
+
+          case "prepare_status":
+            setPrepareStatuses((current) => ({
+              ...current,
+              ...parsed.statuses,
+            }));
+            setPrepareMessage(parsed.message ?? null);
             break;
         }
       } catch (e) {
@@ -99,12 +117,17 @@ export function useWebSocket(url: string) {
   return {
     state,
     snapshots,
+    aiTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
+    prepareStatuses,
+    prepareMessage,
+    setPrepareStatuses,
+    setPrepareMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,

@@ -90,9 +90,9 @@ export class CpuPlayer {
       return;
     }
 
-    // 每 5 tick 执行一次
+    // 每 10 tick 执行一次（与 benchmark 默认一致）
     if (state.tick < this.nextActTick) return;
-    this.nextActTick = state.tick + 5;
+    this.nextActTick = state.tick + 10;
 
     try {
       this.runDecision(state);

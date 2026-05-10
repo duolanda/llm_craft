@@ -546,6 +546,28 @@ export async function handleHttpRequest(
     }
 
     // Control plane routes
+    if (req.method === "POST" && url.pathname === "/api/control/start-game") {
+      if (state.orchestrator) {
+        sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
+        return;
+      }
+      const game = new Game();
+      game.start();
+      state.orchestrator = {
+        getGame: () => game,
+        stop: () => game.stop(),
+        start: () => Promise.resolve(),
+        saveRecord: () => Promise.resolve(""),
+      };
+      sendJson(res, 201, {
+        ok: true,
+        tick: game.getState().tick,
+        kind: "state",
+        data: { status: "started" },
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/control/sessions") {
       const body = await readJsonBody<CreateControlSessionRequest>(req);
       if (!body.playerId || (body.playerId !== PLAYER_IDS.PLAYER_1 && body.playerId !== PLAYER_IDS.PLAYER_2)) {
@@ -553,16 +575,9 @@ export async function handleHttpRequest(
         return;
       }
 
-      // Auto-create a headless game if none is running (no API keys needed)
       if (!state.orchestrator) {
-        const game = new Game();
-        game.start();
-        state.orchestrator = {
-          getGame: () => game,
-          stop: () => game.stop(),
-          start: () => Promise.resolve(),
-          saveRecord: () => Promise.resolve(""),
-        };
+        sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
+        return;
       }
 
       const game = state.orchestrator.getGame() as unknown as Game;

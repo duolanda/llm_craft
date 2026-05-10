@@ -675,10 +675,12 @@ export async function handleHttpRequest(
       if (req.method === "GET" && subPath === "/state") {
         const mapResult = session.bridge.getMapState({ includeCells: false, includeEmptyTiles: false });
         const myResult = session.bridge.getMyState();
+        const gameState = game.getState();
         const response = buildControlResponse(mapResult, "state");
         response.data = {
           ...(response.data as Record<string, unknown>),
           player: (myResult.result as Record<string, unknown>),
+          winner: gameState.winner,
         };
         sendJson(res, 200, response);
         return;

@@ -1,5 +1,12 @@
 # CLI Control Plane — AI Agent Guide
 
+> **⚠️ RULE: Use the `llmcraft` CLI. Do NOT write WebSocket scripts or raw HTTP clients.**
+>
+> The CLI handles all the protocol details for you — session management, authentication,
+> tool routing, error handling, and JSON formatting. Any agent that implements its own
+> WebSocket or HTTP client instead of using `llmcraft` will break when the protocol changes.
+> **You are a shell agent. Run `llmcraft` commands.**
+
 This document tells an external AI agent how to join an LLMCraft game and play using the `llmcraft` CLI.
 
 ---
@@ -17,7 +24,9 @@ Output:
 {"ok":true,"tick":0,"kind":"state","data":{"sessionId":"cs_abc12345","gameId":"default","playerId":"player_1","createdAt":"..."}}
 ```
 
-Keep the `sessionId` — you'll need it if you switch terminals. Or just check it later:
+> ⚡ The CLI saves the sessionId for you automatically. You don't need to pass it to
+> subsequent commands — just run `llmcraft units`, `llmcraft map`, etc.
+> Do NOT write code that reads this sessionId and makes its own API calls.
 
 ```bash
 llmcraft session show

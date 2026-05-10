@@ -32,7 +32,7 @@ import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager, executeControlTool, buildControlResponse, waitTicks } from "./ControlHandler";
-import type { Game } from "./Game";
+import { Game } from "./Game";
 
 dotenv.config();
 
@@ -552,10 +552,19 @@ export async function handleHttpRequest(
         sendJson(res, 400, { error: "playerId 必须是 player_1 或 player_2。" });
         return;
       }
+
+      // Auto-create a headless game if none is running (no API keys needed)
       if (!state.orchestrator) {
-        sendJson(res, 503, { error: "当前没有活跃对局，无法创建控制会话。" });
-        return;
+        const game = new Game();
+        game.start();
+        state.orchestrator = {
+          getGame: () => game,
+          stop: () => game.stop(),
+          start: () => Promise.resolve(),
+          saveRecord: () => Promise.resolve(""),
+        };
       }
+
       const game = state.orchestrator.getGame() as unknown as Game;
       const gameId = body.gameId || "default";
       const session = state.controlSessions.create(game, gameId, body.playerId);

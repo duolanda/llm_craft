@@ -114,10 +114,3 @@ function kindFromEffect(effect: "read" | "action" | "plan"): ControlResponse["ki
       return "plan_result";
   }
 }
-
-export async function waitTicks(game: Game, ticks: number): Promise<void> {
-  const targetTick = game.getState().tick + ticks;
-  while (game.getState().tick < targetTick) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}

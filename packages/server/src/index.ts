@@ -31,7 +31,7 @@ import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from ".
 import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
-import { ControlSessionManager, executeControlTool, buildControlResponse, waitTicks } from "./ControlHandler";
+import { ControlSessionManager, executeControlTool, buildControlResponse } from "./ControlHandler";
 import { CpuPlayer } from "./CpuPlayer";
 import { Game } from "./Game";
 
@@ -726,21 +726,6 @@ export async function handleHttpRequest(
             },
           });
         }
-        return;
-      }
-
-      // POST /api/control/sessions/:sessionId/wait
-      if (req.method === "POST" && subPath === "/wait") {
-        const body = await readJsonBody<{ ticks?: number }>(req);
-        const ticks = typeof body.ticks === "number" && body.ticks > 0 ? body.ticks : 1;
-        await waitTicks(game, ticks);
-        const currentTick = game.getState().tick;
-        sendJson(res, 200, {
-          ok: true,
-          tick: currentTick,
-          kind: "state",
-          data: { waitedTicks: ticks, currentTick },
-        });
         return;
       }
 

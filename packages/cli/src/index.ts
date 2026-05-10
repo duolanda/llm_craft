@@ -8,7 +8,6 @@ import { handleUnits, handleBuildings, handleEnemies, handleResources } from "./
 import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold } from "./commands/actions.js";
 import { handleNearest, handleTarget } from "./commands/transform.js";
 import { handlePlan, handleOrchestrate } from "./commands/plan.js";
-import { handleWait } from "./commands/wait.js";
 import { handlePlay } from "./commands/play.js";
 
 const VERSION = "0.1.0";
@@ -107,7 +106,6 @@ function printHelp(): void {
     "  target             Pair units with enemy-hq or weakest enemy",
     "  plan               Generate a plan (economy/defend/attack-hq/custom)",
     "  orchestrate        Execute a plan or batch of actions from stdin",
-    "  wait               Wait for N game ticks",
     "  play               Start a game against a CPU opponent (play --vs random)",
     "",
     "Plan flags:",
@@ -116,9 +114,6 @@ function printHelp(): void {
     "Orchestrate flags:",
     "  --dry-run          Validate only, do not submit",
     "  --max-actions <n>  Limit number of actions executed",
-    "",
-    "Wait flags:",
-    "  --ticks <n>        Number of game ticks to wait",
     "",
     "Action flags:",
     "  --unit <id>        Unit ID",
@@ -377,12 +372,6 @@ async function main(): Promise<void> {
   }
   if (parsed.command === "orchestrate") {
     await handleOrchestrate(client, sessionId, parsed.flags);
-    return;
-  }
-
-  // Phase 7: Wait
-  if (parsed.command === "wait") {
-    await handleWait(client, sessionId, parsed.flags);
     return;
   }
 

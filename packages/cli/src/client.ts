@@ -43,19 +43,4 @@ export class ControlClient {
     );
     return res.json() as Promise<ControlResponse>;
   }
-
-  async waitTicks(
-    sessionId: string,
-    ticks: number,
-  ): Promise<ControlResponse> {
-    const res = await fetch(
-      `${this.baseUrl}/api/control/sessions/${sessionId}/wait`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticks }),
-      },
-    );
-    return res.json() as Promise<ControlResponse>;
-  }
 }

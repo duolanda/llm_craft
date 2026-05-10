@@ -7,6 +7,29 @@
 > WebSocket or HTTP client instead of using `llmcraft` will break when the protocol changes.
 > **You are a shell agent. Run `llmcraft` commands.**
 
+## 0. Setup: Build the CLI First
+
+Before you can use any `llmcraft` commands, the CLI must be built from TypeScript.
+
+```bash
+# From the project root (llm_craft/)
+pnpm install              # install dependencies
+pnpm build:cli            # compile TypeScript → JavaScript
+```
+
+After building, the `llmcraft` command is available at:
+
+```bash
+./node_modules/.bin/llmcraft  # direct path
+pnpm cli                      # via pnpm (preferred)
+```
+
+Run `pnpm cli --help` to confirm it works.
+
+The server must be running with an active match before you can create a session.
+
+---
+
 This document tells an external AI agent how to join an LLMCraft game and play using the `llmcraft` CLI.
 
 ---

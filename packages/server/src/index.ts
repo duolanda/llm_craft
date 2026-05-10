@@ -7,6 +7,8 @@ import {
   AITerminalEvent,
   ClientMessage,
   ClientStartBenchmarkMessage,
+  ControlToolCallRequest,
+  CreateControlSessionRequest,
   CreateLLMPresetRequest,
   GameSnapshot,
   GameState,
@@ -29,6 +31,8 @@ import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from ".
 import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
+import { ControlSessionManager, executeControlTool, buildControlResponse, waitTicks } from "./ControlHandler";
+import type { Game } from "./Game";
 
 dotenv.config();
 
@@ -72,6 +76,7 @@ export interface ServerState {
     signature: string;
     orchestrator: OrchestratorLike;
   } | null;
+  controlSessions: ControlSessionManager;
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
     config: {
@@ -111,6 +116,7 @@ export function createServerState(
     presetStore,
     orchestrator: null,
     pendingMatch: null,
+    controlSessions: new ControlSessionManager(),
     createOrchestrator,
     createBenchmarkOrchestrator,
     liveEnabled: null,
@@ -536,6 +542,131 @@ export async function handleHttpRequest(
       } catch (error) {
         sendPresetError(res, error);
       }
+      return;
+    }
+
+    // Control plane routes
+    if (req.method === "POST" && url.pathname === "/api/control/sessions") {
+      const body = await readJsonBody<CreateControlSessionRequest>(req);
+      if (!body.playerId || (body.playerId !== PLAYER_IDS.PLAYER_1 && body.playerId !== PLAYER_IDS.PLAYER_2)) {
+        sendJson(res, 400, { error: "playerId 必须是 player_1 或 player_2。" });
+        return;
+      }
+      if (!state.orchestrator) {
+        sendJson(res, 503, { error: "当前没有活跃对局，无法创建控制会话。" });
+        return;
+      }
+      const game = state.orchestrator.getGame() as unknown as Game;
+      const gameId = body.gameId || "default";
+      const session = state.controlSessions.create(game, gameId, body.playerId);
+      const serverTick = game.getState()?.tick ?? 0;
+      sendJson(res, 201, {
+        ok: true,
+        tick: serverTick,
+        kind: "state",
+        data: {
+          sessionId: session.id,
+          gameId: session.gameId,
+          playerId: session.playerId,
+          createdAt: session.createdAt,
+        },
+      });
+      return;
+    }
+
+    const controlSessionPrefix = "/api/control/sessions/";
+    if (url.pathname.startsWith(controlSessionPrefix)) {
+      const sessionPath = url.pathname.slice(controlSessionPrefix.length);
+      const sessionIdEnd = sessionPath.indexOf("/");
+      const sessionId = sessionIdEnd >= 0 ? sessionPath.slice(0, sessionIdEnd) : sessionPath;
+      const subPath = sessionIdEnd >= 0 ? sessionPath.slice(sessionIdEnd) : "";
+
+      if (!sessionId) {
+        sendJson(res, 400, { error: "缺少 session ID。" });
+        return;
+      }
+
+      const session = state.controlSessions.get(sessionId);
+      if (!session) {
+        sendJson(res, 404, { error: "控制会话不存在。" });
+        return;
+      }
+
+      state.controlSessions.touch(sessionId);
+      const game = state.orchestrator.getGame() as unknown as Game;
+
+      // GET /api/control/sessions/:sessionId/state
+      if (req.method === "GET" && subPath === "/state") {
+        const mapResult = session.bridge.getMapState({ includeCells: false, includeEmptyTiles: false });
+        const myResult = session.bridge.getMyState();
+        const response = buildControlResponse(mapResult, "state");
+        response.data = {
+          ...(response.data as Record<string, unknown>),
+          player: (myResult.result as Record<string, unknown>),
+        };
+        sendJson(res, 200, response);
+        return;
+      }
+
+      // POST /api/control/sessions/:sessionId/tools/:toolName
+      if (req.method === "POST" && subPath.startsWith("/tools/")) {
+        const toolName = subPath.slice("/tools/".length);
+        if (!toolName) {
+          sendJson(res, 400, { error: "缺少 tool name。" });
+          return;
+        }
+
+        const validToolNames = [
+          "get_map_state", "get_my_state", "get_my_units",
+          "get_active_plans", "get_recent_events",
+          "move_unit", "attack_move_unit", "attack",
+          "spawn_unit", "build_structure", "start_harvest_loop",
+          "hold_unit", "orchestrate_plan",
+        ];
+        if (!validToolNames.includes(toolName)) {
+          sendJson(res, 400, {
+            ok: false,
+            tick: game.getState().tick,
+            error: { code: "unknown_tool", message: `Unknown tool: ${toolName}` },
+          });
+          return;
+        }
+
+        try {
+          const body = await readJsonBody<ControlToolCallRequest>(req);
+          const args = body.args ?? {};
+          const result = executeControlTool(session.bridge, toolName, args);
+          const response = buildControlResponse(result);
+          sendJson(res, 200, response);
+        } catch (error) {
+          sendJson(res, 400, {
+            ok: false,
+            tick: game.getState().tick,
+            error: {
+              code: "tool_execution_error",
+              message: error instanceof Error ? error.message : "Tool execution failed",
+            },
+          });
+        }
+        return;
+      }
+
+      // POST /api/control/sessions/:sessionId/wait
+      if (req.method === "POST" && subPath === "/wait") {
+        const body = await readJsonBody<{ ticks?: number }>(req);
+        const ticks = typeof body.ticks === "number" && body.ticks > 0 ? body.ticks : 1;
+        await waitTicks(game, ticks);
+        const currentTick = game.getState().tick;
+        sendJson(res, 200, {
+          ok: true,
+          tick: currentTick,
+          kind: "state",
+          data: { waitedTicks: ticks, currentTick },
+        });
+        return;
+      }
+
+      sendJson(res, 404, { error: "未知的控制端点。" });
       return;
     }
 

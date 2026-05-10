@@ -6,11 +6,13 @@
     "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
     "dev:server": "pnpm --filter @llmcraft/server dev",
     "dev:client": "pnpm --filter @llmcraft/client dev",
+    "dev:cli": "pnpm --filter @llmcraft/cli dev",
     "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build",
     "build:shared": "pnpm --filter @llmcraft/shared build",
+    "build:cli": "pnpm --filter @llmcraft/cli build",
     "test": "pnpm --filter @llmcraft/server test",
-    "typecheck": "pnpm --filter @llmcraft/shared typecheck && pnpm --filter @llmcraft/server typecheck && pnpm --filter @llmcraft/client typecheck",
-    "verify": "pnpm typecheck && pnpm --filter @llmcraft/server test && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build"
+    "typecheck": "pnpm --filter @llmcraft/shared typecheck && pnpm --filter @llmcraft/server typecheck && pnpm --filter @llmcraft/client typecheck && pnpm --filter @llmcraft/cli typecheck",
+    "verify": "pnpm typecheck && pnpm --filter @llmcraft/server test && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

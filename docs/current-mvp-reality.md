@@ -111,7 +111,85 @@
 - `worker` 自动采矿，回 HQ 周围 1 格自动交付
 - `barracks` 不能紧贴己方 `HQ`
 
-## 6. 当前限制
+## 6. CLI 控制面
+
+新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。
+
+### 架构
+
+```
+外部调用者 (shell/script/agent)
+  |  llmcraft <command> [flags]
+  v
+@llmcraft/cli (参数解析、stdin 管道、JSON 输出)
+  |  HTTP control API
+  v
+server ControlSessionManager → GameAgentBridge → Game
+```
+
+### 会话管理
+
+- `llmcraft session use --player player_1` — 创建或绑定控制会话
+- `llmcraft session show` — 查看当前会话信息
+
+### 读状态命令
+
+- `state [--compact] [--cells]` — 全图 + 玩家状态
+- `map [--ascii]` — ASCII 战场地图
+- `me` — 经济、HQ、建筑、产能
+- `events [--limit n]` — 近期事件
+- `plans` — 活跃计划
+
+### 选择器命令
+
+- `units [--type w|s] [--idle] [--planned|--unplanned] [--near x,y] [--limit n]`
+- `buildings [--type hq|barracks] [--ready] [--near x,y] [--limit n]`
+- `enemies [--type w|s|hq|barracks] [--near x,y] [--limit n]`
+- `resources [--near x,y] [--limit n]`
+
+### 动作命令
+
+- `move --unit <id> --to x,y`
+- `attack --unit <id> --target <id>`
+- `attack-move --unit <id> --to x,y [--priority s,w]`
+- `gather --unit <id> [--resource x,y]`
+- `build barracks --unit <id> --at x,y`
+- `train worker|soldier --building <id>`
+- `hold --unit <id>`
+
+所有动作命令支持参数输入和 stdin selection 输入（从选择器管道传入）。
+
+### 管道转换器
+
+- `nearest resource` — 为每个单位选择最近资源
+- `nearest enemy` — 为每个单位选择最近敌人
+- `target enemy-hq` — 配对敌方 HQ
+- `target weakest` — 配对最弱敌人
+
+### 计划与编排
+
+- `plan economy|defend|attack-hq|custom --file <path>` — 生成计划 JSON
+- `orchestrate [--dry-run] [--max-actions n]` — 执行计划或批量动作
+
+### 等待
+
+- `wait --ticks n` — 等待 N 个游戏 tick
+
+### 示例管道
+
+```bash
+llmcraft units --idle --type worker | llmcraft gather
+llmcraft buildings --type barracks --ready | llmcraft train soldier
+llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+llmcraft plan economy | llmcraft orchestrate
+```
+
+### 示例脚本
+
+- `examples/cli-bots/basic-economy.sh` — 经济自动化循环
+- `examples/cli-bots/rush.sh` — 激进 rush 策略
+
+## 7. 当前限制
 
 - 当前仍然是服务端每连接 `100ms` 推一次 `state`
 - 当前 `summary` 仍是服务端拼装的轻量文本，不是严格结构化状态摘要

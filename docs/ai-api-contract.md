@@ -768,7 +768,99 @@ result:
 - `spawn_agent` 调用后立即返回 `taskId`，不等待子 Agent 完成
 - 子 Agent 结果会在后续消息中以 `<sub-agent-result>` 标签注入
 
-## 3. 记录格式
+## 3. Control Plane HTTP API
+
+新增控制面 HTTP API，允许外部进程通过 REST 调用控制玩家行动。这些端点与现有 WebSocket 协议并行运行。
+
+### 3.1 ControlResponse envelope
+
+所有控制端点返回统一 envelope：
+
+```ts
+interface ControlResponse<T = unknown> {
+  ok: boolean;
+  tick: number;
+  kind: "state" | "selection" | "action_result" | "plan_result" | "batch_result";
+  data: T;
+  warnings?: Array<{ type: string; message: string }>;
+  error?: {
+    code: string;
+    message: string;
+    hint?: string;
+  };
+}
+```
+
+### 3.2 `POST /api/control/sessions`
+
+创建或绑定控制会话。
+
+Request:
+```ts
+interface CreateControlSessionRequest {
+  playerId: "player_1" | "player_2";
+  gameId?: string; // defaults to "default"
+}
+```
+
+Response (201):
+```json
+{
+  "ok": true,
+  "tick": 0,
+  "kind": "state",
+  "data": {
+    "sessionId": "cs_abc12345",
+    "gameId": "default",
+    "playerId": "player_1",
+    "createdAt": "2026-05-10T..."
+  }
+}
+```
+
+### 3.3 `GET /api/control/sessions/:sessionId/state`
+
+Read combined map + player state for the session.
+
+### 3.4 `POST /api/control/sessions/:sessionId/tools/:toolName`
+
+Call an agent tool on behalf of the session's player. All agent tools (read and action) are available:
+
+Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_active_plans`, `get_recent_events`
+
+Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
+
+Plan tool: `orchestrate_plan`
+
+Request:
+```ts
+interface ControlToolCallRequest {
+  args?: Record<string, unknown>;
+}
+```
+
+Response uses the standard `ControlResponse` envelope with `kind` set to `"state"`, `"action_result"`, or `"plan_result"` depending on the tool.
+
+### 3.5 `POST /api/control/sessions/:sessionId/wait`
+
+Block until N game ticks have elapsed.
+
+Request:
+```ts
+{ ticks: number }
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "tick": 150,
+  "kind": "state",
+  "data": { "waitedTicks": 5, "currentTick": 150 }
+}
+```
+
+## 4. 记录格式
 
 当前 `aiTurns` 不再保存生成的 JavaScript 和沙箱错误，而是保存 agent 行为：
 

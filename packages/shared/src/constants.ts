@@ -19,9 +19,25 @@ export type ResultCode = typeof RESULT_CODES[keyof typeof RESULT_CODES];
 export const UNIT_TYPES = {
   WORKER: "worker",
   SOLDIER: "soldier",
+  TANK: "tank",
+  DEMOLISHER: "demolisher",
 } as const;
 
 export type UnitType = typeof UNIT_TYPES[keyof typeof UNIT_TYPES];
+
+export const ARMOR_TYPES = {
+  LIGHT: "light",
+  HEAVY: "heavy",
+} as const;
+
+export type ArmorType = typeof ARMOR_TYPES[keyof typeof ARMOR_TYPES];
+
+export const DAMAGE_TYPES = {
+  PIERCING: "piercing",
+  EXPLOSIVE: "explosive",
+} as const;
+
+export type DamageType = typeof DAMAGE_TYPES[keyof typeof DAMAGE_TYPES];
 
 export const BUILDING_TYPES = {
   HQ: "hq",
@@ -47,14 +63,24 @@ export const TILE_TYPES = {
 
 export type TileType = typeof TILE_TYPES[keyof typeof TILE_TYPES];
 
-export const UNIT_STATS: Record<UnitType, { hp: number; speed: number; attack: number; cost: number; attackRange: number }> = {
-  [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0 },
-  [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 },
+export const UNIT_STATS: Record<UnitType, {
+  hp: number;
+  speed: number;
+  attack: number;
+  cost: number;
+  attackRange: number;
+  armorType: ArmorType;
+  damageType?: DamageType;
+}> = {
+  [UNIT_TYPES.WORKER]:   { hp: 50, speed: 1, attack: 0,  cost: 50,  attackRange: 0, armorType: ARMOR_TYPES.LIGHT },
+  [UNIT_TYPES.SOLDIER]:  { hp: 80, speed: 1, attack: 12, cost: 80,  attackRange: 1, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.PIERCING },
+  [UNIT_TYPES.TANK]:     { hp: 200, speed: 1, attack: 20, cost: 150, attackRange: 1, armorType: ARMOR_TYPES.HEAVY },
+  [UNIT_TYPES.DEMOLISHER]: { hp: 40, speed: 1, attack: 25, cost: 120, attackRange: 3, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.EXPLOSIVE },
 };
 
-export const BUILDING_STATS: Record<BuildingType, { hp: number; cost: number }> = {
-  [BUILDING_TYPES.HQ]: { hp: 1000, cost: 0 },
-  [BUILDING_TYPES.BARRACKS]: { hp: 300, cost: 120 },
+export const BUILDING_STATS: Record<BuildingType, { hp: number; cost: number; armorType: ArmorType }> = {
+  [BUILDING_TYPES.HQ]: { hp: 1000, cost: 0, armorType: ARMOR_TYPES.HEAVY },
+  [BUILDING_TYPES.BARRACKS]: { hp: 300, cost: 120, armorType: ARMOR_TYPES.HEAVY },
 };
 
 export const ECONOMY_RULES = {
@@ -62,6 +88,21 @@ export const ECONOMY_RULES = {
   WORKER_GATHER_RATE: 10,
   HQ_DELIVERY_RANGE: 1,
 } as const;
+
+export const DAMAGE_INTERACTION: Record<DamageType, Record<ArmorType, number>> = {
+  [DAMAGE_TYPES.PIERCING]:  { [ARMOR_TYPES.LIGHT]: 1.0, [ARMOR_TYPES.HEAVY]: 0.5 },
+  [DAMAGE_TYPES.EXPLOSIVE]: { [ARMOR_TYPES.LIGHT]: 0.5, [ARMOR_TYPES.HEAVY]: 1.5 },
+};
+
+export function calculateDamage(
+  attackerStats: { attack: number; damageType?: DamageType },
+  defenderArmorType: ArmorType,
+): number {
+  if (attackerStats.attack <= 0) return 0;
+  if (!attackerStats.damageType) return attackerStats.attack;
+  const multiplier = DAMAGE_INTERACTION[attackerStats.damageType]?.[defenderArmorType] ?? 1;
+  return Math.floor(attackerStats.attack * multiplier);
+}
 
 /** 对战玩家标识（仅包含实际对局双方） */
 export const PLAYER_IDS = {
@@ -98,4 +139,6 @@ export const GAME_COLORS = {
   resource: "#ffb300",
   hq: "#c45fff",
   barracks: "#2979ff",
+  tank: "#76ff03",
+  demolisher: "#ff6d00",
 } as const;

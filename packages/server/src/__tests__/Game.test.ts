@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
-import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES, RESULT_TYPES, CommandResultData } from "@llmcraft/shared";
+import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES, RESULT_TYPES, BUILDING_STATS, calculateDamage, CommandResultData } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
@@ -233,7 +233,7 @@ describe("Game", () => {
     const buildingManager = game.getBuildingManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = buildingManager.createBuilding(BUILDING_TYPES.BARRACKS, 6, 6, "player_2");
-    const expectedDamage = UNIT_STATS.soldier.attack;
+    const expectedDamage = calculateDamage(UNIT_STATS.soldier, BUILDING_STATS[BUILDING_TYPES.BARRACKS].armorType);
 
     game.queueCommand({
       id: "diag_attack_building",
@@ -279,7 +279,7 @@ describe("Game", () => {
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const enemyWorker = unitManager.createUnit(UNIT_TYPES.WORKER, 4, 5, "player_2");
     const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
-    const expectedDamage = UNIT_STATS.soldier.attack;
+    const expectedDamage = calculateDamage(UNIT_STATS.soldier, BUILDING_STATS[BUILDING_TYPES.HQ].armorType);
 
     game.queueCommand({
       id: "sustain_attack_in_range",

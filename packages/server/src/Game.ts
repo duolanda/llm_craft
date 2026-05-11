@@ -15,6 +15,7 @@ import {
   UNIT_TYPES,
   UNIT_STATS,
   BUILDING_TYPES,
+  BUILDING_STATS,
   UNIT_STATES,
   RESULT_CODES,
   ECONOMY_RULES,
@@ -31,7 +32,8 @@ import {
   AIFeedbackTarget,
   LogDisplayTarget,
   GameLogDataMap,
-  RESULT_TYPES
+  RESULT_TYPES,
+  calculateDamage,
 } from "@llmcraft/shared";
 import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
@@ -690,7 +692,7 @@ export class Game {
                       buildingType: building.type,
                       unitType: command.unitType,
                       hint: building.type === BUILDING_TYPES.HQ
-                        ? "HQ can only spawn workers. Build a barracks to produce soldiers."
+                        ? "HQ can only spawn workers. Build a barracks to produce soldiers, tanks, or demolishers."
                         : "Check that the unit type matches the building.",
                     },
                   },
@@ -877,14 +879,8 @@ export class Game {
   }
 
   private getUnitCost(unitType: string): number {
-    switch (unitType) {
-      case UNIT_TYPES.WORKER:
-        return 50;
-      case UNIT_TYPES.SOLDIER:
-        return 80;
-      default:
-        return 0;
-    }
+    const stats = UNIT_STATS[unitType as keyof typeof UNIT_STATS];
+    return stats?.cost ?? 0;
   }
 
   private getBuildingCost(buildingType: string): number {
@@ -910,7 +906,7 @@ export class Game {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = UNIT_STATS[attacker.type].attack;
+    const damage = calculateDamage(UNIT_STATS[attacker.type], BUILDING_STATS[target.type].armorType);
     this.buildingManager.takeDamage(target, damage);
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
@@ -1136,7 +1132,7 @@ export class Game {
     targetPriority?: string[]
   ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
     const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
-    const priority = (hasExplicitPriority ? targetPriority! : ["hq", "soldier", "worker", "barracks"]).map((value) =>
+    const priority = (hasExplicitPriority ? targetPriority! : ["hq", "demolisher", "tank", "soldier", "worker", "barracks"]).map((value) =>
       String(value).toLowerCase()
     );
 

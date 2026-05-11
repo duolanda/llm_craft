@@ -11,6 +11,7 @@ import {
   ResultCode,
   MAP_WIDTH,
   MAP_HEIGHT,
+  calculateDamage,
 } from "@llmcraft/shared";
 import { PathFinder } from "./PathFinder";
 
@@ -142,7 +143,7 @@ export class UnitManager {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = UNIT_STATS[attacker.type].attack;
+    const damage = calculateDamage(UNIT_STATS[attacker.type], UNIT_STATS[target.type].armorType);
     target.hp -= damage;
     attacker.state = UNIT_STATES.ATTACKING;
     // Record attack intent for visualization

@@ -392,8 +392,8 @@ interface AgentRunInput {
 . empty
 # obstacle
 * resource
-H/B/S/W self hq/barracks/soldier/worker
-h/b/s/w enemy hq/barracks/soldier/worker
+H/B/S/W/T/D self hq/barracks/soldier/worker/tank/demolisher
+h/b/s/w/t/d enemy hq/barracks/soldier/worker/tank/demolisher
 ```
 - 默认不返回 `cells`，以降低上下文体积
 - 传 `includeCells=true` 时只返回“有信息量”的格子：资源、障碍、单位、建筑
@@ -431,6 +431,8 @@ h/b/s/w enemy hq/barracks/soldier/worker
   canBuildBarracks: boolean;
   canSpawnWorker: boolean;
   canSpawnSoldier: boolean;
+  canSpawnTank: boolean;
+  canSpawnDemolisher: boolean;
 }
 ```
 

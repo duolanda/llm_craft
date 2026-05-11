@@ -327,11 +327,12 @@ export class GameAgentBridge {
     return context.snapshot.myBuildings.find((building) => building.type === type && building.exists)?.id ?? null;
   }
 
-  private resolveTargetPriority(value: unknown): Array<"soldier" | "worker"> | undefined {
+  private resolveTargetPriority(value: unknown): string[] | undefined {
     if (!Array.isArray(value)) {
       return undefined;
     }
-    const priority = value.filter((entry): entry is "soldier" | "worker" => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER);
+    const validTypes = Object.values(UNIT_TYPES) as string[];
+    const priority = value.filter((entry): entry is string => typeof entry === "string" && validTypes.includes(entry));
     return priority.length > 0 ? priority : undefined;
   }
 
@@ -361,7 +362,11 @@ export class GameAgentBridge {
               ? "S"
               : type === UNIT_TYPES.WORKER
                 ? "W"
-                : "?";
+                : type === UNIT_TYPES.TANK
+                  ? "T"
+                  : type === UNIT_TYPES.DEMOLISHER
+                    ? "D"
+                    : "?";
       return relation === "self" ? upper : upper.toLowerCase();
     };
 
@@ -564,7 +569,7 @@ export class GameAgentBridge {
     };
   }
 
-  spawnUnit(buildingId: string, unitType: "worker" | "soldier"): ExecutedToolResult {
+  spawnUnit(buildingId: string, unitType: "worker" | "soldier" | "tank" | "demolisher"): ExecutedToolResult {
     const state = this.game.getState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const building = me.buildings.find((candidate) => candidate.id === buildingId && candidate.exists);
@@ -581,7 +586,7 @@ export class GameAgentBridge {
 
     const canProduce =
       (building.type === BUILDING_TYPES.HQ && unitType === "worker") ||
-      (building.type === BUILDING_TYPES.BARRACKS && unitType === "soldier");
+      (building.type === BUILDING_TYPES.BARRACKS && (unitType === "soldier" || unitType === "tank" || unitType === "demolisher"));
     if (!canProduce) {
       return {
         effect: "action",
@@ -591,7 +596,7 @@ export class GameAgentBridge {
           hint:
             building.type === BUILDING_TYPES.HQ
               ? "HQ can only spawn workers."
-              : "Barracks can only spawn soldiers.",
+              : "Barracks can produce soldiers, tanks, and demolishers.",
         }),
       };
     }

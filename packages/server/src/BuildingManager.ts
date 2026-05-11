@@ -82,7 +82,7 @@ export class BuildingManager {
     }
 
     if (building.type === BUILDING_TYPES.BARRACKS) {
-      return unitType === "soldier";
+      return unitType === "soldier" || unitType === "tank" || unitType === "demolisher";
     }
 
     return false;

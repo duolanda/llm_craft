@@ -1,4 +1,4 @@
-import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId } from "./constants";
+import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, ArmorType, DamageType } from "./constants";
 import type { GameLog } from "./logs";
 
 export type LLMProviderType = "openai-compatible";
@@ -243,11 +243,14 @@ export interface UnitStats {
   attack: number;
   cost: number;
   attackRange: number;
+  armorType: ArmorType;
+  damageType?: DamageType;
 }
 
 export interface BuildingStats {
   hp: number;
   cost: number;
+  armorType: ArmorType;
 }
 
 export interface AgentRunInput {

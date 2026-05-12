@@ -35,7 +35,6 @@ interface ReplayRecordListEntry {
 }
 
 // For GitHub Pages / production builds: override via VITE_WS_URL env var
-// e.g. VITE_WS_URL=ws://47.114.116.51:3001
 const WS_URL = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:3001`;
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3001`;
 

@@ -1,12 +1,12 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   CreateLLMPresetRequest,
-  LLMPresetSummary,
+  LocalPreset,
   OpenAICompatibleReasoningEffort,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
-  UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
+import { deletePreset, exportPresets, importPresets, loadPresets, savePreset } from "../lib/localPresets";
 
 type ProviderType = CreateLLMPresetRequest["providerType"];
 
@@ -22,13 +22,8 @@ interface PresetFormState {
 }
 
 interface SettingsPanelProps {
-  presets: LLMPresetSummary[];
-  loading: boolean;
-  error: string | null;
-  onRefresh: () => Promise<void> | void;
-  onCreate: (input: CreateLLMPresetRequest) => Promise<void>;
-  onUpdate: (presetId: string, input: UpdateLLMPresetRequest) => Promise<void>;
-  onDelete: (presetId: string) => Promise<void>;
+  presets: LocalPreset[];
+  onPresetsChange: (presets: LocalPreset[]) => void;
   onTest: (input: TestLLMPresetRequest) => Promise<TestLLMPresetResponse>;
 }
 
@@ -72,12 +67,7 @@ function parseExtraRequestParams(raw: string): Record<string, unknown> | null {
 
 export function SettingsPanel({
   presets,
-  loading,
-  error,
-  onRefresh,
-  onCreate,
-  onUpdate,
-  onDelete,
+  onPresetsChange,
   onTest,
 }: SettingsPanelProps) {
   const [selectedPresetId, setSelectedPresetId] = useState("");
@@ -88,6 +78,7 @@ export function SettingsPanel({
   const [testing, setTesting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedPreset = useMemo(
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
@@ -128,12 +119,16 @@ export function SettingsPanel({
       providerType: selectedPreset.providerType,
       baseURL: selectedPreset.baseURL,
       model: selectedPreset.model,
-      apiKey: "",
+      apiKey: selectedPreset.apiKey,
       rpm: selectedPreset.rpm ? String(selectedPreset.rpm) : "",
       reasoningEffort: selectedPreset.reasoningEffort ?? "",
       extraRequestParams: formatExtraRequestParams(selectedPreset.extraRequestParams),
     });
   }, [selectedPreset]);
+
+  const notifyChange = () => {
+    onPresetsChange(loadPresets());
+  };
 
   const resetForm = (options?: { clearStatus?: boolean }) => {
     setSelectedPresetId("");
@@ -175,7 +170,7 @@ export function SettingsPanel({
     };
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLocalError(null);
     setStatusMessage(null);
@@ -194,22 +189,23 @@ export function SettingsPanel({
     setSaving(true);
     try {
       if (selectedPresetId) {
-        const payload: UpdateLLMPresetRequest = {
+        savePreset({
+          id: selectedPresetId,
           name: form.name.trim(),
           providerType: fields.providerType,
           baseURL: fields.baseURL,
           model: fields.model,
+          apiKey: fields.apiKey || selectedPreset?.apiKey || "",
           rpm: fields.rpm,
           reasoningEffort: fields.reasoningEffort,
           extraRequestParams: fields.extraRequestParams,
-        };
-        if (fields.apiKey) {
-          payload.apiKey = fields.apiKey;
-        }
-        await onUpdate(selectedPresetId, payload);
+          createdAt: selectedPreset?.createdAt ?? new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
         setStatusMessage("预设已更新。");
       } else {
-        await onCreate({
+        savePreset({
+          id: crypto.randomUUID(),
           name: form.name.trim(),
           providerType: fields.providerType,
           baseURL: fields.baseURL,
@@ -218,10 +214,13 @@ export function SettingsPanel({
           rpm: fields.rpm,
           reasoningEffort: fields.reasoningEffort,
           extraRequestParams: fields.extraRequestParams,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         });
         resetForm({ clearStatus: false });
         setStatusMessage("预设已创建。");
       }
+      notifyChange();
     } catch (submitError) {
       setLocalError(submitError instanceof Error ? submitError.message : String(submitError));
     } finally {
@@ -229,7 +228,7 @@ export function SettingsPanel({
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     if (!selectedPresetId) {
       return;
     }
@@ -238,9 +237,10 @@ export function SettingsPanel({
     setLocalError(null);
     setStatusMessage(null);
     try {
-      await onDelete(selectedPresetId);
+      deletePreset(selectedPresetId);
       resetForm({ clearStatus: false });
       setStatusMessage("预设已删除。");
+      notifyChange();
     } catch (deleteError) {
       setLocalError(deleteError instanceof Error ? deleteError.message : String(deleteError));
     } finally {
@@ -256,7 +256,7 @@ export function SettingsPanel({
     try {
       fields = readValidatedProviderFields({
         requireName: false,
-        requireApiKey: !selectedPresetId,
+        requireApiKey: !selectedPreset?.apiKey && !form.apiKey.trim(),
       });
     } catch (validationError) {
       setLocalError(validationError instanceof Error ? validationError.message : String(validationError));
@@ -266,11 +266,10 @@ export function SettingsPanel({
     setTesting(true);
     try {
       const result = await onTest({
-        presetId: selectedPresetId || undefined,
         providerType: fields.providerType,
         baseURL: fields.baseURL,
         model: fields.model,
-        apiKey: fields.apiKey || undefined,
+        apiKey: fields.apiKey || selectedPreset?.apiKey || undefined,
         rpm: fields.rpm,
         reasoningEffort: fields.reasoningEffort,
         extraRequestParams: fields.extraRequestParams,
@@ -284,7 +283,41 @@ export function SettingsPanel({
     }
   };
 
-  const effectiveError = localError ?? error;
+  const handleExport = () => {
+    try {
+      const json = exportPresets();
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "llmcraft-presets.json";
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage("预设已导出。");
+    } catch (exportError) {
+      setLocalError(exportError instanceof Error ? exportError.message : String(exportError));
+    }
+  };
+
+  const handleImportFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const result = importPresets(reader.result as string);
+        setStatusMessage(`已导入 ${result.imported} 个预设。`);
+        notifyChange();
+      } catch (importError) {
+        setLocalError(importError instanceof Error ? importError.message : String(importError));
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  };
+
+  const effectiveError = localError;
 
   return (
     <div className="settings-panel">
@@ -300,7 +333,7 @@ export function SettingsPanel({
               setLocalError(null);
               setStatusMessage(null);
             }}
-            disabled={loading || presets.length === 0}
+            disabled={presets.length === 0}
           >
             <option value="">新建预设</option>
             {presets.map((preset) => (
@@ -310,12 +343,9 @@ export function SettingsPanel({
             ))}
           </select>
         </label>
-        <button className="hud-btn hud-btn-ghost" onClick={() => void onRefresh()} disabled={loading || saving || deleting || testing}>
-          {loading ? "刷新中" : "刷新"}
-        </button>
       </div>
 
-      <form className="settings-form" onSubmit={(event) => void handleSubmit(event)}>
+      <form className="settings-form" onSubmit={handleSubmit}>
         <div className="settings-grid">
           <label className="settings-field">
             <span>名称</span>
@@ -369,7 +399,7 @@ export function SettingsPanel({
               autoComplete="new-password"
               value={form.apiKey}
               onChange={(event) => setForm((current) => ({ ...current, apiKey: event.target.value }))}
-              placeholder={selectedPreset?.hasApiKey ? "已保存，留空则保持不变" : "sk-..."}
+              placeholder={selectedPreset ? "已保存，留空则保持不变" : "sk-..."}
             />
           </label>
 
@@ -426,14 +456,13 @@ export function SettingsPanel({
         <div className="settings-meta">
           {selectedPreset && (
             <>
-              <span className="replay-meta-chip">已保存 Key: {selectedPreset.hasApiKey ? "YES" : "NO"}</span>
               <span className="replay-meta-chip">RPM: {selectedPreset.rpm ?? "UNLIMITED"}</span>
               <span className="replay-meta-chip">reasoning: {selectedPreset.reasoningEffort ?? "DEFAULT"}</span>
               <span className="replay-meta-chip">extra: {selectedPreset.extraRequestParams ? "YES" : "NO"}</span>
               <span className="replay-meta-chip">更新于: {new Date(selectedPreset.updatedAt).toLocaleString()}</span>
             </>
           )}
-          {!selectedPreset && <span className="replay-meta-chip">创建新预设时不会显示明文 API Key。</span>}
+          {!selectedPreset && <span className="replay-meta-chip">创建新预设时保存 API Key 到浏览器本地存储。</span>}
         </div>
 
         {(effectiveError || statusMessage) && (
@@ -466,11 +495,36 @@ export function SettingsPanel({
           <button
             className="hud-btn hud-btn-stop"
             type="button"
-            onClick={() => void handleDelete()}
+            onClick={handleDelete}
             disabled={!selectedPresetId || saving || deleting || testing}
           >
             {deleting ? "删除中" : "删除预设"}
           </button>
+        </div>
+
+        <div className="settings-actions" style={{ marginTop: 8 }}>
+          <button
+            className="hud-btn hud-btn-ghost"
+            type="button"
+            onClick={handleExport}
+            disabled={presets.length === 0}
+          >
+            导出预设
+          </button>
+          <button
+            className="hud-btn hud-btn-ghost"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            导入预设
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            style={{ display: "none" }}
+            onChange={handleImportFile}
+          />
         </div>
       </form>
     </div>

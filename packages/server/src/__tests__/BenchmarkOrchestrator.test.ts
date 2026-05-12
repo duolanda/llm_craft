@@ -48,7 +48,6 @@ describe("BenchmarkOrchestrator", () => {
     const configs: Array<{ player1: { providerType: string }; player2: { providerType: string } }> = [];
     const orchestrator = new BenchmarkOrchestrator(
       {
-        presetId: "preset-1",
         llmConfig: {
           providerType: "openai-compatible",
           apiKey: "token",
@@ -112,7 +111,6 @@ describe("BenchmarkOrchestrator", () => {
     const round = createFakeRound({ winner: null, tick: 120 });
     const orchestrator = new BenchmarkOrchestrator(
       {
-        presetId: "preset-1",
         llmConfig: {
           providerType: "openai-compatible",
           apiKey: "token",

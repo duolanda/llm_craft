@@ -30,7 +30,6 @@ const BENCHMARK_RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmar
 const BENCHMARK_LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-llm-debug");
 
 export interface BenchmarkConfig {
-  presetId: string;
   llmConfig: OpenAICompatibleRuntimeConfig;
   cpuStrategy: CPUStrategyType;
   rounds: number;
@@ -195,7 +194,7 @@ export class BenchmarkOrchestrator {
     return {
       type: "benchmark_complete",
       cpuStrategy: this.config.cpuStrategy,
-      presetId: this.config.presetId,
+      model: this.config.llmConfig.model,
       totalRounds: this.config.rounds,
       completedRounds: this.rounds.length,
       llmWins,

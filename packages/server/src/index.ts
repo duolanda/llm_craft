@@ -6,14 +6,13 @@ import { fileURLToPath } from "node:url";
 import {
   AITerminalEvent,
   ClientMessage,
-  ClientStartBenchmarkMessage,
-  CreateLLMPresetRequest,
   GameSnapshot,
   GameState,
   MatchDebugOptions,
   MatchLLMConfig,
   MatchPrepareState,
   MatchWarmupOptions,
+  MatchPlayerLLMConfig,
   OpenAICompatibleRuntimeConfig,
   PlayerId,
   PLAYER_IDS,
@@ -21,12 +20,10 @@ import {
   ServerMessage,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
-  UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
-import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 
@@ -35,22 +32,12 @@ dotenv.config();
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
-const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LIVE_STATE_SNAPSHOT_LIMIT = 1;
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
-
-export function getDefaultPresetPaths() {
-  return {
-    filePath: path.resolve(SERVER_PACKAGE_DIR, "data", "llm-presets.json"),
-  };
-}
-
-const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
-const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
 
 interface OrchestratorLike {
   prepare?(warmup: MatchWarmupOptions): Promise<void>;
@@ -66,7 +53,6 @@ interface OrchestratorLike {
 }
 
 export interface ServerState {
-  presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
   pendingMatch: {
     signature: string;
@@ -75,45 +61,29 @@ export interface ServerState {
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
     config: {
-      presetId: string;
       llmConfig: OpenAICompatibleRuntimeConfig;
-      cpuStrategy: ClientStartBenchmarkMessage["cpuStrategy"];
+      cpuStrategy: "random" | "rush";
       rounds: number;
       recordReplay: boolean;
       decisionIntervalTicks?: number;
-      debug?: ClientStartBenchmarkMessage["debug"];
+      debug?: MatchDebugOptions;
     },
     ws: Pick<WebSocket, "send"> | null
   ) => OrchestratorLike;
-  liveEnabled: boolean | null;
-}
-
-export function resolvePresetSecret(): string {
-  return BUILTIN_PRESET_SECRET;
-}
-
-export function createPresetStore(options?: {
-  filePath?: string;
-}): PresetStore {
-  return new PresetStore({
-    filePath: options?.filePath || PRESETS_FILE,
-    encryptionSecret: resolvePresetSecret(),
-  });
+  liveEnabled: boolean;
 }
 
 export function createServerState(
-  presetStore: PresetStore,
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike = (config) => new GameOrchestrator(config),
   createBenchmarkOrchestrator: ServerState["createBenchmarkOrchestrator"] = (config, ws) =>
     new BenchmarkOrchestrator(config, ws)
 ): ServerState {
   return {
-    presetStore,
     orchestrator: null,
     pendingMatch: null,
     createOrchestrator,
     createBenchmarkOrchestrator,
-    liveEnabled: null,
+    liveEnabled: true,
   };
 }
 
@@ -131,12 +101,6 @@ type AITerminalMessagePayload = {
   events: AITerminalEvent[];
 };
 
-async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
-  const presets = await state.presetStore.list();
-  state.liveEnabled = presets.length > 0;
-  return state.liveEnabled;
-}
-
 export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
   const currentOrchestrator = state.orchestrator;
   const game = currentOrchestrator?.getGame();
@@ -146,7 +110,7 @@ export function buildStateMessagePayload(state: ServerState): StateMessagePayloa
     type: "state",
     state: game?.getState() ?? null,
     snapshots: Array.isArray(latestSnapshot) ? latestSnapshot : latestSnapshot ? [latestSnapshot] : [],
-    liveEnabled: Boolean(state.liveEnabled),
+    liveEnabled: true,
   };
 }
 
@@ -164,13 +128,13 @@ function buildAITerminalMessagePayload(
 }
 
 function buildMatchSignature(input: {
-  player1PresetId: string;
-  player2PresetId: string;
+  player1: MatchPlayerLLMConfig;
+  player2: MatchPlayerLLMConfig;
   debug?: MatchDebugOptions;
 }): string {
   return JSON.stringify({
-    player1PresetId: input.player1PresetId,
-    player2PresetId: input.player2PresetId,
+    player1: input.player1,
+    player2: input.player2,
     debug: input.debug ?? null,
   });
 }
@@ -216,20 +180,7 @@ async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
   return JSON.parse(raw || "{}") as T;
 }
 
-function normalizePresetRpm(value: unknown): number | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === null || value === "") {
-    return null;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    throw new Error("RPM 必须是正整数，留空表示不限制。");
-  }
-  return value;
-}
-
-function normalizeReasoningEffort(value: unknown): CreateLLMPresetRequest["reasoningEffort"] {
+function normalizeReasoningEffort(value: unknown): TestLLMPresetRequest["reasoningEffort"] {
   if (value === undefined) {
     return undefined;
   }
@@ -239,7 +190,7 @@ function normalizeReasoningEffort(value: unknown): CreateLLMPresetRequest["reaso
   if (typeof value !== "string" || !VALID_REASONING_EFFORTS.has(value)) {
     throw new Error("reasoning_effort 必须是 minimal、low、medium、high、xhigh 或留空。");
   }
-  return value as CreateLLMPresetRequest["reasoningEffort"];
+  return value as TestLLMPresetRequest["reasoningEffort"];
 }
 
 function normalizeExtraRequestParams(value: unknown): Record<string, unknown> | null | undefined {
@@ -263,117 +214,42 @@ function normalizeExtraRequestParams(value: unknown): Record<string, unknown> | 
   return Object.keys(params).length > 0 ? params : null;
 }
 
-function validateCreatePresetRequest(body: CreateLLMPresetRequest): CreateLLMPresetRequest {
-  if (!body.name?.trim()) {
-    throw new Error("预设名称不能为空。");
+function normalizePresetRpm(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
   }
+  if (value === null || value === "") {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error("RPM 必须是正整数，留空表示不限制。");
+  }
+  return value;
+}
+
+function validateTestPresetRequest(body: TestLLMPresetRequest): MatchPlayerLLMConfig {
   if (!body.baseURL?.trim()) {
     throw new Error("Base URL 不能为空。");
   }
   if (!body.model?.trim()) {
     throw new Error("模型名称不能为空。");
+  }
+  if (body.providerType !== "openai-compatible") {
+    throw new Error("当前仅支持 OpenAI-compatible 预设。");
   }
   if (!body.apiKey?.trim()) {
-    throw new Error("API Key 不能为空。");
-  }
-  if (body.providerType !== "openai-compatible") {
-    throw new Error("当前仅支持 OpenAI-compatible 预设。");
-  }
-
-  return {
-    ...body,
-    name: body.name.trim(),
-    baseURL: body.baseURL.trim(),
-    model: body.model.trim(),
-    apiKey: body.apiKey.trim(),
-    rpm: normalizePresetRpm(body.rpm),
-    reasoningEffort: normalizeReasoningEffort(body.reasoningEffort),
-    extraRequestParams: normalizeExtraRequestParams(body.extraRequestParams),
-  };
-}
-
-function validateUpdatePresetRequest(body: UpdateLLMPresetRequest): UpdateLLMPresetRequest {
-  if (!body.name?.trim()) {
-    throw new Error("预设名称不能为空。");
-  }
-  if (!body.baseURL?.trim()) {
-    throw new Error("Base URL 不能为空。");
-  }
-  if (!body.model?.trim()) {
-    throw new Error("模型名称不能为空。");
-  }
-  if (body.providerType !== "openai-compatible") {
-    throw new Error("当前仅支持 OpenAI-compatible 预设。");
-  }
-
-  return {
-    ...body,
-    name: body.name.trim(),
-    baseURL: body.baseURL.trim(),
-    model: body.model.trim(),
-    apiKey: body.apiKey?.trim(),
-    rpm: normalizePresetRpm(body.rpm),
-    reasoningEffort: normalizeReasoningEffort(body.reasoningEffort),
-    extraRequestParams: normalizeExtraRequestParams(body.extraRequestParams),
-  };
-}
-
-async function validateTestPresetRequest(
-  body: TestLLMPresetRequest,
-  presetStore: PresetStore
-): Promise<OpenAICompatibleRuntimeConfig> {
-  if (!body.baseURL?.trim()) {
-    throw new Error("Base URL 不能为空。");
-  }
-  if (!body.model?.trim()) {
-    throw new Error("模型名称不能为空。");
-  }
-  if (body.providerType !== "openai-compatible") {
-    throw new Error("当前仅支持 OpenAI-compatible 预设。");
-  }
-
-  let apiKey = body.apiKey?.trim() ?? "";
-  if (!apiKey && body.presetId) {
-    const savedConfig = await presetStore.getRuntimeConfig(body.presetId);
-    apiKey = savedConfig.apiKey;
-  }
-  if (!apiKey) {
-    throw new Error("测试 API 前必须填写 API Key，或选择一个已保存 Key 的预设。");
+    throw new Error("测试 API 前必须填写 API Key。");
   }
 
   return {
     providerType: "openai-compatible",
-    apiKey,
+    apiKey: body.apiKey.trim(),
     baseURL: body.baseURL.trim(),
     model: body.model.trim(),
     rpm: normalizePresetRpm(body.rpm) ?? null,
     reasoningEffort: normalizeReasoningEffort(body.reasoningEffort) ?? null,
     extraRequestParams: normalizeExtraRequestParams(body.extraRequestParams) ?? null,
   };
-}
-
-function parsePresetId(urlPath: string): string {
-  const presetId = decodeURIComponent(urlPath.replace("/api/settings/presets/", ""));
-  if (!presetId || presetId.includes("/")) {
-    throw new Error("预设 ID 无效。");
-  }
-  return presetId;
-}
-
-function sendPresetError(res: http.ServerResponse, error: unknown) {
-  if (error instanceof SyntaxError) {
-    sendJson(res, 400, { error: "请求体不是有效的 JSON。" });
-    return;
-  }
-  if (error instanceof Error) {
-    if (error.message === "PRESET_NOT_FOUND") {
-      sendJson(res, 404, { error: "指定的预设不存在。" });
-      return;
-    }
-    sendJson(res, 400, { error: error.message });
-    return;
-  }
-  sendJson(res, 500, { error: "预设操作失败。" });
 }
 
 async function listRecordEntries() {
@@ -453,30 +329,10 @@ export async function handleHttpRequest(
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/api/settings/presets") {
-      const presets = await state.presetStore.list();
-      state.liveEnabled = presets.length > 0;
-      sendJson(res, 200, { presets });
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/api/settings/presets") {
-      try {
-        const body = await readJsonBody<CreateLLMPresetRequest>(req);
-        const validatedBody = validateCreatePresetRequest(body);
-        const preset = await state.presetStore.create(validatedBody);
-        state.liveEnabled = true;
-        sendJson(res, 201, { preset });
-      } catch (error) {
-        sendPresetError(res, error);
-      }
-      return;
-    }
-
     if (req.method === "POST" && url.pathname === "/api/settings/presets/test") {
       try {
         const body = await readJsonBody<TestLLMPresetRequest>(req);
-        const runtimeConfig = await validateTestPresetRequest(body, state.presetStore);
+        const runtimeConfig = validateTestPresetRequest(body);
         const provider = createLLMProvider(runtimeConfig);
         const startedAt = Date.now();
         const result = await provider.testConnection();
@@ -493,48 +349,13 @@ export async function handleHttpRequest(
           return;
         }
         if (error instanceof Error) {
-          const statusCode = error.message === "PRESET_NOT_FOUND" || error.message === "PRESET_DECRYPT_FAILED"
+          const statusCode = error.message.includes("不能为空") || error.message.includes("必须")
             ? 400
-            : error.message.includes("不能为空") || error.message.includes("必须")
-              ? 400
-              : 502;
-          const message = error.message === "PRESET_NOT_FOUND"
-            ? "指定的预设不存在。"
-            : error.message === "PRESET_DECRYPT_FAILED"
-              ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
-              : statusCode === 502
-                ? `API 测试失败: ${error.message}`
-                : error.message;
-          sendJson(res, statusCode, { error: message });
+            : 502;
+          sendJson(res, statusCode, { error: statusCode === 502 ? `API 测试失败: ${error.message}` : error.message });
           return;
         }
         sendJson(res, 502, { error: "API 测试失败。" });
-      }
-      return;
-    }
-
-    if (req.method === "PUT" && url.pathname.startsWith("/api/settings/presets/")) {
-      try {
-        const presetId = parsePresetId(url.pathname);
-        const body = await readJsonBody<UpdateLLMPresetRequest>(req);
-        const validatedBody = validateUpdatePresetRequest(body);
-        const preset = await state.presetStore.update(presetId, validatedBody);
-        state.liveEnabled = true;
-        sendJson(res, 200, { preset });
-      } catch (error) {
-        sendPresetError(res, error);
-      }
-      return;
-    }
-
-    if (req.method === "DELETE" && url.pathname.startsWith("/api/settings/presets/")) {
-      try {
-        const presetId = parsePresetId(url.pathname);
-        await state.presetStore.delete(presetId);
-        await refreshLiveEnabled(state);
-        sendJson(res, 200, { ok: true });
-      } catch (error) {
-        sendPresetError(res, error);
       }
       return;
     }
@@ -566,10 +387,10 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     const message: ClientMessage = parsed;
 
     if (message.type === "prepare") {
-      if (!message.player1PresetId || !message.player2PresetId) {
+      if (!message.player1 || !message.player2) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "准备对局前必须为红蓝双方选择预设。",
+          message: "准备对局前必须提供红蓝双方的 LLM 配置。",
         } satisfies ServerMessage));
         return;
       }
@@ -585,8 +406,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       const signature = buildMatchSignature(message);
-      const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
-      const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const player1 = message.player1;
+      const player2 = message.player2;
       let orchestrator = state.pendingMatch?.signature === signature
         ? state.pendingMatch.orchestrator
         : null;
@@ -629,10 +450,10 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     }
 
     if (message.type === "start") {
-      if (!message.player1PresetId || !message.player2PresetId) {
+      if (!message.player1 || !message.player2) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "启动对局前必须为红蓝双方选择预设。",
+          message: "启动对局前必须提供红蓝双方的 LLM 配置。",
         } satisfies ServerMessage));
         return;
       }
@@ -641,8 +462,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const preparedMatch = state.pendingMatch?.signature === signature ? state.pendingMatch : null;
       const previousOrchestrator = preparedMatch ? null : state.orchestrator;
       const nextOrchestrator = preparedMatch?.orchestrator ?? state.createOrchestrator({
-        player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
-        player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
+        player1: message.player1,
+        player2: message.player2,
         debug: message.debug,
       });
       state.orchestrator = nextOrchestrator;
@@ -672,16 +493,16 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     }
 
     if (message.type === "reset") {
-      if (!message.player1PresetId || !message.player2PresetId) {
+      if (!message.player1 || !message.player2) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "重置对局前必须为红蓝双方选择预设。",
+          message: "重置对局前必须提供红蓝双方的 LLM 配置。",
         } satisfies ServerMessage));
         return;
       }
 
-      const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
-      const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const player1 = message.player1;
+      const player2 = message.player2;
       const previousOrchestrator = state.orchestrator;
       const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
 
@@ -709,10 +530,10 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     }
 
     if (message.type === "start_benchmark") {
-      if (!message.presetId) {
+      if (!message.player) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "启动 benchmark 前必须选择一个 LLM 预设。",
+          message: "启动 benchmark 前必须提供 LLM 配置。",
         } satisfies ServerMessage));
         return;
       }
@@ -725,16 +546,19 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
-      const llmConfig = await state.presetStore.getRuntimeConfig(message.presetId);
+      const llmConfig = message.player;
       if (llmConfig.providerType !== "openai-compatible") {
-        throw new Error("BENCHMARK_PRESET_INVALID");
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "Benchmark 只能使用 OpenAI-compatible 预设。",
+        } satisfies ServerMessage));
+        return;
       }
 
       const previousOrchestrator = state.orchestrator;
       const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
         {
-          presetId: message.presetId,
-          llmConfig,
+          llmConfig: llmConfig as OpenAICompatibleRuntimeConfig,
           cpuStrategy: message.cpuStrategy,
           rounds: message.rounds,
           recordReplay: message.recordReplay ?? true,
@@ -763,15 +587,9 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     ws.send(JSON.stringify({
       type: "error",
       message: error instanceof Error
-        ? error.message === "PRESET_NOT_FOUND"
-          ? "所选预设不存在或已被删除。"
-          : error.message === "PRESET_DECRYPT_FAILED"
-            ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
-            : error.message === "BENCHMARK_PRESET_INVALID"
-              ? "Benchmark 只能使用 OpenAI-compatible 预设。"
-              : error.message.startsWith("模型准备失败")
-                ? error.message
-                : "处理客户端消息失败。"
+        ? error.message.startsWith("模型准备失败")
+          ? error.message
+          : "处理客户端消息失败。"
         : "处理客户端消息失败。",
     } satisfies ServerMessage));
   }
@@ -796,9 +614,6 @@ function createServer(state: ServerState) {
       }
       isSendingState = true;
       try {
-        if (state.liveEnabled === null) {
-          await refreshLiveEnabled(state);
-        }
         ws.send(JSON.stringify(buildStateMessagePayload(state)));
       } finally {
         isSendingState = false;
@@ -845,7 +660,7 @@ function createServer(state: ServerState) {
 }
 
 export function startServer() {
-  const state = createServerState(createPresetStore());
+  const state = createServerState();
   const { server, wss } = createServer(state);
 
   console.log("启动 LLMCraft 服务器...");

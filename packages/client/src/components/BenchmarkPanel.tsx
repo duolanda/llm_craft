@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
-import { CPUStrategyType, LLMPresetSummary, MatchDebugOptions } from "@llmcraft/shared";
+import { CPUStrategyType, LocalPreset, MatchDebugOptions } from "@llmcraft/shared";
 
 interface BenchmarkPanelProps {
-  presets: LLMPresetSummary[];
+  presets: LocalPreset[];
   initialPresetId?: string;
   running: boolean;
   onStart: (input: {

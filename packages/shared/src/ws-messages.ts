@@ -1,5 +1,5 @@
 import { PlayerId } from "./constants";
-import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types";
+import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchPlayerLLMConfig, MatchWarmupOptions } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -8,28 +8,28 @@ import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOp
 
 // ---------- 客户端 → 服务端 ----------
 
-/** 开始 AI 对战模拟（需指定红蓝双方 LLM 预设） */
+/** 开始 AI 对战模拟（携带完整 LLM 配置，不再通过 presetId 查找） */
 export interface ClientStartMatchMessage {
   type: "start";
-  player1PresetId: string;
-  player2PresetId: string;
+  player1: MatchPlayerLLMConfig;
+  player2: MatchPlayerLLMConfig;
   debug?: MatchDebugOptions;
 }
 
 /** 赛前准备指定 AI：发送首个真实 agent 请求，但不启动游戏 tick */
 export interface ClientPrepareMatchMessage {
   type: "prepare";
-  player1PresetId: string;
-  player2PresetId: string;
+  player1: MatchPlayerLLMConfig;
+  player2: MatchPlayerLLMConfig;
   debug?: MatchDebugOptions;
   warmup?: MatchWarmupOptions;
 }
 
-/** 重置当前对局（需指定红蓝双方 LLM 预设） */
+/** 重置当前对局（携带完整 LLM 配置） */
 export interface ClientResetMatchMessage {
   type: "reset";
-  player1PresetId: string;
-  player2PresetId: string;
+  player1: MatchPlayerLLMConfig;
+  player2: MatchPlayerLLMConfig;
   debug?: MatchDebugOptions;
 }
 
@@ -43,10 +43,10 @@ export interface ClientSaveRecordMessage {
   type: "save_record";
 }
 
-/** 开始 LLM 对 CPU 的 benchmark */
+/** 开始 LLM 对 CPU 的 benchmark（携带完整 LLM 配置） */
 export interface ClientStartBenchmarkMessage {
   type: "start_benchmark";
-  presetId: string;
+  player: MatchPlayerLLMConfig;
   cpuStrategy: CPUStrategyType;
   rounds: number;
   recordReplay?: boolean;
@@ -117,7 +117,7 @@ export interface ServerBenchmarkRoundResult {
 export interface ServerBenchmarkCompleteMessage {
   type: "benchmark_complete";
   cpuStrategy: CPUStrategyType;
-  presetId: string;
+  model: string;
   totalRounds: number;
   completedRounds: number;
   llmWins: number;

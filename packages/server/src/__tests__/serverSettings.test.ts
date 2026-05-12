@@ -1,35 +1,17 @@
-import fs from "node:fs/promises";
 import http from "node:http";
-import os from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GameState } from "@llmcraft/shared";
-import { PresetStore } from "../PresetStore";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 import {
   buildStateMessagePayload,
-  createPresetStore,
   createServerState,
-  getDefaultPresetPaths,
   handleClientMessage,
   handleHttpRequest,
 } from "../index";
 
-const tempDirs: string[] = [];
-
-afterEach(async () => {
+afterEach(() => {
   vi.restoreAllMocks();
-  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
-
-async function createStore() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-server-settings-"));
-  tempDirs.push(dir);
-  return new PresetStore({
-    filePath: path.join(dir, "llm-presets.json"),
-    encryptionSecret: "0123456789abcdef0123456789abcdef",
-  });
-}
 
 function createRequest({
   method,
@@ -101,236 +83,35 @@ function createMockGameState(tick: number): GameState {
   };
 }
 
+function makeLLMConfig(overrides?: Partial<{ apiKey: string; baseURL: string; model: string }>) {
+  return {
+    providerType: "openai-compatible" as const,
+    apiKey: overrides?.apiKey ?? "token-one",
+    baseURL: overrides?.baseURL ?? "https://api.one.test/v1",
+    model: overrides?.model ?? "model-one",
+    rpm: null,
+    reasoningEffort: null,
+    extraRequestParams: null,
+  };
+}
+
 describe("server settings", () => {
-  it("uses the built-in preset secret without creating a separate secret file", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-secret-bootstrap-"));
-    tempDirs.push(dir);
-    const filePath = path.join(dir, "llm-presets.json");
-    const secretFilePath = path.join(dir, "llm-presets.secret");
-
-    const store = createPresetStore({
-      filePath,
-    });
-
-    await store.create({
-      name: "Preset A",
-      providerType: "openai-compatible",
-      baseURL: "https://api.example.com/v1",
-      model: "gpt-4o-mini",
-      apiKey: "secret-token",
-    });
-
-    await expect(fs.access(secretFilePath)).rejects.toMatchObject({ code: "ENOENT" });
-
-    const reloadedStore = createPresetStore({
-      filePath,
-    });
-    const runtime = await reloadedStore.getRuntimeConfig((await reloadedStore.list())[0]!.id);
-    expect(runtime.apiKey).toBe("secret-token");
-  });
-
-  it("resolves default preset paths independent of process cwd", () => {
-    const cwdSpy = vi.spyOn(process, "cwd");
-    cwdSpy.mockReturnValueOnce("E:/Projects/llm_craft");
-    const rootPaths = getDefaultPresetPaths();
-
-    cwdSpy.mockReturnValueOnce("E:/Projects/llm_craft/packages/server");
-    const nestedPaths = getDefaultPresetPaths();
-
-    expect(nestedPaths).toEqual(rootPaths);
-    expect(rootPaths.filePath).toContain(path.join("packages", "server", "data", "llm-presets.json"));
-    expect(rootPaths.filePath).not.toContain(path.join("packages", "server", "packages", "server"));
-  });
-
-  it("returns preset summaries from GET /api/settings/presets without exposing plaintext tokens", async () => {
-    const presetStore = await createStore();
-    await presetStore.create({
-      name: "Preset A",
-      providerType: "openai-compatible",
-      baseURL: "https://api.example.com/v1",
-      model: "gpt-4o-mini",
-      apiKey: "secret-token",
-    });
-
-    const state = createServerState(presetStore);
-    const response = createResponseCapture();
-
-    await handleHttpRequest(
-      createRequest({ method: "GET", url: "/api/settings/presets" }),
-      response.res,
-      state
-    );
-
-    expect(response.statusCode).toBe(200);
-    expect(response.headers.get("content-type")).toContain("application/json");
-
-    const body = JSON.parse(response.payload) as {
-      presets: Array<{ name: string; hasApiKey: boolean; apiKey?: string }>;
-    };
-    expect(body.presets).toHaveLength(1);
-    expect(body.presets[0]?.name).toBe("Preset A");
-    expect(body.presets[0]?.hasApiKey).toBe(true);
-    expect(JSON.stringify(body)).not.toContain("secret-token");
-    expect(body.presets[0]).not.toHaveProperty("apiKey");
-  });
-
-  it("supports HTTP preset CRUD and preserves apiKey when update omits it", async () => {
-    const presetStore = await createStore();
-    const state = createServerState(presetStore);
-
-    const createResponse = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "POST",
-        url: "/api/settings/presets",
-        body: JSON.stringify({
-          name: "Preset A",
-          providerType: "openai-compatible",
-          baseURL: "https://api.example.com/v1",
-          model: "gpt-4o-mini",
-          apiKey: "secret-token",
-          reasoningEffort: "medium",
-          extraRequestParams: {
-            thinking: { type: "disabled" },
-            max_tokens: 512,
-          },
-        }),
-      }),
-      createResponse.res,
-      state
-    );
-
-    expect(createResponse.statusCode).toBe(201);
-    const createdBody = JSON.parse(createResponse.payload) as { preset: { id: string } };
-    const presetId = createdBody.preset.id;
-
-    const updateResponse = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "PUT",
-        url: `/api/settings/presets/${presetId}`,
-        body: JSON.stringify({
-          name: "Preset B",
-          providerType: "openai-compatible",
-          baseURL: "https://api.example.com/v2",
-          model: "gpt-4.1-mini",
-        }),
-      }),
-      updateResponse.res,
-      state
-    );
-
-    expect(updateResponse.statusCode).toBe(200);
-    const runtime = await presetStore.getRuntimeConfig(presetId);
-    expect(runtime.apiKey).toBe("secret-token");
-    expect(runtime.model).toBe("gpt-4.1-mini");
-    expect(runtime.reasoningEffort).toBeNull();
-    expect(runtime.extraRequestParams).toBeNull();
-
-    const deleteResponse = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "DELETE",
-        url: `/api/settings/presets/${presetId}`,
-      }),
-      deleteResponse.res,
-      state
-    );
-
-    expect(deleteResponse.statusCode).toBe(200);
-    await expect(presetStore.getRuntimeConfig(presetId)).rejects.toThrow("PRESET_NOT_FOUND");
-  });
-
-  it("returns readable errors for invalid JSON and missing presets", async () => {
-    const presetStore = await createStore();
-    const state = createServerState(presetStore);
-
-    const invalidJsonResponse = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "POST",
-        url: "/api/settings/presets",
-        body: "{bad json",
-      }),
-      invalidJsonResponse.res,
-      state
-    );
-
-    expect(invalidJsonResponse.statusCode).toBe(400);
-    expect(invalidJsonResponse.payload).toContain("请求体不是有效的 JSON");
-
-    const missingPresetResponse = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "DELETE",
-        url: "/api/settings/presets/missing-id",
-      }),
-      missingPresetResponse.res,
-      state
-    );
-
-    expect(missingPresetResponse.statusCode).toBe(404);
-    expect(missingPresetResponse.payload).toContain("指定的预设不存在");
-  });
-
-  it("rejects extra request params that override core request fields", async () => {
-    const presetStore = await createStore();
-    const state = createServerState(presetStore);
-
-    const response = createResponseCapture();
-    await handleHttpRequest(
-      createRequest({
-        method: "POST",
-        url: "/api/settings/presets",
-        body: JSON.stringify({
-          name: "Preset A",
-          providerType: "openai-compatible",
-          baseURL: "https://api.example.com/v1",
-          model: "gpt-4o-mini",
-          apiKey: "secret-token",
-          extraRequestParams: {
-            model: "other-model",
-          },
-        }),
-      }),
-      response.res,
-      state
-    );
-
-    expect(response.statusCode).toBe(400);
-    expect(response.payload).toContain("高级请求参数不能覆盖 model");
-  });
-
-  it("rejects start when a preset id is missing", async () => {
-    const presetStore = await createStore();
-    const state = createServerState(presetStore);
+  it("rejects start when player config is missing", async () => {
+    const state = createServerState();
     const ws = { send: vi.fn() };
 
     await handleClientMessage({
-      data: JSON.stringify({ type: "start", player1PresetId: "", player2PresetId: "" }),
+      data: JSON.stringify({ type: "start", player1: null, player2: null }),
       ws: ws as any,
       state,
     });
 
-    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("必须为红蓝双方选择预设"));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("必须提供红蓝双方的 LLM 配置"));
   });
 
-  it("creates a fresh orchestrator from the selected presets for each player", async () => {
-    const presetStore = await createStore();
-    const player1Preset = await presetStore.create({
-      name: "Red",
-      providerType: "openai-compatible",
-      baseURL: "https://api.one.test/v1",
-      model: "model-one",
-      apiKey: "token-one",
-    });
-    const player2Preset = await presetStore.create({
-      name: "Blue",
-      providerType: "openai-compatible",
-      baseURL: "https://api.two.test/v1",
-      model: "model-two",
-      apiKey: "token-two",
-    });
+  it("creates a fresh orchestrator from the provided player configs", async () => {
+    const player1 = makeLLMConfig({ model: "model-one" });
+    const player2 = makeLLMConfig({ apiKey: "token-two", baseURL: "https://api.two.test/v1", model: "model-two" });
 
     const start = vi.fn<[], Promise<void>>(async () => undefined);
     const stop = vi.fn<[], void>(() => undefined);
@@ -346,13 +127,13 @@ describe("server settings", () => {
       getGame,
       config,
     }));
-    const state = createServerState(presetStore, createOrchestrator);
+    const state = createServerState(createOrchestrator);
 
     await handleClientMessage({
       data: JSON.stringify({
         type: "start",
-        player1PresetId: player1Preset.id,
-        player2PresetId: player2Preset.id,
+        player1,
+        player2,
       }),
       ws: { send: vi.fn() } as any,
       state,
@@ -379,21 +160,8 @@ describe("server settings", () => {
   });
 
   it("keeps the previous orchestrator if starting the next one fails", async () => {
-    const presetStore = await createStore();
-    const player1Preset = await presetStore.create({
-      name: "Red",
-      providerType: "openai-compatible",
-      baseURL: "https://api.one.test/v1",
-      model: "model-one",
-      apiKey: "token-one",
-    });
-    const player2Preset = await presetStore.create({
-      name: "Blue",
-      providerType: "openai-compatible",
-      baseURL: "https://api.two.test/v1",
-      model: "model-two",
-      apiKey: "token-two",
-    });
+    const player1 = makeLLMConfig();
+    const player2 = makeLLMConfig({ model: "model-two" });
 
     const previousOrchestrator = {
       start: vi.fn<[], Promise<void>>(async () => undefined),
@@ -415,7 +183,7 @@ describe("server settings", () => {
         getSnapshots: () => [],
       })),
     };
-    const state = createServerState(presetStore, vi.fn(() => failedOrchestrator as any));
+    const state = createServerState(vi.fn(() => failedOrchestrator as any));
     state.orchestrator = previousOrchestrator;
     const ws = { send: vi.fn() };
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -423,8 +191,8 @@ describe("server settings", () => {
     await handleClientMessage({
       data: JSON.stringify({
         type: "start",
-        player1PresetId: player1Preset.id,
-        player2PresetId: player2Preset.id,
+        player1,
+        player2,
       }),
       ws: ws as any,
       state,
@@ -437,66 +205,9 @@ describe("server settings", () => {
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("处理客户端消息失败"));
   });
 
-  it("returns a readable error when a preset can no longer be decrypted", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-corrupt-preset-"));
-    tempDirs.push(dir);
-    const filePath = path.join(dir, "llm-presets.json");
-    const presetId = "broken-preset";
-
-    await fs.writeFile(
-      filePath,
-      JSON.stringify([
-        {
-          id: presetId,
-          name: "Broken",
-          providerType: "openai-compatible",
-          baseURL: "https://api.example.com/v1",
-          model: "gpt-4.1-mini",
-          apiKeyEncrypted: "invalid-payload",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-      ]),
-      "utf8"
-    );
-
-    const presetStore = new PresetStore({
-      filePath,
-      encryptionSecret: "0123456789abcdef0123456789abcdef",
-    });
-    const state = createServerState(presetStore);
-    const ws = { send: vi.fn() };
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    await handleClientMessage({
-      data: JSON.stringify({
-        type: "start",
-        player1PresetId: presetId,
-        player2PresetId: presetId,
-      }),
-      ws: ws as any,
-      state,
-    });
-
-    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("预设中的 API Key 无法解密"));
-  });
-
   it("passes per-match debug flags through start message orchestration config", async () => {
-    const presetStore = await createStore();
-    const player1Preset = await presetStore.create({
-      name: "Red",
-      providerType: "openai-compatible",
-      baseURL: "https://api.one.test/v1",
-      model: "model-one",
-      apiKey: "token-one",
-    });
-    const player2Preset = await presetStore.create({
-      name: "Blue",
-      providerType: "openai-compatible",
-      baseURL: "https://api.two.test/v1",
-      model: "model-two",
-      apiKey: "token-two",
-    });
+    const player1 = makeLLMConfig();
+    const player2 = makeLLMConfig({ model: "model-two" });
     const createOrchestrator = vi.fn(() => ({
       start: vi.fn(async () => undefined),
       stop: vi.fn(() => undefined),
@@ -506,13 +217,13 @@ describe("server settings", () => {
         getSnapshots: () => [],
       })),
     }));
-    const state = createServerState(presetStore, createOrchestrator);
+    const state = createServerState(createOrchestrator);
 
     await handleClientMessage({
       data: JSON.stringify({
         type: "start",
-        player1PresetId: player1Preset.id,
-        player2PresetId: player2Preset.id,
+        player1,
+        player2,
         debug: { recordLLMTranscript: true },
       }),
       ws: { send: vi.fn() } as any,
@@ -527,21 +238,8 @@ describe("server settings", () => {
   });
 
   it("prepares selected players before start and reports status", async () => {
-    const presetStore = await createStore();
-    const player1Preset = await presetStore.create({
-      name: "Red",
-      providerType: "openai-compatible",
-      baseURL: "https://api.one.test/v1",
-      model: "model-one",
-      apiKey: "token-one",
-    });
-    const player2Preset = await presetStore.create({
-      name: "Blue",
-      providerType: "openai-compatible",
-      baseURL: "https://api.two.test/v1",
-      model: "model-two",
-      apiKey: "token-two",
-    });
+    const player1 = makeLLMConfig({ model: "model-one" });
+    const player2 = makeLLMConfig({ model: "model-two" });
     const prepare = vi.fn(async () => undefined);
     const createOrchestrator = vi.fn(() => ({
       prepare,
@@ -553,14 +251,14 @@ describe("server settings", () => {
         getSnapshots: () => [],
       })),
     }));
-    const state = createServerState(presetStore, createOrchestrator);
+    const state = createServerState(createOrchestrator);
     const ws = { send: vi.fn() };
 
     await handleClientMessage({
       data: JSON.stringify({
         type: "prepare",
-        player1PresetId: player1Preset.id,
-        player2PresetId: player2Preset.id,
+        player1,
+        player2,
         warmup: { player_1: true, player_2: false },
       }),
       ws: ws as any,
@@ -578,16 +276,8 @@ describe("server settings", () => {
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"player_1":"ready"'));
   });
 
-  it("tests a preset API connection without exposing the saved api key", async () => {
-    const presetStore = await createStore();
-    const preset = await presetStore.create({
-      name: "Preset A",
-      providerType: "openai-compatible",
-      baseURL: "https://api.example.com/v1",
-      model: "gpt-4o-mini",
-      apiKey: "secret-token",
-    });
-    const state = createServerState(presetStore);
+  it("tests a preset API connection with the provided config", async () => {
+    const state = createServerState();
     const response = createResponseCapture();
     const testSpy = vi
       .spyOn(OpenAICompatibleProvider.prototype, "testConnection")
@@ -598,10 +288,10 @@ describe("server settings", () => {
         method: "POST",
         url: "/api/settings/presets/test",
         body: JSON.stringify({
-          presetId: preset.id,
           providerType: "openai-compatible",
           baseURL: "https://api.example.com/v1",
           model: "gpt-4o-mini",
+          apiKey: "secret-token",
         }),
       }),
       response.res,
@@ -615,15 +305,8 @@ describe("server settings", () => {
     expect(response.payload).not.toContain("secret-token");
   });
 
-  it("starts benchmark orchestration with the selected preset and cpu strategy", async () => {
-    const presetStore = await createStore();
-    const preset = await presetStore.create({
-      name: "Benchmark LLM",
-      providerType: "openai-compatible",
-      baseURL: "https://api.one.test/v1",
-      model: "model-one",
-      apiKey: "token-one",
-    });
+  it("starts benchmark orchestration with the provided config and cpu strategy", async () => {
+    const player = makeLLMConfig({ model: "model-one" });
 
     const previousOrchestrator = {
       start: vi.fn(async () => undefined),
@@ -644,13 +327,13 @@ describe("server settings", () => {
       })),
     };
     const createBenchmarkOrchestrator = vi.fn(() => benchmarkOrchestrator as any);
-    const state = createServerState(presetStore, undefined, createBenchmarkOrchestrator);
+    const state = createServerState(undefined, createBenchmarkOrchestrator);
     state.orchestrator = previousOrchestrator as any;
 
     await handleClientMessage({
       data: JSON.stringify({
         type: "start_benchmark",
-        presetId: preset.id,
+        player,
         cpuStrategy: "random",
         rounds: 12,
         recordReplay: true,
@@ -664,7 +347,6 @@ describe("server settings", () => {
     expect(previousOrchestrator.stop).toHaveBeenCalledTimes(1);
     expect(createBenchmarkOrchestrator).toHaveBeenCalledWith(
       {
-        presetId: preset.id,
         llmConfig: expect.objectContaining({
           providerType: "openai-compatible",
           apiKey: "token-one",
@@ -683,46 +365,32 @@ describe("server settings", () => {
     expect(state.orchestrator).toBe(benchmarkOrchestrator);
   });
 
-  it("builds live state payloads without hitting preset storage and only includes the latest snapshot", async () => {
-    const presetStore = await createStore();
-    const listSpy = vi.spyOn(presetStore, "list");
-    const snapshots = Array.from({ length: 25 }, (_, index) => ({
-      tick: index,
-      state: createMockGameState(index),
-      aiOutputs: { player_1: `p1-${index}`, player_2: `p2-${index}` },
-    }));
+  it("builds live state payloads with always-enabled live flag", async () => {
+    const latestSnapshot = {
+      tick: 24,
+      state: createMockGameState(24),
+      aiOutputs: { player_1: "p1-24", player_2: "p2-24" },
+    };
 
     const state = createServerState(
-      presetStore,
       vi.fn(() => ({
         start: vi.fn(async () => undefined),
         stop: vi.fn(() => undefined),
         saveRecord: vi.fn(async () => "logs/records/mock.json"),
         getGame: vi.fn(() => ({
           getState: () => createMockGameState(24),
-          getSnapshots: () => snapshots,
+          getSnapshots: () => [],
+          getLatestSnapshot: () => latestSnapshot,
         })),
       }))
     );
-    state.liveEnabled = true;
     state.orchestrator = state.createOrchestrator({
-      player1: {
-        providerType: "openai-compatible",
-        apiKey: "token-one",
-        baseURL: "https://api.one.test/v1",
-        model: "model-one",
-      },
-      player2: {
-        providerType: "openai-compatible",
-        apiKey: "token-two",
-        baseURL: "https://api.two.test/v1",
-        model: "model-two",
-      },
+      player1: makeLLMConfig(),
+      player2: makeLLMConfig({ model: "model-two" }),
     }) as any;
 
     const payload = buildStateMessagePayload(state);
 
-    expect(listSpy).not.toHaveBeenCalled();
     expect(payload.liveEnabled).toBe(true);
     expect(payload.snapshots).toHaveLength(1);
     expect(payload.snapshots[0]?.tick).toBe(24);

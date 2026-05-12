@@ -53,6 +53,20 @@ export interface LLMPresetSummary {
   updatedAt: string;
 }
 
+export interface LocalPreset {
+  id: string;
+  name: string;
+  providerType: "openai-compatible";
+  baseURL: string;
+  model: string;
+  apiKey: string;
+  rpm?: number | null;
+  reasoningEffort?: OpenAICompatibleReasoningEffort | null;
+  extraRequestParams?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CreateLLMPresetRequest {
   name: string;
   providerType: "openai-compatible";
@@ -76,7 +90,6 @@ export interface UpdateLLMPresetRequest {
 }
 
 export interface TestLLMPresetRequest {
-  presetId?: string;
   providerType: "openai-compatible";
   baseURL: string;
   model: string;

@@ -1,16 +1,15 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   CPUStrategyType,
-  CreateLLMPresetRequest,
   GameRecord,
   GameSnapshot,
   GameState,
-  LLMPresetSummary,
+  LocalPreset,
   MatchDebugOptions,
+  MatchPlayerLLMConfig,
   MatchPrepareState,
   PlayerId,
   TestLLMPresetRequest,
-  UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
 import { AIOutputPanel } from "./components/AIOutputPanel";
@@ -22,7 +21,8 @@ import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
+import { testPreset } from "./lib/settingsApi";
+import { loadPresets } from "./lib/localPresets";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
 
 type AppMode = "live" | "replay";
@@ -34,9 +34,9 @@ interface ReplayRecordListEntry {
   modifiedAt: string;
 }
 
-const SERVER_HOST = window.location.hostname || "localhost";
-const WS_URL = `ws://${SERVER_HOST}:3001`;
-const API_BASE_URL = `http://${SERVER_HOST}:3001`;
+// For GitHub Pages / production builds: override via VITE_WS_URL env var
+const WS_URL = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:3001`;
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:3001`;
 
 function App() {
   const {
@@ -71,9 +71,7 @@ function App() {
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
-  const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
-  const [presetsLoading, setPresetsLoading] = useState(false);
-  const [presetError, setPresetError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<LocalPreset[]>(() => loadPresets());
   const [player1PresetId, setPlayer1PresetId] = useState("");
   const [player2PresetId, setPlayer2PresetId] = useState("");
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
@@ -203,22 +201,8 @@ function App() {
     }
   };
 
-  const refreshPresets = async () => {
-    setPresetsLoading(true);
-    setPresetError(null);
-    try {
-      const nextPresets = await listPresets(API_BASE_URL);
-      setPresets(nextPresets);
-    } catch (error) {
-      setPresetError(`获取预设列表失败: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setPresetsLoading(false);
-    }
-  };
-
   useEffect(() => {
     void fetchRecordEntries();
-    void refreshPresets();
   }, []);
 
   useEffect(() => {
@@ -284,6 +268,24 @@ function App() {
     }
   };
 
+  const buildMatchDebugOptions = (recordLLMTranscript: boolean): MatchDebugOptions | undefined => {
+    return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+  };
+
+  const getPresetConfig = (presetId: string): MatchPlayerLLMConfig | null => {
+    const preset = presets.find((p) => p.id === presetId);
+    if (!preset) return null;
+    return {
+      providerType: "openai-compatible",
+      apiKey: preset.apiKey,
+      baseURL: preset.baseURL,
+      model: preset.model,
+      rpm: preset.rpm ?? null,
+      reasoningEffort: preset.reasoningEffort ?? null,
+      extraRequestParams: preset.extraRequestParams ?? null,
+    };
+  };
+
   const handleStart = () => {
     startLiveMatch();
   };
@@ -293,14 +295,18 @@ function App() {
       return;
     }
 
+    const player1 = getPresetConfig(player1PresetId);
+    const player2 = getPresetConfig(player2PresetId);
+    if (!player1 || !player2) return;
+
     clearServerMessage();
     setStartPending(false);
     setIsPlaying(false);
     setWinnerOverlayDismissed(false);
     send({
       type: "reset",
-      player1PresetId,
-      player2PresetId,
+      player1,
+      player2,
       debug: buildMatchDebugOptions(recordLLMTranscript),
     });
   };
@@ -310,6 +316,10 @@ function App() {
       return;
     }
 
+    const player1 = getPresetConfig(player1PresetId);
+    const player2 = getPresetConfig(player2PresetId);
+    if (!player1 || !player2) return;
+
     clearServerMessage();
     setPrepareMessage(null);
     setStartPending(true);
@@ -317,8 +327,8 @@ function App() {
     setIsPlaying(false);
     send({
       type: "start",
-      player1PresetId,
-      player2PresetId,
+      player1,
+      player2,
       debug: buildMatchDebugOptions(recordLLMTranscript),
     });
   };
@@ -328,6 +338,10 @@ function App() {
       return;
     }
 
+    const player1 = getPresetConfig(player1PresetId);
+    const player2 = getPresetConfig(player2PresetId);
+    if (!player1 || !player2) return;
+
     clearServerMessage();
     setPrepareStatuses((current) => ({
       ...current,
@@ -336,8 +350,8 @@ function App() {
     setPrepareMessage(null);
     send({
       type: "prepare",
-      player1PresetId,
-      player2PresetId,
+      player1,
+      player2,
       debug: buildMatchDebugOptions(recordLLMTranscript),
       warmup: {
         player_1: playerId === "player_1",
@@ -364,6 +378,9 @@ function App() {
     decisionIntervalTicks: number;
     debug?: MatchDebugOptions;
   }) => {
+    const player = getPresetConfig(input.presetId);
+    if (!player) return;
+
     clearServerMessage();
     clearBenchmarkResult();
     setBenchmarkRunning(true);
@@ -376,28 +393,13 @@ function App() {
     setIsPlaying(false);
     send({
       type: "start_benchmark",
-      presetId: input.presetId,
+      player,
       cpuStrategy: input.cpuStrategy,
       rounds: input.rounds,
       recordReplay: input.recordReplay,
       decisionIntervalTicks: input.decisionIntervalTicks,
       debug: input.debug,
     });
-  };
-
-  const handleCreatePreset = async (input: CreateLLMPresetRequest) => {
-    await createPreset(API_BASE_URL, input);
-    await refreshPresets();
-  };
-
-  const handleUpdatePreset = async (presetId: string, input: UpdateLLMPresetRequest) => {
-    await updatePreset(API_BASE_URL, presetId, input);
-    await refreshPresets();
-  };
-
-  const handleDeletePreset = async (presetId: string) => {
-    await deletePreset(API_BASE_URL, presetId);
-    await refreshPresets();
   };
 
   const handleTestPreset = async (input: TestLLMPresetRequest) => {
@@ -473,7 +475,7 @@ function App() {
                         className="settings-select live-preset-select red"
                         value={player1PresetId}
                         onChange={(event) => setPlayer1PresetId(event.target.value)}
-                        disabled={presetsLoading || presets.length === 0}
+                        disabled={presets.length === 0}
                       >
                         <option value="">选择红方预设</option>
                         {presets.map((preset) => (
@@ -499,7 +501,7 @@ function App() {
                         className="settings-select live-preset-select blue"
                         value={player2PresetId}
                         onChange={(event) => setPlayer2PresetId(event.target.value)}
-                        disabled={presetsLoading || presets.length === 0}
+                        disabled={presets.length === 0}
                       >
                         <option value="">选择蓝方预设</option>
                         {presets.map((preset) => (
@@ -584,7 +586,7 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
             {prepareMessage && <span>{prepareMessage}</span>}
@@ -596,7 +598,6 @@ function App() {
               </span>
             )}
             {replayError && <span className="status-error">{replayError}</span>}
-            {presetError && <span className="status-error">{presetError}</span>}
             {lastSavedRecordPath && <span>记录已保存到: {lastSavedRecordPath}</span>}
           </div>
         )}
@@ -780,12 +781,7 @@ function App() {
         >
           <SettingsPanel
             presets={presets}
-            loading={presetsLoading}
-            error={presetError}
-            onRefresh={refreshPresets}
-            onCreate={handleCreatePreset}
-            onUpdate={handleUpdatePreset}
-            onDelete={handleDeletePreset}
+            onPresetsChange={setPresets}
             onTest={handleTestPreset}
           />
         </SettingsOverlay>
@@ -843,10 +839,6 @@ function App() {
 }
 
 export default App;
-
-function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
-  return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
-}
 
 function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
   if (status === "preparing") {

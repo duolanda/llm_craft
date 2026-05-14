@@ -51,10 +51,10 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 
 - 如果一次 orchestrate_plan 返回 invalid_plan，本次 run 不要继续反复试错，立即回退到即时命令
 - 注册计划后，计划会在后续 tick 自动推进，直到完成、失败或被新命令打断
-- 推荐的开局计划写法：先读取 get_map_state / get_my_state / get_my_units 找到 worker 和 HQ，然后注册：
-  {"unitIds":["worker_1","worker_2"],"loop":1,"steps":[{"call":"start_harvest_loop","args":{"unitId":"$unitId"},"scope":"per_unit"},{"call":"build_structure","args":{"unitId":"worker_1","buildingType":"barracks","x":4,"y":10},"scope":"global","when":{"condition":"credits_at_least","amount":120},"until":{"condition":"building_exists","buildingType":"barracks"},"retry":true},{"call":"spawn_unit","args":{"buildingId":"$barracks","unitType":"soldier"},"scope":"global","when":{"condition":"production_queue_empty","buildingType":"barracks"},"until":{"condition":"unit_count_at_least","unitType":"soldier","count":4},"retry":true}]}
-- 推荐的 HQ 进攻计划写法：先读取 get_map_state 找到 enemy HQ 的 targetId，然后对可用士兵注册：
-  {"unitIds":["soldier_1","soldier_2"],"loop":1,"steps":[{"call":"attack_move_unit","args":{"unitId":"$unitId","x":18,"y":10},"until":{"condition":"near_position","x":18,"y":10,"distance":2},"maxTicks":40},{"call":"attack","args":{"unitId":"$unitId","targetId":"enemy_hq_id"},"until":{"condition":"target_destroyed","targetId":"enemy_hq_id"},"retry":true}]}
+- 推荐的开局计划写法：先读取 get_map_state / get_my_state / get_my_units 找到 worker 和 HQ，然后注册混编生产，不要只按示例固定造 soldier：
+  {"unitIds":["worker_1","worker_2"],"loop":1,"steps":[{"call":"start_harvest_loop","args":{"unitId":"$unitId"},"scope":"per_unit"},{"call":"build_structure","args":{"unitId":"worker_1","buildingType":"barracks","x":4,"y":10},"scope":"global","when":{"condition":"credits_at_least","amount":120},"until":{"condition":"building_exists","buildingType":"barracks"},"retry":true},{"call":"spawn_unit","args":{"buildingId":"$barracks","unitType":"soldier"},"scope":"global","when":{"condition":"production_queue_empty","buildingType":"barracks"},"until":{"condition":"unit_count_at_least","unitType":"soldier","count":2},"retry":true},{"call":"spawn_unit","args":{"buildingId":"$barracks","unitType":"tank"},"scope":"global","when":{"condition":"production_queue_empty","buildingType":"barracks"},"until":{"condition":"unit_count_at_least","unitType":"tank","count":1},"retry":true},{"call":"spawn_unit","args":{"buildingId":"$barracks","unitType":"demolisher"},"scope":"global","when":{"condition":"production_queue_empty","buildingType":"barracks"},"until":{"condition":"unit_count_at_least","unitType":"demolisher","count":1},"retry":true}]}
+- 推荐的 HQ 进攻计划写法：先读取 get_map_state 找到 enemy HQ 的 targetId，然后对可用战斗单位注册：
+  {"unitIds":["soldier_1","tank_1","demolisher_1"],"loop":1,"steps":[{"call":"attack_move_unit","args":{"unitId":"$unitId","x":18,"y":10},"until":{"condition":"near_position","x":18,"y":10,"distance":2},"maxTicks":40},{"call":"attack","args":{"unitId":"$unitId","targetId":"enemy_hq_id"},"until":{"condition":"target_destroyed","targetId":"enemy_hq_id"},"retry":true}]}
 
 ## 经济与生产纪律
 
@@ -69,7 +69,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 
 - 如果攻击目标已经死亡，attack 会自动降级为移动到目标最后位置；不要为了同一个死亡目标反复重新读取三种状态
 - 如果同一单位连续出现 \`move_adjusted\`、\`move_blocked\` 或目标格被占用，下一次必须改用不同目标点，不要反复点同一格
-- 多个士兵前压时，不要把他们都发往同一个格子；如果敌方 HQ / barracks ID 已可见，不要停留在中场或只继续 attack-move，应把可进攻士兵改为 attack 这些建筑目标
+- 多个战斗单位前压时，不要把他们都发往同一个格子；如果敌方 HQ / barracks ID 已可见，不要停留在中场或只继续 attack-move，应把可进攻单位改为 attack 这些建筑目标
 - 如果上一轮大多数动作都失败，本轮优先发纠错命令，不要重复同一种失败模式
 
 ## 战术提醒

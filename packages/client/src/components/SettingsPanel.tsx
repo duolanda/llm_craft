@@ -303,8 +303,8 @@ export function SettingsPanel({
             disabled={loading || presets.length === 0}
           >
             <option value="">新建预设</option>
-            {presets.map((preset) => (
-              <option key={preset.id} value={preset.id}>
+            {presets.map((preset, index) => (
+              <option key={`${preset.id}-${index}`} value={preset.id}>
                 {preset.name}
               </option>
             ))}

@@ -493,13 +493,13 @@ h/b/s/w/t/d enemy hq/barracks/soldier/worker/tank/demolisher
   unitId: string;
   x: number;
   y: number;
-  priority?: Array<"soldier" | "worker">;
+  priority?: Array<"soldier" | "worker" | "tank" | "demolisher">;
 }
 ```
 
 说明：
 
-- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- 只接受有攻击能力的己方单位：`soldier`、`tank`、`demolisher`
 - 单位会向目标点移动，并在到达前自动攻击范围内的敌方单位
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
@@ -517,7 +517,7 @@ h/b/s/w/t/d enemy hq/barracks/soldier/worker/tank/demolisher
 
 说明：
 
-- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- 只接受有攻击能力的己方单位：`soldier`、`tank`、`demolisher`
 - `targetId` 必须来自最近的可见敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
 - 攻击敌方 HQ、barracks 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
@@ -529,9 +529,14 @@ h/b/s/w/t/d enemy hq/barracks/soldier/worker/tank/demolisher
 ```ts
 {
   buildingId: string;
-  unitType: "worker" | "soldier";
+  unitType: "worker" | "soldier" | "tank" | "demolisher";
 }
 ```
+
+说明：
+
+- `HQ` 只能生产 `worker`
+- `barracks` 可生产 `soldier`、`tank`、`demolisher`
 
 #### `build_structure`
 
@@ -668,7 +673,7 @@ type PlanStepCondition =
 - `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"` 或 `"$barracks"`，在执行时解析为当前友方建筑
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
-示例：开局让两个 worker 挂矿，等钱够后造兵营，再持续造到 4 个 soldier。
+示例：开局让两个 worker 挂矿，等钱够后造兵营，再生产混编战斗单位。
 
 ```json
 {
@@ -689,18 +694,34 @@ type PlanStepCondition =
       "args": { "buildingId": "$barracks", "unitType": "soldier" },
       "scope": "global",
       "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
-      "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 4 },
+      "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 2 },
+      "retry": true
+    },
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$barracks", "unitType": "tank" },
+      "scope": "global",
+      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
+      "until": { "condition": "unit_count_at_least", "unitType": "tank", "count": 1 },
+      "retry": true
+    },
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$barracks", "unitType": "demolisher" },
+      "scope": "global",
+      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
+      "until": { "condition": "unit_count_at_least", "unitType": "demolisher", "count": 1 },
       "retry": true
     }
   ]
 }
 ```
 
-示例：一队士兵先移动攻击到敌方 HQ 附近，再集火 HQ。
+示例：一队战斗单位先移动攻击到敌方 HQ 附近，再集火 HQ。
 
 ```json
 {
-  "unitIds": ["unit_5", "unit_6"],
+  "unitIds": ["unit_5", "unit_6", "unit_7"],
   "loop": 1,
   "steps": [
     {

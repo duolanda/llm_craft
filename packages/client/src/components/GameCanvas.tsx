@@ -74,6 +74,83 @@ function drawIdBadge(
   ctx.restore();
 }
 
+function drawUnitShape(ctx: CanvasRenderingContext2D, type: string, cx: number, cy: number, playerColor: string) {
+  ctx.save();
+  ctx.fillStyle = playerColor;
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 1;
+
+  if (type === "soldier") {
+    const outer = TILE_SIZE / 3 - 1;
+    const inner = TILE_SIZE / 4 - 2;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = -Math.PI / 2 + (Math.PI / 4) * i;
+      const radius = i % 2 === 0 ? outer : inner;
+      const px = cx + Math.cos(angle) * radius;
+      const py = cy + Math.sin(angle) * radius;
+      if (i === 0) {
+        ctx.moveTo(px, py);
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (type === "worker") {
+    ctx.beginPath();
+    ctx.arc(cx, cy, TILE_SIZE / 4 - 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else if (type === "tank") {
+    drawRoundedRect(ctx, cx - 12, cy - 8, 24, 16, 3);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = GAME_COLORS.tank;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy);
+    ctx.lineTo(cx + 11, cy);
+    ctx.stroke();
+    ctx.fillStyle = GAME_COLORS.tank;
+    ctx.fillRect(cx - 5, cy - 4, 8, 8);
+  } else if (type === "demolisher") {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 12);
+    ctx.lineTo(cx + 11, cy);
+    ctx.lineTo(cx, cy + 12);
+    ctx.lineTo(cx - 11, cy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = GAME_COLORS.demolisher;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const angle = -Math.PI / 2 + (Math.PI / 3) * i;
+      const px = cx + Math.cos(angle) * (TILE_SIZE / 4);
+      const py = cy + Math.sin(angle) * (TILE_SIZE / 4);
+      if (i === 0) {
+        ctx.moveTo(px, py);
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 export function GameCanvas({ state }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -192,38 +269,7 @@ export function GameCanvas({ state }: GameCanvasProps) {
         const uy = BOARD_OFFSET_Y + unit.y * TILE_SIZE;
         const cx = ux + TILE_SIZE / 2;
         const cy = uy + TILE_SIZE / 2;
-        ctx.fillStyle = color;
-
-        // 根据单位类型使用不同形状
-        if (unit.type === "soldier") {
-          // 士兵: 带刺八边形
-          const outer = TILE_SIZE / 3 - 1;
-          const inner = TILE_SIZE / 4 - 2;
-          ctx.beginPath();
-          for (let i = 0; i < 8; i++) {
-            const angle = -Math.PI / 2 + (Math.PI / 4) * i;
-            const radius = i % 2 === 0 ? outer : inner;
-            const px = cx + Math.cos(angle) * radius;
-            const py = cy + Math.sin(angle) * radius;
-            if (i === 0) {
-              ctx.moveTo(px, py);
-            } else {
-              ctx.lineTo(px, py);
-            }
-          }
-          ctx.closePath();
-          ctx.fill();
-        } else if (unit.type === "worker") {
-          // 工人: 纯圆形
-          ctx.beginPath();
-          ctx.arc(cx, cy, TILE_SIZE / 4 - 1, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        // 单位边框（白色微描边增加对比）
-        ctx.strokeStyle = "rgba(255,255,255,0.25)";
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        drawUnitShape(ctx, unit.type, cx, cy, color);
 
         // 血条背景
         ctx.fillStyle = "#1a2028";

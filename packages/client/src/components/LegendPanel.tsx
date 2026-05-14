@@ -13,7 +13,9 @@ export function LegendPanel() {
         <div className="legend-title">单位 / 建筑</div>
         <div className="legend-row">
           <LegendItem shape="circle" color="#aaa" label="Worker 圆形" />
-          <LegendItem shape="diamond" color="#aaa" label="Soldier 刺角八边形" />
+          <LegendItem shape="diamond" color="#aaa" label="Soldier 士兵" />
+          <LegendItem shape="rect" color="#76ff03" label="Tank 坦克" />
+          <LegendItem shape="ring" color="#ff6d00" label="Demolisher 远程射手" />
           <LegendItem shape="square" color="#aaa" label="建筑" />
         </div>
       </div>
@@ -42,16 +44,16 @@ function LegendItem({
   color,
   label,
 }: {
-  shape: "circle" | "square" | "dot" | "bar" | "diamond";
+  shape: "circle" | "square" | "dot" | "bar" | "diamond" | "rect" | "ring";
   color: string;
   label: string;
 }) {
   const iconStyle: React.CSSProperties = {
-    width: shape === "dot" ? 6 : shape === "bar" ? 14 : 10,
+    width: shape === "dot" ? 6 : shape === "bar" || shape === "rect" ? 14 : 10,
     height: shape === "bar" ? 3 : shape === "dot" ? 6 : 10,
-    borderRadius: shape === "circle" ? "50%" : shape === "bar" ? 1 : 2,
-    background: color,
-    border: shape === "square" ? `1.5px solid ${color}` : undefined,
+    borderRadius: shape === "circle" || shape === "ring" ? "50%" : shape === "bar" ? 1 : 2,
+    background: shape === "ring" ? "transparent" : color,
+    border: shape === "square" || shape === "ring" ? `1.5px solid ${color}` : undefined,
     boxShadow: `0 0 6px ${color}66`,
     flexShrink: 0,
     transform: shape === "diamond" ? "rotate(45deg)" : undefined,

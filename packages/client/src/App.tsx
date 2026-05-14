@@ -476,8 +476,8 @@ function App() {
                         disabled={presetsLoading || presets.length === 0}
                       >
                         <option value="">选择红方预设</option>
-                        {presets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
+                        {presets.map((preset, index) => (
+                          <option key={`${preset.id}-${index}`} value={preset.id}>
                             {preset.name}
                           </option>
                         ))}
@@ -502,8 +502,8 @@ function App() {
                         disabled={presetsLoading || presets.length === 0}
                       >
                         <option value="">选择蓝方预设</option>
-                        {presets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
+                        {presets.map((preset, index) => (
+                          <option key={`${preset.id}-${index}`} value={preset.id}>
                             {preset.name}
                           </option>
                         ))}

@@ -1,17 +1,25 @@
-import { GameState } from "@llmcraft/shared";
+import { GAME_COLORS, GameState, UNIT_TYPES, UnitType } from "@llmcraft/shared";
 
 interface StatsPanelProps {
   state: GameState | null;
 }
 
-const UNIT_COLORS: Record<string, string> = {
-  worker: "#ffb300",
+const UNIT_TYPE_ORDER = [UNIT_TYPES.WORKER, UNIT_TYPES.SOLDIER, UNIT_TYPES.TANK, UNIT_TYPES.DEMOLISHER] as const;
+
+type UnitCounts = Record<UnitType, number> & { total: number };
+
+const UNIT_COLORS: Record<UnitType, string> = {
+  worker: GAME_COLORS.resource,
   soldier: "#ff2a4a",
+  tank: GAME_COLORS.tank,
+  demolisher: GAME_COLORS.demolisher,
 };
 
-const UNIT_LABELS: Record<string, string> = {
+const UNIT_LABELS: Record<UnitType, string> = {
   worker: "工人",
   soldier: "士兵",
+  tank: "坦克",
+  demolisher: "攻城",
 };
 
 export function StatsPanel({ state }: StatsPanelProps) {
@@ -28,12 +36,19 @@ export function StatsPanel({ state }: StatsPanelProps) {
   const [player1, player2] = state.players;
 
   const getUnitCounts = (player: (typeof state.players)[0]) => {
-    const units = player.units.filter((u) => u.exists);
-    return {
-      worker: units.filter((u) => u.type === "worker").length,
-      soldier: units.filter((u) => u.type === "soldier").length,
-      total: units.length,
+    const counts: UnitCounts = {
+      worker: 0,
+      soldier: 0,
+      tank: 0,
+      demolisher: 0,
+      total: 0,
     };
+    for (const unit of player.units) {
+      if (!unit.exists) continue;
+      counts[unit.type] += 1;
+      counts.total += 1;
+    }
+    return counts;
   };
 
   const getBuildingCounts = (player: (typeof state.players)[0]) => {
@@ -89,8 +104,9 @@ export function StatsPanel({ state }: StatsPanelProps) {
           <span style={{ color: "var(--accent-purple)" }}>◈</span> 单位编制
         </div>
         <div className="unit-legend-bar">
-          <UnitLegend type="worker" />
-          <UnitLegend type="soldier" />
+          {UNIT_TYPE_ORDER.map((type) => (
+            <UnitLegend key={type} type={type} />
+          ))}
         </div>
         <div className="stat-row" style={{ justifyContent: "center", gap: "12px", marginTop: 4 }}>
           <UnitChips counts={p1Units} align="end" />
@@ -132,7 +148,7 @@ export function StatsPanel({ state }: StatsPanelProps) {
   );
 }
 
-function UnitLegend({ type }: { type: string }) {
+function UnitLegend({ type }: { type: UnitType }) {
   const color = UNIT_COLORS[type];
   return (
     <div className="unit-legend-item">
@@ -142,16 +158,17 @@ function UnitLegend({ type }: { type: string }) {
   );
 }
 
-function UnitChips({ counts, align }: { counts: { worker: number; soldier: number }; align: "start" | "end" }) {
+function UnitChips({ counts, align }: { counts: UnitCounts; align: "start" | "end" }) {
   return (
     <div className="unit-chips" style={{ justifyContent: align === "end" ? "flex-end" : "flex-start" }}>
-      <Chip type="worker" count={counts.worker} />
-      <Chip type="soldier" count={counts.soldier} />
+      {UNIT_TYPE_ORDER.map((type) => (
+        <Chip key={type} type={type} count={counts[type]} />
+      ))}
     </div>
   );
 }
 
-function Chip({ type, count }: { type: string; count: number }) {
+function Chip({ type, count }: { type: UnitType; count: number }) {
   const color = UNIT_COLORS[type];
   return (
     <span className="unit-chip" style={{ color }}>

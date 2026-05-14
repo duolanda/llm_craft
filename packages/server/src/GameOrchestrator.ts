@@ -17,6 +17,7 @@ import {
   LOG_DISPLAY_TARGETS,
   AIFeedbackTarget,
   TICK_INTERVAL_MS,
+  UNIT_TYPES,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -457,8 +458,8 @@ export class GameOrchestrator {
 
     const summaryLines = [
       `tick=${state.tick}, intervalMs=${TICK_INTERVAL_MS}`,
-      `myCredits=${me.resources.credits}, myWorkers=${me.units.filter((unit) => unit.type === "worker" && unit.exists).length}, mySoldiers=${me.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
-      `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemySoldiers=${enemy.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
+      `myCredits=${me.resources.credits}, myUnits=${this.formatUnitCounts(me)}`,
+      `enemyUnits=${this.formatUnitCounts(enemy)}`,
       myHQ ? `myHQHp=${myHQ.hp}/${myHQ.maxHp}` : "myHQMissing=true",
       enemyHQ ? `enemyHQHp=${enemyHQ.hp}/${enemyHQ.maxHp}` : "enemyHQMissing=true",
       `activePlans=${this.runtimeByPlayer[playerId].getActivePlans().length}`,
@@ -478,6 +479,12 @@ export class GameOrchestrator {
       tickIntervalMs: TICK_INTERVAL_MS,
       summary: summaryLines.join("\n"),
     };
+  }
+
+  private formatUnitCounts(player: GameState["players"][number]): string {
+    return Object.values(UNIT_TYPES)
+      .map((unitType) => `${unitType}:${player.units.filter((unit) => unit.type === unitType && unit.exists).length}`)
+      .join(",");
   }
 
   private appendTerminalRequestEvent(playerId: PlayerId, requestNumber: number, requestTick: number): void {

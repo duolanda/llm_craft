@@ -16,6 +16,7 @@ import {
   TILE_TYPES,
   UNIT_STATS,
   UNIT_TYPES,
+  UnitType,
 } from "@llmcraft/shared";
 import { Game } from "../Game";
 import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
@@ -49,6 +50,13 @@ const PLAN_UNTIL_CONDITIONS = [
   "unit_count_at_least",
   "production_queue_empty",
 ] as const;
+const ALL_UNIT_TYPES = Object.values(UNIT_TYPES) as UnitType[];
+const DEFAULT_ATTACK_MOVE_PRIORITY: UnitType[] = [
+  UNIT_TYPES.DEMOLISHER,
+  UNIT_TYPES.TANK,
+  UNIT_TYPES.SOLDIER,
+  UNIT_TYPES.WORKER,
+];
 
 type CachedEnemyTarget = {
   id: string;
@@ -239,10 +247,10 @@ export class GameAgentBridge {
         validateArgs: (args) =>
           (args.buildingId === undefined || typeof args.buildingId === "string") &&
           (args.buildingType === undefined || args.buildingType === BUILDING_TYPES.HQ || args.buildingType === BUILDING_TYPES.BARRACKS) &&
-          (args.unitType === UNIT_TYPES.WORKER || args.unitType === UNIT_TYPES.SOLDIER),
+          this.isUnitType(args.unitType),
         createCommand: (context) => {
           const unitType = context.args.unitType;
-          if (unitType !== UNIT_TYPES.WORKER && unitType !== UNIT_TYPES.SOLDIER) {
+          if (!this.isUnitType(unitType)) {
             return null;
           }
           const buildingId = this.resolvePlanBuildingId(context, unitType === UNIT_TYPES.WORKER ? BUILDING_TYPES.HQ : BUILDING_TYPES.BARRACKS);
@@ -409,6 +417,8 @@ export class GameAgentBridge {
         canBuildBarracks: me.resources.credits >= BUILDING_STATS.barracks.cost,
         canSpawnWorker: me.resources.credits >= UNIT_STATS.worker.cost,
         canSpawnSoldier: me.resources.credits >= UNIT_STATS.soldier.cost,
+        canSpawnTank: me.resources.credits >= UNIT_STATS.tank.cost,
+        canSpawnDemolisher: me.resources.credits >= UNIT_STATS.demolisher.cost,
       },
     };
   }
@@ -478,7 +488,7 @@ export class GameAgentBridge {
     };
   }
 
-  attackMoveUnit(unitId: string, position: Position, targetPriority?: Array<"soldier" | "worker">): ExecutedToolResult {
+  attackMoveUnit(unitId: string, position: Position, targetPriority?: UnitType[]): ExecutedToolResult {
     const state = this.game.getState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit) {
@@ -493,7 +503,7 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier.",
+        hint: "Choose a friendly unit with attack capability, such as a soldier, tank, or demolisher.",
       });
     }
 
@@ -512,7 +522,7 @@ export class GameAgentBridge {
       });
     }
 
-    const priority = targetPriority && targetPriority.length > 0 ? targetPriority : [UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER];
+    const priority = targetPriority && targetPriority.length > 0 ? targetPriority : DEFAULT_ATTACK_MOVE_PRIORITY;
     this.planRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("attack_move", { unitId, position, targetPriority: priority }));
@@ -539,7 +549,7 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier.",
+        hint: "Choose a friendly unit with attack capability, such as a soldier, tank, or demolisher.",
       });
     }
 
@@ -1179,7 +1189,7 @@ export class GameAgentBridge {
         );
       case "unit_count_at_least":
         return (
-          (value.unitType === UNIT_TYPES.WORKER || value.unitType === UNIT_TYPES.SOLDIER) &&
+          this.isUnitType(value.unitType) &&
           Number.isInteger(value.count) &&
           Number(value.count) >= 0
         );
@@ -1197,8 +1207,12 @@ export class GameAgentBridge {
   private isOptionalTargetPriority(value: unknown): boolean {
     return (
       value === undefined ||
-      (Array.isArray(value) && value.every((entry) => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER))
+      (Array.isArray(value) && value.every((entry) => this.isUnitType(entry)))
     );
+  }
+
+  private isUnitType(value: unknown): value is UnitType {
+    return typeof value === "string" && ALL_UNIT_TYPES.includes(value as UnitType);
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

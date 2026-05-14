@@ -198,6 +198,51 @@ describe("Game", () => {
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
   });
 
+  it("spawns tanks and demolishers from barracks", () => {
+    const worker = game
+      .getState()
+      .players[0]
+      .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: { x: 4, y: 10 },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const barracks = game
+      .getState()
+      .players[0]
+      .buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS)!;
+
+    game.queueCommand({
+      id: "spawn_tank",
+      type: "spawn",
+      buildingId: barracks.id,
+      unitType: UNIT_TYPES.TANK,
+      playerId: "player_1",
+    });
+    game.queueCommand({
+      id: "spawn_demolisher",
+      type: "spawn",
+      buildingId: barracks.id,
+      unitType: UNIT_TYPES.DEMOLISHER,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    game.start();
+    game.tickUpdate();
+    game.tickUpdate();
+    game.stop();
+
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.TANK)).toHaveLength(1);
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.DEMOLISHER)).toHaveLength(1);
+  });
+
   it("keeps worker unable to attack and soldier attack range at one", () => {
     const unitManager = game.getUnitManager();
     const worker = unitManager.createUnit(UNIT_TYPES.WORKER, 5, 5, "player_1");

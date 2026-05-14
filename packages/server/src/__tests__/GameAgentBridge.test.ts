@@ -306,10 +306,43 @@ describe("GameAgentBridge", () => {
         type: "attack_move",
         unitId: soldier.id,
         position: { x: 18, y: 10 },
-        targetPriority: ["soldier", "worker"],
+        targetPriority: ["demolisher", "tank", "soldier", "worker"],
       }),
     ]);
     game.stop();
+  });
+
+  it("allows production plans for every barracks combat unit", () => {
+    for (const unitType of [UNIT_TYPES.SOLDIER, UNIT_TYPES.TANK, UNIT_TYPES.DEMOLISHER]) {
+      const game = new Game();
+      game.start();
+      const bridge = new GameAgentBridge(game, "player_1");
+      const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+      game.getBuildingManager().createBuilding("barracks", 4, 10, "player_1");
+
+      const result = bridge.orchestratePlan({
+        unitIds: [worker.id],
+        steps: [
+          {
+            call: "spawn_unit",
+            args: { buildingId: "$barracks", unitType },
+            scope: "global",
+            when: { condition: "production_queue_empty", buildingType: "barracks" },
+            until: { condition: "unit_count_at_least", unitType, count: 1 },
+            retry: true,
+          },
+        ],
+      });
+
+      expect(result.result).toMatchObject({ ok: true });
+      expect(bridge.advancePlans()).toEqual([
+        expect.objectContaining({
+          type: "spawn",
+          unitType,
+        }),
+      ]);
+      game.stop();
+    }
   });
 
   it("queues high-level attack as movement until the target is in range", () => {

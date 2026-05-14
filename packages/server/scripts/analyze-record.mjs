@@ -19,6 +19,7 @@ const record = JSON.parse(readFileSync(filePath, "utf8"));
 const debugPath = debugFile ? resolveInputPath(debugFile) : null;
 const debugText = debugPath ? readFileSync(debugPath, "utf8") : null;
 const players = (record.finalState?.players ?? record.initialState?.players ?? []).map((player) => player.id);
+const unitTypes = ["worker", "soldier", "tank", "demolisher"];
 
 const createCounter = () => Object.create(null);
 const bump = (counter, key, amount = 1) => {
@@ -40,8 +41,7 @@ const metrics = Object.fromEntries(
       commandResults: createCounter(),
       finalCredits: 0,
       maxCredits: 0,
-      workerCount: 0,
-      soldierCount: 0,
+      unitCounts: createCounter(),
       barracksCount: 0,
       hqAlive: false,
       firstEnemyHqDamageTick: null,
@@ -136,8 +136,9 @@ for (const player of record.finalState?.players ?? []) {
   }
   entry.finalCredits = player.resources?.credits ?? 0;
   entry.maxCredits = Math.max(entry.maxCredits, entry.finalCredits);
-  entry.workerCount = (player.units ?? []).filter((unit) => unit.exists && unit.type === "worker").length;
-  entry.soldierCount = (player.units ?? []).filter((unit) => unit.exists && unit.type === "soldier").length;
+  for (const unitType of unitTypes) {
+    entry.unitCounts[unitType] = (player.units ?? []).filter((unit) => unit.exists && unit.type === unitType).length;
+  }
   entry.barracksCount = (player.buildings ?? []).filter((building) => building.exists && building.type === "barracks").length;
   entry.hqAlive = (player.buildings ?? []).some((building) => building.exists && building.type === "hq");
 }
@@ -158,7 +159,7 @@ for (const playerId of players) {
   if (entry.maxCredits >= 2000 || entry.finalCredits >= 1000) {
     flags.push("floating_credits");
   }
-  if (entry.workerCount > 8 || (entry.commands["spawn:worker"] ?? 0) > 12) {
+  if ((entry.unitCounts.worker ?? 0) > 8 || (entry.commands["spawn:worker"] ?? 0) > 12) {
     flags.push("worker_overproduction_possible");
   }
   if (entry.maxCredits >= 1000 && entry.barracksCount < 2) {
@@ -169,7 +170,7 @@ for (const playerId of players) {
   }
 
   console.log(`${playerId}:`);
-  console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}, workers=${entry.workerCount}, soldiers=${entry.soldierCount}, barracks=${entry.barracksCount}, hqAlive=${entry.hqAlive}`);
+  console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}, units=${formatCounter(entry.unitCounts)}, barracks=${entry.barracksCount}, hqAlive=${entry.hqAlive}`);
   console.log(`  agent: modelRequests=${entry.modelRequests}, toolCalls=${entry.toolCalls}`);
   console.log(`  tools: ${formatCounter(entry.toolNames)}`);
   console.log(`  commands: ${formatCounter(entry.commands)}`);

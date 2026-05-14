@@ -193,7 +193,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train soldiers:",
+      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train a mixed squad:",
       JSON.stringify({
         unitIds: ["worker_1", "worker_2"],
         loop: 1,
@@ -212,14 +212,30 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             args: { buildingId: "$barracks", unitType: "soldier" },
             scope: "global",
             when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "soldier", count: 4 },
+            until: { condition: "unit_count_at_least", unitType: "soldier", count: 2 },
+            retry: true,
+          },
+          {
+            call: "spawn_unit",
+            args: { buildingId: "$barracks", unitType: "tank" },
+            scope: "global",
+            when: { condition: "production_queue_empty", buildingType: "barracks" },
+            until: { condition: "unit_count_at_least", unitType: "tank", count: 1 },
+            retry: true,
+          },
+          {
+            call: "spawn_unit",
+            args: { buildingId: "$barracks", unitType: "demolisher" },
+            scope: "global",
+            when: { condition: "production_queue_empty", buildingType: "barracks" },
+            until: { condition: "unit_count_at_least", unitType: "demolisher", count: 1 },
             retry: true,
           },
         ],
       }),
-      "Combat assault example: move-attack a squad near the enemy HQ, then focus the HQ:",
+      "Combat assault example: move-attack combat units near the enemy HQ, then focus the HQ:",
       JSON.stringify({
-        unitIds: ["soldier_1", "soldier_2"],
+        unitIds: ["soldier_1", "tank_1", "demolisher_1"],
         loop: 1,
         steps: [
           {

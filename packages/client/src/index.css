@@ -1058,7 +1058,8 @@ body {
 .unit-legend-bar {
   display: flex;
   justify-content: center;
-  gap: 14px;
+  gap: 8px 12px;
+  flex-wrap: wrap;
   margin-bottom: 4px;
 }
 

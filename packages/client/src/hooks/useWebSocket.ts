@@ -41,15 +41,19 @@ export function useWebSocket(url: string) {
   }, []);
 
   useEffect(() => {
+    let active = true;
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!active) return;
       console.log("WebSocket 已连接");
       setConnected(true);
     };
 
     ws.onmessage = (event) => {
+      if (!active) return;
+
       try {
         const parsed = JSON.parse(event.data);
 
@@ -101,15 +105,22 @@ export function useWebSocket(url: string) {
     };
 
     ws.onclose = () => {
+      if (!active || wsRef.current !== ws) return;
       console.log("WebSocket 已断开");
+      wsRef.current = null;
       setConnected(false);
     };
 
     ws.onerror = (error) => {
+      if (!active || wsRef.current !== ws) return;
       console.error("WebSocket 错误:", error);
     };
 
     return () => {
+      active = false;
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       ws.close();
     };
   }, [url]);

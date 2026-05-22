@@ -45,10 +45,14 @@ export async function handlePlan(
     exit(ExitCode.BackendFailure, stateResp.error?.message ?? "Failed to get state");
   }
   const stateData = stateResp.data as Record<string, unknown>;
-  const units = (stateData.units as Array<Record<string, unknown>>) ?? [];
+  const unitsResp = await client.callTool(sessionId, "get_my_units");
+  if (!unitsResp.ok) {
+    exit(ExitCode.BackendFailure, unitsResp.error?.message ?? "Failed to get units");
+  }
+  const unitsData = unitsResp.data as Record<string, unknown>;
+  const units = (unitsData.units as Array<Record<string, unknown>>) ?? [];
   const buildings = (stateData.buildings as Array<Record<string, unknown>>) ?? [];
   const queueData = (stateData.productionQueues as Array<{ buildingId: string; queue: unknown[] }>) ?? [];
-  const resources = (stateData.resources as Record<string, number>) ?? {};
 
   const idleWorkers = units.filter((u) => u.type === "worker" && u.state === "idle");
   const soldierUnits = units.filter((u) => u.type === "soldier");
@@ -58,7 +62,7 @@ export async function handlePlan(
     const q = queueData.find((qd) => qd.buildingId === b.id);
     return !q || q.queue.length === 0;
   });
-  const credits = resources.credits ?? 0;
+  const credits = typeof stateData.credits === "number" ? stateData.credits : 0;
 
   let plan: Record<string, unknown>;
 

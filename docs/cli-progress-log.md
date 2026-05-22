@@ -171,17 +171,16 @@ Implemented plan generation and orchestration commands. Plans are generated clie
 
 ---
 
-## 2026-05-10: Phase 7 — Wait, Scripts & Docs ✅
+## 2026-05-10: Phase 7 — Scripts & Docs ✅
 
 ### What was built
 
-Implemented the `wait` command, created example shell script bots, and updated project documentation to reflect CLI capabilities.
+Created example shell script bots and updated project documentation to reflect CLI capabilities.
 
 ### New files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `packages/cli/src/commands/wait.ts` | 23 | Handler for `wait --ticks n` |
 | `examples/cli-bots/basic-economy.sh` | 56 | Economy automation shell script |
 | `examples/cli-bots/rush.sh` | 70 | Aggressive rush strategy shell script |
 
@@ -189,7 +188,7 @@ Implemented the `wait` command, created example shell script bots, and updated p
 
 | File | Change |
 |------|--------|
-| `packages/cli/src/index.ts` | Added wait import/routing, help text for wait flags and piped-loop example |
+| `packages/cli/src/index.ts` | Added help text and piped-loop example |
 | `docs/current-mvp-reality.md` | Added section 6: CLI Control Plane — architecture overview, all commands, pipe examples, script references |
 | `docs/ai-api-contract.md` | Added section 3: Control Plane HTTP API — all 4 endpoints with request/response schemas |
 
@@ -216,4 +215,3 @@ Both scripts are executable and use `set -euo pipefail`:
 | Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `hold` |
 | Transformers | `nearest`, `target` |
 | Plan | `plan`, `orchestrate` |
-| Wait | `wait` |

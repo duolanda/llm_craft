@@ -240,19 +240,7 @@ llmcraft plan attack-hq | llmcraft orchestrate --max-actions 5
 
 ---
 
-## 7. Wait
-
-Advance time. The game ticks every 500ms.
-
-```bash
-llmcraft wait --ticks 10
-```
-
-Blocks until the specified number of game ticks have elapsed, then returns the current tick.
-
----
-
-## 8. Full Gameplay Loop
+## 7. Full Gameplay Loop
 
 A complete bot using the CLI looks like this:
 
@@ -282,8 +270,8 @@ for i in $(seq 1 50); do
   # Attack with soldiers
   llmcraft units --type soldier --unplanned | llmcraft target enemy-hq | llmcraft attack
 
-  # Wait for next tick window
-  llmcraft wait --ticks 5
+  # Let the game advance before the next read/action cycle
+  sleep 3
 done
 ```
 
@@ -293,7 +281,7 @@ Two complete example scripts are in `examples/cli-bots/`:
 
 ---
 
-## 9. Quick Reference
+## 8. Quick Reference
 
 | Category | Commands |
 |----------|----------|
@@ -303,7 +291,6 @@ Two complete example scripts are in `examples/cli-bots/`:
 | Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `hold` |
 | Transformers | `nearest`, `target` |
 | Plan | `plan`, `orchestrate` |
-| Wait | `wait` |
 
 | Global flags | |
 |--------------|---|

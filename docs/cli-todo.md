@@ -16,7 +16,6 @@
 - [x] HTTP endpoint: 创建或绑定 session (`POST /api/control/sessions`)
 - [x] HTTP endpoint: 调用 tool (`POST /sessions/:id/tools/:toolName`)
 - [x] HTTP endpoint: 查询当前 state (`GET /sessions/:id/state`)
-- [x] HTTP endpoint: 等待 ticks (`POST /sessions/:id/wait`)
 - [x] 将 `GameAgentBridge` 作为 session 级对象维护
 - [x] 包装 `executeAgentTool` 结果为统一 control response
 - [ ] 基础测试：session 绑定 player
@@ -28,9 +27,9 @@
 
 | 文件 | 行数 | 状态 |
 |------|------|------|
-| `packages/server/src/ControlHandler.ts` | 123 | ✅ `ControlSessionManager` + `executeControlTool()` + `buildControlResponse()` + `waitTicks()` |
-| `packages/server/src/index.ts` | 1003 | ✅ 4 个控制路由已注册（create / state / tool / wait）|
-| `packages/shared/src/types.ts` | 527 | ✅ `ControlSession`、`ControlResponse`、`ControlError`、`ControlWarning`、`CreateControlSessionRequest`、`ControlToolCallRequest`、`ControlWaitRequest`
+| `packages/server/src/ControlHandler.ts` | 123 | ✅ `ControlSessionManager` + `executeControlTool()` + `buildControlResponse()` |
+| `packages/server/src/index.ts` | 1003 | ✅ 3 个控制路由已注册（create / state / tool）|
+| `packages/shared/src/types.ts` | 527 | ✅ `ControlSession`、`ControlResponse`、`ControlError`、`ControlWarning`、`CreateControlSessionRequest`、`ControlToolCallRequest`
 
 ---
 
@@ -166,9 +165,8 @@ llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 
 ---
 
-## Phase 7: 等待、脚本化和文档 ✅
+## Phase 7: 脚本化和文档 ✅
 
-- [x] 实现 `wait --ticks n`
 - [x] 增加 `examples/cli-bots/basic-economy.sh`
 - [x] 增加 `examples/cli-bots/rush.sh`
 - [x] 编写 CLI 使用文档 (内嵌在 help text 中)
@@ -181,7 +179,7 @@ while true; do
   llmcraft units --idle --type worker | llmcraft gather
   llmcraft buildings --type barracks --ready | llmcraft train soldier
   llmcraft units --type soldier --unplanned | llmcraft target enemy-hq | llmcraft attack
-  llmcraft wait --ticks 5
+  sleep 3
 done
 ```
 
@@ -189,9 +187,8 @@ done
 
 | 文件 | 行数 | 状态 |
 |------|------|------|
-| `packages/cli/src/commands/wait.ts` | 23 | ✅ wait --ticks n |
 | `examples/cli-bots/basic-economy.sh` | 56 | ✅ 经济自动化 shell 脚本 |
 | `examples/cli-bots/rush.sh` | 70 | ✅ 激进 rush shell 脚本 |
-| `packages/cli/src/index.ts` | 341 | ✅ 新增 wait 路由 + 帮助更新 |
+| `packages/cli/src/index.ts` | 341 | ✅ 帮助更新 |
 | `docs/current-mvp-reality.md` | — | ✅ 新增 CLI 控制面章节 |
 | `docs/ai-api-contract.md` | — | ✅ 新增 Control Plane HTTP API 章节 |

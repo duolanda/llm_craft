@@ -129,8 +129,8 @@ check "enemies" "$CLI enemies --base-url http://localhost:3001 2>&1" true
 # Test 10: Resources
 check "resources" "$CLI resources --base-url http://localhost:3001 2>&1" true
 
-# Test 11: Wait
-check "wait --ticks 1" "$CLI wait --ticks 1 --base-url http://localhost:3001 2>&1" true
+# Test 11: Plans
+check "plans" "$CLI plans --base-url http://localhost:3001 2>&1" true
 
 # Test 12: Move (will fail gracefully without valid unit, but should return proper JSON)
 check "move (arg error)" "$CLI move --unit invalid --to 5,8 --base-url http://localhost:3001 2>&1" true

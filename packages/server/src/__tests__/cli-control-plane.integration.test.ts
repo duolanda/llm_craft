@@ -91,8 +91,13 @@ describe("CLI Control Plane Integration", () => {
     const manager = new ControlSessionManager();
     const session = manager.create(game, "test-game", "player_1");
 
-    const result = executeControlTool(session.bridge, "start_harvest_loop", {});
-    const response = buildControlControlResponse(result);
+    const readResult = executeControlTool(session.bridge, "get_my_units", {});
+    const readData = readResult.result as Record<string, unknown>;
+    const units = readData.units as Array<Record<string, unknown>>;
+    const workerId = units.find((unit) => unit.type === "worker")?.id as string;
+
+    const result = executeControlTool(session.bridge, "start_harvest_loop", { unitId: workerId });
+    const response = buildControlResponse(result);
 
     expect(response.ok).toBe(true);
   });

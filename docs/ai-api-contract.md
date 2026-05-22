@@ -841,25 +841,6 @@ interface ControlToolCallRequest {
 
 Response uses the standard `ControlResponse` envelope with `kind` set to `"state"`, `"action_result"`, or `"plan_result"` depending on the tool.
 
-### 3.5 `POST /api/control/sessions/:sessionId/wait`
-
-Block until N game ticks have elapsed.
-
-Request:
-```ts
-{ ticks: number }
-```
-
-Response:
-```json
-{
-  "ok": true,
-  "tick": 150,
-  "kind": "state",
-  "data": { "waitedTicks": 5, "currentTick": 150 }
-}
-```
-
 ## 4. 记录格式
 
 当前 `aiTurns` 不再保存生成的 JavaScript 和沙箱错误，而是保存 agent 行为：

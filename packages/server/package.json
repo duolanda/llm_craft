@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc --build",
-    "start": "node dist/index.js",
+    "start": "tsx dist/index.js",
     "analyze:record": "node scripts/analyze-record.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"

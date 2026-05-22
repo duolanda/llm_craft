@@ -669,6 +669,10 @@ export async function handleHttpRequest(
       }
 
       state.controlSessions.touch(sessionId);
+      if (!state.orchestrator) {
+        sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
+        return;
+      }
       const game = state.orchestrator.getGame() as unknown as Game;
 
       // GET /api/control/sessions/:sessionId/state

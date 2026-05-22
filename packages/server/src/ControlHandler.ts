@@ -61,7 +61,18 @@ export function executeControlTool(
   args: Record<string, unknown>
 ): AgentToolExecution {
   bridge.beginRun();
-  return executeAgentTool(bridge, toolName, args);
+  try {
+    return executeAgentTool(bridge, toolName, args);
+  } catch (error) {
+    return {
+      effect: "read",
+      result: {
+        ok: false,
+        error: "tool_execution_error",
+        message: error instanceof Error ? error.message : "Tool execution failed",
+      },
+    };
+  }
 }
 
 export function buildControlResponse(

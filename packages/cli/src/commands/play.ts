@@ -89,7 +89,7 @@ export async function handlePlay(
       "建造兵营:   llmcraft build barracks --unit worker_1 --at 6,8",
       "训练士兵:   llmcraft train soldier --building barracks_1",
       "攻击:       llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack",
-      "等待:       llmcraft wait --ticks 10",
+      "等待:       sleep 1 后重新读取 state",
     ],
   });
 }

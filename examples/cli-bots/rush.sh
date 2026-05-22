@@ -30,7 +30,7 @@ for ((turn=1; turn<=10; turn++)); do
   echo "Turn $turn — gathering + producing workers"
   llmcraft units --idle --type worker | llmcraft gather 2>/dev/null || true
   llmcraft buildings --type hq --ready | llmcraft train worker 2>/dev/null || true
-  llmcraft wait --ticks 3
+  sleep 2
 done
 
 # Phase 2: Build barracks + first soldiers (turns 11-20)
@@ -46,7 +46,7 @@ for ((turn=11; turn<=20; turn++)); do
 
   # Train soldiers
   llmcraft buildings --type barracks --ready | llmcraft train soldier 2>/dev/null || true
-  llmcraft wait --ticks 3
+  sleep 2
 done
 
 # Phase 3: Attack! (turns 21+)
@@ -71,7 +71,7 @@ for ((turn=21; turn<=MAX_TURNS; turn++)); do
     break
   fi
 
-  llmcraft wait --ticks 3
+  sleep 2
 done
 
 echo "=== Rush bot finished ==="

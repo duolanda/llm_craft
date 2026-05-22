@@ -4,7 +4,7 @@
 # This script runs a simple economy loop:
 # 1. Assign idle workers to gather resources
 # 2. Train workers when HQ is idle
-# 3. Wait for the game to progress
+# 3. Sleep briefly so the game can progress
 #
 # Usage:
 #   llmcraft session use --player player_1
@@ -52,9 +52,9 @@ for ((turn=1; turn<=MAX_TURNS; turn++)); do
   echo "Training soldiers..."
   llmcraft buildings --type barracks --ready | llmcraft train soldier || true
 
-  # Wait for game to progress
-  echo "Waiting 5 ticks..."
-  llmcraft wait --ticks 3
+  # Let the game progress
+  echo "Sleeping for 2s..."
+  sleep 2
 
   echo ""
 done

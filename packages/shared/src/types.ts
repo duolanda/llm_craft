@@ -521,7 +521,3 @@ export interface CreateControlSessionRequest {
 export interface ControlToolCallRequest {
   args?: Record<string, unknown>;
 }
-
-export interface ControlWaitRequest {
-  ticks: number;
-}

@@ -134,16 +134,16 @@ while tick < TOTAL_TICKS:
             except:
                 pass
 
-        # Wait 10 ticks
-        run("wait", "--ticks", "10")
+        # Let the game advance roughly 10 ticks.
+        time.sleep(5)
 
     except subprocess.CalledProcessError as e:
         print(f"  ⚠️  Error at tick {tick}: {e}")
-        run("wait", "--ticks", "10")
+        time.sleep(5)
         continue
     except json.JSONDecodeError:
         print(f"  ⚠️  JSON parse error at tick {tick}")
-        run("wait", "--ticks", "10")
+        time.sleep(5)
         continue
 
 # Final state

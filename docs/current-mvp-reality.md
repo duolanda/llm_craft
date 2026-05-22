@@ -171,10 +171,6 @@ server ControlSessionManager → GameAgentBridge → Game
 - `plan economy|defend|attack-hq|custom --file <path>` — 生成计划 JSON
 - `orchestrate [--dry-run] [--max-actions n]` — 执行计划或批量动作
 
-### 等待
-
-- `wait --ticks n` — 等待 N 个游戏 tick
-
 ### 示例管道
 
 ```bash

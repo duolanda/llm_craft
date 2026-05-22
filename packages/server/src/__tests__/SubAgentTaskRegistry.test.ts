@@ -73,6 +73,30 @@ describe("SubAgentTaskRegistry", () => {
     expect(registry.drainNotifications("player_1")).toHaveLength(0);
   });
 
+  it("drainNotifications reports runner failures for a player", async () => {
+    const registry = new SubAgentTaskRegistry();
+    const runner = vi.fn(async () => {
+      throw new Error("provider unavailable");
+    });
+
+    const result = registry.spawn(createInput({ description: "failing task" }), "player_1", runner);
+
+    await vi.waitFor(() => {
+      expect(registry.drainNotifications("player_1")).toEqual([
+        [
+          "<sub-agent-result>",
+          `taskId: ${result.ok ? result.taskId : ""}`,
+          "description: failing task",
+          "status: failed",
+          "objective: do something",
+          "result:",
+          "provider unavailable",
+          "</sub-agent-result>",
+        ].join("\n"),
+      ]);
+    });
+  });
+
   it("abortPlayer aborts active tasks and clears notifications for a player", async () => {
     const registry = new SubAgentTaskRegistry();
     const abortSpy = vi.fn();

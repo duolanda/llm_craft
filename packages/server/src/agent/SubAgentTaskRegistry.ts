@@ -61,8 +61,14 @@ export class SubAgentTaskRegistry {
           this.activeTasks.delete(taskId);
         }
       })
-      .catch(() => {
-        this.activeTasks.delete(taskId);
+      .catch((error) => {
+        if (this.activeTasks.has(taskId)) {
+          this.notificationQueues.push({
+            playerId,
+            content: this.formatFailureNotification(taskId, input, error),
+          });
+          this.activeTasks.delete(taskId);
+        }
       });
 
     return {
@@ -103,5 +109,19 @@ export class SubAgentTaskRegistry {
     });
     this.activeTasks.clear();
     this.notificationQueues = [];
+  }
+
+  private formatFailureNotification(taskId: string, input: SpawnAgentInput, error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return [
+      "<sub-agent-result>",
+      `taskId: ${taskId}`,
+      `description: ${input.description}`,
+      "status: failed",
+      `objective: ${input.objective}`,
+      "result:",
+      message,
+      "</sub-agent-result>",
+    ].join("\n");
   }
 }

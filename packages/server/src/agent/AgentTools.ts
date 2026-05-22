@@ -193,7 +193,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train a mixed squad:",
+      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train an early soldier/demolisher squad. Do not open with a tank; tanks are expensive siege units for a stable economy:",
       JSON.stringify({
         unitIds: ["worker_1", "worker_2"],
         loop: 1,
@@ -213,14 +213,6 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             scope: "global",
             when: { condition: "production_queue_empty", buildingType: "barracks" },
             until: { condition: "unit_count_at_least", unitType: "soldier", count: 2 },
-            retry: true,
-          },
-          {
-            call: "spawn_unit",
-            args: { buildingId: "$barracks", unitType: "tank" },
-            scope: "global",
-            when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "tank", count: 1 },
             retry: true,
           },
           {

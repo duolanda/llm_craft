@@ -19,7 +19,7 @@ const UNIT_LABELS: Record<UnitType, string> = {
   worker: "工人",
   soldier: "士兵",
   tank: "坦克",
-  demolisher: "攻城",
+  demolisher: "射手",
 };
 
 export function StatsPanel({ state }: StatsPanelProps) {

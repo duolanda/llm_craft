@@ -172,7 +172,7 @@ export interface Unit extends GameObject {
   path?: Array<{ x: number; y: number }>;
   // 寻路目标
   pathTarget?: { x: number; y: number };
-  // 防止同一 tick 重复攻击
+  // 最近一次攻击 tick，用于结算攻击冷却
   lastAttackTick?: number;
 }
 
@@ -243,6 +243,7 @@ export interface UnitStats {
   attack: number;
   cost: number;
   attackRange: number;
+  attackCooldownTicks: number;
   armorType: ArmorType;
   damageType?: DamageType;
 }

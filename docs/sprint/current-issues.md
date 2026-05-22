@@ -64,6 +64,7 @@
 - [x] 明确 `attack` 是有目标 ID 时的默认战斗命令，避免 LLM 把 `attack_move_unit` 当成拆 HQ / barracks 的替代品
 - [x] 为 `orchestrate_plan` 增加 `{ call, args, scope, when, until, retry }` steps，让计划能复用现有动作工具表达开局、生产和连续作战意图
 - [x] 补齐 `tank` / `demolisher` 的 AI plan 校验、生产提示、状态摘要和前端显示，避免新单位只停留在底层规则里
+- [x] 调整三单位定位：新增 `concrete` 建筑护甲、提高 tank 造价、降低 demolisher 对 HQ 的有效性，并让提示词避免开局直接造 tank
 
 ---
 

@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-05-08
+日期: 2026-05-14
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -537,6 +537,10 @@ h/b/s/w/t/d enemy hq/barracks/soldier/worker/tank/demolisher
 
 - `HQ` 只能生产 `worker`
 - `barracks` 可生产 `soldier`、`tank`、`demolisher`
+- 当前造价：`worker=50`、`soldier=80`、`demolisher=160`、`tank=300`
+- 当前建筑护甲：`HQ` 和 `barracks` 都是 `concrete`
+- 当前战斗定位：`tank` 是昂贵攻城/抗线单位，`demolisher` 是射程 3、攻击冷却 4 ticks 的慢速远程单位，主要克制 `heavy`，不特别克制 `concrete`
+- 伤害倍率：`piercing` 对 `light/heavy/concrete` 为 `100%/50%/35%`；`explosive` 对 `light/heavy/concrete` 为 `50%/150%/60%`；无属性伤害为 `100%`
 
 #### `build_structure`
 
@@ -673,7 +677,7 @@ type PlanStepCondition =
 - `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"` 或 `"$barracks"`，在执行时解析为当前友方建筑
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
-示例：开局让两个 worker 挂矿，等钱够后造兵营，再生产混编战斗单位。
+示例：开局让两个 worker 挂矿，等钱够后造兵营，再生产早期 soldier/demolisher 混编。`tank` 造价高，不应作为开局第一座 barracks 后的默认排产。
 
 ```json
 {
@@ -695,14 +699,6 @@ type PlanStepCondition =
       "scope": "global",
       "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
       "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 2 },
-      "retry": true
-    },
-    {
-      "call": "spawn_unit",
-      "args": { "buildingId": "$barracks", "unitType": "tank" },
-      "scope": "global",
-      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
-      "until": { "condition": "unit_count_at_least", "unitType": "tank", "count": 1 },
       "retry": true
     },
     {

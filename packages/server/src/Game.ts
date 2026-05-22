@@ -925,6 +925,11 @@ export class Game {
       : this.attackBuilding(attacker, target as Building);
   }
 
+  private canAttackThisTick(attacker: RuntimeUnit): boolean {
+    const cooldownTicks = UNIT_STATS[attacker.type].attackCooldownTicks;
+    return cooldownTicks <= 0 || attacker.lastAttackTick === undefined || this.tick - attacker.lastAttackTick >= cooldownTicks;
+  }
+
   private executeAttackIntent(
     attacker: RuntimeUnit,
     playerId: PlayerId,
@@ -934,22 +939,50 @@ export class Game {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    let result: ResultCode;
+    let selectedTarget: { target: Unit | Building; kind: "unit" | "building" } | undefined;
 
     if (intent.targetId) {
       const unitTarget = this.unitManager.getUnit(intent.targetId);
       const buildingTarget = this.buildingManager.getBuilding(intent.targetId);
-      result = unitTarget
-        ? this.executeAttackTarget(attacker, unitTarget, "unit")
+      selectedTarget = unitTarget
+        ? { target: unitTarget, kind: "unit" }
         : buildingTarget
-          ? this.executeAttackTarget(attacker, buildingTarget, "building")
-          : RESULT_CODES.ERR_INVALID_TARGET;
+          ? { target: buildingTarget, kind: "building" }
+          : undefined;
     } else {
-      const prioritizedTarget = this.findPrioritizedAttackTarget(attacker, playerId, intent.targetPriority);
-      result = prioritizedTarget
-        ? this.executeAttackTarget(attacker, prioritizedTarget.target, prioritizedTarget.kind)
-        : RESULT_CODES.ERR_NOT_IN_RANGE;
+      selectedTarget = this.findPrioritizedAttackTarget(attacker, playerId, intent.targetPriority) ?? undefined;
     }
+
+    if (!selectedTarget) {
+      return intent.targetId ? RESULT_CODES.ERR_INVALID_TARGET : RESULT_CODES.ERR_NOT_IN_RANGE;
+    }
+
+    if (!selectedTarget.target.exists || selectedTarget.target.playerId === playerId) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    const distance = Math.max(
+      Math.abs(attacker.x - selectedTarget.target.x),
+      Math.abs(attacker.y - selectedTarget.target.y)
+    );
+    if (distance > attacker.attackRange) {
+      return RESULT_CODES.ERR_NOT_IN_RANGE;
+    }
+
+    if (!this.canAttackThisTick(attacker)) {
+      attacker.state = UNIT_STATES.ATTACKING;
+      attacker.intent = {
+        type: "attack",
+        targetId: intent.targetId,
+        targetPriority: intent.targetPriority,
+        targetX: selectedTarget.target.x,
+        targetY: selectedTarget.target.y,
+      };
+      this.unitManager.clearPath(attacker);
+      return RESULT_CODES.OK;
+    }
+
+    const result = this.executeAttackTarget(attacker, selectedTarget.target, selectedTarget.kind);
 
     if (result === RESULT_CODES.OK) {
       this.unitManager.clearPath(attacker);
@@ -986,7 +1019,7 @@ export class Game {
         continue;
       }
 
-      if (runtimeUnit.lastAttackTick !== this.tick) {
+      if (this.canAttackThisTick(runtimeUnit)) {
         const prioritizedTarget = this.findPrioritizedAttackTarget(
           runtimeUnit,
           runtimeUnit.playerId,
@@ -1004,6 +1037,17 @@ export class Game {
             this.unitManager.clearPath(runtimeUnit);
             continue;
           }
+        }
+      } else {
+        const prioritizedTarget = this.findPrioritizedAttackTarget(
+          runtimeUnit,
+          runtimeUnit.playerId,
+          attackMoveIntent.targetPriority
+        );
+        if (prioritizedTarget) {
+          runtimeUnit.state = UNIT_STATES.ATTACKING;
+          this.unitManager.clearPath(runtimeUnit);
+          continue;
         }
       }
 
@@ -1044,7 +1088,8 @@ export class Game {
 
       const runtimeUnit = unit as RuntimeUnit;
 
-      if (runtimeUnit.lastAttackTick === this.tick) {
+      if (!this.canAttackThisTick(runtimeUnit)) {
+        runtimeUnit.state = UNIT_STATES.ATTACKING;
         continue;
       }
 

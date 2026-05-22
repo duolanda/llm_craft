@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
-import { BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES, RESULT_TYPES, BUILDING_STATS, calculateDamage, CommandResultData } from "@llmcraft/shared";
+import { ARMOR_TYPES, BUILDING_TYPES, MAP_HEIGHT, MAP_WIDTH, RESULT_CODES, TILE_TYPES, UNIT_STATS, UNIT_TYPES, RESULT_TYPES, BUILDING_STATS, calculateDamage, CommandResultData } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
@@ -198,7 +198,7 @@ describe("Game", () => {
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
   });
 
-  it("spawns tanks and demolishers from barracks", () => {
+  it("keeps tanks too expensive to queue immediately after the opening barracks", () => {
     const worker = game
       .getState()
       .players[0]
@@ -226,21 +226,54 @@ describe("Game", () => {
       unitType: UNIT_TYPES.TANK,
       playerId: "player_1",
     });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_NOT_ENOUGH_CREDITS);
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.TANK)).toHaveLength(0);
+  });
+
+  it("spawns tanks and demolishers from barracks when resources are available", () => {
+    const barracks = game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 4, 10, "player_1");
+
+    game.queueCommand({
+      id: "spawn_tank",
+      type: "spawn",
+      buildingId: barracks.id,
+      unitType: UNIT_TYPES.TANK,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.TANK)).toHaveLength(1);
+    expect(game.getState().players[0].resources.credits).toBe(100);
+
+    game = new Game();
+    const secondBarracks = game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 4, 10, "player_1");
+
     game.queueCommand({
       id: "spawn_demolisher",
       type: "spawn",
-      buildingId: barracks.id,
+      buildingId: secondBarracks.id,
       unitType: UNIT_TYPES.DEMOLISHER,
       playerId: "player_1",
     });
     game.processCommands();
     game.start();
     game.tickUpdate();
-    game.tickUpdate();
     game.stop();
 
-    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.TANK)).toHaveLength(1);
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.DEMOLISHER)).toHaveLength(1);
+    expect(game.getState().players[0].resources.credits).toBe(240);
+  });
+
+  it("uses concrete armor for buildings so demolishers do not hard-counter HQ", () => {
+    expect(BUILDING_STATS[BUILDING_TYPES.HQ].armorType).toBe(ARMOR_TYPES.CONCRETE);
+    expect(BUILDING_STATS[BUILDING_TYPES.BARRACKS].armorType).toBe(ARMOR_TYPES.CONCRETE);
+    expect(calculateDamage(UNIT_STATS.demolisher, UNIT_STATS.tank.armorType)).toBe(37);
+    expect(calculateDamage(UNIT_STATS.demolisher, BUILDING_STATS[BUILDING_TYPES.HQ].armorType)).toBe(15);
   });
 
   it("keeps worker unable to attack and soldier attack range at one", () => {
@@ -294,11 +327,11 @@ describe("Game", () => {
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
-  it("keeps attacking every tick after a successful attack command", () => {
+  it("keeps attacking on its cooldown after a successful attack command", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
-    const expectedDamage = UNIT_STATS.soldier.attack;
+    const expectedDamage = calculateDamage(UNIT_STATS.soldier, UNIT_STATS.soldier.armorType);
 
     game.queueCommand({
       id: "sustain_attack",
@@ -309,6 +342,9 @@ describe("Game", () => {
     });
 
     game.start();
+    game.tickUpdate();
+    expect(target.hp).toBe(target.maxHp - expectedDamage);
+
     game.tickUpdate();
     expect(target.hp).toBe(target.maxHp - expectedDamage);
 
@@ -335,6 +371,9 @@ describe("Game", () => {
     });
 
     game.start();
+    game.tickUpdate();
+    expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage);
+
     game.tickUpdate();
     expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage);
 
@@ -421,6 +460,11 @@ describe("Game", () => {
     });
 
     game.start();
+    game.tickUpdate();
+    expect(attacker.intent?.type).toBe("attack_move");
+    expect(attacker.x).toBe(6);
+    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
+
     game.tickUpdate();
     expect(attacker.intent?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);

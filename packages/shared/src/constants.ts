@@ -28,6 +28,7 @@ export type UnitType = typeof UNIT_TYPES[keyof typeof UNIT_TYPES];
 export const ARMOR_TYPES = {
   LIGHT: "light",
   HEAVY: "heavy",
+  CONCRETE: "concrete",
 } as const;
 
 export type ArmorType = typeof ARMOR_TYPES[keyof typeof ARMOR_TYPES];
@@ -69,18 +70,19 @@ export const UNIT_STATS: Record<UnitType, {
   attack: number;
   cost: number;
   attackRange: number;
+  attackCooldownTicks: number;
   armorType: ArmorType;
   damageType?: DamageType;
 }> = {
-  [UNIT_TYPES.WORKER]:   { hp: 50, speed: 1, attack: 0,  cost: 50,  attackRange: 0, armorType: ARMOR_TYPES.LIGHT },
-  [UNIT_TYPES.SOLDIER]:  { hp: 80, speed: 1, attack: 12, cost: 80,  attackRange: 1, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.PIERCING },
-  [UNIT_TYPES.TANK]:     { hp: 200, speed: 1, attack: 20, cost: 150, attackRange: 1, armorType: ARMOR_TYPES.HEAVY },
-  [UNIT_TYPES.DEMOLISHER]: { hp: 40, speed: 1, attack: 25, cost: 120, attackRange: 3, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.EXPLOSIVE },
+  [UNIT_TYPES.WORKER]:   { hp: 50, speed: 1, attack: 0,  cost: 50,  attackRange: 0, attackCooldownTicks: 0, armorType: ARMOR_TYPES.LIGHT },
+  [UNIT_TYPES.SOLDIER]:  { hp: 80, speed: 1, attack: 12, cost: 80,  attackRange: 1, attackCooldownTicks: 2, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.PIERCING },
+  [UNIT_TYPES.TANK]:     { hp: 220, speed: 1, attack: 28, cost: 300, attackRange: 1, attackCooldownTicks: 2, armorType: ARMOR_TYPES.HEAVY },
+  [UNIT_TYPES.DEMOLISHER]: { hp: 40, speed: 1, attack: 25, cost: 160, attackRange: 3, attackCooldownTicks: 4, armorType: ARMOR_TYPES.LIGHT,  damageType: DAMAGE_TYPES.EXPLOSIVE },
 };
 
 export const BUILDING_STATS: Record<BuildingType, { hp: number; cost: number; armorType: ArmorType }> = {
-  [BUILDING_TYPES.HQ]: { hp: 1000, cost: 0, armorType: ARMOR_TYPES.HEAVY },
-  [BUILDING_TYPES.BARRACKS]: { hp: 300, cost: 120, armorType: ARMOR_TYPES.HEAVY },
+  [BUILDING_TYPES.HQ]: { hp: 1000, cost: 0, armorType: ARMOR_TYPES.CONCRETE },
+  [BUILDING_TYPES.BARRACKS]: { hp: 300, cost: 120, armorType: ARMOR_TYPES.CONCRETE },
 };
 
 export const ECONOMY_RULES = {
@@ -90,8 +92,16 @@ export const ECONOMY_RULES = {
 } as const;
 
 export const DAMAGE_INTERACTION: Record<DamageType, Record<ArmorType, number>> = {
-  [DAMAGE_TYPES.PIERCING]:  { [ARMOR_TYPES.LIGHT]: 1.0, [ARMOR_TYPES.HEAVY]: 0.5 },
-  [DAMAGE_TYPES.EXPLOSIVE]: { [ARMOR_TYPES.LIGHT]: 0.5, [ARMOR_TYPES.HEAVY]: 1.5 },
+  [DAMAGE_TYPES.PIERCING]: {
+    [ARMOR_TYPES.LIGHT]: 1.0,
+    [ARMOR_TYPES.HEAVY]: 0.5,
+    [ARMOR_TYPES.CONCRETE]: 0.35,
+  },
+  [DAMAGE_TYPES.EXPLOSIVE]: {
+    [ARMOR_TYPES.LIGHT]: 0.5,
+    [ARMOR_TYPES.HEAVY]: 1.5,
+    [ARMOR_TYPES.CONCRETE]: 0.6,
+  },
 };
 
 export function calculateDamage(

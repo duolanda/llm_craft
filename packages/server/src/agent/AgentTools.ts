@@ -178,6 +178,64 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     execute: (bridge, args) => bridge.holdUnit(String(args.unitId)),
   },
   {
+    name: "spawn_agent",
+    description: [
+      "Spawn a background sub-agent to execute a localized task that you have already decomposed from the overall plan.",
+      "Use this ONLY when:",
+      "- You have already finished overall strategic planning, scouting, and situation assessment.",
+      "- The task is a self-contained execution step that does not require further strategy decisions.",
+      "- You are assigning non-overlapping units or buildings to the sub-agent.",
+      "Do NOT use this for:",
+      "- Strategic analysis, tactical evaluation, or plan review.",
+      "- Getting a second opinion on your strategy.",
+      "- Asking the sub-agent to formulate or refine the overall plan.",
+      "The sub-agent runs in the background and you will not wait for its final result.",
+      "You will receive a taskId immediately; the sub-agent's final result will appear in a later message.",
+      "Constraints:",
+      "- Sub-agents can use all game tools EXCEPT spawn_agent.",
+      "- Sub-agents are execution workers, not strategic planners.",
+      "- Assign non-overlapping unitIds and buildingIds to avoid conflicts.",
+      "- If the task is impossible to execute, the sub-agent will report why and stop.",
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      required: ["description", "objective"],
+      properties: {
+        description: {
+          type: "string",
+          description: "Short label for this sub-agent task, e.g. 'defend HQ with soldiers 1-3'.",
+        },
+        objective: {
+          type: "string",
+          description: "The specific execution objective. Include concrete steps, target locations, and success criteria.",
+        },
+        assignedUnits: {
+          type: "array",
+          items: { type: "string" },
+          description: "Unit IDs assigned exclusively to this sub-agent.",
+        },
+        assignedBuildings: {
+          type: "array",
+          items: { type: "string" },
+          description: "Building IDs assigned exclusively to this sub-agent.",
+        },
+        constraints: {
+          type: "string",
+          description: "Additional constraints, e.g. 'do not engage enemy HQ'.",
+        },
+        successCriteria: {
+          type: "string",
+          description: "Explicit criteria that defines when this task is complete.",
+        },
+      },
+      additionalProperties: false,
+    },
+    execute: () => ({
+      effect: "read" as const,
+      result: { ok: false, error: "spawn_agent must be handled by the provider" },
+    }),
+  },
+  {
     name: "orchestrate_plan",
     description: [
       "Register a flat orchestration plan for one or more units using existing action-tool calls, optional until conditions, and looping.",
@@ -350,6 +408,10 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
 
 export function getAgentToolDefinitions(): AgentToolDefinition[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+}
+
+export function getAgentToolNames(): string[] {
+  return tools.map((tool) => tool.name);
 }
 
 export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {

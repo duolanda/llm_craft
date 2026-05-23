@@ -28,6 +28,15 @@ export interface AgentRuntimeState {
   recentEvents: unknown;
 }
 
+export interface SubAgentParentContext {
+  playerId: string;
+  input: AgentRunInput;
+  messages: unknown[];
+  runtimeState: AgentRuntimeState;
+  tools: AgentToolDefinition[];
+  executeTool: (name: string, args: unknown) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
+}
+
 export interface RunAgentOptions {
   tools: AgentToolDefinition[];
   executeTool: (name: string, args: unknown) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
@@ -35,6 +44,8 @@ export interface RunAgentOptions {
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
   signal?: AbortSignal;
+  spawnSubAgent?: (args: unknown, context: SubAgentParentContext) => AgentToolExecutionResult;
+  drainSubAgentNotifications?: () => string[];
 }
 
 export interface RunAgentResult {

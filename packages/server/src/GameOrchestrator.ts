@@ -21,12 +21,15 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import OpenAI from "openai";
 import { Game } from "./Game";
 import { createLLMProvider } from "./createLLMProvider";
-import { LLMProvider } from "./LLMProvider";
+import { LLMProvider, SubAgentParentContext } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { GameAgentBridge } from "./agent/GameAgentBridge";
 import { AgentRuntime, AgentRuntimeResult } from "./agent/AgentRuntime";
+import { SubAgentTaskRegistry, SubAgentRunner, SpawnAgentInput } from "./agent/SubAgentTaskRegistry";
+import { runSubAgentTask } from "./agent/SubAgentRunner";
 import { getHQUnderAttackAlertFromGameState } from "./HQAlert";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
@@ -87,6 +90,8 @@ export class GameOrchestrator {
   private aiTerminalEventSequence = 0;
   private aiRequestCounts = { player_1: 0, player_2: 0 };
   private warmupRequestNumbers: Partial<Record<PlayerId, number>> = {};
+  private subAgentTaskRegistry = new SubAgentTaskRegistry();
+  private subAgentClients: Partial<Record<PlayerId, OpenAI>> = {};
 
   constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
@@ -102,6 +107,18 @@ export class GameOrchestrator {
       : null;
     this.llm1 = createLLMProvider(config.player1);
     this.llm2 = createLLMProvider(config.player2);
+    if (config.player1.providerType === "openai-compatible") {
+      this.subAgentClients.player_1 = new OpenAI({
+        apiKey: config.player1.apiKey,
+        baseURL: config.player1.baseURL,
+      });
+    }
+    if (config.player2.providerType === "openai-compatible") {
+      this.subAgentClients.player_2 = new OpenAI({
+        apiKey: config.player2.apiKey,
+        baseURL: config.player2.baseURL,
+      });
+    }
     this.bridgeByPlayer = {
       player_1: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1),
       player_2: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
@@ -157,6 +174,8 @@ export class GameOrchestrator {
           this.appendTerminalToolCallEvent(playerId, requestNumber, state.tick, record);
           void this.writeTranscriptToolCall(transcriptRunId, playerId, state.tick, record);
         },
+        spawnSubAgent: (args, context) => this.handleSpawnSubAgent(playerId, args, context),
+        drainSubAgentNotifications: () => this.subAgentTaskRegistry.drainNotifications(playerId),
       }, controller.signal);
       const latestState = this.game.getState();
       await this.writeTranscriptRunComplete(transcriptRunId, playerId, state.tick, latestState.tick, result);
@@ -289,6 +308,7 @@ export class GameOrchestrator {
     this.warmupController?.abort();
     this.activeRunControllers.player_1?.abort();
     this.activeRunControllers.player_2?.abort();
+    this.subAgentTaskRegistry.abortAll();
     if (this.pollTimeout) {
       clearTimeout(this.pollTimeout);
       this.pollTimeout = null;
@@ -523,6 +543,40 @@ export class GameOrchestrator {
       createdAt: new Date().toISOString(),
       toolCall: structuredClone(toolCall),
     });
+  }
+
+  private handleSpawnSubAgent(
+    playerId: PlayerId,
+    args: unknown,
+    context: SubAgentParentContext,
+  ): { effect: "read"; result: unknown } {
+    const client = this.subAgentClients[playerId];
+    if (!client) {
+      return {
+        effect: "read",
+        result: { ok: false, error: "spawn_agent_unavailable" },
+      };
+    }
+    const model = this.getProvider(playerId).getModel();
+    const input = args as SpawnAgentInput;
+    const runner: SubAgentRunner = (taskId, spawnInput, signal) =>
+      runSubAgentTask({
+        client,
+        model,
+        taskId,
+        description: spawnInput.description,
+        objective: spawnInput.objective,
+        assignedUnits: spawnInput.assignedUnits,
+        assignedBuildings: spawnInput.assignedBuildings,
+        constraints: spawnInput.constraints,
+        successCriteria: spawnInput.successCriteria,
+        parentContext: context,
+        signal,
+      });
+    return {
+      effect: "read",
+      result: this.subAgentTaskRegistry.spawn(input, playerId, runner),
+    };
   }
 
   private getProvider(playerId: PlayerId): LLMProvider {

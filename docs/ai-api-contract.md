@@ -717,6 +717,57 @@ type PlanStepCondition =
 }
 ```
 
+### 2.4 子 Agent 工具 `spawn_agent`
+
+`spawn_agent` 是唯一的子 Agent 派生工具，**只有父 Agent 可用**。
+
+#### 输入
+
+```ts
+interface SpawnAgentInput {
+  description: string;
+  objective: string;
+  assignedUnits?: string[];
+  assignedBuildings?: string[];
+  constraints?: string;
+  successCriteria?: string;
+}
+```
+
+#### 输出（即时返回）
+
+```ts
+// 成功
+{ ok: true, taskId: string, status: "running", description: string }
+// 失败
+{ ok: false, error: string, hint?: string }
+```
+
+#### 子 Agent 完成通知
+
+子 Agent 完成后，结果会注入父 Agent 的下一次模型请求：
+
+```xml
+<sub-agent-result>
+taskId: ...
+description: ...
+status: completed | failed | aborted
+objective: ...
+result:
+...
+</sub-agent-result>
+```
+
+#### 使用规则
+
+- `spawn_agent` 由父 Agent 自主选择是否调用，不由服务端触发
+- 父 Agent 必须已完成总体规划、侦察和局势评估
+- 子 Agent 是执行 worker，不是战略规划者
+- 子 Agent 可使用全部游戏工具，但不能调用 `spawn_agent`
+- 分配到不同子 Agent 的 unitIds / buildingIds 必须互不重叠
+- `spawn_agent` 调用后立即返回 `taskId`，不等待子 Agent 完成
+- 子 Agent 结果会在后续消息中以 `<sub-agent-result>` 标签注入
+
 ## 3. 记录格式
 
 当前 `aiTurns` 不再保存生成的 JavaScript 和沙箱错误，而是保存 agent 行为：

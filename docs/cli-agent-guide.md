@@ -1,308 +1,457 @@
-# CLI Control Plane — AI Agent Guide
+# CLI Control Plane - AI Agent Guide
 
-> **⚠️ RULE: Use the `llmcraft` CLI. Do NOT write WebSocket scripts or raw HTTP clients.**
->
-> The CLI handles all the protocol details for you — session management, authentication,
-> tool routing, error handling, and JSON formatting. Any agent that implements its own
-> WebSocket or HTTP client instead of using `llmcraft` will break when the protocol changes.
-> **You are a shell agent. Run `llmcraft` commands.**
+> Rule for agents: use the `llmcraft` CLI. Do not write WebSocket clients or raw HTTP control clients unless this guide explicitly says the CLI cannot do the required operation.
 
-## 0. Setup: Build the CLI First
+The CLI is the stable shell interface for external agents. It handles session creation, server URL resolution, stdin pipelines, JSON formatting, exit codes, and tool routing. Treat it as your action API.
 
-Before you can use any `llmcraft` commands, the CLI must be built from TypeScript.
+This guide uses `llmcraft ...` for readability. Inside this repo you can run the same commands as:
 
 ```bash
-# From the project root (llm_craft/)
-pnpm install              # install dependencies
-pnpm build:cli            # compile TypeScript → JavaScript
+pnpm cli -- <command> [flags]
 ```
 
-After building, the `llmcraft` command is available at:
+Example:
 
 ```bash
-./node_modules/.bin/llmcraft  # direct path
-pnpm cli                      # via pnpm (preferred)
+pnpm cli -- state --compact
 ```
 
-Run `pnpm cli --help` to confirm it works.
+## 0. Prerequisites
 
-The server must be running with an active match before you can create a session.
+Build the CLI and run the server:
 
----
+```bash
+pnpm install
+pnpm build:cli
+pnpm dev:server
+```
 
-This document tells an external AI agent how to join an LLMCraft game and play using the `llmcraft` CLI.
+The default server is `http://localhost:3001`. Override it with either:
 
----
+```bash
+llmcraft state --base-url http://localhost:3001
+```
 
-## 1. Join a Game
+or:
 
-First, create a control session. This binds you to a side.
+```bash
+export LLMCRAFT_SERVER=http://localhost:3001
+```
+
+PowerShell:
+
+```powershell
+$env:LLMCRAFT_SERVER = "http://localhost:3001"
+```
+
+Sanity check:
+
+```bash
+llmcraft --help
+```
+
+## 1. Start A Match
+
+There are two supported CLI start modes.
+
+### Agent vs CPU
+
+Use this when one shell agent should play `player_1` against a built-in CPU `player_2`.
+
+```bash
+llmcraft play --vs random
+```
+
+or:
+
+```bash
+llmcraft play --vs rush
+```
+
+This does three things:
+
+- creates a new game on the server
+- starts CPU control for `player_2`
+- joins you as `player_1` and saves your session to `~/.llmcraft/session.json`
+
+After this, commands like `llmcraft state` and `llmcraft units` use the saved session automatically.
+
+### Two CLI Agents
+
+Use this when two independent agents should play each other through the CLI.
+
+Start a PVP game:
+
+```bash
+llmcraft play --mode pvp
+```
+
+Then each agent joins one side:
+
+```bash
+# Agent 1
+llmcraft session use --player player_1
+
+# Agent 2
+llmcraft session use --player player_2
+```
+
+The game does not start ticking until both players have created a control session.
+
+## 2. Session Rules
+
+`session use` returns JSON like:
+
+```json
+{
+  "ok": true,
+  "sessionId": "cs_abc12345",
+  "gameId": "default",
+  "playerId": "player_1",
+  "createdAt": "...",
+  "serverUrl": "http://localhost:3001"
+}
+```
+
+For a single local agent, using the saved session file is fine:
 
 ```bash
 llmcraft session use --player player_1
+llmcraft state
 ```
 
-Output:
-```json
-{"ok":true,"tick":0,"kind":"state","data":{"sessionId":"cs_abc12345","gameId":"default","playerId":"player_1","createdAt":"..."}}
+For two agents on the same machine, do not rely on the shared `~/.llmcraft/session.json`; the second `session use` will overwrite it. Use explicit sessions or per-agent environment variables.
+
+Explicit sessions:
+
+```bash
+llmcraft state --session cs_player1
+llmcraft units --idle --type worker --session cs_player1 | llmcraft gather --session cs_player1
 ```
 
-> ⚡ The CLI saves the sessionId for you automatically. You don't need to pass it to
-> subsequent commands — just run `llmcraft units`, `llmcraft map`, etc.
-> Do NOT write code that reads this sessionId and makes its own API calls.
+Environment variables:
+
+```bash
+export LLMCRAFT_SESSION=cs_player1
+export LLMCRAFT_SERVER=http://localhost:3001
+```
+
+PowerShell:
+
+```powershell
+$env:LLMCRAFT_SESSION = "cs_player1"
+$env:LLMCRAFT_SERVER = "http://localhost:3001"
+```
+
+Check your current saved session:
 
 ```bash
 llmcraft session show
 ```
 
-> **Note:** A match must be running on the server before you can create a session. Start one from the web UI first.
+## 3. Read Before Acting
 
----
-
-## 2. Read the Battlefield
-
-### Full state
+Every agent turn should begin with a read. Good reads:
 
 ```bash
-llmcraft state
-```
-
-Returns the combined map + player state: ASCII map, units, buildings, economy, production queues.
-
-### Just the ASCII map
-
-```bash
-llmcraft map --ascii
-```
-
-### My economy and buildings
-
-```bash
+llmcraft state --compact
 llmcraft me
-```
-
-Shows: credits, HQ HP, buildings, production queues, worker count.
-
-### Recent events
-
-```bash
+llmcraft units
+llmcraft buildings
+llmcraft enemies
 llmcraft events --limit 5
 ```
 
-### Active plans
+Action results can include warnings:
+
+- `no_recent_read`: this session has not read state before acting
+- `state_stale`: the last read is too old for the current tick
+
+If you see either warning, stop issuing actions and read again:
 
 ```bash
-llmcraft plans
+llmcraft state --compact
+llmcraft units
 ```
 
----
+## 4. Selectors
 
-## 3. Filter and Select Targets
-
-These commands filter the battlefield and output structured JSON for piping.
-
-| Command | What it returns |
-|---------|----------------|
-| `units` | My units |
-| `buildings` | My buildings |
-| `enemies` | Enemy units + buildings |
-| `resources` | Resource tiles on the map |
-
-### Common filters
+Selectors read state and output `kind: "selection"` JSON for piping into actions.
 
 ```bash
-# Idle workers
+# My idle workers
 llmcraft units --type worker --idle
 
-# Soldiers without a plan
+# My soldiers that are not assigned to an active plan
 llmcraft units --type soldier --unplanned
 
-# Ready barracks (empty production queue)
+# My ready HQ or barracks, meaning empty production queue
+llmcraft buildings --type hq --ready
 llmcraft buildings --type barracks --ready
 
 # Enemy HQ
 llmcraft enemies --type hq
 
-# Resources near a location
+# Resource tiles near a point
 llmcraft resources --near 10,10 --limit 3
 ```
 
-All selectors output `kind: "selection"` with the data keyed by command name.
+Common selector flags:
 
----
+| Flag | Meaning |
+|------|---------|
+| `--type worker|soldier|hq|barracks` | Filter by entity type |
+| `--idle` | Only idle units |
+| `--planned` | Only units with active plans |
+| `--unplanned` | Only units without active plans |
+| `--ready` | Only buildings with empty production queue |
+| `--near x,y` | Sort by Chebyshev distance |
+| `--limit n` | Return at most `n` items |
 
-## 4. Issue Commands
+## 5. Actions
 
-### Direct (parameter input)
+Actions can take explicit IDs:
 
 ```bash
-# Move a unit
-llmcraft move --unit worker_1 --to 5,8
-
-# Attack a target
-llmcraft attack --unit soldier_1 --target building_2
-
-# Attack-move (advance toward coordinates, engage enemies on the way)
-llmcraft attack-move --unit soldier_1 --to 18,10
-
-# Gather resources
-llmcraft gather --unit worker_1
-
-# Build a structure
-llmcraft build barracks --unit worker_1 --at 8,8
-
-# Train a unit
-llmcraft train soldier --building barracks_1
-
-# Hold position
-llmcraft hold --unit soldier_1
+llmcraft move --unit unit_1 --to 5,8
+llmcraft gather --unit unit_1
+llmcraft build barracks --unit unit_1 --at 5,10
+llmcraft train worker --building building_1
+llmcraft train soldier --building building_3
+llmcraft attack --unit unit_7 --target building_2
+llmcraft attack-move --unit unit_7 --to 18,10
+llmcraft hold --unit unit_7
 ```
 
-### Pipe input (from selectors)
+Actions also accept selector stdin:
 
 ```bash
-# Gather all idle workers
 llmcraft units --idle --type worker | llmcraft gather
-
-# Train soldiers in all ready barracks
+llmcraft buildings --type hq --ready | llmcraft train worker
 llmcraft buildings --type barracks --ready | llmcraft train soldier
-
-# Attack enemy HQ with all soldiers
-llmcraft units --type soldier | llmcraft attack --target building_2
 ```
 
-When piped, each item becomes a separate action. Output is `kind: "batch_result"`.
+When piped, each selected item becomes one action. The output is `kind: "batch_result"`.
 
----
+## 6. Transformers
 
-## 5. Pipeline Transformers
-
-These sit between a selector and an action command, converting selections into pairings.
-
-| Transformer | What it does | Output kind |
-|-------------|-------------|-------------|
-| `nearest resource` | Pair each unit with nearest resource tile | `pairing` |
-| `nearest enemy` | Pair each unit with nearest enemy | `pairing` |
-| `target enemy-hq` | Pair each unit with enemy HQ | `pairing` |
-| `target weakest` | Pair each unit with lowest-HP enemy | `pairing` |
-
-### Full pipe examples
+Transformers sit between selectors and actions.
 
 ```bash
-# Idle workers → nearest resource → gather
+# Pair each idle worker with a nearby resource, then gather
 llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
 
-# Soldiers → enemy HQ → attack
+# Pair each soldier with enemy HQ, then issue target attack
+llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+
+# Pair each soldier with weakest visible enemy
+llmcraft units --type soldier | llmcraft target weakest | llmcraft attack
+```
+
+Available transformers:
+
+| Command | Purpose |
+|---------|---------|
+| `nearest resource` | Pair selected units with nearest resource tile |
+| `nearest enemy` | Pair selected units with nearest enemy |
+| `target enemy-hq` | Pair selected units with enemy HQ |
+| `target weakest` | Pair selected units with lowest-HP enemy |
+
+## 7. Attack Semantics
+
+Use `attack` when you know the target ID. This is the correct way to destroy HQ and barracks:
+
+```bash
 llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 ```
 
----
-
-## 6. Plans and Orchestration
-
-Plans are multi-step, multi-tick strategies. Generate one or write your own.
-
-### Generate a plan
+Use `attack-move` when you only want to move toward coordinates and fight enemy units encountered on the way:
 
 ```bash
-# Economy plan: mine + build + train
-llmcraft plan economy
-
-# Defense plan: protect HQ
-llmcraft plan defend
-
-# Attack plan: assault enemy HQ
-llmcraft plan attack-hq
+llmcraft units --type soldier | llmcraft attack-move --to 18,10
 ```
 
-Each outputs `kind: "plan"`. Pipe it to `orchestrate` to execute:
+Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
+
+## 8. Build Positions
+
+Current map starts with:
+
+- `player_1` HQ near `(2,10)`
+- `player_2` HQ near `(18,10)`
+
+Barracks cannot be adjacent to your HQ. Practical first barracks positions:
 
 ```bash
-llmcraft plan economy | llmcraft orchestrate
-llmcraft plan attack-hq | llmcraft orchestrate
+# player_1
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
+
+# player_2
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 15,10
 ```
 
-### Custom plan from file
+If a build fails, read `events` or the action error `hint`, then choose another empty tile.
+
+## 9. Minimal Turn Loop
+
+This is the basic loop every agent should understand:
 
 ```bash
-llmcraft plan custom --file my-plan.json | llmcraft orchestrate
+llmcraft state --compact
+llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
+llmcraft buildings --type hq --ready | llmcraft train worker
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
+llmcraft buildings --type barracks --ready | llmcraft train soldier
+llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+sleep 1
 ```
 
-### Orchestrate options
+For `player_2`, use a right-side barracks coordinate such as `15,10`.
+
+## 10. Bash Bot Skeleton
 
 ```bash
-# Dry run (validate without executing)
-llmcraft plan economy | llmcraft orchestrate --dry-run
-
-# Limit actions per tick
-llmcraft plan attack-hq | llmcraft orchestrate --max-actions 5
-```
-
----
-
-## 7. Full Gameplay Loop
-
-A complete bot using the CLI looks like this:
-
-```bash
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Join the game
-llmcraft session use --player player_1
+SESSION="${LLMCRAFT_SESSION:?set LLMCRAFT_SESSION first}"
+SERVER="${LLMCRAFT_SERVER:-http://localhost:3001}"
+BUILD_AT="${BUILD_AT:-5,10}"
 
-# Main loop
-for i in $(seq 1 50); do
-  echo "=== Turn $i ==="
+for turn in $(seq 1 80); do
+  llmcraft state --compact --session "$SESSION" --base-url "$SERVER" >/dev/null
 
-  # Economy: idle workers gather
-  llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
+  llmcraft units --idle --type worker --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft nearest resource --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft gather --session "$SESSION" --base-url "$SERVER" || true
 
-  # Production: train workers if low
-  llmcraft me | llmcraft orchestrate --dry-run  # check eco
-  llmcraft buildings --ready | llmcraft train worker
+  llmcraft buildings --type hq --ready --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft train worker --session "$SESSION" --base-url "$SERVER" || true
 
-  # Military: build barracks, then train soldiers
-  if [ $i -gt 5 ]; then
-    llmcraft buildings --ready | llmcraft train soldier
-  fi
+  llmcraft units --idle --type worker --limit 1 --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft build barracks --at "$BUILD_AT" --session "$SESSION" --base-url "$SERVER" || true
 
-  # Attack with soldiers
-  llmcraft units --type soldier --unplanned | llmcraft target enemy-hq | llmcraft attack
+  llmcraft buildings --type barracks --ready --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft train soldier --session "$SESSION" --base-url "$SERVER" || true
 
-  # Let the game advance before the next read/action cycle
-  sleep 3
+  llmcraft units --type soldier --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft target enemy-hq --session "$SESSION" --base-url "$SERVER" \
+    | llmcraft attack --session "$SESSION" --base-url "$SERVER" || true
+
+  sleep 1
 done
 ```
 
-Two complete example scripts are in `examples/cli-bots/`:
-- `basic-economy.sh` — 50-turn economy loop
-- `rush.sh` — 3-phase rush strategy
+## 11. PowerShell Bot Skeleton
 
----
+```powershell
+$Session = $env:LLMCRAFT_SESSION
+$Server = if ($env:LLMCRAFT_SERVER) { $env:LLMCRAFT_SERVER } else { "http://localhost:3001" }
+$BuildAt = if ($env:LLMCRAFT_BUILD_AT) { $env:LLMCRAFT_BUILD_AT } else { "5,10" }
 
-## 8. Quick Reference
+if (-not $Session) {
+  throw "Set LLMCRAFT_SESSION first."
+}
+
+for ($turn = 1; $turn -le 80; $turn++) {
+  llmcraft state --compact --session $Session --base-url $Server | Out-Null
+
+  llmcraft units --idle --type worker --session $Session --base-url $Server `
+    | llmcraft nearest resource --session $Session --base-url $Server `
+    | llmcraft gather --session $Session --base-url $Server
+
+  llmcraft buildings --type hq --ready --session $Session --base-url $Server `
+    | llmcraft train worker --session $Session --base-url $Server
+
+  llmcraft units --idle --type worker --limit 1 --session $Session --base-url $Server `
+    | llmcraft build barracks --at $BuildAt --session $Session --base-url $Server
+
+  llmcraft buildings --type barracks --ready --session $Session --base-url $Server `
+    | llmcraft train soldier --session $Session --base-url $Server
+
+  llmcraft units --type soldier --session $Session --base-url $Server `
+    | llmcraft target enemy-hq --session $Session --base-url $Server `
+    | llmcraft attack --session $Session --base-url $Server
+
+  Start-Sleep -Seconds 1
+}
+```
+
+PowerShell native command errors can stop a strict script. For robust bots, wrap individual pipelines in `try { ... } catch { ... }` and read `events` after failures.
+
+## 12. Two-Agent Local Test
+
+Terminal 1:
+
+```bash
+pnpm dev:server
+```
+
+Terminal 2:
+
+```bash
+llmcraft play --mode pvp
+llmcraft session use --player player_1
+```
+
+Copy the `sessionId` as `P1_SESSION`.
+
+Terminal 3:
+
+```bash
+llmcraft session use --player player_2
+```
+
+Copy the `sessionId` as `P2_SESSION`.
+
+Then run each bot with explicit session isolation:
+
+```bash
+LLMCRAFT_SESSION=$P1_SESSION LLMCRAFT_BUILD_AT=5,10 ./examples/cli-bots/rush.sh
+LLMCRAFT_SESSION=$P2_SESSION LLMCRAFT_BUILD_AT=15,10 ./examples/cli-bots/rush.sh
+```
+
+If you run commands manually, always pass the matching `--session` flag for that agent.
+
+## 13. Common Failures
+
+| Symptom | Meaning | Fix |
+|---------|---------|-----|
+| `No session found` | You did not join a game or did not set `LLMCRAFT_SESSION` | Run `session use` or pass `--session` |
+| `没有活跃对局` | Server has no control-plane game | Run `llmcraft play --vs random` or `llmcraft play --mode pvp` |
+| `已有活跃对局` | A match is already running | Stop/reset the server or finish the current match |
+| `stdin selection has no units` | Selector returned an empty list | Read state and try a different selector |
+| `insufficient_credits` | Not enough credits | Gather, wait, or train less |
+| `invalid_build_position` | Tile blocked or too close to HQ | Pick another empty tile |
+| `state_stale` / `no_recent_read` | You acted without a recent read | Run `state`, `me`, or `units` before acting |
+
+## 14. Command Reference
 
 | Category | Commands |
 |----------|----------|
+| Match | `play --vs random`, `play --vs rush`, `play --mode pvp` |
 | Session | `session use`, `session show` |
 | State | `state`, `map`, `me`, `events`, `plans` |
 | Selectors | `units`, `buildings`, `enemies`, `resources` |
 | Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `hold` |
 | Transformers | `nearest`, `target` |
-| Plan | `plan`, `orchestrate` |
+| Plans | `plan`, `orchestrate` |
 
-| Global flags | |
-|--------------|---|
-| `--base-url <url>` | Server URL (default: http://localhost:3001) |
-| `--session <id>` | Session ID (default: saved from `session use`) |
-| `--player <id>` | Player ID: player_1 or player_2 |
-| `--json` | Force JSON output |
+Global flags:
 
-| Exit codes | |
-|------------|---|
+| Flag | Meaning |
+|------|---------|
+| `--base-url <url>` | Server URL, defaults to `LLMCRAFT_SERVER` or `http://localhost:3001` |
+| `--session <id>` | Control session ID, defaults to `LLMCRAFT_SESSION` or saved session |
+| `--player <id>` | `player_1` or `player_2` |
+| `--json` | JSON output, currently the default |
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
 | 0 | Success |
 | 1 | Argument error |
-| 2 | Backend failure |
+| 2 | Backend action or plan failure |
 | 3 | Connection failure |
 | 4 | Stdin parse error |

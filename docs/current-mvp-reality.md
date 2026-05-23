@@ -129,6 +129,8 @@ server ControlSessionManager → GameAgentBridge → Game
 
 ### 会话管理
 
+- `llmcraft play --vs random|rush` — 创建 `player_1 vs CPU player_2` 对局，并自动加入 `player_1`
+- `llmcraft play --mode pvp` — 创建等待两个 control session 加入的 PVP 对局
 - `llmcraft session use --player player_1` — 创建或绑定控制会话
 - `llmcraft session show` — 查看当前会话信息
 
@@ -151,7 +153,7 @@ server ControlSessionManager → GameAgentBridge → Game
 
 - `move --unit <id> --to x,y`
 - `attack --unit <id> --target <id>`
-- `attack-move --unit <id> --to x,y [--priority s,w]`
+- `attack-move --unit <id> --to x,y [--priority soldier,worker]`
 - `gather --unit <id> [--resource x,y]`
 - `build barracks --unit <id> --at x,y`
 - `train worker|soldier --building <id>`
@@ -184,6 +186,8 @@ llmcraft plan economy | llmcraft orchestrate
 
 - `examples/cli-bots/basic-economy.sh` — 经济自动化循环
 - `examples/cli-bots/rush.sh` — 激进 rush 策略
+
+完整的 agent 操作手册见 `docs/cli-agent-guide.md`。双 CLI agent 同机对战时必须显式隔离 session：后续命令使用 `--session <id>`，或分别设置 `LLMCRAFT_SESSION`，避免两个 agent 共享并覆盖 `~/.llmcraft/session.json`。
 
 ## 7. 当前限制
 

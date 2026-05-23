@@ -9,6 +9,15 @@ export class ControlClient {
     return this.baseUrl;
   }
 
+  async startGame(cpu?: string): Promise<ControlResponse> {
+    const res = await fetch(`${this.baseUrl}/api/control/start-game`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cpu ? { cpu } : {}),
+    });
+    return res.json() as Promise<ControlResponse>;
+  }
+
   async createSession(
     playerId: string,
     gameId?: string,

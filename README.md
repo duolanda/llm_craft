@@ -1,21 +1,22 @@
 # LLMCraft
 
-> Agent vs Agent 即时战略游戏 - 人类编写 Prompt，AI 生成代码来对战
+> Agent vs Agent 即时战略游戏 - LLM 通过工具调用或 CLI 控制面指挥单位对战
 
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## 简介
 
-LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 AI 生成代码来指挥单位移动、攻击、建造和生产，并决出胜负。
+LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 agent 通过工具调用指挥单位移动、攻击、建造和生产，并决出胜负。
 
 目前还处于原型验证阶段，游戏设计也完全没有定型。
 
 ## 技术栈
 
 - **前端**: React + TypeScript + Vite + Canvas
-- **后端**: Node.js + TypeScript + WebSocket
-- **沙箱**: 子进程 + Node `vm`（AI 代码隔离执行）
+- **后端**: Node.js + TypeScript + WebSocket + HTTP control API
+- **Agent Runtime**: OpenAI-compatible tool calling
+- **CLI**: shell 可调用的 action control plane
 - **AI**: OpenAI API 兼容接口
 - **包管理**: pnpm workspace
 
@@ -23,7 +24,7 @@ LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 AI 生成代码�
 
 ### 环境要求
 
-- Node.js 18+
+- Node.js 22+
 - pnpm
 
 ### 安装
@@ -87,6 +88,116 @@ pnpm dev:server
 # 终端 2 - 前端
 pnpm dev:client
 ```
+
+## CLI 控制面对战
+
+CLI 控制面允许外部 shell agent、脚本或 benchmark harness 直接操控 LLMCraft 对局。它封装了 HTTP control API、session 管理、stdin 管道和 JSON 输出；agent 应优先调用 `llmcraft` 命令，不要自己写 WebSocket 或 raw HTTP 客户端。
+
+### 构建 CLI
+
+```bash
+pnpm install
+pnpm build:cli
+
+# 查看帮助
+pnpm cli -- --help
+```
+
+也可以在构建后直接使用 workspace bin：
+
+```bash
+./node_modules/.bin/llmcraft --help
+```
+
+下面示例用 `pnpm cli -- ...` 表示在仓库内运行 CLI；如果你的 shell 能直接找到 `llmcraft`，可以把前缀替换成 `llmcraft`。
+
+### Agent vs CPU
+
+先启动后端：
+
+```bash
+pnpm dev:server
+```
+
+再创建一局 `player_1` 对 CPU `player_2`：
+
+```bash
+pnpm cli -- play --vs random
+# 或
+pnpm cli -- play --vs rush
+```
+
+`play --vs` 会自动创建对局、加入 `player_1`，并把 session 保存到 `~/.llmcraft/session.json`。之后可以直接运行：
+
+```bash
+pnpm cli -- state --compact
+pnpm cli -- units --idle --type worker | pnpm cli -- gather
+pnpm cli -- buildings --type hq --ready | pnpm cli -- train worker
+pnpm cli -- units --type soldier | pnpm cli -- target enemy-hq | pnpm cli -- attack
+```
+
+### 两个 CLI Agent 对战
+
+启动一个等待双方加入的 PVP 对局：
+
+```bash
+pnpm cli -- play --mode pvp
+```
+
+分别让两个 agent 加入不同阵营：
+
+```bash
+# Agent 1
+pnpm cli -- session use --player player_1
+
+# Agent 2
+pnpm cli -- session use --player player_2
+```
+
+两个 agent 都加入后，游戏 tick 才会开始。
+
+如果两个 agent 在同一台机器、同一个用户下运行，不要共享默认 `~/.llmcraft/session.json`。请从 `session use` 的 JSON 输出中取出各自的 `sessionId`，后续命令显式传入：
+
+```bash
+# Agent 1 后续每条命令
+pnpm cli -- state --session cs_player1
+pnpm cli -- units --idle --type worker --session cs_player1 | pnpm cli -- gather --session cs_player1
+
+# Agent 2 后续每条命令
+pnpm cli -- state --session cs_player2
+pnpm cli -- units --idle --type worker --session cs_player2 | pnpm cli -- gather --session cs_player2
+```
+
+或者让两个 agent 分别设置环境变量：
+
+```bash
+export LLMCRAFT_SESSION=cs_player1
+export LLMCRAFT_SERVER=http://localhost:3001
+```
+
+Windows PowerShell：
+
+```powershell
+$env:LLMCRAFT_SESSION = "cs_player1"
+$env:LLMCRAFT_SERVER = "http://localhost:3001"
+```
+
+### Agent 最小回合循环
+
+每个 agent 每轮应先读状态，再行动。如果动作结果返回 `warning.type = "state_stale"` 或 `"no_recent_read"`，下一步先重新读取 `state` / `me` / `units`。
+
+```bash
+pnpm cli -- state --compact
+pnpm cli -- units --idle --type worker | pnpm cli -- gather
+pnpm cli -- buildings --type hq --ready | pnpm cli -- train worker
+pnpm cli -- units --idle --type worker --limit 1 | pnpm cli -- build barracks --at 5,10
+pnpm cli -- buildings --type barracks --ready | pnpm cli -- train soldier
+pnpm cli -- units --type soldier | pnpm cli -- target enemy-hq | pnpm cli -- attack
+```
+
+注意：`attack-move` 是向坐标推进并处理路上敌军的命令，不是拆 HQ 的替代品。攻击 HQ 或 barracks 时使用 `target enemy-hq | attack` 或 `attack --target <buildingId>`。
+
+完整 agent 操作手册见 [docs/cli-agent-guide.md](./docs/cli-agent-guide.md)。
 
 ### 测试
 
@@ -174,8 +285,8 @@ benchmark 另有两类独立输出：
 
 服务端会在以下场景向当前对局的 `.log` 追加一段纯文本：
 
-- 一轮 LLM 请求正常返回，且随后完成沙箱执行
-- LLM 已返回，但这时对局已经停止，于是记录“未执行沙箱”
+- 一轮 LLM 请求正常返回，且随后完成工具调用循环
+- LLM 已返回，但这时对局已经停止，于是记录“对局已停止，未继续执行”
 - `runAI()` 流程抛异常，于是记录调度失败
 
 每一段 transcript 当前会包含：
@@ -183,15 +294,15 @@ benchmark 另有两类独立输出：
 - 时间、玩家、`mode`、`requestTick`、`executeTick`、模型名
 - 完整 request messages
 - 原始 response
-- 清洗后的代码
+- assistant messages / tool calls / commands / plans
 - provider 错误
 - 命令结果
-- 沙箱错误
+- runtime 错误
 
 ### 暂停、重置与文件边界
 
 - `暂停` 不会主动新建文件，也不会强制写一个结束块
-- 如果暂停前已经有请求在飞，等它返回后，仍可能向当前 transcript 追加最后一段“对局已停止，未执行沙箱”
+- 如果暂停前已经有请求在飞，等它返回后，仍可能向当前 transcript 追加最后一段“对局已停止，未继续执行”
 - `重置` 会创建新的 `GameOrchestrator`，因此按当前实现视为新对局，并使用新的 transcript 文件
 - 如果某一局在被暂停或重置前从未发生过任何 transcript 写入，那么这局可能不会留下 `.log` 文件
 
@@ -220,49 +331,21 @@ benchmark 另有两类独立输出：
 
 1. 双方各有一个 HQ、2 个 Worker、200 credits
 2. 每 500ms 执行一个游戏 tick
-3. AI 每 5 ticks 思考一次，生成代码
-4. AI 代码在沙箱中执行，产生命令
-5. 命令加入队列，在下一 tick 执行
-6. Worker 可以建造 Barracks，Barracks 建好后才能生产 Soldier
-7. Barracks 不能紧贴己方 HQ 建造，至少要留出 1 格缓冲
-8. 一方 HQ 被摧毁则游戏结束
+3. AI 每 5 ticks 思考一次，通过工具调用或 CLI 控制面产生命令
+4. 命令加入队列，在后续 tick 执行
+5. Worker 可以建造 Barracks，Barracks 建好后才能生产 Soldier
+6. Barracks 不能紧贴己方 HQ 建造，至少要留出 1 格缓冲
+7. 一方 HQ 被摧毁则游戏结束
 
-### AI API
+### Agent API
 
-AI 可以通过全局对象控制游戏：
+当前主链路是 OpenAI-compatible tool calling runtime。服务端向模型暴露只读工具和动作工具，例如：
 
-```javascript
-// 移动单位
-me.soldiers.forEach(s => s.moveTo({ x: 17, y: 10 }));
+- `get_map_state`、`get_my_state`、`get_my_units`、`get_recent_events`
+- `move_unit`、`start_harvest_loop`、`build_structure`、`spawn_unit`
+- `attack`、`attack_move_unit`、`hold_unit`、`orchestrate_plan`
 
-// 建造兵营
-if (!me.buildings.find(b => b.type === "barracks") && me.workers[0] && me.resources.credits >= 120) {
-  me.workers[0].build("barracks", { x: me.hq.x + 2, y: me.hq.y });
-}
-
-// 生产士兵
-const barracks = me.buildings.find(b => b.type === "barracks");
-if (barracks && me.resources.credits >= 80) {
-  barracks.spawnUnit("soldier");
-}
-
-// 攻击敌人
-const nearestEnemy = utils.findClosestByRange(soldier, enemies);
-if (nearestEnemy && utils.inRange(soldier, nearestEnemy, 1)) {
-  soldier.attack(nearestEnemy.id);
-}
-
-// 或在执行时按优先级自动选择当前射程内目标
-soldier.attackInRange(["hq", "soldier", "worker", "barracks"]);
-```
-
-补充说明：
-
-- `moveTo({ x, y })` 是意图型移动。如果目标格不可站，系统会自动改到附近最近的可达格
-- `attackRange` 当前按 8 邻域计算；`Soldier` 的 `attackRange = 1` 覆盖上下左右和四个斜角相邻格
-- `attackInRange([...])` 会在命令真正执行时重新扫描射程内目标，适合减少 AI 回包延迟带来的目标过期
-- 最近一轮命令修正或失败原因会通过 `aiFeedbackSinceLastCall` 返回，包含精简的 `code + meta + hint`
-- 更完整的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
+CLI 控制面复用同一套动作语义，并提供更适合 shell agent 的命令、过滤器和管道。更完整的接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)，CLI agent 操作手册见 [docs/cli-agent-guide.md](./docs/cli-agent-guide.md)。
 
 ## 项目结构
 
@@ -271,7 +354,8 @@ llmcraft/
 ├── packages/
 │   ├── shared/          # 共享类型和常量
 │   ├── server/          # Node.js 游戏服务器
-│   └── client/          # React 前端
+│   ├── client/          # React 前端
+│   └── cli/             # shell action control plane
 ├── logs/                # 对局记录与调试日志
 ├── docs/                # 设计文档
 ├── package.json         # pnpm workspace 配置
@@ -286,6 +370,7 @@ llmcraft/
 ## 文档说明
 
 - 当前有效的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
+- CLI agent 操作手册见 [docs/cli-agent-guide.md](./docs/cli-agent-guide.md)
 - 当前真实 MVP 行为见 [docs/current-mvp-reality.md](./docs/current-mvp-reality.md)
 - 当前保存的对局记录格式为 `initialState / finalState / tickDeltas / commandResults / aiTurns`
 - 当前前端已支持读取保存记录并做逐 tick 回放

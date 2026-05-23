@@ -10,11 +10,15 @@
 # Usage:
 #   llmcraft session use --player player_1
 #   ./examples/cli-bots/rush.sh
+#
+# For player_2, set a right-side barracks position:
+#   LLMCRAFT_BUILD_AT=15,10 ./examples/cli-bots/rush.sh
 
 set -euo pipefail
 
 MAX_TURNS="${MAX_TURNS:-60}"
 SESSION="${LLMCRAFT_SESSION:-}"
+BUILD_AT="${LLMCRAFT_BUILD_AT:-5,10}"
 
 if [ -z "$SESSION" ]; then
   echo "Error: No session. Run 'llmcraft session use --player player_1' first." >&2
@@ -23,6 +27,7 @@ fi
 
 echo "=== LLMCraft Rush Bot ==="
 echo "Session: $SESSION"
+echo "Barracks position: $BUILD_AT"
 
 # Phase 1: Early economy (turns 1-10)
 echo "=== Phase 1: Economy setup ==="
@@ -42,7 +47,7 @@ for ((turn=11; turn<=20; turn++)); do
 
   # Build barracks
   llmcraft units --idle --type worker --limit 1 | \
-    llmcraft build barracks --at 8,8 2>/dev/null || true
+    llmcraft build barracks --at "$BUILD_AT" 2>/dev/null || true
 
   # Train soldiers
   llmcraft buildings --type barracks --ready | llmcraft train soldier 2>/dev/null || true

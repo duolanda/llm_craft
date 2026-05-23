@@ -70,6 +70,14 @@ interface OrchestratorLike {
   };
 }
 
+interface ControlPlaneOrchestrator extends OrchestratorLike {
+  getGame(): Game;
+  _p1Ready: boolean;
+  _p2Ready: boolean;
+  _started?: boolean;
+  _cpuPlayer: CpuPlayer | undefined;
+}
+
 export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
@@ -168,6 +176,24 @@ function buildAITerminalMessagePayload(
     reset,
     events,
   };
+}
+
+function releaseFinishedOrchestrator(state: ServerState): boolean {
+  const currentOrchestrator = state.orchestrator;
+  if (!currentOrchestrator) {
+    return false;
+  }
+
+  const winner = currentOrchestrator.getGame().getState()?.winner;
+  if (!winner) {
+    return false;
+  }
+
+  currentOrchestrator.stop();
+  state.orchestrator = null;
+  state.pendingMatch = null;
+  state.controlSessions.clear();
+  return true;
 }
 
 function buildMatchSignature(input: {
@@ -548,7 +574,7 @@ export async function handleHttpRequest(
 
     // Control plane routes
     if (req.method === "POST" && url.pathname === "/api/control/start-game") {
-      if (state.orchestrator) {
+      if (state.orchestrator && !releaseFinishedOrchestrator(state)) {
         sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
         return;
       }
@@ -570,7 +596,7 @@ export async function handleHttpRequest(
       }
 
       // Don't start ticking yet — wait for both players
-      state.orchestrator = {
+      const controlOrchestrator: ControlPlaneOrchestrator = {
         getGame: () => game,
         stop: () => {
           game.stop();
@@ -578,12 +604,11 @@ export async function handleHttpRequest(
         },
         start: () => Promise.resolve(),
         saveRecord: () => Promise.resolve(""),
-      } as any;
-      // Store ready flags on orchestrator for lobby sync
-      (state.orchestrator as any)._game = game;
-      (state.orchestrator as any)._p1Ready = false;
-      (state.orchestrator as any)._p2Ready = !!cpuPlayer; // CPU is always "ready"
-      (state.orchestrator as any)._cpuPlayer = cpuPlayer;
+        _p1Ready: false,
+        _p2Ready: !!cpuPlayer,
+        _cpuPlayer: cpuPlayer,
+      };
+      state.orchestrator = controlOrchestrator;
       sendJson(res, 201, {
         ok: true,
         tick: 0,
@@ -597,7 +622,7 @@ export async function handleHttpRequest(
     }
 
     const tryStartGame = (): void => {
-      const o = state.orchestrator as any;
+      const o = state.orchestrator as ControlPlaneOrchestrator | null;
       if (o?._p1Ready && o?._p2Ready && !o?._started) {
         o._started = true;
         o.getGame().start();
@@ -610,7 +635,13 @@ export async function handleHttpRequest(
     }
 
     if (req.method === "POST" && url.pathname === "/api/control/sessions") {
-      const body = await readJsonBody<CreateControlSessionRequest>(req);
+      let body: CreateControlSessionRequest;
+      try {
+        body = await readJsonBody<CreateControlSessionRequest>(req);
+      } catch {
+        sendJson(res, 400, { error: "请求体 JSON 格式错误。" });
+        return;
+      }
       if (!body.playerId || (body.playerId !== PLAYER_IDS.PLAYER_1 && body.playerId !== PLAYER_IDS.PLAYER_2)) {
         sendJson(res, 400, { error: "playerId 必须是 player_1 或 player_2。" });
         return;
@@ -624,10 +655,11 @@ export async function handleHttpRequest(
       const game = state.orchestrator.getGame() as unknown as Game;
 
       // Mark player as ready
+      const controlOrchestrator = state.orchestrator as ControlPlaneOrchestrator;
       if (body.playerId === PLAYER_IDS.PLAYER_1) {
-        (state.orchestrator as any)._p1Ready = true;
+        controlOrchestrator._p1Ready = true;
       } else {
-        (state.orchestrator as any)._p2Ready = true;
+        controlOrchestrator._p2Ready = true;
       }
 
       const session = state.controlSessions.create(game, body.gameId || "default", body.playerId);

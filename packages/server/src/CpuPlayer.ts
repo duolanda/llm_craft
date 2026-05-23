@@ -62,9 +62,11 @@ export class CpuPlayer {
   private interval: NodeJS.Timeout | null = null;
   private nextActTick = 0;
   private strategy: CPUStrategyType;
+  private game: Game;
   private bridge: GameAgentBridge;
 
   constructor(game: Game, playerId: PlayerId, strategy: CPUStrategyType) {
+    this.game = game;
     this.strategy = strategy;
     this.bridge = new GameAgentBridge(game, playerId);
   }
@@ -83,7 +85,7 @@ export class CpuPlayer {
   }
 
   private tick(): void {
-    const state = this.bridge["game"].getState();
+    const state = this.game.getState();
     if (!state) return;
     if (state.winner) {
       this.stop();

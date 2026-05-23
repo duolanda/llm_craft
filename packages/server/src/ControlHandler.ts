@@ -53,6 +53,10 @@ export class ControlSessionManager {
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
   }
+
+  clear(): void {
+    this.sessions.clear();
+  }
 }
 
 export function executeControlTool(

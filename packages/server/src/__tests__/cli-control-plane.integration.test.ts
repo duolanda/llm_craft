@@ -54,6 +54,29 @@ describe("CLI Control Plane Integration", () => {
 
     expect(response.ok).toBe(true);
     expect(response.tick).toBeTypeOf("number");
+    expect(response.warnings).toBeUndefined();
+  });
+
+  it("keeps recent read tracking across control tool calls", () => {
+    const game = new Game();
+    game.start();
+    const manager = new ControlSessionManager();
+    const session = manager.create(game, "test-game", "player_1");
+
+    const readResult = executeControlTool(session.bridge, "get_my_units", {});
+    const readData = readResult.result as Record<string, unknown>;
+    const units = readData.units as Array<Record<string, unknown>>;
+    const workerId = units[0].id as string;
+
+    const actionResult = executeControlTool(session.bridge, "move_unit", {
+      unitId: workerId,
+      x: 5,
+      y: 8,
+    });
+    const actionResponse = buildControlResponse(actionResult);
+
+    expect(actionResponse.ok).toBe(true);
+    expect(actionResponse.warnings).toBeUndefined();
   });
 
   it("returns error for unknown tool", () => {

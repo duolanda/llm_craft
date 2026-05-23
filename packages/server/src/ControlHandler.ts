@@ -60,7 +60,7 @@ export function executeControlTool(
   toolName: string,
   args: Record<string, unknown>
 ): AgentToolExecution {
-  bridge.beginRun();
+  bridge.beginToolCall();
   try {
     return executeAgentTool(bridge, toolName, args);
   } catch (error) {

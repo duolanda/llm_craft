@@ -142,7 +142,7 @@ server ControlSessionManager → GameAgentBridge → Game
 - `events [--limit n]` — 近期事件
 - `plans` — 活跃计划
 
-`state --compact` 会返回 `winner`，方便 agent 快速判断对局是否结束。对局结束后，`state` / `map` / `me` / `events` / `plans` 仍可读取；selector、transformer、action、plan、orchestrate 会直接返回 `game_over` 和赢家，不再继续执行无意义管道。
+`state --compact` 会返回 `winner`，方便 agent 快速判断对局是否结束。PVP lobby 在双方都创建 control session 前不会 tick；等待期间读命令仍可用，但 selector、transformer、action、plan、orchestrate 会返回 `game_not_started`，避免先加入的一方提前排队动作。对局结束后，`state` / `map` / `me` / `events` / `plans` 仍可读取；selector、transformer、action、plan、orchestrate 会直接返回 `game_over` 和赢家，不再继续执行无意义管道。
 
 ### 选择器命令
 

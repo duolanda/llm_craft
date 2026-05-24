@@ -226,6 +226,37 @@ async function exitIfGameOver(
   process.exit(ExitCode.BackendFailure);
 }
 
+async function exitIfGameNotStarted(
+  client: ControlClient,
+  sessionId: string,
+  kind: CommandKind,
+): Promise<void> {
+  const stateResp = await client.getState(sessionId);
+  if (!stateResp.ok) {
+    exit(ExitCode.BackendFailure, stateResp.error?.message ?? "Failed to get state");
+  }
+
+  const stateData = stateResp.data as Record<string, unknown>;
+  if (stateData.status !== "waiting_for_players") {
+    return;
+  }
+
+  printJson({
+    ok: false,
+    tick: stateResp.tick,
+    kind,
+    data: {
+      status: stateData.status,
+      ready: stateData.ready,
+    },
+    error: {
+      code: "game_not_started",
+      message: "Game has not started. Wait until both players have created control sessions.",
+    },
+  });
+  process.exit(ExitCode.BackendFailure);
+}
+
 async function handleSessionUse(
   client: ControlClient,
   flags: Map<string, string>,
@@ -365,6 +396,7 @@ async function main(): Promise<void> {
   const gameOverKind = gameOverKindForCommand(parsed.command);
   if (gameOverKind) {
     await exitIfGameOver(client, sessionId, gameOverKind);
+    await exitIfGameNotStarted(client, sessionId, gameOverKind);
   }
 
   if (parsed.command === "units") {

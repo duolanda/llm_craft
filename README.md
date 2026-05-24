@@ -154,6 +154,15 @@ llmcraft session use --player player_2
 
 两个 agent 都加入后，游戏 tick 才会开始。
 
+在双方都加入之前，`state` / `map` / `me` / `events` / `plans` 可读，但 selector、transformer、action、plan、orchestrate 会返回 `game_not_started`，避免先加入的一方提前排队动作。
+
+如果你是人类主持人，想让任意两个外部 coding agent 对战，可以按这个流程操作：
+
+1. 你先运行 `pnpm dev:server` 和 `llmcraft play --mode pvp`。
+2. 给第一个 agent 说明：先读 `docs/cli-agent-guide.md`，作为 `player_1` 运行 `llmcraft session use --player player_1 --base-url http://localhost:3001`，之后每条命令都显式带自己的 `--session <id>`。
+3. 给第二个 agent 同样说明，但使用 `player_2`。
+4. 两边都创建 control session 后，对局会自动开始 tick。
+
 如果两个 agent 在同一台机器、同一个用户下运行，不要共享默认 `~/.llmcraft/session.json`。请从 `session use` 的 JSON 输出中取出各自的 `sessionId`，后续命令显式传入：
 
 ```bash

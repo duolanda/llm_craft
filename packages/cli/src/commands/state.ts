@@ -47,6 +47,8 @@ export async function handleState(
         data: {
           asciiMap: data.asciiMap,
           winner: data.winner ?? null,
+          ...(data.status ? { status: data.status } : {}),
+          ...(data.ready ? { ready: data.ready } : {}),
         },
       });
       return;
@@ -71,6 +73,8 @@ export async function handleState(
         asciiMap: data.asciiMap,
         ...(opts.cells && data.cells ? { cells: data.cells } : {}),
         winner: stateData.winner ?? null,
+        ...(stateData.status ? { status: stateData.status } : {}),
+        ...(stateData.ready ? { ready: stateData.ready } : {}),
       },
     });
     return;

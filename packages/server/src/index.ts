@@ -78,6 +78,29 @@ interface ControlPlaneOrchestrator extends OrchestratorLike {
   _cpuPlayer: CpuPlayer | undefined;
 }
 
+const CONTROL_READ_TOOL_NAMES = new Set([
+  "get_map_state",
+  "get_my_state",
+  "get_my_units",
+  "get_active_plans",
+  "get_recent_events",
+]);
+
+function getControlLobbyStatus(orchestrator: OrchestratorLike | null): {
+  status: "waiting_for_players" | "running";
+  ready: { player_1: boolean; player_2: boolean };
+} | null {
+  if (!orchestrator) return null;
+  const control = orchestrator as ControlPlaneOrchestrator;
+  return {
+    status: control._started ? "running" : "waiting_for_players",
+    ready: {
+      player_1: control._p1Ready === true,
+      player_2: control._p2Ready === true,
+    },
+  };
+}
+
 export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
@@ -712,11 +735,13 @@ export async function handleHttpRequest(
         const mapResult = session.bridge.getMapState({ includeCells: false, includeEmptyTiles: false });
         const myResult = session.bridge.getMyState();
         const gameState = game.getState();
+        const lobby = getControlLobbyStatus(state.orchestrator);
         const response = buildControlResponse(mapResult, "state");
         response.data = {
           ...(response.data as Record<string, unknown>),
           player: (myResult.result as Record<string, unknown>),
           winner: gameState.winner,
+          ...(lobby ? { status: lobby.status, ready: lobby.ready } : {}),
         };
         sendJson(res, 200, response);
         return;
@@ -742,6 +767,24 @@ export async function handleHttpRequest(
             ok: false,
             tick: game.getState().tick,
             error: { code: "unknown_tool", message: `Unknown tool: ${toolName}` },
+          });
+          return;
+        }
+
+        const lobby = getControlLobbyStatus(state.orchestrator);
+        if (lobby?.status === "waiting_for_players" && !CONTROL_READ_TOOL_NAMES.has(toolName)) {
+          sendJson(res, 409, {
+            ok: false,
+            tick: game.getState().tick,
+            kind: toolName === "orchestrate_plan" ? "plan_result" : "action_result",
+            data: {
+              status: lobby.status,
+              ready: lobby.ready,
+            },
+            error: {
+              code: "game_not_started",
+              message: "Game has not started. Wait until both players have created control sessions.",
+            },
           });
           return;
         }

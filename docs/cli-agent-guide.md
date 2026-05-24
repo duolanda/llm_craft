@@ -101,6 +101,38 @@ llmcraft session use --player player_2
 
 The game does not start ticking until both players have created a control session.
 
+Before both players have joined, read commands are available but selectors, transformers, actions, `plan`, and `orchestrate` return `game_not_started`. This prevents the first agent to join from pre-queuing actions before the other agent is ready.
+
+### Host A Match Between Two External Agents
+
+Use this flow when a human host wants any two external coding agents to play each other:
+
+1. In one terminal, start the server:
+
+```bash
+pnpm dev:server
+```
+
+2. In another terminal, create the PVP lobby:
+
+```bash
+llmcraft play --mode pvp
+```
+
+3. Give the first agent this instruction:
+
+```text
+You are player_1 in a LLMCraft CLI match.
+First read docs/cli-agent-guide.md.
+Join with: llmcraft session use --player player_1 --base-url http://localhost:3001
+After joining, copy your sessionId and pass --session <sessionId> on every command.
+Use only llmcraft. Do not write WebSocket or raw HTTP clients.
+```
+
+4. Give the second agent the same instruction with `player_2`.
+
+5. After both agents have created control sessions, the game starts ticking automatically. Each agent should then read `state --compact` and continue with normal CLI turns.
+
 ## 2. Session Rules
 
 `session use` returns JSON like:
@@ -380,6 +412,7 @@ If you run commands manually, always pass the matching `--session` flag for that
 | `insufficient_credits` | Not enough credits | Gather, wait, or train less |
 | `invalid_build_position` | Tile blocked or too close to HQ | Pick another empty tile |
 | `state_stale` / `no_recent_read` | You acted without a recent read | Run `state`, `me`, or `units` before acting |
+| `game_not_started` | PVP lobby is waiting for both players | Wait for the other agent to run `session use`, then read `state` |
 | `game_over` | The match already has a winner | Stop issuing actions; read `state` for final details |
 
 ## 13. Command Reference

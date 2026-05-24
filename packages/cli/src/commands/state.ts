@@ -34,6 +34,24 @@ export async function handleState(
   const opts = getFlags(flags);
 
   if (opts.compact || opts.ascii) {
+    if (!opts.cells && !opts.emptyTiles) {
+      const stateResp = await client.getState(sessionId);
+      if (!stateResp.ok) {
+        exit(ExitCode.BackendFailure, stateResp.error?.message ?? "Failed to get state");
+      }
+      const data = stateResp.data as Record<string, unknown>;
+      printJson({
+        ok: true,
+        tick: stateResp.tick,
+        kind: "selection",
+        data: {
+          asciiMap: data.asciiMap,
+          winner: data.winner ?? null,
+        },
+      });
+      return;
+    }
+
     // Compact: only asciiMap + tick
     const mapResp = await client.callTool(sessionId, "get_map_state", {
       includeCells: opts.cells || false,
@@ -43,6 +61,8 @@ export async function handleState(
       exit(ExitCode.BackendFailure, mapResp.error?.message ?? "Failed to get map state");
     }
     const data = mapResp.data as Record<string, unknown>;
+    const stateResp = await client.getState(sessionId);
+    const stateData = stateResp.ok ? stateResp.data as Record<string, unknown> : {};
     printJson({
       ok: true,
       tick: mapResp.tick,
@@ -50,6 +70,7 @@ export async function handleState(
       data: {
         asciiMap: data.asciiMap,
         ...(opts.cells && data.cells ? { cells: data.cells } : {}),
+        winner: stateData.winner ?? null,
       },
     });
     return;

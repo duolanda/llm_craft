@@ -100,16 +100,14 @@ pnpm install
 pnpm build:cli
 
 # 查看帮助
-pnpm cli -- --help
+./node_modules/.bin/llmcraft --help
 ```
 
-也可以在构建后直接使用 workspace bin：
+构建后 agent-facing 命令是 `llmcraft`。`pnpm cli -- ...` 只作为开发期调试入口；需要管道 JSON 时不要用 pnpm script 包装。
 
 ```bash
 ./node_modules/.bin/llmcraft --help
 ```
-
-下面示例用 `pnpm cli -- ...` 表示在仓库内运行 CLI；如果你的 shell 能直接找到 `llmcraft`，可以把前缀替换成 `llmcraft`。
 
 ### Agent vs CPU
 
@@ -122,18 +120,18 @@ pnpm dev:server
 再创建一局 `player_1` 对 CPU `player_2`：
 
 ```bash
-pnpm cli -- play --vs random
+llmcraft play --vs random
 # 或
-pnpm cli -- play --vs rush
+llmcraft play --vs rush
 ```
 
 `play --vs` 会自动创建对局、加入 `player_1`，并把 session 保存到 `~/.llmcraft/session.json`。之后可以直接运行：
 
 ```bash
-pnpm cli -- state --compact
-pnpm cli -- units --idle --type worker | pnpm cli -- gather
-pnpm cli -- buildings --type hq --ready | pnpm cli -- train worker
-pnpm cli -- units --type soldier | pnpm cli -- target enemy-hq | pnpm cli -- attack
+llmcraft state --compact
+llmcraft units --idle --type worker | llmcraft gather
+llmcraft buildings --type hq --ready | llmcraft train worker
+llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 ```
 
 ### 两个 CLI Agent 对战
@@ -141,17 +139,17 @@ pnpm cli -- units --type soldier | pnpm cli -- target enemy-hq | pnpm cli -- att
 启动一个等待双方加入的 PVP 对局：
 
 ```bash
-pnpm cli -- play --mode pvp
+llmcraft play --mode pvp
 ```
 
 分别让两个 agent 加入不同阵营：
 
 ```bash
 # Agent 1
-pnpm cli -- session use --player player_1
+llmcraft session use --player player_1
 
 # Agent 2
-pnpm cli -- session use --player player_2
+llmcraft session use --player player_2
 ```
 
 两个 agent 都加入后，游戏 tick 才会开始。
@@ -160,12 +158,12 @@ pnpm cli -- session use --player player_2
 
 ```bash
 # Agent 1 后续每条命令
-pnpm cli -- state --session cs_player1
-pnpm cli -- units --idle --type worker --session cs_player1 | pnpm cli -- gather --session cs_player1
+llmcraft state --session cs_player1
+llmcraft units --idle --type worker --session cs_player1 | llmcraft gather --session cs_player1
 
 # Agent 2 后续每条命令
-pnpm cli -- state --session cs_player2
-pnpm cli -- units --idle --type worker --session cs_player2 | pnpm cli -- gather --session cs_player2
+llmcraft state --session cs_player2
+llmcraft units --idle --type worker --session cs_player2 | llmcraft gather --session cs_player2
 ```
 
 或者让两个 agent 分别设置环境变量：
@@ -182,18 +180,26 @@ $env:LLMCRAFT_SESSION = "cs_player1"
 $env:LLMCRAFT_SERVER = "http://localhost:3001"
 ```
 
+PowerShell 中坐标参数要加引号，例如 `--at '5,10'`、`--to '18,10'`，避免逗号被 shell 拆成多个参数。
+
 ### Agent 最小回合循环
 
 每个 agent 每轮应先读状态，再行动。如果动作结果返回 `warning.type = "state_stale"` 或 `"no_recent_read"`，下一步先重新读取 `state` / `me` / `units`。
 
 ```bash
-pnpm cli -- state --compact
-pnpm cli -- units --idle --type worker | pnpm cli -- gather
-pnpm cli -- buildings --type hq --ready | pnpm cli -- train worker
-pnpm cli -- units --idle --type worker --limit 1 | pnpm cli -- build barracks --at 5,10
-pnpm cli -- buildings --type barracks --ready | pnpm cli -- train soldier
-pnpm cli -- units --type soldier | pnpm cli -- target enemy-hq | pnpm cli -- attack
+llmcraft state --compact
+llmcraft units --idle --type worker | llmcraft gather
+llmcraft buildings --type hq --ready | llmcraft train worker
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
+llmcraft buildings --type barracks --ready | llmcraft train soldier
+llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 ```
+
+CLI 本身不会强制等待或插入 `sleep`；外部 agent 或 benchmark harness 拥有调度循环，下一轮何时读取由调用方决定。
+
+`state --compact` 会返回 `winner`，可用于快速判断对局是否结束；需要完整经济、HQ 和生产信息时使用不带 `--compact` 的 `state`。
+
+对局结束后，除 `state` / `map` / `me` / `events` / `plans` 这类读取命令外，selector、transformer、action、plan 和 orchestrate 命令会直接返回 `game_over` 与赢家，避免 agent 继续执行无意义管道。
 
 注意：`attack-move` 是向坐标推进并处理路上敌军的命令，不是拆 HQ 的替代品。攻击 HQ 或 barracks 时使用 `target enemy-hq | attack` 或 `attack --target <buildingId>`。
 

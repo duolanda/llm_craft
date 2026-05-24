@@ -7,7 +7,7 @@
     "dev:server": "pnpm --filter @llmcraft/server dev",
     "dev:client": "pnpm --filter @llmcraft/client dev",
     "dev:cli": "pnpm --filter @llmcraft/cli dev",
-    "cli": "pnpm --filter @llmcraft/cli exec tsx src/index.ts",
+    "cli": "node scripts/run-cli.mjs",
     "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build",
     "build:shared": "pnpm --filter @llmcraft/shared build",
     "build:cli": "pnpm --filter @llmcraft/cli build",
@@ -16,6 +16,7 @@
     "verify": "pnpm typecheck && pnpm --filter @llmcraft/server test && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build"
   },
   "devDependencies": {
+    "@llmcraft/cli": "workspace:*",
     "concurrently": "^8.2.2",
     "typescript": "^5.9.0"
   }

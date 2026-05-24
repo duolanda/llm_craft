@@ -4,17 +4,20 @@
 
 The CLI is the stable shell interface for external agents. It handles session creation, server URL resolution, stdin pipelines, JSON formatting, exit codes, and tool routing. Treat it as your action API.
 
-This guide uses `llmcraft ...` for readability. Inside this repo you can run the same commands as:
+This guide uses the agent-facing executable:
 
 ```bash
-pnpm cli -- <command> [flags]
+llmcraft <command> [flags]
 ```
 
-Example:
+In this repo, build the CLI first and call the workspace bin directly:
 
 ```bash
-pnpm cli -- state --compact
+pnpm build:cli
+./node_modules/.bin/llmcraft state --compact
 ```
+
+`pnpm cli -- ...` is only a development convenience. Do not use it in pipelines that feed JSON to another CLI command; npm/pnpm script banners can pollute stdout.
 
 ## 0. Prerequisites
 
@@ -143,6 +146,13 @@ $env:LLMCRAFT_SESSION = "cs_player1"
 $env:LLMCRAFT_SERVER = "http://localhost:3001"
 ```
 
+PowerShell treats commas in unquoted native-command arguments specially. Quote coordinates:
+
+```powershell
+llmcraft build barracks --at '5,10'
+llmcraft attack-move --to '18,10'
+```
+
 Check your current saved session:
 
 ```bash
@@ -167,7 +177,7 @@ Action results can include warnings:
 - `no_recent_read`: this session has not read state before acting
 - `state_stale`: the last read is too old for the current tick
 
-If you see either warning, stop issuing actions and read again:
+If you see either warning, stop issuing actions and read again. When running through `pnpm cli`, process startup plus agent thinking can make the read stale before the action. Prefer short turns with explicit session flags, and issue only the actions justified by the latest read:
 
 ```bash
 llmcraft state --compact
@@ -248,6 +258,8 @@ llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 llmcraft units --type soldier | llmcraft target weakest | llmcraft attack
 ```
 
+`target weakest` is a global visible-target helper. Do not use it as a defense heuristic when enemies are already near your HQ; read `enemies --near <hq x,y>` or use an explicit `--target` for the immediate threat.
+
 Available transformers:
 
 | Command | Purpose |
@@ -273,6 +285,8 @@ llmcraft units --type soldier | llmcraft attack-move --to 18,10
 
 Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
 
+At long range, `attack` may first appear as movement toward the target. Re-read state/events after the unit arrives; if the target still exists and the unit is idle, issue `attack` again.
+
 ## 8. Build Positions
 
 Current map starts with:
@@ -292,9 +306,9 @@ llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 15,
 
 If a build fails, read `events` or the action error `hint`, then choose another empty tile.
 
-## 9. Minimal Turn Loop
+## 9. Minimal Agent Turn
 
-This is the basic loop every agent should understand:
+This is the basic turn shape every agent should understand. A turn starts with a read, then issues only the actions justified by the current state:
 
 ```bash
 llmcraft state --compact
@@ -303,83 +317,32 @@ llmcraft buildings --type hq --ready | llmcraft train worker
 llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
 llmcraft buildings --type barracks --ready | llmcraft train soldier
 llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
-sleep 1
 ```
 
 For `player_2`, use a right-side barracks coordinate such as `15,10`.
 
-## 10. Bash Bot Skeleton
+The CLI does not require or insert a sleep between turns. If an external harness runs continuously, pacing belongs to that harness. LLM/tool-calling agents can simply make the next read/action decision when control returns to them.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+`state --compact` includes `winner` for end-of-game checks. Full `state` is still the best final read when you need HQ, economy, production, and complete unit/building details.
 
-SESSION="${LLMCRAFT_SESSION:?set LLMCRAFT_SESSION first}"
-SERVER="${LLMCRAFT_SERVER:-http://localhost:3001}"
-BUILD_AT="${BUILD_AT:-5,10}"
+After a winner exists, read commands (`state`, `map`, `me`, `events`, `plans`) remain available. Selectors, transformers, actions, `plan`, and `orchestrate` return `game_over` with the winner instead of continuing the pipeline.
 
-for turn in $(seq 1 80); do
-  llmcraft state --compact --session "$SESSION" --base-url "$SERVER" >/dev/null
+Plans are asynchronous intentions. `hasActivePlan: true` does not guarantee the unit will immediately leave `idle`; the plan may be waiting for credits, production queue availability, a target condition, or the next plan tick. If a plan appears stuck, read `plans` and `events` before assuming the plan failed.
 
-  llmcraft units --idle --type worker --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft nearest resource --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft gather --session "$SESSION" --base-url "$SERVER" || true
+## 10. External Scheduler Shape
 
-  llmcraft buildings --type hq --ready --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft train worker --session "$SESSION" --base-url "$SERVER" || true
+The CLI process is intentionally one command at a time. A long-running agent, benchmark runner, or shell wrapper owns the outer scheduling loop:
 
-  llmcraft units --idle --type worker --limit 1 --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft build barracks --at "$BUILD_AT" --session "$SESSION" --base-url "$SERVER" || true
-
-  llmcraft buildings --type barracks --ready --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft train soldier --session "$SESSION" --base-url "$SERVER" || true
-
-  llmcraft units --type soldier --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft target enemy-hq --session "$SESSION" --base-url "$SERVER" \
-    | llmcraft attack --session "$SESSION" --base-url "$SERVER" || true
-
-  sleep 1
-done
+```text
+read state/events/plans
+decide whether any action is needed
+issue zero or more CLI actions
+return control to the caller's scheduler
 ```
 
-## 11. PowerShell Bot Skeleton
+Do not treat the fixed command sequence above as a recommended strategy. It is only a compact example of the command surface.
 
-```powershell
-$Session = $env:LLMCRAFT_SESSION
-$Server = if ($env:LLMCRAFT_SERVER) { $env:LLMCRAFT_SERVER } else { "http://localhost:3001" }
-$BuildAt = if ($env:LLMCRAFT_BUILD_AT) { $env:LLMCRAFT_BUILD_AT } else { "5,10" }
-
-if (-not $Session) {
-  throw "Set LLMCRAFT_SESSION first."
-}
-
-for ($turn = 1; $turn -le 80; $turn++) {
-  llmcraft state --compact --session $Session --base-url $Server | Out-Null
-
-  llmcraft units --idle --type worker --session $Session --base-url $Server `
-    | llmcraft nearest resource --session $Session --base-url $Server `
-    | llmcraft gather --session $Session --base-url $Server
-
-  llmcraft buildings --type hq --ready --session $Session --base-url $Server `
-    | llmcraft train worker --session $Session --base-url $Server
-
-  llmcraft units --idle --type worker --limit 1 --session $Session --base-url $Server `
-    | llmcraft build barracks --at $BuildAt --session $Session --base-url $Server
-
-  llmcraft buildings --type barracks --ready --session $Session --base-url $Server `
-    | llmcraft train soldier --session $Session --base-url $Server
-
-  llmcraft units --type soldier --session $Session --base-url $Server `
-    | llmcraft target enemy-hq --session $Session --base-url $Server `
-    | llmcraft attack --session $Session --base-url $Server
-
-  Start-Sleep -Seconds 1
-}
-```
-
-PowerShell native command errors can stop a strict script. For robust bots, wrap individual pipelines in `try { ... } catch { ... }` and read `events` after failures.
-
-## 12. Two-Agent Local Test
+## 11. Two-Agent Local Test
 
 Terminal 1:
 
@@ -404,16 +367,9 @@ llmcraft session use --player player_2
 
 Copy the `sessionId` as `P2_SESSION`.
 
-Then run each bot with explicit session isolation:
-
-```bash
-LLMCRAFT_SESSION=$P1_SESSION LLMCRAFT_BUILD_AT=5,10 ./examples/cli-bots/rush.sh
-LLMCRAFT_SESSION=$P2_SESSION LLMCRAFT_BUILD_AT=15,10 ./examples/cli-bots/rush.sh
-```
-
 If you run commands manually, always pass the matching `--session` flag for that agent.
 
-## 13. Common Failures
+## 12. Common Failures
 
 | Symptom | Meaning | Fix |
 |---------|---------|-----|
@@ -424,8 +380,9 @@ If you run commands manually, always pass the matching `--session` flag for that
 | `insufficient_credits` | Not enough credits | Gather, wait, or train less |
 | `invalid_build_position` | Tile blocked or too close to HQ | Pick another empty tile |
 | `state_stale` / `no_recent_read` | You acted without a recent read | Run `state`, `me`, or `units` before acting |
+| `game_over` | The match already has a winner | Stop issuing actions; read `state` for final details |
 
-## 14. Command Reference
+## 13. Command Reference
 
 | Category | Commands |
 |----------|----------|

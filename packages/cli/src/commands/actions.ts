@@ -93,10 +93,36 @@ export async function handleAttack(
   }
 
   const stdinInput = await readStdin();
-  if (!stdinInput || stdinInput.kind !== "selection") {
+  if (!stdinInput || (stdinInput.kind !== "selection" && stdinInput.kind !== "pairing")) {
     exit(ExitCode.ArgError, "attack requires --unit <id> --target <id> or stdin selection (from units)");
   }
   const data = stdinInput.data as Record<string, unknown>;
+
+  // Pairing from transformers (target enemy-hq, target weakest)
+  if (stdinInput.kind === "pairing") {
+    const pairs = (data.pairs as Array<Record<string, unknown>>) ?? [];
+    if (pairs.length === 0) {
+      exit(ExitCode.ArgError, "attack: stdin pairing has no pairs");
+    }
+    const results: unknown[] = [];
+    for (const pair of pairs) {
+      const enemy = pair.enemy as Record<string, unknown> | undefined;
+      const resp = await client.callTool(sessionId, "attack", {
+        unitId: pair.unitId as string,
+        targetId: enemy?.id as string,
+      });
+      results.push(resp);
+    }
+    printJson({
+      ok: true,
+      tick: stdinInput.tick,
+      kind: "batch_result",
+      data: { results },
+    });
+    return;
+  }
+
+  // Selection
   const items = (data.units as Array<Record<string, unknown>>) ?? [];
   if (items.length === 0) {
     exit(ExitCode.ArgError, "attack: stdin selection has no units");

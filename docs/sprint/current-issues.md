@@ -34,11 +34,15 @@
 - **描述**: `orchestrate_plan` 已支持基于现有动作工具的 call steps，但还缺少 benchmark/transcript 数据验证模型是否会稳定使用
 - **影响**: 表达力已比旧 DSL 更贴近工具调用心智模型，但是否能显著减少微操和提高胜率仍需实测
 
-### 8. Benchmark 面板还没消费新 runtime 细节
+### 8. active plan 的可解释状态不足
+- **描述**: CLI agent 实测中，`plan economy | orchestrate` / `plan attack-hq | orchestrate` 会返回 active plan，单位也可能显示 `hasActivePlan: true`，但单位状态仍是 `idle` 时 agent 很难判断计划是在等待条件、尚未推进、执行失败，还是状态展示滞后
+- **影响**: agent 容易误判 plan 没有生效并转向重复微操；后续服务端应统一暴露 plan 的 current step、waiting reason、last attempt、last error 等状态，避免只靠 unit state 推断计划进度
+
+### 9. Benchmark 面板还没消费新 runtime 细节
 - **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
 - **影响**: 回放已经能看到 tool-driven agent 行为，但 benchmark 视角仍不够完整
 
-### 9. 日志文件名时间戳仍使用 UTC 时间
+### 10. 日志文件名时间戳仍使用 UTC 时间
 - **描述**: 当前对局日志/回放等文件名里的时间戳使用 UTC 时间，与本地开发和排查时常用的北京时间不一致
 - **影响**: 按文件名定位具体对局时需要额外换算时区，容易和控制台、本地观察时间产生偏差；后续可评估改为北京时间或在文件名中显式标注时区
 

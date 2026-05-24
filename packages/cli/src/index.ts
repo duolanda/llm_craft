@@ -11,6 +11,7 @@ import { handlePlan, handleOrchestrate } from "./commands/plan.js";
 import { handlePlay } from "./commands/play.js";
 
 const VERSION = "0.1.0";
+type CommandKind = "selection" | "action_result" | "plan_result";
 
 interface ParsedArgs {
   baseUrl?: string;
@@ -160,7 +161,9 @@ function printHelp(): void {
     "  llmcraft plan economy | llmcraft orchestrate",
     "  llmcraft plan attack-hq | llmcraft orchestrate",
     "  llmcraft orchestrate --dry-run < actions.json",
-    "  while true; do llmcraft units --idle --type worker | llmcraft gather; sleep 1; done",
+    "  llmcraft units --idle --type worker | llmcraft gather",
+    "",
+    "PowerShell: quote coordinates, e.g. --at '5,10' or --to '18,10'.",
     "",
     "Exit codes:",
     "  0  Success",
@@ -176,6 +179,51 @@ function printHelp(): void {
 function printVersion(): void {
   process.stdout.write(`llmcraft ${VERSION}\n`);
   process.exit(0);
+}
+
+function gameOverKindForCommand(command: string): CommandKind | null {
+  if (["units", "buildings", "enemies", "resources", "nearest", "target"].includes(command)) {
+    return "selection";
+  }
+  if (["move", "attack", "attack-move", "gather", "build", "train", "hold"].includes(command)) {
+    return "action_result";
+  }
+  if (["plan", "orchestrate"].includes(command)) {
+    return "plan_result";
+  }
+  return null;
+}
+
+async function exitIfGameOver(
+  client: ControlClient,
+  sessionId: string,
+  kind: CommandKind,
+): Promise<void> {
+  const stateResp = await client.getState(sessionId);
+  if (!stateResp.ok) {
+    exit(ExitCode.BackendFailure, stateResp.error?.message ?? "Failed to get state");
+  }
+
+  const stateData = stateResp.data as Record<string, unknown>;
+  const winner = stateData.winner;
+  if (winner === null || winner === undefined) {
+    return;
+  }
+
+  printJson({
+    ok: false,
+    tick: stateResp.tick,
+    kind,
+    data: {
+      gameOver: true,
+      winner,
+    },
+    error: {
+      code: "game_over",
+      message: `Game is over. Winner: ${String(winner)}`,
+    },
+  });
+  process.exit(ExitCode.BackendFailure);
 }
 
 async function handleSessionUse(
@@ -313,6 +361,12 @@ async function main(): Promise<void> {
     await handlePlans(client, sessionId);
     return;
   }
+
+  const gameOverKind = gameOverKindForCommand(parsed.command);
+  if (gameOverKind) {
+    await exitIfGameOver(client, sessionId, gameOverKind);
+  }
+
   if (parsed.command === "units") {
     await handleUnits(client, sessionId, parsed.flags);
     return;
@@ -384,6 +438,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  printError(err instanceof Error ? err.message : String(err));
-  process.exit(ExitCode.ArgError);
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause as { code?: string } | undefined : undefined;
+  const connectionFailure = message.includes("fetch failed") || cause?.code === "ECONNREFUSED";
+  printError(connectionFailure ? `Failed to connect to server: ${message}` : message);
+  process.exit(connectionFailure ? ExitCode.ConnectionFailure : ExitCode.ArgError);
 });

@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@llmcraft/cli':
+        specifier: workspace:*
+        version: link:packages/cli
       concurrently:
         specifier: ^8.2.2
         version: 8.2.2

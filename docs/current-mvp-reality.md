@@ -113,7 +113,7 @@
 
 ## 6. CLI 控制面
 
-新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。
+新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。agent-facing 命令是构建后的 `llmcraft`；`pnpm cli -- ...` 仅作为开发调试入口。
 
 ### 架构
 
@@ -141,6 +141,8 @@ server ControlSessionManager → GameAgentBridge → Game
 - `me` — 经济、HQ、建筑、产能
 - `events [--limit n]` — 近期事件
 - `plans` — 活跃计划
+
+`state --compact` 会返回 `winner`，方便 agent 快速判断对局是否结束。对局结束后，`state` / `map` / `me` / `events` / `plans` 仍可读取；selector、transformer、action、plan、orchestrate 会直接返回 `game_over` 和赢家，不再继续执行无意义管道。
 
 ### 选择器命令
 
@@ -182,12 +184,9 @@ llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 llmcraft plan economy | llmcraft orchestrate
 ```
 
-### 示例脚本
-
-- `examples/cli-bots/basic-economy.sh` — 经济自动化循环
-- `examples/cli-bots/rush.sh` — 激进 rush 策略
-
 完整的 agent 操作手册见 `docs/cli-agent-guide.md`。双 CLI agent 同机对战时必须显式隔离 session：后续命令使用 `--session <id>`，或分别设置 `LLMCRAFT_SESSION`，避免两个 agent 共享并覆盖 `~/.llmcraft/session.json`。
+
+CLI 本身只执行单次读/动作命令，不内置 turn loop，也不要求两轮之间 `sleep`。外部 agent、benchmark harness 或脚本如果需要持续运行，应自行决定下一次读取和行动的调度节奏。
 
 ## 7. 当前限制
 

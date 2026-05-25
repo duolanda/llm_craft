@@ -1,229 +1,251 @@
-# DeepSeek Prefix Cache 优化分析
+# Reasonix Prefix Cache 调研与 LLMCraft 可借鉴点
 
-> 基于 [Reasonix (esengine/DeepSeek-Reasonix)](https://github.com/esengine/DeepSeek-Reasonix) 的架构研究与逆向分析。
-> Reasonix 是一个 DeepSeek-native AI coding agent，围绕 prefix-cache 稳定性设计整个 agent loop。
-> 核心数据：单日 435M input tokens，99.82% cache hit rate，~$12 vs ~$61（无缓存基准）。
-
----
-
-## 1. 背景：LLM API Prefix Cache 机制
-
-### 1.1 工作原理
-
-DeepSeek（以及 Anthropic、OpenAI 等主流 API）都实现了自动 prefix caching。其核心机制是：
-
-> **如果连续两次请求的 token 前缀完全相同，第二次请求命中缓存，只按 ~10% 的价格计费。**
-
-```
-请求 1: [system prompt A] + [history B] + [user input C]  → 全价
-请求 2: [system prompt A] + [history B] + [user input D]  → 只付 input C 的 full price + A+B 的 cache price
-请求 3: [system prompt A] + [history B] + [user input E]  → 同上
-```
-
-### 1.2 DeepSeek 的定价差异
-
-| 模型 | 缓存命中 (/1M tokens) | 缓存未命中 (/1M tokens) | 命中/未命中比 |
-|------|----------------------|------------------------|-------------|
-| deepseek-v4-flash | $0.028 | $0.14 | **2%** |
-| deepseek-v4-pro | $0.139 | $1.667 | **~8%** |
-
-缓存命中的 cost 是未命中的 **2%~8%**，这是优化的经济动力。
-
-### 1.3 自动化但脆弱
-
-Prefix caching 是自动的（不需要在请求头里声明），但它极其脆弱：
-
-> **任何字节级别的变化都会导致缓存 miss。**
-
-这意味着：
-- 在 system prompt 中写入时间戳 → 每次 miss
-- 重新序列化 tool schema 导致 key 顺序变化 → 每次 miss
-- 在历史消息中间插入新内容 → 破坏之后所有消息的缓存
-- 对旧消息做原地修改（标记为 "expired" 等）→ 破坏前缀稳定
+> 调研目标：看看 [esengine/deepseek-reasonix](https://github.com/esengine/deepseek-reasonix) 的 DeepSeek prefix cache 设计里，有哪些原则适合迁移到 LLMCraft。
+>
+> 结论先行：可借鉴的是上下文稳定性原则，不是照搬 Reasonix 的产品形态。LLMCraft 是双 AI 实时对战，胜负质量比纯成本更重要；但当前 agent loop 里确实有几个会破坏 prefix cache 的点，值得修。
 
 ---
 
-## 2. Reasonix 的三区域内存架构
+## 1. DeepSeek prefix cache 的真实约束
 
-核心 insight：**把上下文分区，让不同区域的更新策略不同，保证缓存前缀稳定。**
+DeepSeek 的 Context Caching 默认开启，不需要额外 API 参数。官方文档描述的关键规则是：
 
-```
-┌─────────────────────────────────────────────────┐
-│ ① IMMUTABLE PREFIX                              │
-│ 系统提示 + 工具规格 + 少量示例         ← 固化     │
-│ 整个 session 不修改，每轮请求的缓存命中从这里开始   │
-├─────────────────────────────────────────────────┤
-│ ② APPEND-ONLY LOG                               │
-│ [user₁][assistant₁][tool₁][user₂][assistant₂]… │
-│ 只追加，不重写，不插入中间                 ← 稳定 │
-├─────────────────────────────────────────────────┤
-│ ③ VOLATILE SCRATCH                              │
-│ R1 thinking、临时计划状态、本轮的瞬态信息           │
-│ 从不发往 API                                ← 无害 │
-└─────────────────────────────────────────────────┘
-```
+- 后续请求如果复用了已经持久化的相同前缀，可以命中 cache。
+- 匹配从第 0 个 token 开始，要求完整复用某个 cache prefix unit。
+- cache 是 best-effort，不保证 100% 命中。
+- response usage 中有 `prompt_cache_hit_tokens` 和 `prompt_cache_miss_tokens` 可观测。
 
-### 2.1 ImmutablePrefix（不可变前缀）
+官方当前价格（截至 2026-05-26，价格可能变动）：
 
-- System prompt 在 session 开始时被冻结，锁定为相同的字节序列
-- Tool 定义（包括 JSON schema）被序列化一次并缓存结果，后续直接用相同的序列化表示
-- 少量 few-shot 示例（如果使用）也被包含在这里
-- 整块内容在整个 session 中**不做任何修改**
+| 模型 | Cache hit input / 1M | Cache miss input / 1M | Output / 1M |
+|---|---:|---:|---:|
+| `deepseek-v4-flash` | `$0.0028` | `$0.14` | `$0.28` |
+| `deepseek-v4-pro` | `$0.003625` | `$0.435` | `$0.87` |
 
-ImmutablePrefix 的实现通过 `registerMemory()` 在会话启动时收集所有固定记忆类型（user / feedback / project / reference），拼接到 system prompt 之后，然后锁定。后续轮次不再重新拼接，而是直接用锁定的字节序列。
+这意味着在 v4-flash 上，cached input 约为 uncached input 的 2%；在 v4-pro 当前价格上，cached input 约为 0.83%。工程收益足够大，但前提是客户端不要频繁改变请求前缀。
 
-### 2.2 AppendOnlyLog（追加日志）
+参考：
 
-- 每一轮的消息（user input → assistant response → tool results → 下一轮 user input）按顺序追加到日志末尾
-- **没有中间插入**——即使有 HQ 被攻击的紧急告警、sub-agent 完成通知，也是追加到末尾而不是插入到历史中间
-- **没有原地修改**——即使需要让旧 tool result "过期"，也不改写日志中已有的消息，而是追加一条新消息告知模型
-- 日志的大小决定缓存前缀的长度：日志越长，下一次请求可缓存的 token 越多
-
-### 2.3 VolatileScratch（易失暂存区）
-
-- DeepSeek R1 风格的 thinking/reasoning_content 被捕获后放在暂存区
-- 临时的 plan 状态、tool call 的中间结果只在本轮可见
-- **暂存区的内容永不进入发送给 API 的消息数组**，因此不会影响缓存
-- 每轮结束时清空
+- DeepSeek pricing: https://api-docs.deepseek.com/quick_start/pricing
+- DeepSeek context caching: https://api-docs.deepseek.com/guides/kv_cache
 
 ---
 
-## 3. 四个关键工程决策
+## 2. Reasonix 值得看的不是数字，而是不变量
 
-### 3.1 冻结工具 schema 序列化
-
-大多数 LLM 客户端（包括 OpenAI SDK 默认行为）每次调用 API 时都会重新序列化工具定义。由于 JavaScript 对象 key 的遍历顺序在某些条件下不确定，或者因为工具注册顺序可能变化，两次序列化的结果可能产生字节级别的差异，直接导致缓存 miss。
-
-Reasonix 的做法：
-- 在 session 启动时一次性序列化所有 tool definition
-- `ToolRegistry` 中每个 tool 的 `name`、`description`、`parameters` 在注册后以**规范化格式**存储（key 排序）
-- 每次 API 调用直接复用预序列化的工具块
-
-### 3.2 禁止历史消息改写
-
-许多 agent 框架在管理上下文时，会对旧消息做以下操作：
-- 标记已过时的 tool result 为 "expired"（直接在原消息上修改 content）
-- 压缩历史时折叠旧轮次（改写消息数组）
-- 删除中间轮次以节省空间（消息数组重新拼接）
-
-所有这些操作都会**改变历史消息数组的字节序列**，从而破坏后续请求的前缀缓存。
-
-Reasonix 的原则：
-- 任何需要"修改"旧消息的需求，都改为**追加一条新消息**来实现
-- 即使旧 tool result 已经完全过时，也不修改它在 AppendOnlyLog 中的原始内容
-- Auto-compaction 的实现是**追加一条压缩摘要到日志末尾**，然后截断早期消息——但因为早期的字节已经不在前缀中，截断不影响后续缓存。具体做法在第 3.4 节详述。
-
-### 3.3 紧急告警的非侵入式注入
-
-游戏场景中常见的需求：当 HQ 被攻击时需要立即插入一条紧急消息通知 AI。在 `LLM Craft` 的 `OpenAICompatibleProvider.ts` 中，`injectUrgentRuntimeAlert()` 的实现是在 `messages` 数组中 `push` 一条新消息——这符合 append-only 原则，不会破坏缓存。
-
-但需要注意的是：**如果告警消息被插入到消息数组的中间位置**（比如在旧 user message 和新的 assistant response 之间），它就会改变所有后续消息的字节偏移，破坏缓存。
-
-Reasonix 的实现确保所有注入消息都走 append 路径，不插入中间。
-
-### 3.4 Auto-compaction 的缓存友好实现
-
-当上下文接近 token 限制时，需要压缩历史。通常的实现方式是：
-- 取最近的 N 轮对话，丢弃更早的轮次
-- 或者重写一个摘要
-
-这两种做法都会破坏前缀缓存（因为字节序列变了）。
-
-Reasonix 的做法：
-- 当上下文接近限制时，从 AppendOnlyLog 的头部取一段历史（最早的部分）
-- 将这部分的原始消息用一个模型调用压缩成一个摘要
-- **将摘要作为一条新的 system/user 消息追加到 AppendOnlyLog 末尾**
-- 再截断头部对应的原始消息
-
-这样做的效果：缓存前缀在压缩前后保持不变——前一请求的后半部分（摘要）和下一请求的前半部分（摘要）是一致的。
-
-```
-压缩前: [ImmutablePrefix][A][B][C][D][E]  ← 全部缓存
-                压缩 A+B → summary
-压缩后: [ImmutablePrefix][C][D][E][summary]  ← [ImmutablePrefix][C][D][E] 缓存命中
-                                               [summary] 是新内容，但只占小幅
-```
-
----
-
-## 4. 对比：naive 客户端 vs Reasonix
-
-以 DeepSeek 的 pricing 为基准，分别看四种常见 client 的 cache hit rate 表现：
-
-| 客户端 | 典型 hit rate | 原因 |
-|--------|-------------|------|
-| **DeepSeek 官网对话** | 60-80% | 同一会话内前缀基本稳定；新会话/刷新后系统提示可能变化，降为 0% |
-| **Cherry Studio / Open WebUI** | 30-60% | 工具 schema 每次序列化 key 顺序不固定；加上消息格式可能因版本不同略有变化 |
-| **Cline / Continue（XML tool call）** | <30% | Tool result 以 XML 形式嵌入对话，每轮 tool result 的内容和长度不同，导致整个前缀变化的概率极高 |
-| **Reasonix** | **99.82%** | 上述四个工程决策组合实现 |
-
-这不是 DeepSeek 的缓存机制有区别——**是 client 端对缓存前缀的保护策略有区别**。
-
----
-
-## 5. 核心参考数据：真实用户单日缓存效果
-
-来源：`benchmarks/real-world-cache/README.md`（2026-05-01 数据）
-
-### 用量
+Reasonix README 和 benchmark 给出的单日案例是：
 
 | 指标 | 数值 |
-|------|------|
+|---|---:|
 | Input cache hit tokens | 435,033,856 |
 | Input cache miss tokens | 767,616 |
 | Output tokens | 179,763 |
-| **Cache hit ratio (input)** | **99.82%** |
-| 模型 | deepseek-v4-flash |
+| Input cache hit ratio | 99.82% |
 
-### 费用
+按 Reasonix benchmark README 中的当前 v4-flash 价格表计算，该 workload 约为 `$1.38`，如果完全没有 input cache 约为 `$61.06`。
 
-| | 实际（99.82% hit） | 假设 0% cache |
-|--|-------------------|---------------|
-| Cache-hit input | $12.18 | — |
-| Cache-miss input | $0.11 | $60.58 |
-| Output | $0.05 | $0.05 |
-| **全天总计** | **$12.34** | **$60.63** |
+这个数据只能说明：在某个真实用户的一天里，Reasonix 的 prompt 组织方式非常 cache-friendly。它不能直接推出 LLMCraft 也能达到 99%+，因为 LLMCraft 每个 game turn 都会注入变化的战场状态，天然比代码助手更动态。
 
-缓存节约了 **~80%** 的 input token 费用。
+Reasonix 真正值得借鉴的是这些不变量：
 
-使用 v4-pro（缓存折扣更大）的情况下：$62.35 vs $727.08，节约 **~91%**。
+1. **固定前缀只计算一次**
+   system prompt、tool specs、few-shot 示例等尽量固定，不在每次请求时重新拼接随机内容、时间戳或顺序不稳定的数据。
 
----
+2. **历史消息只追加，不原地改写**
+   如果旧观察过期，追加一条新消息说明它过期，而不是修改旧 tool result 的 `content`。
 
-## 6. 与其他缓存机制的对比
+3. **临时状态不要进入下一轮 prompt**
+   本轮 scratch、内部计划、reasoning 摘要等如果只是执行时辅助，不要写回长期对话历史。
 
-### 6.1 Anthropic Prompt Caching
+4. **压缩是成本/质量权衡，不是免费 cache 魔法**
+   一旦删除历史头部或替换早期消息，下一个请求的前缀就会改变。可以做 compaction，但要把它当作必要时的上下文治理，而不是声称不破坏 cache。
 
-Anthropic 也有相似的缓存机制，但需要显式声明 `cache_control` 断点。Reasonix 的架构设计同样适用于 Anthropic，但目前的实现是 DeepSeek-only。
+参考：
 
-### 6.2 OpenAI 的 Prompt Caching
-
-OpenAI 的缓存是自动的（类似 DeepSeek），但缓存有效期较短（5-10 分钟无请求后过期），且只对 >= 1024 个 token 的前缀生效。在游戏场景中（tick 间隔可能较长），实际收益会更低。
-
-### 6.3 关键区别
-
-| | DeepSeek | Anthropic | OpenAI |
-|--|----------|-----------|--------|
-| 声明显式断点 | 不需要 | 需要（cache_control） | 不需要 |
-| 缓存粒度 | 整个前缀 | 断点之间 | 整个前缀（>=1024 tokens） |
-| 折扣力度 | ~98% off | ~90% off | ~50% off |
-| 对字节稳定的要求 | 极高 | 高 | 高 |
+- Reasonix README: https://github.com/esengine/deepseek-reasonix
+- Reasonix architecture: https://github.com/esengine/deepseek-reasonix/blob/main/docs/ARCHITECTURE.md
+- Reasonix real-world cache case: https://github.com/esengine/deepseek-reasonix/blob/main/benchmarks/real-world-cache/README.md
 
 ---
 
-## 7. 结论
+## 3. LLMCraft 当前已经做对的地方
 
-DeepSeek prefix cache 的优化本质上不是一个 API 特性问题，而是一个**客户端架构问题**。
+当前 `OpenAICompatibleProvider` 里有几个设计天然有利于 prefix cache：
 
-核心原则可以总结为：
+- `SYSTEM_PROMPT` 是常量，不含时间戳或随机字段。
+- 每个 provider 实例持有自己的 `history`，每轮从 `system + history + current user input` 继续。
+- assistant message 和 tool result 正常追加到 `messages` 和 `persistentHistory`。
+- `injectUrgentRuntimeAlert()` 用 `messages.push(...)` 注入 HQ 告警，没有插入到历史中间。
+- `injectSubAgentNotifications()` 也是 append 模式，并且同步写入 `persistentHistory`。
 
-> **不让上下文管理代码的便利性，以牺牲字节稳定性为代价。**
+这些都符合 Reasonix 的 append-only 基本方向。
 
-具体地：
-1. 将上下文分区：不可变部分 → 追加部分 → 暂存部分
-2. 禁止任何形式的历史消息改写
-3. 紧急注入始终走 append，不插入中间
-4. 压缩通过追加摘要 + 截断实现，不重写前缀
-5. 工具 schema 序列化锁定字节序列
+---
 
-这些原则适用于任何实现了 prefix caching 的 LLM API，不只是 DeepSeek。
+## 4. 当前最值得修的 cache 破坏点
+
+### 4.1 会原地改写旧 tool result
+
+`OpenAICompatibleProvider.expireSupersededReadToolResults()` 会遍历历史消息，并把旧的同名同参数读取结果改成：
+
+```json
+{
+  "expired": true,
+  "reason": "superseded_by_new_read",
+  "message": "This older read result was replaced..."
+}
+```
+
+这对模型行为有帮助，但对 prefix cache 不友好：旧消息一旦参与过上一轮请求，下一轮再修改它的 `content`，前缀就变了。
+
+更 cache-friendly 的替代方案：
+
+- 不改写旧 tool message。
+- 新读取完成后，追加一条短消息，例如：
+
+```json
+{
+  "role": "tool",
+  "tool_call_id": "<current-call-id>",
+  "name": "get_map_state",
+  "content": "{\"supersedes\":[\"old-call-id\"],\"result\":...}"
+}
+```
+
+或者追加一条 user/system 风格的 runtime note，告诉模型哪些旧 call id 已被替代。关键是：旧消息字节不要变。
+
+### 4.2 tools 每次请求都会重新映射
+
+`createAgentCompletion()` 每次都从 `options.tools.map(...)` 构造 OpenAI tool definitions。当前 tool 列表来自静态代码，实际风险不算最高，但如果后续增加动态工具、MCP 工具、按玩家状态启停工具，序列化稳定性会变差。
+
+可借鉴 Reasonix 的做法：
+
+- provider 初始化时冻结 tool specs，或在 `AgentRuntime` 创建时冻结。
+- 对 schema key 做稳定排序。
+- 请求时复用同一份 tool definitions，而不是每次重新生成。
+
+### 4.3 没有记录 DeepSeek cache telemetry
+
+DeepSeek 会返回 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`。LLMCraft 现在只记录 `modelRequests`、`toolCalls`、`stallDetected` 等指标，没有把 cache hit/miss 写入 `AgentRunMetrics` 或 transcript。
+
+这会导致后续优化没有反馈闭环。建议先加观测，再讨论重构：
+
+- 每次 model response 后读取 usage。
+- 聚合到单次 run 的 metrics。
+- transcript 中记录 hit/miss tokens、finish_reason、latencyMs。
+- client UI 可以先不展示，日志里有就够。
+
+### 4.4 战场状态是动态输入，不能盲目追求 99%+
+
+LLMCraft 每个 turn 的 `AgentRunInput` 会包含 tick、summary、delta 或 full state。游戏状态本来就该变化，不能为了 cache 命中牺牲 AI 的战场感知。
+
+合理目标不是“让所有输入都稳定”，而是：
+
+- 稳定 system prompt 和 tools。
+- 稳定历史消息字节。
+- 把变化集中放在当前 user input 的尾部。
+- 控制不必要的重复读取和重复大块状态。
+
+---
+
+## 5. 不建议照搬的点
+
+### 5.1 不要把 compaction 写成“不破坏 cache”
+
+如果从：
+
+```text
+[system][A][B][C][D][E]
+```
+
+变成：
+
+```text
+[system][C][D][E][summary]
+```
+
+那么请求从 `A` 位置开始就不再匹配旧前缀。DeepSeek cache 不是“任意中间片段匹配”；它要求复用已持久化的 prefix unit。
+
+可以做 compaction，但文档和实现都应该承认代价：
+
+- 压缩发生的那一轮或下一轮可能 cache miss 增加。
+- 换来的是避免超过上下文、降低长期 prompt 体积、减少模型被过期信息干扰。
+- 如果要减少损失，可以在阈值很高时才做，或把摘要先 append 并在后续稳定后再截断。
+
+### 5.2 不要直接引入 Reasonix 的产品级功能
+
+Reasonix 有 MCP、filesystem、shell、skills、semantic search、dashboard、session persistence 等能力。这些不是 LLMCraft 当前问题的解法。
+
+LLMCraft 的核心场景是实时游戏 AI 对战，优先级应该是：
+
+1. 让 AI 决策更稳。
+2. 让 turn latency 可解释。
+3. 降低无意义 token 消耗。
+4. 最后才是扩展通用 agent 能力。
+
+---
+
+## 6. 建议的实施顺序
+
+### P0：先加观测
+
+- 在 `OpenAICompatibleProvider` 捕获 response usage。
+- 记录：
+  - `prompt_cache_hit_tokens`
+  - `prompt_cache_miss_tokens`
+  - visible output tokens
+  - finish_reason
+  - request latency
+- 写入 `AgentRunMetrics` 和 transcript。
+
+没有这些数据，任何 cache 优化都只能靠猜。
+
+### P1：停止原地改写历史消息
+
+把 `expireSupersededReadToolResults()` 改成 append-only supersede note。这个改动最直接，且不改变游戏规则。
+
+验收方式：
+
+- 同一 provider 连续两轮后，上一轮已经发送过的 message object 不再被修改。
+- 模型仍能看到“旧读取已过期”的提示。
+- 现有 stall / repeated read 行为测试继续通过。
+
+### P2：冻结 tools 序列化
+
+把 tool definitions 规范化为稳定结构：
+
+- tool 顺序固定。
+- schema key 稳定排序。
+- provider 请求复用冻结后的 tools。
+
+这一步为后续动态工具、MCP 或子 Agent 工具裁剪留空间。
+
+### P3：评估上下文压缩
+
+只有在 transcript 显示 prompt 体积或延迟成为瓶颈后，再做 compaction。不要为了“像 Reasonix”而提前引入。
+
+如果要做，建议先明确策略：
+
+- 压缩对象：旧 tool result、旧 delta、还是完整历史轮次。
+- 压缩触发：token 阈值、turn 数、还是 latency 阈值。
+- 压缩结果的可信度：摘要是否可用于战术决策，是否必须允许重新读取。
+- cache 影响：压缩后 hit/miss 是否恶化。
+
+---
+
+## 7. 对 PR 的最终结论
+
+这个 PR 应该保留为一份调研文档，而不是一份实现计划。
+
+Reasonix 对 LLMCraft 的核心启发是：
+
+> 把 prompt 当成一段需要长期保持字节稳定的协议，而不是每轮随手重组的临时 JSON。
+
+落到 LLMCraft，最小可行动作是：
+
+1. 加 cache telemetry。
+2. 禁止原地改写历史 tool result。
+3. 冻结 tool specs。
+4. 等有数据后再讨论 compaction。
+
+这些改动比照搬 Reasonix 的三层命名、成本宣传数字或通用 coding-agent 功能更实际。

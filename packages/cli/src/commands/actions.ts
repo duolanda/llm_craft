@@ -2,6 +2,7 @@ import type { ControlClient } from "../client.js";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
+import { printBatchResult } from "./batch.js";
 
 function parseCoord(raw: string): { x: number; y: number } {
   const parts = raw.split(",");
@@ -69,12 +70,7 @@ export async function handleMove(
     });
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- attack ---
@@ -113,12 +109,7 @@ export async function handleAttack(
       });
       results.push(resp);
     }
-    printJson({
-      ok: true,
-      tick: stdinInput.tick,
-      kind: "batch_result",
-      data: { results },
-    });
+    printBatchResult(stdinInput.tick, results);
     return;
   }
 
@@ -140,12 +131,7 @@ export async function handleAttack(
     });
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- attack-move ---
@@ -200,12 +186,7 @@ export async function handleAttackMove(
     const resp = await client.callTool(sessionId, "attack_move_unit", args);
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- gather ---
@@ -249,12 +230,7 @@ export async function handleGather(
       const resp = await client.callTool(sessionId, "start_harvest_loop", args);
       results.push(resp);
     }
-    printJson({
-      ok: true,
-      tick: stdinInput.tick,
-      kind: "batch_result",
-      data: { results },
-    });
+    printBatchResult(stdinInput.tick, results);
     return;
   }
 
@@ -272,12 +248,7 @@ export async function handleGather(
     const resp = await client.callTool(sessionId, "start_harvest_loop", args);
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- build ---
@@ -334,12 +305,7 @@ export async function handleBuild(
     });
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- train ---
@@ -384,12 +350,7 @@ export async function handleTrain(
     });
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }
 
 // --- hold ---
@@ -423,10 +384,5 @@ export async function handleHold(
     });
     results.push(resp);
   }
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }

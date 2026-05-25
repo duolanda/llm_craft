@@ -2,6 +2,7 @@ import type { ControlClient } from "../client.js";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
+import { printBatchResult } from "./batch.js";
 import fs from "node:fs";
 
 // --- plan ---
@@ -255,10 +256,5 @@ export async function handleOrchestrate(
     results.push(resp);
   }
 
-  printJson({
-    ok: true,
-    tick: stdinInput.tick,
-    kind: "batch_result",
-    data: { results },
-  });
+  printBatchResult(stdinInput.tick, results);
 }

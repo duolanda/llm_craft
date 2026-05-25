@@ -7,7 +7,7 @@ import {
 } from "@llmcraft/shared";
 import { GameAgentBridge } from "./GameAgentBridge";
 import { AgentToolDefinition, executeAgentTool, getAgentToolDefinitions } from "./AgentTools";
-import { LLMProvider, WarmupAgentResult } from "../LLMProvider";
+import { LLMProvider, RunAgentOptions, WarmupAgentResult } from "../LLMProvider";
 
 export interface AgentRuntimeResult {
   assistantMessages: string[];
@@ -21,6 +21,8 @@ export interface AgentRuntimeResult {
 export interface AgentRuntimeCallbacks {
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
+  spawnSubAgent?: RunAgentOptions["spawnSubAgent"];
+  drainSubAgentNotifications?: RunAgentOptions["drainSubAgentNotifications"];
 }
 
 export class AgentRuntime {
@@ -63,6 +65,8 @@ export class AgentRuntime {
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
+      spawnSubAgent: callbacks?.spawnSubAgent,
+      drainSubAgentNotifications: callbacks?.drainSubAgentNotifications,
       signal,
     });
 

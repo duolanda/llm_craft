@@ -68,7 +68,10 @@
 - [x] 明确 `attack` 是有目标 ID 时的默认战斗命令，避免 LLM 把 `attack_move_unit` 当成拆 HQ / barracks 的替代品
 - [x] 为 `orchestrate_plan` 增加 `{ call, args, scope, when, until, retry }` steps，让计划能复用现有动作工具表达开局、生产和连续作战意图
 - [x] 修复 CLI control plane 每次工具调用重置 read tracking，导致 `units | build` 等先读后写管道误报 `no_recent_read`
+- [x] 收敛 CLI control-plane CPU 对手到 benchmark 共享的内建 CPU 策略，避免 `random/rush` 行为复制漂移
+- [x] 将 CLI control-plane 对局从 `state.orchestrator` 假适配对象拆出为独立 `ControlPlaneMatch`，避免普通 LLM 对局被 control session 误绑定
+- [x] 清理旧的 CLI 临时 smoke 脚本，避免继续暗示 fake orchestrator 或过期双 agent 接入方式
 
 ---
 
-*最后更新: 2026-05-23*
+*最后更新: 2026-05-26*

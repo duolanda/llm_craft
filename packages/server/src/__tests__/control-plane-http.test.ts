@@ -117,10 +117,10 @@ describe("control plane HTTP routes", () => {
     });
     expect(first.statusCode).toBe(201);
 
-    const previousOrchestrator = state.orchestrator;
-    expect(previousOrchestrator).not.toBeNull();
+    const previousMatch = state.controlMatch;
+    expect(previousMatch).not.toBeNull();
 
-    const game = previousOrchestrator?.getGame();
+    const game = previousMatch?.getGame();
     (game as unknown as { winner: typeof PLAYER_IDS.PLAYER_1 }).winner = PLAYER_IDS.PLAYER_1;
 
     const next = await request(state, {
@@ -130,6 +130,6 @@ describe("control plane HTTP routes", () => {
     });
 
     expect(next.statusCode).toBe(201);
-    expect(state.orchestrator).not.toBe(previousOrchestrator);
+    expect(state.controlMatch).not.toBe(previousMatch);
   });
 });

@@ -406,12 +406,29 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
 ];
 
+const providerOnlyToolNames = new Set(["spawn_agent"]);
+const readToolNames = new Set([
+  "get_map_state",
+  "get_my_state",
+  "get_my_units",
+  "get_active_plans",
+  "get_recent_events",
+]);
+
 export function getAgentToolDefinitions(): AgentToolDefinition[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
 }
 
 export function getAgentToolNames(): string[] {
   return tools.map((tool) => tool.name);
+}
+
+export function getControlAgentToolNames(): string[] {
+  return getAgentToolNames().filter((name) => !providerOnlyToolNames.has(name));
+}
+
+export function getControlReadToolNames(): string[] {
+  return getControlAgentToolNames().filter((name) => readToolNames.has(name));
 }
 
 export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {

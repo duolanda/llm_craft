@@ -32,8 +32,8 @@ import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager, executeControlTool, buildControlResponse } from "./ControlHandler";
-import { CpuPlayer } from "./CpuPlayer";
-import { Game } from "./Game";
+import { getControlAgentToolNames, getControlReadToolNames } from "./agent/AgentTools";
+import { ControlPlaneMatch } from "./control/ControlPlaneMatch";
 
 dotenv.config();
 
@@ -70,40 +70,13 @@ interface OrchestratorLike {
   };
 }
 
-interface ControlPlaneOrchestrator extends OrchestratorLike {
-  getGame(): Game;
-  _p1Ready: boolean;
-  _p2Ready: boolean;
-  _started?: boolean;
-  _cpuPlayer: CpuPlayer | undefined;
-}
-
-const CONTROL_READ_TOOL_NAMES = new Set([
-  "get_map_state",
-  "get_my_state",
-  "get_my_units",
-  "get_active_plans",
-  "get_recent_events",
-]);
-
-function getControlLobbyStatus(orchestrator: OrchestratorLike | null): {
-  status: "waiting_for_players" | "running";
-  ready: { player_1: boolean; player_2: boolean };
-} | null {
-  if (!orchestrator) return null;
-  const control = orchestrator as ControlPlaneOrchestrator;
-  return {
-    status: control._started ? "running" : "waiting_for_players",
-    ready: {
-      player_1: control._p1Ready === true,
-      player_2: control._p2Ready === true,
-    },
-  };
-}
+const CONTROL_TOOL_NAMES = new Set(getControlAgentToolNames());
+const CONTROL_READ_TOOL_NAMES = new Set(getControlReadToolNames());
 
 export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
+  controlMatch: ControlPlaneMatch | null;
   pendingMatch: {
     signature: string;
     orchestrator: OrchestratorLike;
@@ -147,6 +120,7 @@ export function createServerState(
   return {
     presetStore,
     orchestrator: null,
+    controlMatch: null,
     pendingMatch: null,
     controlSessions: new ControlSessionManager(),
     createOrchestrator,
@@ -215,6 +189,18 @@ function releaseFinishedOrchestrator(state: ServerState): boolean {
   currentOrchestrator.stop();
   state.orchestrator = null;
   state.pendingMatch = null;
+  state.controlSessions.clear();
+  return true;
+}
+
+function releaseFinishedControlMatch(state: ServerState): boolean {
+  const currentMatch = state.controlMatch;
+  if (!currentMatch || !currentMatch.isFinished()) {
+    return false;
+  }
+
+  currentMatch.stop();
+  state.controlMatch = null;
   state.controlSessions.clear();
   return true;
 }
@@ -601,7 +587,11 @@ export async function handleHttpRequest(
         sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
         return;
       }
-      // Read optional body for cpu parameter
+      if (state.controlMatch && !releaseFinishedControlMatch(state)) {
+        sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
+        return;
+      }
+
       let cpu: string | undefined;
       try {
         const body = await readJsonBody<{ cpu?: string }>(req);
@@ -610,51 +600,32 @@ export async function handleHttpRequest(
         // no body / non-JSON body is fine
       }
 
-      const game = new Game();
-      let cpuPlayer: CpuPlayer | undefined;
-
-      if (cpu === "random" || cpu === "rush") {
-        // CPU 作为 player_2，人类作为 player_1
-        cpuPlayer = new CpuPlayer(game, "player_2", cpu);
+      if (cpu !== undefined && cpu !== "random" && cpu !== "rush") {
+        sendJson(res, 400, {
+          ok: false,
+          tick: 0,
+          kind: "state",
+          data: {},
+          error: {
+            code: "invalid_cpu_strategy",
+            message: "cpu must be random or rush.",
+          },
+        });
+        return;
       }
 
-      // Don't start ticking yet — wait for both players
-      const controlOrchestrator: ControlPlaneOrchestrator = {
-        getGame: () => game,
-        stop: () => {
-          game.stop();
-          cpuPlayer?.stop();
-        },
-        start: () => Promise.resolve(),
-        saveRecord: () => Promise.resolve(""),
-        _p1Ready: false,
-        _p2Ready: !!cpuPlayer,
-        _cpuPlayer: cpuPlayer,
-      };
-      state.orchestrator = controlOrchestrator;
+      const controlMatch = new ControlPlaneMatch({ cpuStrategy: cpu });
+      state.controlMatch = controlMatch;
       sendJson(res, 201, {
         ok: true,
         tick: 0,
         kind: "state",
         data: {
           status: "waiting_for_players",
-          ...(cpuPlayer ? { cpu: cpu, cpuPlayer: "player_2" } : {}),
+          ...(cpu ? { cpu, cpuPlayer: "player_2" } : {}),
         },
       });
       return;
-    }
-
-    const tryStartGame = (): void => {
-      const o = state.orchestrator as ControlPlaneOrchestrator | null;
-      if (o?._p1Ready && o?._p2Ready && !o?._started) {
-        o._started = true;
-        o.getGame().start();
-        // Start CPU player if present
-        if (o._cpuPlayer) {
-          o._cpuPlayer.start();
-        }
-        console.log("Both players ready — game started");
-      }
     }
 
     if (req.method === "POST" && url.pathname === "/api/control/sessions") {
@@ -670,26 +641,15 @@ export async function handleHttpRequest(
         return;
       }
 
-      if (!state.orchestrator) {
+      if (!state.controlMatch) {
         sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
         return;
       }
 
-      const game = state.orchestrator.getGame() as unknown as Game;
-
-      // Mark player as ready
-      const controlOrchestrator = state.orchestrator as ControlPlaneOrchestrator;
-      if (body.playerId === PLAYER_IDS.PLAYER_1) {
-        controlOrchestrator._p1Ready = true;
-      } else {
-        controlOrchestrator._p2Ready = true;
-      }
-
+      const game = state.controlMatch.getGame();
       const session = state.controlSessions.create(game, body.gameId || "default", body.playerId);
       const serverTick = game.getState()?.tick ?? 0;
-
-      // Try to start — only fires when both are ready
-      tryStartGame();
+      state.controlMatch.join(body.playerId);
 
       sendJson(res, 201, {
         ok: true,
@@ -724,18 +684,19 @@ export async function handleHttpRequest(
       }
 
       state.controlSessions.touch(sessionId);
-      if (!state.orchestrator) {
+      if (!state.controlMatch) {
         sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
         return;
       }
-      const game = state.orchestrator.getGame() as unknown as Game;
+      const controlMatch = state.controlMatch;
+      const game = controlMatch.getGame();
 
       // GET /api/control/sessions/:sessionId/state
       if (req.method === "GET" && subPath === "/state") {
         const mapResult = session.bridge.getMapState({ includeCells: false, includeEmptyTiles: false });
         const myResult = session.bridge.getMyState();
         const gameState = game.getState();
-        const lobby = getControlLobbyStatus(state.orchestrator);
+        const lobby = controlMatch.getLobbyStatus();
         const response = buildControlResponse(mapResult, "state");
         response.data = {
           ...(response.data as Record<string, unknown>),
@@ -755,23 +716,18 @@ export async function handleHttpRequest(
           return;
         }
 
-        const validToolNames = [
-          "get_map_state", "get_my_state", "get_my_units",
-          "get_active_plans", "get_recent_events",
-          "move_unit", "attack_move_unit", "attack",
-          "spawn_unit", "build_structure", "start_harvest_loop",
-          "hold_unit", "orchestrate_plan",
-        ];
-        if (!validToolNames.includes(toolName)) {
+        if (!CONTROL_TOOL_NAMES.has(toolName)) {
           sendJson(res, 400, {
             ok: false,
             tick: game.getState().tick,
+            kind: "action_result",
+            data: {},
             error: { code: "unknown_tool", message: `Unknown tool: ${toolName}` },
           });
           return;
         }
 
-        const lobby = getControlLobbyStatus(state.orchestrator);
+        const lobby = controlMatch.getLobbyStatus();
         if (lobby?.status === "waiting_for_players" && !CONTROL_READ_TOOL_NAMES.has(toolName)) {
           sendJson(res, 409, {
             ok: false,
@@ -1127,6 +1083,7 @@ export function startServer() {
   process.on("SIGINT", () => {
     console.log("\n关闭服务器...");
     state.orchestrator?.stop();
+    state.controlMatch?.stop();
     server.close();
     wss.close();
     process.exit(0);

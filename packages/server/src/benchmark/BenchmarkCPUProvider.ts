@@ -4,6 +4,7 @@ import {
   LLMProvider,
   RunAgentOptions,
   RunAgentResult,
+  RunSubAgentTaskInput,
   WarmupAgentResult,
 } from "../LLMProvider";
 import { runBuiltinCPUStrategy } from "./BuiltinCPUStrategy";
@@ -33,6 +34,19 @@ export class BenchmarkCPUProvider implements LLMProvider {
     return {
       responseText: "OK",
     };
+  }
+
+  async runSubAgentTask(_input: RunSubAgentTaskInput): Promise<string> {
+    return [
+      "<sub-agent-result>",
+      "taskId: cpu-unavailable",
+      "description: CPU provider does not support sub-agents",
+      "status: failed",
+      "objective: unavailable",
+      "result:",
+      "spawn_agent is unavailable for builtin CPU providers.",
+      "</sub-agent-result>",
+    ].join("\n");
   }
 
   async runAgent(_input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {

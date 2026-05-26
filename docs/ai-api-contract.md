@@ -772,6 +772,8 @@ result:
 
 新增控制面 HTTP API，允许外部进程通过 REST 调用控制玩家行动。这些端点与现有 WebSocket 协议并行运行。
 
+Control session 是访问令牌；同一玩家的多个 session 共享 `ControlPlaneMatch` 中的 player 级运行时状态，包括 active plans、target memory 和持续 attack orders。`orchestrate_plan` 注册后由 control-plane match loop 随 tick 推进，不依赖发起该 plan 的 session 后续继续存活。
+
 ### 3.1 ControlResponse envelope
 
 所有控制端点返回统一 envelope：
@@ -824,7 +826,7 @@ Read combined map + player state for the session.
 
 ### 3.4 `POST /api/control/sessions/:sessionId/tools/:toolName`
 
-Call an agent tool on behalf of the session's player. All agent tools (read and action) are available:
+Call an agent tool on behalf of the session's player. Control plane 只暴露可直接落到游戏状态的工具；provider-only 工具（目前为 `spawn_agent`）不通过 HTTP control API 暴露。
 
 Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_active_plans`, `get_recent_events`
 

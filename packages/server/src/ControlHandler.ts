@@ -1,14 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
-  ControlSession as ControlSessionInfo,
   ControlResponse,
   ControlError,
-  CreateControlSessionRequest,
   PlayerId,
 } from "@llmcraft/shared";
-import { GameAgentBridge, ExecutedToolResult } from "./agent/GameAgentBridge";
+import { GameAgentBridge } from "./agent/GameAgentBridge";
 import { executeAgentTool, AgentToolExecution } from "./agent/AgentTools";
-import { Game } from "./Game";
 
 export interface ControlSessionState {
   id: string;
@@ -22,11 +19,9 @@ export interface ControlSessionState {
 export class ControlSessionManager {
   private sessions = new Map<string, ControlSessionState>();
 
-  create(game: Game, gameId: string, playerId: PlayerId): ControlSessionState {
+  create(bridge: GameAgentBridge, gameId: string, playerId: PlayerId): ControlSessionState {
     const id = `cs_${randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    const bridge = new GameAgentBridge(game, playerId);
-    bridge.beginRun();
     const session: ControlSessionState = {
       id,
       gameId,

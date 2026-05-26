@@ -35,7 +35,7 @@
 - **影响**: 表达力已比旧 DSL 更贴近工具调用心智模型，但是否能显著减少微操和提高胜率仍需实测
 
 ### 8. active plan 的可解释状态不足
-- **描述**: CLI agent 实测中，`plan economy | orchestrate` / `plan attack-hq | orchestrate` 会返回 active plan，单位也可能显示 `hasActivePlan: true`，但单位状态仍是 `idle` 时 agent 很难判断计划是在等待条件、尚未推进、执行失败，还是状态展示滞后
+- **描述**: CLI agent 实测中，`plan economy | orchestrate` / `plan attack-hq | orchestrate` 会返回 active plan，单位也可能显示 `hasActivePlan: true`，但单位状态仍是 `idle` 时 agent 很难判断计划是在等待条件、执行失败，还是状态展示滞后。此前 control-plane match 未推进 session bridge 上的 plan，已修复为 match 级 player bridge 并按 tick 推进。
 - **影响**: agent 容易误判 plan 没有生效并转向重复微操；后续服务端应统一暴露 plan 的 current step、waiting reason、last attempt、last error 等状态，避免只靠 unit state 推断计划进度
 
 ### 9. Benchmark 面板还没消费新 runtime 细节
@@ -71,6 +71,9 @@
 - [x] 收敛 CLI control-plane CPU 对手到 benchmark 共享的内建 CPU 策略，避免 `random/rush` 行为复制漂移
 - [x] 将 CLI control-plane 对局从 `state.orchestrator` 假适配对象拆出为独立 `ControlPlaneMatch`，避免普通 LLM 对局被 control session 误绑定
 - [x] 清理旧的 CLI 临时 smoke 脚本，避免继续暗示 fake orchestrator 或过期双 agent 接入方式
+- [x] 将 CLI control session 改为共享 `ControlPlaneMatch` 的 player 级 bridge，并由 match loop 推进 `orchestrate_plan`
+- [x] 将 `spawn_agent` 子 Agent 执行纳入 `LLMProvider` / rate-limit wrapper，避免 `GameOrchestrator` 直接耦合 OpenAI client
+- [x] 拆出 control HTTP 路由模块，并把 control read/provider-only 工具分类收敛到 shared 元数据
 
 ---
 

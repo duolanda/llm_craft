@@ -56,6 +56,18 @@ export interface RunAgentResult {
   metrics: AgentRunMetrics;
 }
 
+export interface RunSubAgentTaskInput {
+  taskId: string;
+  description: string;
+  objective: string;
+  assignedUnits?: string[];
+  assignedBuildings?: string[];
+  constraints?: string;
+  successCriteria?: string;
+  parentContext: SubAgentParentContext;
+  signal: AbortSignal;
+}
+
 export interface WarmupAgentResult {
   assistantMessages: string[];
   stopReason: string;
@@ -71,6 +83,7 @@ export interface LLMConnectionTestResult {
 
 export interface LLMProvider {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
+  runSubAgentTask(input: RunSubAgentTaskInput): Promise<string>;
   warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult>;
   testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
   getModel(): string;

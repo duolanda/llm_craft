@@ -124,8 +124,10 @@
 @llmcraft/cli (参数解析、stdin 管道、JSON 输出)
   |  HTTP control API
   v
-server ControlSessionManager → GameAgentBridge → Game
+server ControlSessionManager → ControlPlaneMatch(player bridge) → Game
 ```
+
+Control session 只是访问令牌；同一 player 的多个 session 共享 match 里的 `GameAgentBridge`，因此 active plans、target memory 和持续 attack orders 不会因重连或多 session 被拆散。`orchestrate_plan` 注册后由 `ControlPlaneMatch` 按 tick 推进并排入游戏命令队列。
 
 ### 会话管理
 

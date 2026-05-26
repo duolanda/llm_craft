@@ -1,4 +1,8 @@
-import { OrchestratePlanInput } from "@llmcraft/shared";
+import {
+  CONTROL_PROVIDER_ONLY_TOOL_NAMES,
+  CONTROL_READ_TOOL_NAMES,
+  OrchestratePlanInput,
+} from "@llmcraft/shared";
 import { GameAgentBridge } from "./GameAgentBridge";
 
 export interface AgentToolDefinition {
@@ -406,14 +410,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
 ];
 
-const providerOnlyToolNames = new Set(["spawn_agent"]);
-const readToolNames = new Set([
-  "get_map_state",
-  "get_my_state",
-  "get_my_units",
-  "get_active_plans",
-  "get_recent_events",
-]);
+const providerOnlyToolNames = new Set<string>(CONTROL_PROVIDER_ONLY_TOOL_NAMES);
+const readToolNames = new Set<string>(CONTROL_READ_TOOL_NAMES);
 
 export function getAgentToolDefinitions(): AgentToolDefinition[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));

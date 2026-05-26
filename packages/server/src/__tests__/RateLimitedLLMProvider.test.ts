@@ -37,6 +37,7 @@ function createProvider(runAgent: LLMProvider["runAgent"]): LLMProvider {
         modelRequests: 1,
       },
     })),
+    runSubAgentTask: vi.fn(async () => "<sub-agent-result>done</sub-agent-result>"),
     testConnection: vi.fn(async () => ({ responseText: "OK" })),
     getModel: () => "test-model",
     getBaseURL: () => "http://test.local",

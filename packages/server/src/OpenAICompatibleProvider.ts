@@ -10,11 +10,13 @@ import {
   OpenAIProviderConfig,
   RunAgentOptions,
   RunAgentResult,
+  RunSubAgentTaskInput,
   SubAgentParentContext,
   WarmupAgentResult,
 } from "./LLMProvider";
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
+import { runSubAgentTask } from "./agent/SubAgentRunner";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
@@ -297,6 +299,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
         stallDetected: stopReason === "stall_detected",
       },
     };
+  }
+
+  async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
+    return await runSubAgentTask({
+      ...input,
+      createCompletion: async (request, signal) =>
+        await this.client.chat.completions.create(
+          {
+            model: this.model,
+            messages: request.messages,
+            tools: request.tools.map((tool) => ({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              },
+            })),
+            tool_choice: "auto",
+            temperature: request.temperature,
+            max_tokens: request.maxTokens,
+            ...this.buildOptionalRequestParams(),
+          } as any,
+          { signal },
+        ),
+    });
   }
 
   getModel(): string {

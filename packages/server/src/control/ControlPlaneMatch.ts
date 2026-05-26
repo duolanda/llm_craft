@@ -11,9 +11,12 @@ export interface ControlLobbyStatus {
 
 export class ControlPlaneMatch {
   private readonly game = new Game();
+  private readonly bridgeByPlayer: Record<PlayerId, GameAgentBridge>;
   private readonly ready = { player_1: false, player_2: false };
   private started = false;
   private cpuLoop: NodeJS.Timeout | null = null;
+  private planLoop: NodeJS.Timeout | null = null;
+  private lastPlanAdvanceTick = -1;
   private cpuNextActTick = 0;
   private readonly cpu:
     | {
@@ -24,11 +27,15 @@ export class ControlPlaneMatch {
     | null;
 
   constructor(options?: { cpuStrategy?: CPUStrategyType }) {
+    this.bridgeByPlayer = {
+      [PLAYER_IDS.PLAYER_1]: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1),
+      [PLAYER_IDS.PLAYER_2]: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
+    };
     this.cpu = options?.cpuStrategy
       ? {
           playerId: PLAYER_IDS.PLAYER_2,
           strategy: options.cpuStrategy,
-          bridge: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
+          bridge: this.bridgeByPlayer[PLAYER_IDS.PLAYER_2],
         }
       : null;
 
@@ -39,6 +46,25 @@ export class ControlPlaneMatch {
 
   getGame(): Game {
     return this.game;
+  }
+
+  getBridge(playerId: PlayerId): GameAgentBridge {
+    return this.bridgeByPlayer[playerId];
+  }
+
+  advancePlans(): void {
+    const state = this.game.getState();
+    if (!state || state.winner || state.tick === this.lastPlanAdvanceTick) {
+      return;
+    }
+
+    this.lastPlanAdvanceTick = state.tick;
+    for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
+      const commands = this.bridgeByPlayer[playerId].advancePlans();
+      for (const command of commands) {
+        this.game.queueCommand(command);
+      }
+    }
   }
 
   getLobbyStatus(): ControlLobbyStatus {
@@ -60,6 +86,7 @@ export class ControlPlaneMatch {
   stop(): void {
     this.game.stop();
     this.stopCpuLoop();
+    this.stopPlanLoop();
   }
 
   private startIfReady(): void {
@@ -68,7 +95,25 @@ export class ControlPlaneMatch {
     }
     this.started = true;
     this.game.start();
+    this.startPlanLoop();
     this.startCpuLoop();
+  }
+
+  private startPlanLoop(): void {
+    if (this.planLoop) {
+      return;
+    }
+    this.planLoop = setInterval(() => {
+      this.advancePlans();
+    }, 100);
+  }
+
+  private stopPlanLoop(): void {
+    if (!this.planLoop) {
+      return;
+    }
+    clearInterval(this.planLoop);
+    this.planLoop = null;
   }
 
   private startCpuLoop(): void {

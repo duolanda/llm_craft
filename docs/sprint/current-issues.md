@@ -46,6 +46,10 @@
 - **描述**: 当前对局日志/回放等文件名里的时间戳使用 UTC 时间，与本地开发和排查时常用的北京时间不一致
 - **影响**: 按文件名定位具体对局时需要额外换算时区，容易和控制台、本地观察时间产生偏差；后续可评估改为北京时间或在文件名中显式标注时区
 
+### 11. CLI/control-plane 对局不会保存 record 文件
+- **描述**: CLI PVP / CLI vs CPU 走 `ControlPlaneMatch`，目前没有接入 `GameOrchestrator.saveRecord()` 的落盘路径，也没有 control API 暴露保存回放入口
+- **影响**: CLI agent 对打可在内存中推进并通过 `state/events` 观察，但结束后不会留下 `logs/records/*.json`，不利于复盘、离线分析和 benchmark 横向比较；后续应抽出通用 record builder，或为 control-plane 增加 `saveRecord()` / `POST /api/control/save-record`
+
 ## 已完成 ✅
 
 - [x] 移除 `AISandbox` 与 `Node vm` 主链路

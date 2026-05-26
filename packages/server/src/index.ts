@@ -29,6 +29,9 @@ import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from ".
 import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
+import { ControlSessionManager } from "./ControlHandler";
+import { ControlPlaneMatch } from "./control/ControlPlaneMatch";
+import { handleControlHttpRequest } from "./control/ControlRoutes";
 
 dotenv.config();
 
@@ -68,10 +71,12 @@ interface OrchestratorLike {
 export interface ServerState {
   presetStore: PresetStore;
   orchestrator: OrchestratorLike | null;
+  controlMatch: ControlPlaneMatch | null;
   pendingMatch: {
     signature: string;
     orchestrator: OrchestratorLike;
   } | null;
+  controlSessions: ControlSessionManager;
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
     config: {
@@ -110,7 +115,9 @@ export function createServerState(
   return {
     presetStore,
     orchestrator: null,
+    controlMatch: null,
     pendingMatch: null,
+    controlSessions: new ControlSessionManager(),
     createOrchestrator,
     createBenchmarkOrchestrator,
     liveEnabled: null,
@@ -539,6 +546,10 @@ export async function handleHttpRequest(
       return;
     }
 
+    if (await handleControlHttpRequest(req, res, url, state, { sendJson, readJsonBody })) {
+      return;
+    }
+
     sendJson(res, 404, { error: "未找到请求资源。" });
   } catch (error) {
     console.error("HTTP 处理失败:", error);
@@ -854,6 +865,7 @@ export function startServer() {
   process.on("SIGINT", () => {
     console.log("\n关闭服务器...");
     state.orchestrator?.stop();
+    state.controlMatch?.stop();
     server.close();
     wss.close();
     process.exit(0);

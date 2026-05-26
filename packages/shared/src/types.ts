@@ -482,3 +482,42 @@ export interface GameRecord {
   commandResults: GameLog[];
   aiTurns: SavedAITurnRecord[];
 }
+
+// --- Control Plane Types ---
+
+export interface ControlSession {
+  id: string;
+  gameId: string;
+  playerId: PlayerId;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+export interface ControlError {
+  code: string;
+  message: string;
+  hint?: string;
+}
+
+export interface ControlWarning {
+  type: string;
+  message: string;
+}
+
+export interface ControlResponse<T = unknown> {
+  ok: boolean;
+  tick: number;
+  kind: "state" | "selection" | "action_result" | "plan_result" | "batch_result";
+  data: T;
+  warnings?: ControlWarning[];
+  error?: ControlError;
+}
+
+export interface CreateControlSessionRequest {
+  gameId?: string;
+  playerId: PlayerId;
+}
+
+export interface ControlToolCallRequest {
+  args?: Record<string, unknown>;
+}

@@ -1,4 +1,8 @@
-import { OrchestratePlanInput } from "@llmcraft/shared";
+import {
+  CONTROL_PROVIDER_ONLY_TOOL_NAMES,
+  CONTROL_READ_TOOL_NAMES,
+  OrchestratePlanInput,
+} from "@llmcraft/shared";
 import { GameAgentBridge } from "./GameAgentBridge";
 
 export interface AgentToolDefinition {
@@ -406,12 +410,23 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
 ];
 
+const providerOnlyToolNames = new Set<string>(CONTROL_PROVIDER_ONLY_TOOL_NAMES);
+const readToolNames = new Set<string>(CONTROL_READ_TOOL_NAMES);
+
 export function getAgentToolDefinitions(): AgentToolDefinition[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
 }
 
 export function getAgentToolNames(): string[] {
   return tools.map((tool) => tool.name);
+}
+
+export function getControlAgentToolNames(): string[] {
+  return getAgentToolNames().filter((name) => !providerOnlyToolNames.has(name));
+}
+
+export function getControlReadToolNames(): string[] {
+  return getControlAgentToolNames().filter((name) => readToolNames.has(name));
 }
 
 export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {

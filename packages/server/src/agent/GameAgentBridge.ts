@@ -83,6 +83,11 @@ export class GameAgentBridge {
     this.lastReadTick = null;
   }
 
+  beginToolCall(): void {
+    this.issuedCommands = [];
+    this.runPlanRecords = [];
+  }
+
   takeIssuedCommands(): Command[] {
     const commands = [...this.issuedCommands];
     this.issuedCommands = [];

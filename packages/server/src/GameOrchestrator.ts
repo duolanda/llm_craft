@@ -21,7 +21,6 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import OpenAI from "openai";
 import { Game } from "./Game";
 import { createLLMProvider } from "./createLLMProvider";
 import { LLMProvider, SubAgentParentContext } from "./LLMProvider";
@@ -29,7 +28,6 @@ import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { GameAgentBridge } from "./agent/GameAgentBridge";
 import { AgentRuntime, AgentRuntimeResult } from "./agent/AgentRuntime";
 import { SubAgentTaskRegistry, SubAgentRunner, SpawnAgentInput } from "./agent/SubAgentTaskRegistry";
-import { runSubAgentTask } from "./agent/SubAgentRunner";
 import { getHQUnderAttackAlertFromGameState } from "./HQAlert";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
@@ -91,7 +89,6 @@ export class GameOrchestrator {
   private aiRequestCounts = { player_1: 0, player_2: 0 };
   private warmupRequestNumbers: Partial<Record<PlayerId, number>> = {};
   private subAgentTaskRegistry = new SubAgentTaskRegistry();
-  private subAgentClients: Partial<Record<PlayerId, OpenAI>> = {};
 
   constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
@@ -107,18 +104,6 @@ export class GameOrchestrator {
       : null;
     this.llm1 = createLLMProvider(config.player1);
     this.llm2 = createLLMProvider(config.player2);
-    if (config.player1.providerType === "openai-compatible") {
-      this.subAgentClients.player_1 = new OpenAI({
-        apiKey: config.player1.apiKey,
-        baseURL: config.player1.baseURL,
-      });
-    }
-    if (config.player2.providerType === "openai-compatible") {
-      this.subAgentClients.player_2 = new OpenAI({
-        apiKey: config.player2.apiKey,
-        baseURL: config.player2.baseURL,
-      });
-    }
     this.bridgeByPlayer = {
       player_1: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1),
       player_2: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
@@ -550,19 +535,10 @@ export class GameOrchestrator {
     args: unknown,
     context: SubAgentParentContext,
   ): { effect: "read"; result: unknown } {
-    const client = this.subAgentClients[playerId];
-    if (!client) {
-      return {
-        effect: "read",
-        result: { ok: false, error: "spawn_agent_unavailable" },
-      };
-    }
-    const model = this.getProvider(playerId).getModel();
+    const provider = this.getProvider(playerId);
     const input = args as SpawnAgentInput;
     const runner: SubAgentRunner = (taskId, spawnInput, signal) =>
-      runSubAgentTask({
-        client,
-        model,
+      provider.runSubAgentTask({
         taskId,
         description: spawnInput.description,
         objective: spawnInput.objective,

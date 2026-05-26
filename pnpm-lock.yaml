@@ -8,9 +8,28 @@ importers:
 
   .:
     devDependencies:
+      '@llmcraft/cli':
+        specifier: workspace:*
+        version: link:packages/cli
       concurrently:
         specifier: ^8.2.2
         version: 8.2.2
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  packages/cli:
+    dependencies:
+      '@llmcraft/shared':
+        specifier: '*'
+        version: link:../shared
+    devDependencies:
+      '@types/node':
+        specifier: ^20.10.5
+        version: 20.19.37
+      tsx:
+        specifier: ^4.7.0
+        version: 4.21.0
       typescript:
         specifier: ^5.9.0
         version: 5.9.3

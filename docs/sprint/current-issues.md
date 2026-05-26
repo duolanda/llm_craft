@@ -34,13 +34,21 @@
 - **描述**: `orchestrate_plan` 已支持基于现有动作工具的 call steps，但还缺少 benchmark/transcript 数据验证模型是否会稳定使用
 - **影响**: 表达力已比旧 DSL 更贴近工具调用心智模型，但是否能显著减少微操和提高胜率仍需实测
 
-### 8. Benchmark 面板还没消费新 runtime 细节
+### 8. active plan 的可解释状态不足
+- **描述**: CLI agent 实测中，`plan economy | orchestrate` / `plan attack-hq | orchestrate` 会返回 active plan，单位也可能显示 `hasActivePlan: true`，但单位状态仍是 `idle` 时 agent 很难判断计划是在等待条件、执行失败，还是状态展示滞后。此前 control-plane match 未推进 session bridge 上的 plan，已修复为 match 级 player bridge 并按 tick 推进。
+- **影响**: agent 容易误判 plan 没有生效并转向重复微操；后续服务端应统一暴露 plan 的 current step、waiting reason、last attempt、last error 等状态，避免只靠 unit state 推断计划进度
+
+### 9. Benchmark 面板还没消费新 runtime 细节
 - **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
 - **影响**: 回放已经能看到 tool-driven agent 行为，但 benchmark 视角仍不够完整
 
-### 9. 日志文件名时间戳仍使用 UTC 时间
+### 10. 日志文件名时间戳仍使用 UTC 时间
 - **描述**: 当前对局日志/回放等文件名里的时间戳使用 UTC 时间，与本地开发和排查时常用的北京时间不一致
 - **影响**: 按文件名定位具体对局时需要额外换算时区，容易和控制台、本地观察时间产生偏差；后续可评估改为北京时间或在文件名中显式标注时区
+
+### 11. CLI/control-plane 对局不会保存 record 文件
+- **描述**: CLI PVP / CLI vs CPU 走 `ControlPlaneMatch`，目前没有接入 `GameOrchestrator.saveRecord()` 的落盘路径，也没有 control API 暴露保存回放入口
+- **影响**: CLI agent 对打可在内存中推进并通过 `state/events` 观察，但结束后不会留下 `logs/records/*.json`，不利于复盘、离线分析和 benchmark 横向比较；后续应抽出通用 record builder，或为 control-plane 增加 `saveRecord()` / `POST /api/control/save-record`
 
 ## 已完成 ✅
 
@@ -63,7 +71,14 @@
 - [x] 限制 `attack_move_unit` 到达目标点后结束，避免士兵在敌方基地永久自动清理后续新单位
 - [x] 明确 `attack` 是有目标 ID 时的默认战斗命令，避免 LLM 把 `attack_move_unit` 当成拆 HQ / barracks 的替代品
 - [x] 为 `orchestrate_plan` 增加 `{ call, args, scope, when, until, retry }` steps，让计划能复用现有动作工具表达开局、生产和连续作战意图
+- [x] 修复 CLI control plane 每次工具调用重置 read tracking，导致 `units | build` 等先读后写管道误报 `no_recent_read`
+- [x] 收敛 CLI control-plane CPU 对手到 benchmark 共享的内建 CPU 策略，避免 `random/rush` 行为复制漂移
+- [x] 将 CLI control-plane 对局从 `state.orchestrator` 假适配对象拆出为独立 `ControlPlaneMatch`，避免普通 LLM 对局被 control session 误绑定
+- [x] 清理旧的 CLI 临时 smoke 脚本，避免继续暗示 fake orchestrator 或过期双 agent 接入方式
+- [x] 将 CLI control session 改为共享 `ControlPlaneMatch` 的 player 级 bridge，并由 match loop 推进 `orchestrate_plan`
+- [x] 将 `spawn_agent` 子 Agent 执行纳入 `LLMProvider` / rate-limit wrapper，避免 `GameOrchestrator` 直接耦合 OpenAI client
+- [x] 拆出 control HTTP 路由模块，并把 control read/provider-only 工具分类收敛到 shared 元数据
 
 ---
 
-*最后更新: 2026-05-09*
+*最后更新: 2026-05-26*

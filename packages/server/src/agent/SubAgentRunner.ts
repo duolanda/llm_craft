@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import { AgentRunInput } from "@llmcraft/shared";
 import {
   AgentToolExecutionResult,
@@ -23,6 +22,16 @@ const SUB_AGENT_CONSTRAINTS = `
 
 const SUB_AGENT_MAX_TOKENS = 2048;
 const SUB_AGENT_TEMPERATURE = 0.7;
+
+type CreateSubAgentCompletion = (
+  request: {
+    messages: unknown[];
+    tools: AgentToolDefinition[];
+    temperature: number;
+    maxTokens: number;
+  },
+  signal: AbortSignal,
+) => Promise<any>;
 
 function parseToolArgs(raw: string): unknown {
   try {
@@ -79,8 +88,7 @@ function formatNotificationXML(
 }
 
 export interface SubAgentRunConfig {
-  client: OpenAI;
-  model: string;
+  createCompletion: CreateSubAgentCompletion;
   systemPrompt?: string;
   taskId: string;
   description: string;
@@ -95,8 +103,7 @@ export interface SubAgentRunConfig {
 
 export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string> {
   const {
-    client,
-    model,
+    createCompletion,
     systemPrompt,
     taskId,
     description,
@@ -138,23 +145,14 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
       return formatNotificationXML(taskId, description, "aborted", objective, assistantTexts.join("\n") || "Aborted before completion.");
     }
 
-    const response = await client.chat.completions.create(
+    const response = await createCompletion(
       {
-        model,
         messages,
-        tools: filteredTools.map((tool) => ({
-          type: "function" as const,
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          },
-        })),
-        tool_choice: "auto" as const,
+        tools: filteredTools,
         temperature: SUB_AGENT_TEMPERATURE,
-        max_tokens: SUB_AGENT_MAX_TOKENS,
-      } as any,
-      { signal },
+        maxTokens: SUB_AGENT_MAX_TOKENS,
+      },
+      signal,
     );
 
     modelRequests++;

@@ -4,6 +4,7 @@ import {
   LLMProvider,
   RunAgentOptions,
   RunAgentResult,
+  RunSubAgentTaskInput,
   WarmupAgentResult,
 } from "./LLMProvider";
 
@@ -72,6 +73,19 @@ export class RateLimitedLLMProvider implements LLMProvider {
     return result;
   }
 
+  async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
+    if (input.signal.aborted) {
+      return this.createAbortedSubAgentResult(input);
+    }
+
+    if (!this.rpm) {
+      return this.inner.runSubAgentTask(input);
+    }
+
+    const result = await this.runWithRateLimit(input.signal, () => this.inner.runSubAgentTask(input));
+    return result ?? this.createAbortedSubAgentResult(input);
+  }
+
   async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
     if (options.signal?.aborted) {
       return createAbortedWarmupResult();
@@ -129,5 +143,18 @@ export class RateLimitedLLMProvider implements LLMProvider {
       }
       throw error;
     }
+  }
+
+  private createAbortedSubAgentResult(input: RunSubAgentTaskInput): string {
+    return [
+      "<sub-agent-result>",
+      `taskId: ${input.taskId}`,
+      `description: ${input.description}`,
+      "status: aborted",
+      `objective: ${input.objective}`,
+      "result:",
+      "Aborted before completion.",
+      "</sub-agent-result>",
+    ].join("\n");
   }
 }

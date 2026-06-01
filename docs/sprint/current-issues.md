@@ -78,7 +78,8 @@
 - [x] 将 CLI control session 改为共享 `ControlPlaneMatch` 的 player 级 bridge，并由 match loop 推进 `orchestrate_plan`
 - [x] 将 `spawn_agent` 子 Agent 执行纳入 `LLMProvider` / rate-limit wrapper，避免 `GameOrchestrator` 直接耦合 OpenAI client
 - [x] 拆出 control HTTP 路由模块，并把 control read/provider-only 工具分类收敛到 shared 元数据
+- [x] 增加单位被攻击后的自卫反击保底，让 idle/hold 的有攻击力单位在射程内自动还击攻击者，而不是由 HQ/barracks 触发周围单位护卫
 
 ---
 
-*最后更新: 2026-05-26*
+*最后更新: 2026-05-31*

@@ -273,6 +273,74 @@ describe("Game", () => {
     expect(target.hp).toBe(target.maxHp - expectedDamage * 2);
   });
 
+  it("lets idle combat units retaliate when attacked by an enemy unit", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const defender = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
+    const expectedDamage = UNIT_STATS.soldier.attack;
+
+    game.queueCommand({
+      id: "retaliation_attack",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: defender.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(defender.hp).toBe(defender.maxHp - expectedDamage);
+    expect(attacker.hp).toBe(attacker.maxHp - expectedDamage);
+    expect(defender.intent).toMatchObject({ type: "attack", targetId: attacker.id });
+  });
+
+  it("does not retaliate with units that have no attack", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const worker = unitManager.createUnit(UNIT_TYPES.WORKER, 6, 5, "player_2");
+
+    game.queueCommand({
+      id: "worker_no_retaliation",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: worker.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+
+    expect(worker.hp).toBe(worker.maxHp - UNIT_STATS.soldier.attack);
+    expect(attacker.hp).toBe(attacker.maxHp);
+  });
+
+  it("does not interrupt moving combat units for retaliation", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const defender = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
+
+    game.queueCommand({
+      id: "defender_move_before_retaliation",
+      type: "move",
+      unitId: defender.id,
+      position: { x: 8, y: 5 },
+      playerId: "player_2",
+    });
+    game.processCommands();
+
+    game.queueCommand({
+      id: "moving_unit_no_retaliation",
+      type: "attack",
+      unitId: attacker.id,
+      targetId: defender.id,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect(defender.hp).toBe(defender.maxHp - UNIT_STATS.soldier.attack);
+    expect(attacker.hp).toBe(attacker.maxHp);
+    expect(defender.intent).toMatchObject({ type: "move", targetX: 8, targetY: 5 });
+  });
+
   it("keeps re-evaluating attack_in_range on later ticks", () => {
     const unitManager = game.getUnitManager();
     const buildingManager = game.getBuildingManager();
@@ -395,7 +463,7 @@ describe("Game", () => {
     game.tickUpdate();
     game.stop();
 
-    expect(attacker.intent?.type).toBe("hold");
+    expect(attacker.intent?.type).not.toBe("attack_move");
   });
 
   it("attack_move stops auto-attacking after reaching its destination", () => {

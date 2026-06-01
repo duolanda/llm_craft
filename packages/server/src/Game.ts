@@ -924,9 +924,55 @@ export class Game {
     target: Unit | Building,
     kind: "unit" | "building"
   ): ResultCode {
-    return kind === "unit"
-      ? this.unitManager.attackUnit(attacker, target as Unit)
-      : this.attackBuilding(attacker, target as Building);
+    if (kind === "building") {
+      return this.attackBuilding(attacker, target as Building);
+    }
+
+    const targetUnit = target as RuntimeUnit;
+    const result = this.unitManager.attackUnit(attacker, targetUnit);
+    if (result === RESULT_CODES.OK) {
+      this.processUnitRetaliation(targetUnit, attacker);
+    }
+    return result;
+  }
+
+  private processUnitRetaliation(defender: RuntimeUnit, attacker: RuntimeUnit): void {
+    if (!this.canUseUnitRetaliation(defender, attacker)) {
+      return;
+    }
+
+    const result = this.unitManager.attackUnit(defender, attacker);
+    if (result === RESULT_CODES.OK) {
+      this.unitManager.clearPath(defender);
+      defender.lastAttackTick = this.tick;
+    }
+  }
+
+  private canUseUnitRetaliation(defender: RuntimeUnit, attacker: RuntimeUnit): boolean {
+    if (
+      !defender.exists ||
+      !attacker.exists ||
+      defender.playerId === attacker.playerId ||
+      defender.lastAttackTick === this.tick ||
+      UNIT_STATS[defender.type].attack <= 0 ||
+      defender.attackRange <= 0
+    ) {
+      return false;
+    }
+
+    if (defender.path?.length || defender.pathTarget) {
+      return false;
+    }
+
+    if (defender.intent && defender.intent.type !== "hold") {
+      return false;
+    }
+
+    return this.getChebyshevDistance(defender, attacker) <= defender.attackRange;
+  }
+
+  private getChebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+    return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
   }
 
   private executeAttackIntent(

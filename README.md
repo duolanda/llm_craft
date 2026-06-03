@@ -256,6 +256,15 @@ pnpm --filter @llmcraft/client build
 - `GET /api/replay/records`：列出 `logs/records/` 中的记录
 - `GET /api/replay/records/:fileName`：读取单个记录 JSON
 
+### 调试页面入口
+
+启动前后端后，除了主页面外，还有两个独立调试页面：
+
+- `http://localhost:3000/diagnostics.html`：对局诊断页。直接从服务端记录列表选择 `match-*.json`，查看 HQ 压力时间线、防守响应延迟、受压后工具调用、失效单位、出生点陷阱等结构化指标。
+- `http://localhost:3000/transcript.html`：模型日志查看页。用于查看 `packages/server/logs/llm-debug/*.log`，拆解每次 LLM 请求看到的上下文、响应、工具调用和执行结果。
+
+这两个页面目前是调试入口，没有放进主界面导航；需要直接访问 URL。
+
 说明：
 
 - 回放是基于 `initialState + tickDeltas + commandResults + aiTurns` 的重建，不是重新跑一遍引擎

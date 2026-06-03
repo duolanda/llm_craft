@@ -9,6 +9,7 @@ export default defineConfig({
       input: {
         main: path.resolve(__dirname, "index.html"),
         transcript: path.resolve(__dirname, "transcript.html"),
+        diagnostics: path.resolve(__dirname, "diagnostics.html"),
       },
     },
   },

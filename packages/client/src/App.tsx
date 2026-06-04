@@ -37,6 +37,37 @@ interface ReplayRecordListEntry {
 const SERVER_HOST = window.location.hostname || "localhost";
 const WS_URL = `ws://${SERVER_HOST}:3001`;
 const API_BASE_URL = `http://${SERVER_HOST}:3001`;
+const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
+
+interface LivePresetSelection {
+  player1PresetId: string;
+  player2PresetId: string;
+}
+
+function readStoredLivePresetSelection(): LivePresetSelection {
+  try {
+    const rawSelection = window.localStorage.getItem(LIVE_PRESET_SELECTION_STORAGE_KEY);
+    if (!rawSelection) {
+      return { player1PresetId: "", player2PresetId: "" };
+    }
+
+    const parsedSelection = JSON.parse(rawSelection) as Partial<LivePresetSelection>;
+    return {
+      player1PresetId: typeof parsedSelection.player1PresetId === "string" ? parsedSelection.player1PresetId : "",
+      player2PresetId: typeof parsedSelection.player2PresetId === "string" ? parsedSelection.player2PresetId : "",
+    };
+  } catch {
+    return { player1PresetId: "", player2PresetId: "" };
+  }
+}
+
+function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
+  try {
+    window.localStorage.setItem(LIVE_PRESET_SELECTION_STORAGE_KEY, JSON.stringify(selection));
+  } catch {
+    // Ignore storage failures so private browsing or quota issues do not break match setup.
+  }
+}
 
 function App() {
   const {
@@ -72,10 +103,11 @@ function App() {
   const [replayError, setReplayError] = useState<string | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
+  const [presetsLoaded, setPresetsLoaded] = useState(false);
   const [presetsLoading, setPresetsLoading] = useState(false);
   const [presetError, setPresetError] = useState<string | null>(null);
-  const [player1PresetId, setPlayer1PresetId] = useState("");
-  const [player2PresetId, setPlayer2PresetId] = useState("");
+  const [player1PresetId, setPlayer1PresetId] = useState(() => readStoredLivePresetSelection().player1PresetId);
+  const [player2PresetId, setPlayer2PresetId] = useState(() => readStoredLivePresetSelection().player2PresetId);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
@@ -210,6 +242,7 @@ function App() {
     try {
       const nextPresets = await listPresets(API_BASE_URL);
       setPresets(nextPresets);
+      setPresetsLoaded(true);
     } catch (error) {
       setPresetError(`获取预设列表失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -223,6 +256,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!presetsLoaded) {
+      return;
+    }
+
     if (presets.length === 0) {
       setPlayer1PresetId("");
       setPlayer2PresetId("");
@@ -232,7 +269,11 @@ function App() {
     const presetIds = new Set(presets.map((preset) => preset.id));
     setPlayer1PresetId((current) => (current && presetIds.has(current) ? current : presets[0]?.id ?? ""));
     setPlayer2PresetId((current) => (current && presetIds.has(current) ? current : presets[1]?.id ?? presets[0]?.id ?? ""));
-  }, [presets]);
+  }, [presets, presetsLoaded]);
+
+  useEffect(() => {
+    writeStoredLivePresetSelection({ player1PresetId, player2PresetId });
+  }, [player1PresetId, player2PresetId]);
 
   useEffect(() => {
     setPrepareStatuses({});

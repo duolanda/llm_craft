@@ -40,6 +40,17 @@ describe("Game", () => {
     }
   });
 
+  it("initializes a custom square map size", () => {
+    const customGame = new Game({ map: { width: 31, height: 31 } });
+    const state = customGame.getState();
+    const [player1, player2] = state.players;
+
+    expect(state.tiles).toHaveLength(31);
+    expect(state.tiles[0]).toHaveLength(31);
+    expect(player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: 2, y: 15 });
+    expect(player2.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject({ x: 28, y: 15 });
+  });
+
   it("allows HQ to spawn workers and deducts credits", () => {
     const state = game.getState();
     const player1 = state.players[0];

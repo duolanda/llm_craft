@@ -21,6 +21,7 @@ import {
   TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
+  MatchMapConfig,
   LOG_TYPES,
   LogType,
   defaultLogMeta,
@@ -80,18 +81,30 @@ export class Game {
   private winner: PlayerId | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
+  private readonly mapWidth: number;
+  private readonly mapHeight: number;
 
-  constructor() {
+  constructor(options: { map?: MatchMapConfig } = {}) {
+    const map = Game.normalizeMapConfig(options.map);
+    this.mapWidth = map.width;
+    this.mapHeight = map.height;
     this.initializeGame();
   }
 
+  static normalizeMapConfig(map?: MatchMapConfig): MatchMapConfig {
+    return {
+      width: map?.width ?? MAP_WIDTH,
+      height: map?.height ?? MAP_HEIGHT,
+    };
+  }
+
   private initializeGame(): void {
-    const centerY = Math.floor(MAP_HEIGHT / 2);
+    const centerY = Math.floor(this.mapHeight / 2);
     const leftHqX = 2;
-    const rightHqX = MAP_WIDTH - 3;
+    const rightHqX = this.mapWidth - 3;
 
     // 1. Generate map
-    this.tiles = MapGenerator.generate();
+    this.tiles = MapGenerator.generate(this.mapWidth, this.mapHeight);
 
     // 2. Create two players
     this.players = [
@@ -133,9 +146,9 @@ export class Game {
 
     // Convert TileType[][] to Tile[][]
     const tiles: Tile[][] = [];
-    for (let y = 0; y < MAP_HEIGHT; y++) {
+    for (let y = 0; y < this.mapHeight; y++) {
       tiles[y] = [];
-      for (let x = 0; x < MAP_WIDTH; x++) {
+      for (let x = 0; x < this.mapWidth; x++) {
         tiles[y][x] = {
           x,
           y,
@@ -1234,9 +1247,9 @@ export class Game {
     if (
       requestedPosition &&
       requestedPosition.x >= 0 &&
-      requestedPosition.x < MAP_WIDTH &&
+      requestedPosition.x < this.mapWidth &&
       requestedPosition.y >= 0 &&
-      requestedPosition.y < MAP_HEIGHT &&
+      requestedPosition.y < this.mapHeight &&
       this.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
     ) {
       return requestedPosition;
@@ -1247,8 +1260,8 @@ export class Game {
     }
 
     let best: { x: number; y: number; distance: number } | null = null;
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
+    for (let y = 0; y < this.mapHeight; y++) {
+      for (let x = 0; x < this.mapWidth; x++) {
         if (this.tiles[y][x] !== TILE_TYPES.RESOURCE) {
           continue;
         }
@@ -1536,7 +1549,7 @@ export class Game {
           const y = centerY + dy;
 
           // Check bounds
-          if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+          if (x < 0 || x >= this.mapWidth || y < 0 || y >= this.mapHeight) continue;
 
           // Check if position is not an obstacle
           if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) continue;
@@ -1589,7 +1602,7 @@ export class Game {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+    if (x < 0 || x >= this.mapWidth || y < 0 || y >= this.mapHeight) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
@@ -1616,7 +1629,7 @@ export class Game {
       return { type: "move_bad_target", hint: "Use integer map coordinates." };
     }
 
-    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+    if (x < 0 || x >= this.mapWidth || y < 0 || y >= this.mapHeight) {
       return { type: "move_bad_target", hint: "Choose a tile inside the map bounds." };
     }
 
@@ -1636,7 +1649,7 @@ export class Game {
   }
 
   private describeBuildFailure(playerId: PlayerId, x: number, y: number): { type: string; hint: string } {
-    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= this.mapWidth || y < 0 || y >= this.mapHeight) {
       return { type: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
     }
 

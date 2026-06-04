@@ -12,6 +12,7 @@ import {
   GameState,
   MatchDebugOptions,
   MatchLLMConfig,
+  MatchMapConfig,
   MatchPrepareState,
   MatchWarmupOptions,
   OpenAICompatibleRuntimeConfig,
@@ -88,6 +89,7 @@ export interface ServerState {
       decisionIntervalTicks?: number;
       concurrency?: number;
       debug?: ClientStartBenchmarkMessage["debug"];
+      map?: MatchMapConfig;
     },
     ws: Pick<WebSocket, "send"> | null
   ) => OrchestratorLike;
@@ -175,12 +177,38 @@ function buildMatchSignature(input: {
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }): string {
   return JSON.stringify({
     player1PresetId: input.player1PresetId,
     player2PresetId: input.player2PresetId,
     debug: input.debug ?? null,
+    map: normalizeMatchMapConfig(input.map),
   });
+}
+
+function normalizeMatchMapConfig(map?: MatchMapConfig): MatchMapConfig {
+  const width = map?.width ?? 21;
+  const height = map?.height ?? 21;
+  return { width, height };
+}
+
+function validateMatchMapConfig(map?: MatchMapConfig): MatchMapConfig {
+  const normalized = normalizeMatchMapConfig(map);
+  const { width, height } = normalized;
+  const valid =
+    Number.isInteger(width) &&
+    Number.isInteger(height) &&
+    width >= 15 &&
+    height >= 15 &&
+    width <= 41 &&
+    height <= 41 &&
+    width % 2 === 1 &&
+    height % 2 === 1;
+  if (!valid) {
+    throw new Error("地图尺寸必须是 15 到 41 之间的奇数宽高。");
+  }
+  return normalized;
 }
 
 function sendPrepareStatus(
@@ -586,6 +614,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      const map = message.map ? validateMatchMapConfig(message.map) : undefined;
       const warmup = normalizeWarmupOptions(message.warmup);
       const warmupPlayers = [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2].filter((playerId) => warmup[playerId]);
       if (warmupPlayers.length === 0) {
@@ -596,7 +625,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
-      const signature = buildMatchSignature(message);
+      const signature = buildMatchSignature({ ...message, map });
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
       let orchestrator = state.pendingMatch?.signature === signature
@@ -609,6 +638,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           player1,
           player2,
           debug: message.debug,
+          ...(map ? { map } : {}),
         });
         state.orchestrator = orchestrator;
         state.pendingMatch = { signature, orchestrator };
@@ -649,13 +679,15 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
-      const signature = buildMatchSignature(message);
+      const map = message.map ? validateMatchMapConfig(message.map) : undefined;
+      const signature = buildMatchSignature({ ...message, map });
       const preparedMatch = state.pendingMatch?.signature === signature ? state.pendingMatch : null;
       const previousOrchestrator = preparedMatch ? null : state.orchestrator;
       const nextOrchestrator = preparedMatch?.orchestrator ?? state.createOrchestrator({
         player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
         player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
         debug: message.debug,
+        ...(map ? { map } : {}),
       });
       state.orchestrator = nextOrchestrator;
 
@@ -692,10 +724,16 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      const map = message.map ? validateMatchMapConfig(message.map) : undefined;
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
       const previousOrchestrator = state.orchestrator;
-      const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
+      const nextOrchestrator = state.createOrchestrator({
+        player1,
+        player2,
+        debug: message.debug,
+        ...(map ? { map } : {}),
+      });
 
       state.orchestrator = nextOrchestrator;
       state.pendingMatch = null;
@@ -754,6 +792,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       const previousOrchestrator = state.orchestrator;
+      const map = message.map ? validateMatchMapConfig(message.map) : undefined;
       const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
         {
           presetId: message.presetId,
@@ -764,6 +803,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           decisionIntervalTicks: message.decisionIntervalTicks,
           concurrency: message.concurrency,
           debug: message.debug,
+          ...(map ? { map } : {}),
         },
         ws
       );
@@ -793,6 +833,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
             : error.message === "BENCHMARK_PRESET_INVALID"
               ? "Benchmark 只能使用 OpenAI-compatible 预设。"
+              : error.message.startsWith("地图尺寸")
+                ? error.message
               : error.message.startsWith("模型准备失败")
                 ? error.message
                 : "处理客户端消息失败。"

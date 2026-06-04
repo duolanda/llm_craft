@@ -4,6 +4,7 @@ import { CPUStrategyType, LLMPresetSummary, MatchDebugOptions } from "@llmcraft/
 interface BenchmarkPanelProps {
   presets: LLMPresetSummary[];
   initialPresetId?: string;
+  initialMapSize?: number;
   running: boolean;
   onStart: (input: {
     presetId: string;
@@ -13,16 +14,18 @@ interface BenchmarkPanelProps {
     decisionIntervalTicks: number;
     concurrency: number;
     debug?: MatchDebugOptions;
+    mapSize: number;
   }) => void;
   onClose: () => void;
 }
 
-export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart, onClose }: BenchmarkPanelProps) {
+export function BenchmarkPanel({ presets, initialPresetId = "", initialMapSize = 21, running, onStart, onClose }: BenchmarkPanelProps) {
   const [presetId, setPresetId] = useState(initialPresetId);
   const [cpuStrategy, setCpuStrategy] = useState<CPUStrategyType>("random");
   const [rounds, setRounds] = useState("1");
   const [decisionIntervalTicks, setDecisionIntervalTicks] = useState("10");
   const [concurrency, setConcurrency] = useState("1");
+  const [mapSize, setMapSize] = useState(String(initialMapSize));
   const [recordReplay, setRecordReplay] = useState(true);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +41,8 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       }
       return presets[0]?.id ?? "";
     });
-  }, [initialPresetId, presets]);
+    setMapSize(String(initialMapSize));
+  }, [initialMapSize, initialPresetId, presets]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -65,6 +69,12 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       return;
     }
 
+    const parsedMapSize = Number(mapSize);
+    if (!Number.isInteger(parsedMapSize) || ![15, 21, 31].includes(parsedMapSize)) {
+      setError("地图尺寸必须选择 15、21 或 31。");
+      return;
+    }
+
     setError(null);
     onStart({
       presetId,
@@ -74,6 +84,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       decisionIntervalTicks: parsedDecisionInterval,
       concurrency: parsedConcurrency,
       debug: recordLLMTranscript ? { recordLLMTranscript: true } : undefined,
+      mapSize: parsedMapSize,
     });
   };
 
@@ -134,6 +145,20 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
             onChange={(event) => setConcurrency(event.target.value)}
             disabled={running}
           />
+        </label>
+
+        <label className="settings-field">
+          <span>地图</span>
+          <select
+            className="settings-select"
+            value={mapSize}
+            onChange={(event) => setMapSize(event.target.value)}
+            disabled={running}
+          >
+            <option value="15">15 x 15</option>
+            <option value="21">21 x 21</option>
+            <option value="31">31 x 31</option>
+          </select>
         </label>
 
         <label className="settings-field">

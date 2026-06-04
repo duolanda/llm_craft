@@ -91,7 +91,7 @@ export class GameOrchestrator {
   private subAgentTaskRegistry = new SubAgentTaskRegistry();
 
   constructor(config: GameOrchestratorConfig) {
-    this.game = new Game();
+    this.game = new Game({ map: config.map });
     this.aiInterval = config.runtime?.aiIntervalTicks ?? 5;
     this.aiIntervals = {
       player_1: config.runtime?.aiIntervalTicksByPlayer?.player_1 ?? this.aiInterval,
@@ -398,8 +398,8 @@ export class GameOrchestrator {
         aiIntervalTicks: this.aiInterval,
         aiContextWindowTurns: this.aiTurns.length,
         map: {
-          width: MAP_WIDTH,
-          height: MAP_HEIGHT,
+          width: state.tiles[0]?.length ?? MAP_WIDTH,
+          height: state.tiles.length || MAP_HEIGHT,
         },
         recordFormat: "compact-v2",
         systemPrompt: SYSTEM_PROMPT,

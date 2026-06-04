@@ -1,4 +1,4 @@
-import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
+import { TileType, TILE_TYPES } from "@llmcraft/shared";
 
 interface Node {
   x: number;
@@ -28,12 +28,14 @@ export class PathFinder {
     tiles: TileType[][],
     occupiedPositions?: Set<string>
   ): Array<{ x: number; y: number }> {
+    const height = tiles.length;
+    const width = tiles[0]?.length ?? 0;
     // 目标点合法性检查
     if (
       targetX < 0 ||
-      targetX >= MAP_WIDTH ||
+      targetX >= width ||
       targetY < 0 ||
-      targetY >= MAP_HEIGHT
+      targetY >= height
     ) {
       return [];
     }
@@ -88,7 +90,7 @@ export class PathFinder {
         const { x, y } = neighbor;
 
         // 越界检查
-        if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+        if (x < 0 || x >= width || y < 0 || y >= height) {
           continue;
         }
 

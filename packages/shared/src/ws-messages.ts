@@ -1,5 +1,5 @@
 import { PlayerId } from "./constants";
-import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types";
+import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchMapConfig, MatchWarmupOptions } from "./types";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -14,6 +14,7 @@ export interface ClientStartMatchMessage {
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }
 
 /** 赛前准备指定 AI：发送首个真实 agent 请求，但不启动游戏 tick */
@@ -22,6 +23,7 @@ export interface ClientPrepareMatchMessage {
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
   warmup?: MatchWarmupOptions;
 }
 
@@ -31,6 +33,7 @@ export interface ClientResetMatchMessage {
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }
 
 /** 停止 AI 对战模拟 */
@@ -53,6 +56,7 @@ export interface ClientStartBenchmarkMessage {
   decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }
 
 /** 所有客户端发送的消息联合类型 */

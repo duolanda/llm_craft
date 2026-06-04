@@ -109,6 +109,7 @@ function App() {
   const [player1PresetId, setPlayer1PresetId] = useState(() => readStoredLivePresetSelection().player1PresetId);
   const [player2PresetId, setPlayer2PresetId] = useState(() => readStoredLivePresetSelection().player2PresetId);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
+  const [mapSize, setMapSize] = useState(21);
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -344,6 +345,7 @@ function App() {
       player1PresetId,
       player2PresetId,
       debug: buildMatchDebugOptions(recordLLMTranscript),
+      map: { width: mapSize, height: mapSize },
     });
   };
 
@@ -362,6 +364,7 @@ function App() {
       player1PresetId,
       player2PresetId,
       debug: buildMatchDebugOptions(recordLLMTranscript),
+      map: { width: mapSize, height: mapSize },
     });
   };
 
@@ -381,6 +384,7 @@ function App() {
       player1PresetId,
       player2PresetId,
       debug: buildMatchDebugOptions(recordLLMTranscript),
+      map: { width: mapSize, height: mapSize },
       warmup: {
         player_1: playerId === "player_1",
         player_2: playerId === "player_2",
@@ -406,6 +410,7 @@ function App() {
     decisionIntervalTicks: number;
     concurrency: number;
     debug?: MatchDebugOptions;
+    mapSize: number;
   }) => {
     clearServerMessage();
     clearBenchmarkResult();
@@ -427,6 +432,7 @@ function App() {
       decisionIntervalTicks: input.decisionIntervalTicks,
       concurrency: input.concurrency,
       debug: input.debug,
+      map: { width: input.mapSize, height: input.mapSize },
     });
   };
 
@@ -574,6 +580,19 @@ function App() {
                       checked={recordLLMTranscript}
                       onChange={(event) => setRecordLLMTranscript(event.target.checked)}
                     />
+                  </label>
+                  <label className="settings-field compact">
+                    <span>地图</span>
+                    <select
+                      className="settings-select"
+                      value={mapSize}
+                      onChange={(event) => setMapSize(Number(event.target.value))}
+                      disabled={isPlaying || startPending || isPreparing || benchmarkRunning}
+                    >
+                      <option value={15}>15 x 15</option>
+                      <option value={21}>21 x 21</option>
+                      <option value={31}>31 x 31</option>
+                    </select>
                   </label>
                 </div>
                 <button
@@ -864,6 +883,7 @@ function App() {
               running={benchmarkRunning}
               onStart={handleStartBenchmark}
               onClose={() => setBenchmarkOpen(false)}
+              initialMapSize={mapSize}
             />
           )}
           {benchmarkOpen && benchmarkResult && (

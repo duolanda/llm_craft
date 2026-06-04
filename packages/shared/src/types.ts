@@ -33,10 +33,16 @@ export interface MatchWarmupOptions {
   player_2?: boolean;
 }
 
+export interface MatchMapConfig {
+  width: number;
+  height: number;
+}
+
 export interface MatchLLMConfig {
   player1: MatchPlayerLLMConfig;
   player2: MatchPlayerLLMConfig;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }
 
 export interface LLMPresetSummary {

@@ -4,6 +4,7 @@ import {
   CPUStrategyType,
   GameState,
   MatchDebugOptions,
+  MatchMapConfig,
   OpenAICompatibleRuntimeConfig,
   ServerBenchmarkActiveRound,
   ServerBenchmarkCompleteMessage,
@@ -43,6 +44,7 @@ export interface BenchmarkConfig {
   decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
+  map?: MatchMapConfig;
 }
 
 export class BenchmarkOrchestrator {
@@ -138,6 +140,7 @@ export class BenchmarkOrchestrator {
       player1: llmSide === "player_1" ? this.config.llmConfig : cpuConfig,
       player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
       debug: this.config.debug,
+      map: this.config.map,
       runtime: {
         aiIntervalTicksByPlayer: {
           [llmSide]: 5,

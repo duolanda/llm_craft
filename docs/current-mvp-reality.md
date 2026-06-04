@@ -110,7 +110,7 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - 单位只保留 `worker` 和 `soldier`
 - 开局每方 `1 HQ + 2 Worker + 400 credits`
 - 胜负条件是摧毁敌方 `HQ`
-- 当前地图 `21 x 21`
+- 默认地图 `21 x 21`；实时对局和 benchmark 可在启动时设置地图宽高，服务端接受 `15` 到 `41` 之间的奇数尺寸
 - 当前没有战争迷雾
 - `worker` 自动采矿，回 HQ 周围 1 格自动交付
 - `barracks` 不能紧贴己方 `HQ`

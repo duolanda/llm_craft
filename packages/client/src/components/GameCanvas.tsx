@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { GameState, MAP_WIDTH, MAP_HEIGHT, PLAYER_COLORS, GAME_COLORS } from "@llmcraft/shared";
+import { GameState, PLAYER_COLORS, GAME_COLORS } from "@llmcraft/shared";
 
 interface GameCanvasProps {
   state: GameState | null;
@@ -9,10 +9,6 @@ const TILE_SIZE = 32;
 const AXIS_GUTTER = 24;
 const BOARD_OFFSET_X = AXIS_GUTTER;
 const BOARD_OFFSET_Y = AXIS_GUTTER;
-const BOARD_WIDTH = MAP_WIDTH * TILE_SIZE;
-const BOARD_HEIGHT = MAP_HEIGHT * TILE_SIZE;
-const CANVAS_WIDTH = BOARD_OFFSET_X + BOARD_WIDTH;
-const CANVAS_HEIGHT = BOARD_OFFSET_Y + BOARD_HEIGHT;
 
 const COLORS = {
   empty: GAME_COLORS.empty,
@@ -83,48 +79,54 @@ export function GameCanvas({ state }: GameCanvasProps) {
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const mapHeight = state.tiles.length;
+    const mapWidth = state.tiles[0]?.length ?? 0;
+    const boardWidth = mapWidth * TILE_SIZE;
+    const boardHeight = mapHeight * TILE_SIZE;
+    const canvasWidth = BOARD_OFFSET_X + boardWidth;
+    const canvasHeight = BOARD_OFFSET_Y + boardHeight;
 
     // 清除背景
     ctx.fillStyle = "#080a0c";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
     // 坐标轴底板
     ctx.fillStyle = "rgba(8, 10, 12, 0.98)";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, BOARD_OFFSET_Y);
-    ctx.fillRect(0, 0, BOARD_OFFSET_X, CANVAS_HEIGHT);
+    ctx.fillRect(0, 0, canvasWidth, BOARD_OFFSET_Y);
+    ctx.fillRect(0, 0, BOARD_OFFSET_X, canvasHeight);
 
     // 坐标数字
     ctx.fillStyle = "rgba(153, 182, 197, 0.85)";
     ctx.font = "11px 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    for (let x = 0; x < MAP_WIDTH; x++) {
+    for (let x = 0; x < mapWidth; x++) {
       ctx.fillText(String(x), BOARD_OFFSET_X + x * TILE_SIZE + TILE_SIZE / 2, BOARD_OFFSET_Y / 2);
     }
     ctx.textAlign = "right";
-    for (let y = 0; y < MAP_HEIGHT; y++) {
+    for (let y = 0; y < mapHeight; y++) {
       ctx.fillText(String(y), BOARD_OFFSET_X - 6, BOARD_OFFSET_Y + y * TILE_SIZE + TILE_SIZE / 2);
     }
 
     // 绘制 subtle 网格
     ctx.strokeStyle = "rgba(42, 52, 64, 0.35)";
     ctx.lineWidth = 1;
-    for (let x = 0; x <= MAP_WIDTH; x++) {
+    for (let x = 0; x <= mapWidth; x++) {
       ctx.beginPath();
       ctx.moveTo(BOARD_OFFSET_X + x * TILE_SIZE, BOARD_OFFSET_Y);
-      ctx.lineTo(BOARD_OFFSET_X + x * TILE_SIZE, CANVAS_HEIGHT);
+      ctx.lineTo(BOARD_OFFSET_X + x * TILE_SIZE, canvasHeight);
       ctx.stroke();
     }
-    for (let y = 0; y <= MAP_HEIGHT; y++) {
+    for (let y = 0; y <= mapHeight; y++) {
       ctx.beginPath();
       ctx.moveTo(BOARD_OFFSET_X, BOARD_OFFSET_Y + y * TILE_SIZE);
-      ctx.lineTo(CANVAS_WIDTH, BOARD_OFFSET_Y + y * TILE_SIZE);
+      ctx.lineTo(canvasWidth, BOARD_OFFSET_Y + y * TILE_SIZE);
       ctx.stroke();
     }
 
     // 绘制地块
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
+    for (let y = 0; y < mapHeight; y++) {
+      for (let x = 0; x < mapWidth; x++) {
         const tile = state.tiles[y]?.[x];
         if (tile?.type === "resource") {
           ctx.fillStyle = COLORS.resource;
@@ -375,8 +377,8 @@ export function GameCanvas({ state }: GameCanvasProps) {
   return (
     <canvas
       ref={canvasRef}
-      width={CANVAS_WIDTH}
-      height={CANVAS_HEIGHT}
+      width={BOARD_OFFSET_X + (state?.tiles[0]?.length ?? 21) * TILE_SIZE}
+      height={BOARD_OFFSET_Y + (state?.tiles.length ?? 21) * TILE_SIZE}
     />
   );
 }

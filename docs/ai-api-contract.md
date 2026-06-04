@@ -111,6 +111,10 @@ interface TestLLMPresetResponse {
   "debug": {
     "recordLLMTranscript": true
   },
+  "map": {
+    "width": 21,
+    "height": 21
+  },
   "warmup": {
     "player_1": true,
     "player_2": false
@@ -123,6 +127,7 @@ interface TestLLMPresetResponse {
 - 红蓝双方必须都选择预设
 - 服务端会按两个 preset 创建或复用一套待开战 orchestrator
 - `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
+- `map` 可选；默认 `21 x 21`，服务端接受 `15` 到 `41` 之间的奇数宽高
 - `warmup.player_1/player_2 = true` 时，对应模型会在游戏 tick 启动前先收到首个真实 `AgentRunInput + tools` 请求。服务端只等待模型返回第一条 assistant message；如果该 message 包含 tool calls，会先挂起，不执行工具、不返回 tool result。
 - 服务端会发送 `prepare_status`，告知前端准备中、已准备或失败。用户仍需另外发送 `start` 才会启动游戏时间。
 
@@ -135,6 +140,10 @@ interface TestLLMPresetResponse {
   "player2PresetId": "preset-blue",
   "debug": {
     "recordLLMTranscript": true
+  },
+  "map": {
+    "width": 21,
+    "height": 21
   }
 }
 ```
@@ -153,6 +162,10 @@ interface TestLLMPresetResponse {
   "player2PresetId": "preset-blue",
   "debug": {
     "recordLLMTranscript": true
+  },
+  "map": {
+    "width": 21,
+    "height": 21
   }
 }
 ```
@@ -275,6 +288,10 @@ interface ServerRecordSavedMessage {
   "concurrency": 4,
   "recordReplay": true,
   "decisionIntervalTicks": 10,
+  "map": {
+    "width": 21,
+    "height": 21
+  },
   "debug": {
     "recordLLMTranscript": false
   }

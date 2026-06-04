@@ -83,6 +83,8 @@ export class UnitManager {
     tiles?: TileType[][],
     blockedPositions?: Set<string>
   ): ResultCode {
+    const mapHeight = tiles?.length ?? MAP_HEIGHT;
+    const mapWidth = tiles?.[0]?.length ?? MAP_WIDTH;
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -93,7 +95,7 @@ export class UnitManager {
     }
 
     // Check map bounds
-    if (targetX < 0 || targetX >= MAP_WIDTH || targetY < 0 || targetY >= MAP_HEIGHT) {
+    if (targetX < 0 || targetX >= mapWidth || targetY < 0 || targetY >= mapHeight) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
@@ -188,6 +190,8 @@ export class UnitManager {
     blockedPositions?: Set<string>,
     keepResolvedTargetWhenAlreadyThere = false
   ): ResultCode {
+    const mapHeight = tiles.length;
+    const mapWidth = tiles[0]?.length ?? 0;
     if (!unit.exists) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -199,9 +203,9 @@ export class UnitManager {
     // 检查目标点是否合法
     if (
       targetX < 0 ||
-      targetX >= MAP_WIDTH ||
+      targetX >= mapWidth ||
       targetY < 0 ||
-      targetY >= MAP_HEIGHT
+      targetY >= mapHeight
     ) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
@@ -339,9 +343,11 @@ export class UnitManager {
   ): { x: number; y: number } | null {
     const candidates: Array<{ x: number; y: number; radius: number; pathLength: number; unitDistance: number }> = [];
 
-    for (let radius = 0; radius <= MAP_WIDTH + MAP_HEIGHT; radius++) {
-      for (let y = Math.max(0, requestedY - radius); y <= Math.min(MAP_HEIGHT - 1, requestedY + radius); y++) {
-        for (let x = Math.max(0, requestedX - radius); x <= Math.min(MAP_WIDTH - 1, requestedX + radius); x++) {
+    const mapHeight = tiles.length;
+    const mapWidth = tiles[0]?.length ?? 0;
+    for (let radius = 0; radius <= mapWidth + mapHeight; radius++) {
+      for (let y = Math.max(0, requestedY - radius); y <= Math.min(mapHeight - 1, requestedY + radius); y++) {
+        for (let x = Math.max(0, requestedX - radius); x <= Math.min(mapWidth - 1, requestedX + radius); x++) {
           if (Math.abs(x - requestedX) + Math.abs(y - requestedY) !== radius) {
             continue;
           }

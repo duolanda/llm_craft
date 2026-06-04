@@ -47,6 +47,26 @@ pnpm --filter @llmcraft/server test -- src/__tests__/Game.test.ts
 pnpm --filter @llmcraft/server test -- --grep "Game"
 ```
 
+### 分析保存的对局录像
+
+排查 `packages/server/logs/records/*.json` 时，优先使用内置分析脚本，不要先临时手写解析器：
+
+```bash
+# 总览：经济、命令、结果、胜负
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.json
+
+# 关键时间线：总部压力、掉血、技能、关键命令
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.json --timeline
+
+# 指定 tick 快照，适合复盘某次交战
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.json --snapshots "54,59,62,82" --focus player_1
+
+# 分析一次性命令/技能释放时机
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.json --skill <command_type> --focus player_1
+```
+
+当怀疑模型“反应慢”时，先对齐：敌军进入 HQ 5/3/2 格的 tick、HQ 首次掉血 tick、关键技能成功 tick、HQ 死亡 tick。`aiTurns` 为空的旧记录只能反推行为，不能还原模型原文和工具调用链。
+
 ## 架构概览
 
 ###  monorepo 结构

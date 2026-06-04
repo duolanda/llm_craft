@@ -1,6 +1,7 @@
 import {
   Unit,
   UnitIntent,
+  UnitStatusEffect,
   Building,
   Player,
   PlayerId,
@@ -66,6 +67,11 @@ type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
 };
 
 const STARTING_CREDITS = 400;
+const CALL_TO_ARMS_ACTIVE_TICKS = 20;
+const CALL_TO_ARMS_FATIGUE_TICKS = 40;
+const CALL_TO_ARMS_WORKER_ATTACK = 8;
+const CALL_TO_ARMS_WORKER_ATTACK_RANGE = 1;
+const CALL_TO_ARMS_GATHER_RATE_MULTIPLIER = 0.5;
 
 export class Game {
   private tick = 0;
@@ -80,6 +86,10 @@ export class Game {
   private winner: PlayerId | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
+  private callToArmsUsed: Record<PlayerId, boolean> = {
+    player_1: false,
+    player_2: false,
+  };
 
   constructor() {
     this.initializeGame();
@@ -669,6 +679,80 @@ export class Game {
         break;
       }
 
+      case "call_to_arms": {
+        if (this.callToArmsUsed[command.playerId]) {
+          this.addLog(
+            LOG_TYPES.COMMAND_RESULT,
+            "Call to Arms failed: already used",
+            {
+              command,
+              result_code: RESULT_CODES.ERR_BUSY,
+              type: RESULT_TYPES.CALL_TO_ARMS_ALREADY_USED,
+              result_data: {
+                hint: "Call to Arms can only be successfully activated once per player per match.",
+              },
+            },
+            {
+              owner: command.playerId,
+              feedbackTarget: command.playerId,
+              level: LOG_LEVELS.WARNING,
+            }
+          );
+          break;
+        }
+
+        const workers = this.unitManager
+          .getUnitsByPlayer(command.playerId)
+          .filter((unit) => unit.type === UNIT_TYPES.WORKER && unit.exists);
+        if (workers.length === 0) {
+          this.addLog(
+            LOG_TYPES.COMMAND_RESULT,
+            "Call to Arms failed: no living workers",
+            {
+              command,
+              result_code: RESULT_CODES.ERR_INVALID_TARGET,
+              type: RESULT_TYPES.CALL_TO_ARMS_NO_WORKERS,
+              result_data: {
+                hint: "Call to Arms only affects workers that are alive at activation time.",
+              },
+            },
+            {
+              owner: command.playerId,
+              feedbackTarget: command.playerId,
+              level: LOG_LEVELS.WARNING,
+            }
+          );
+          break;
+        }
+
+        const activeUntilTick = this.tick + CALL_TO_ARMS_ACTIVE_TICKS;
+        const fatigueUntilTick = this.tick + CALL_TO_ARMS_FATIGUE_TICKS;
+        this.callToArmsUsed[command.playerId] = true;
+        for (const worker of workers) {
+          this.applyCallToArms(worker, activeUntilTick, fatigueUntilTick);
+        }
+
+        this.addLog(
+          LOG_TYPES.COMMAND_RESULT,
+          `Call to Arms activated for ${workers.length} workers`,
+          {
+            command,
+            result_code: RESULT_CODES.OK,
+            type: RESULT_TYPES.CALL_TO_ARMS_SUCCESS,
+            result_data: {
+              affectedWorkerIds: workers.map((worker) => worker.id),
+              activeUntilTick,
+              fatigueUntilTick,
+            },
+          },
+          {
+            owner: command.playerId,
+            feedbackTarget: command.playerId,
+          }
+        );
+        break;
+      }
+
       case "spawn": {
         if (command.buildingId && command.unitType) {
           const building = this.buildingManager.getBuilding(command.buildingId);
@@ -906,15 +990,42 @@ export class Game {
     }
 
     const distance = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
-    if (distance > attacker.attackRange) {
+    if (distance > this.getUnitAttackRange(attacker)) {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = UNIT_STATS[attacker.type].attack;
+    const damage = this.getUnitAttackDamage(attacker);
     this.buildingManager.takeDamage(target, damage);
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
     attacker.lastAttackTick = this.tick;
+
+    return RESULT_CODES.OK;
+  }
+
+  private attackUnit(attacker: RuntimeUnit, target: Unit): ResultCode {
+    if (!attacker.exists || !target.exists) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (attacker.playerId === target.playerId) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    const distance = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
+    if (distance > this.getUnitAttackRange(attacker)) {
+      return RESULT_CODES.ERR_NOT_IN_RANGE;
+    }
+
+    const damage = this.getUnitAttackDamage(attacker);
+    target.hp -= damage;
+    attacker.state = UNIT_STATES.ATTACKING;
+    attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
+
+    if (target.hp <= 0) {
+      target.hp = 0;
+      target.exists = false;
+    }
 
     return RESULT_CODES.OK;
   }
@@ -929,7 +1040,7 @@ export class Game {
     }
 
     const targetUnit = target as RuntimeUnit;
-    const result = this.unitManager.attackUnit(attacker, targetUnit);
+    const result = this.attackUnit(attacker, targetUnit);
     if (result === RESULT_CODES.OK) {
       this.processUnitRetaliation(targetUnit, attacker);
     }
@@ -941,7 +1052,7 @@ export class Game {
       return;
     }
 
-    const result = this.unitManager.attackUnit(defender, attacker);
+    const result = this.attackUnit(defender, attacker);
     if (result === RESULT_CODES.OK) {
       this.unitManager.clearPath(defender);
       defender.lastAttackTick = this.tick;
@@ -954,8 +1065,8 @@ export class Game {
       !attacker.exists ||
       defender.playerId === attacker.playerId ||
       defender.lastAttackTick === this.tick ||
-      UNIT_STATS[defender.type].attack <= 0 ||
-      defender.attackRange <= 0
+      this.getUnitAttackDamage(defender) <= 0 ||
+      this.getUnitAttackRange(defender) <= 0
     ) {
       return false;
     }
@@ -968,7 +1079,7 @@ export class Game {
       return false;
     }
 
-    return this.getChebyshevDistance(defender, attacker) <= defender.attackRange;
+    return this.getChebyshevDistance(defender, attacker) <= this.getUnitAttackRange(defender);
   }
 
   private getChebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
@@ -1108,6 +1219,78 @@ export class Game {
     }
   }
 
+  private applyCallToArms(worker: Unit, activeUntilTick: number, fatigueUntilTick: number): void {
+    const existing = worker.statusEffects?.filter(
+      (effect) => effect.type !== "call_to_arms" && effect.type !== "call_to_arms_fatigue"
+    ) ?? [];
+    worker.statusEffects = [
+      ...existing,
+      {
+        type: "call_to_arms",
+        expiresTick: activeUntilTick,
+        attack: CALL_TO_ARMS_WORKER_ATTACK,
+        attackRange: CALL_TO_ARMS_WORKER_ATTACK_RANGE,
+      },
+      {
+        type: "call_to_arms_fatigue",
+        expiresTick: fatigueUntilTick,
+        gatherRateMultiplier: CALL_TO_ARMS_GATHER_RATE_MULTIPLIER,
+      },
+    ];
+    worker.attackRange = CALL_TO_ARMS_WORKER_ATTACK_RANGE;
+  }
+
+  private expireUnitStatusEffects(): void {
+    for (const unit of this.unitManager.getAllUnits()) {
+      if (!unit.statusEffects?.length) {
+        continue;
+      }
+
+      unit.statusEffects = unit.statusEffects.filter((effect) => effect.expiresTick > this.tick);
+      if (unit.statusEffects.length === 0) {
+        unit.statusEffects = undefined;
+      }
+
+      if (!this.getActiveCallToArms(unit)) {
+        unit.attackRange = UNIT_STATS[unit.type].attackRange;
+      }
+    }
+  }
+
+  private getActiveCallToArms(unit: Unit): Extract<UnitStatusEffect, { type: "call_to_arms" }> | null {
+    return (
+      unit.statusEffects?.find(
+        (effect): effect is Extract<UnitStatusEffect, { type: "call_to_arms" }> =>
+          effect.type === "call_to_arms" && effect.expiresTick > this.tick
+      ) ?? null
+    );
+  }
+
+  private getActiveCallToArmsFatigue(
+    unit: Unit
+  ): Extract<UnitStatusEffect, { type: "call_to_arms_fatigue" }> | null {
+    return (
+      unit.statusEffects?.find(
+        (effect): effect is Extract<UnitStatusEffect, { type: "call_to_arms_fatigue" }> =>
+          effect.type === "call_to_arms_fatigue" && effect.expiresTick > this.tick
+      ) ?? null
+    );
+  }
+
+  private getUnitAttackDamage(unit: Unit): number {
+    return this.getActiveCallToArms(unit)?.attack ?? UNIT_STATS[unit.type].attack;
+  }
+
+  private getUnitAttackRange(unit: Unit): number {
+    return this.getActiveCallToArms(unit)?.attackRange ?? unit.attackRange;
+  }
+
+  private getWorkerGatherRate(worker: Unit): number {
+    const fatigue = this.getActiveCallToArmsFatigue(worker);
+    const multiplier = fatigue?.gatherRateMultiplier ?? 1;
+    return Math.max(1, Math.floor(ECONOMY_RULES.WORKER_GATHER_RATE * multiplier));
+  }
+
   private processHarvestLoopIntents(): void {
     for (const unit of this.unitManager.getAllUnits()) {
       const runtimeUnit = unit as RuntimeUnit;
@@ -1189,13 +1372,18 @@ export class Game {
     const enemyUnits = this.unitManager
       .getAllUnits()
       .filter((unit) => unit.exists && unit.playerId !== playerId)
-      .filter((unit) => Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <= attacker.attackRange);
+      .filter(
+        (unit) =>
+          Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <=
+          this.getUnitAttackRange(attacker)
+      );
     const enemyBuildings = this.buildingManager
       .getAllBuildings()
       .filter((building) => building.exists && building.playerId !== playerId)
       .filter(
         (building) =>
-          Math.max(Math.abs(attacker.x - building.x), Math.abs(attacker.y - building.y)) <= attacker.attackRange
+          Math.max(Math.abs(attacker.x - building.x), Math.abs(attacker.y - building.y)) <=
+          this.getUnitAttackRange(attacker)
       );
 
     const fallbackUnits = enemyUnits.sort((a, b) => a.id.localeCompare(b.id));
@@ -1300,6 +1488,8 @@ export class Game {
 
       // Process commands
       this.processCommands();
+
+      this.expireUnitStatusEffects();
 
       // Process unit path movement (自动寻路移动)
       const blockedPositions = this.buildingManager.getOccupiedPositions();
@@ -1425,6 +1615,25 @@ export class Game {
     return this.winner;
   }
 
+  getCallToArmsStatus(playerId: PlayerId): {
+    used: boolean;
+    activeWorkerIds: string[];
+    fatiguedWorkerIds: string[];
+  } {
+    const workers = this.unitManager
+      .getUnitsByPlayer(playerId)
+      .filter((unit) => unit.type === UNIT_TYPES.WORKER && unit.exists);
+    return {
+      used: this.callToArmsUsed[playerId],
+      activeWorkerIds: workers
+        .filter((worker) => this.getActiveCallToArms(worker))
+        .map((worker) => worker.id),
+      fatiguedWorkerIds: workers
+        .filter((worker) => this.getActiveCallToArmsFatigue(worker))
+        .map((worker) => worker.id),
+    };
+  }
+
   isGameRunning(): boolean {
     return this.isRunning;
   }
@@ -1469,7 +1678,7 @@ export class Game {
 
         if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
           const gatheredCredits = Math.min(
-            ECONOMY_RULES.WORKER_GATHER_RATE,
+            this.getWorkerGatherRate(unit),
             unit.carryCapacity - unit.carryingCredits
           );
 

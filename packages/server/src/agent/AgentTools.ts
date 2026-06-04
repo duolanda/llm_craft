@@ -182,6 +182,13 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     execute: (bridge, args) => bridge.holdUnit(String(args.unitId)),
   },
   {
+    name: "call_to_arms",
+    description:
+      'Use the once-per-match emergency militia ability. If you see "Alert: our HQ is under attack." and this ability is available, call it immediately before further scouting or normal commands. It affects only workers alive when activated: they temporarily gain melee attack capability, then suffer reduced mining output for 40 ticks.',
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: (bridge) => bridge.callToArms(),
+  },
+  {
     name: "spawn_agent",
     description: [
       "Spawn a background sub-agent to execute a localized task that you have already decomposed from the overall plan.",

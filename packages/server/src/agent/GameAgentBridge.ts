@@ -71,6 +71,7 @@ export class GameAgentBridge {
   private readonly planToolHandlers: PlanToolHandlers;
   private targetMemory = new Map<string, CachedEnemyTarget>();
   private attackOrders = new Map<string, { unitId: string; targetId: string }>();
+  private pendingCallToArms = false;
 
   constructor(private readonly game: Game, private readonly playerId: PlayerId) {
     this.planToolHandlers = this.createPlanToolHandlers();
@@ -81,6 +82,7 @@ export class GameAgentBridge {
     this.issuedCommands = [];
     this.runPlanRecords = [];
     this.lastReadTick = null;
+    this.pendingCallToArms = false;
   }
 
   beginToolCall(): void {
@@ -409,6 +411,7 @@ export class GameAgentBridge {
         canBuildBarracks: me.resources.credits >= BUILDING_STATS.barracks.cost,
         canSpawnWorker: me.resources.credits >= UNIT_STATS.worker.cost,
         canSpawnSoldier: me.resources.credits >= UNIT_STATS.soldier.cost,
+        callToArms: this.game.getCallToArmsStatus(this.playerId),
       },
     };
   }
@@ -489,7 +492,7 @@ export class GameAgentBridge {
       });
     }
 
-    if (UNIT_STATS[unit.type].attack <= 0) {
+    if (!this.canUnitAttack(unit)) {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
@@ -535,11 +538,11 @@ export class GameAgentBridge {
       });
     }
 
-    if (UNIT_STATS[attacker.type].attack <= 0) {
+    if (!this.canUnitAttack(attacker)) {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier.",
+        hint: "Choose a friendly unit with attack capability, such as a soldier, or activate Call to Arms before ordering workers to attack.",
       });
     }
 
@@ -743,6 +746,39 @@ export class GameAgentBridge {
     };
   }
 
+  callToArms(): ExecutedToolResult {
+    const status = this.game.getCallToArmsStatus(this.playerId);
+    if (status.used || this.pendingCallToArms) {
+      return this.actionResult({
+        ok: false,
+        error: "call_to_arms_already_used",
+        hint: "Call to Arms can only be successfully activated once per player per match.",
+      });
+    }
+
+    const state = this.game.getState();
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const affectedWorkers = me.units.filter((unit) => unit.exists && unit.type === UNIT_TYPES.WORKER);
+    if (affectedWorkers.length === 0) {
+      return this.actionResult({
+        ok: false,
+        error: "call_to_arms_no_workers",
+        hint: "Call to Arms only affects workers that are alive now.",
+      });
+    }
+
+    this.pendingCallToArms = true;
+    const command = this.enqueue(this.createCommand("call_to_arms", {}));
+    return {
+      effect: "action",
+      result: this.withActionMetadata({
+        ok: true,
+        commandId: command.id,
+        affectedWorkerIds: affectedWorkers.map((worker) => worker.id),
+      }),
+    };
+  }
+
   orchestratePlan(input: OrchestratePlanInput): ExecutedToolResult {
     const validated = this.validatePlanInput(input);
     if (!validated.ok) {
@@ -891,7 +927,7 @@ export class GameAgentBridge {
     const commands: Command[] = [];
     for (const [unitId, order] of this.attackOrders) {
       const unit = this.getFriendlyUnit(unitId);
-      if (!unit || UNIT_STATS[unit.type].attack <= 0) {
+      if (!unit || !this.canUnitAttack(unit)) {
         this.attackOrders.delete(unitId);
         continue;
       }
@@ -918,7 +954,9 @@ export class GameAgentBridge {
 
     const target = this.getEnemyTarget(targetId);
     if (target) {
-      const inRange = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y)) <= attacker.attackRange;
+      const inRange =
+        Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y)) <=
+        this.getUnitAttackRange(attacker);
       if (inRange) {
         return {
           ok: true,
@@ -1203,5 +1241,29 @@ export class GameAgentBridge {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null;
+  }
+
+  private canUnitAttack(unit: { type: string; statusEffects?: Array<{ type: string; expiresTick: number }> }): boolean {
+    return (
+      unit.type === UNIT_TYPES.SOLDIER ||
+      this.hasActiveCallToArms(unit) ||
+      (this.pendingCallToArms && unit.type === UNIT_TYPES.WORKER)
+    );
+  }
+
+  private getUnitAttackRange(unit: { attackRange: number; type: string; statusEffects?: Array<Record<string, unknown>> }): number {
+    const callToArms = unit.statusEffects?.find(
+      (effect) => effect.type === "call_to_arms" && typeof effect.expiresTick === "number" && effect.expiresTick > this.game.getTick()
+    );
+    if (callToArms && typeof callToArms.attackRange === "number") {
+      return callToArms.attackRange;
+    }
+    return this.pendingCallToArms && unit.type === UNIT_TYPES.WORKER ? 1 : unit.attackRange;
+  }
+
+  private hasActiveCallToArms(unit: { statusEffects?: Array<{ type: string; expiresTick: number }> }): boolean {
+    return Boolean(
+      unit.statusEffects?.some((effect) => effect.type === "call_to_arms" && effect.expiresTick > this.game.getTick())
+    );
   }
 }

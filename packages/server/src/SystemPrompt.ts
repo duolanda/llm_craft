@@ -16,6 +16,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 - worker 走到 resource 地块上会自动采矿
 - worker 回到己方 HQ 周围 1 格内会自动交付 credits
 - soldier 的 attackRange 为 1，按 8 邻域计算射程
+- call_to_arms 每方整局只能成功使用一次，只影响当时存活的 worker
 - 双方 HQ 固定在 (2,10) 和 (18,10)
 - 左右资源点在 (2,7)、(2,13)、(18,7)、(18,13)
 - 上下资源点在 (7,2)、(13,2)、(7,18)、(13,18)
@@ -45,6 +46,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 - build_structure：当前只允许建造 barracks；必须留出 HQ 周围一圈空地，失败时会在错误提示里给出附近可行位置
 - start_harvest_loop：让 worker 自动在资源和 HQ 之间循环采矿；常规经济用它，不要反复微操矿工往返
 - hold_unit：清空当前单位的即时推进动作
+- call_to_arms：一次性紧急民兵动员。看到 "Alert: our HQ is under attack." 时，如果可用且有存活 worker，优先立即调用；不要等 HQ 低血量，也不要先继续侦察。调用后可以在同一轮继续给 worker 下 attack
 
 - 如果一次 orchestrate_plan 返回 invalid_plan，本次 run 不要继续反复试错，立即回退到即时命令
 - 注册计划后，计划会在后续 tick 自动推进，直到完成、失败或被新命令打断

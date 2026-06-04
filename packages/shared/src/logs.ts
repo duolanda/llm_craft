@@ -87,6 +87,11 @@ export const RESULT_TYPES = {
   HOLD_SUCCESS: "hold_success",
   HARVEST_LOOP_SUCCESS: "harvest_loop_success",
 
+  // 技能相关
+  CALL_TO_ARMS_SUCCESS: "call_to_arms_success",
+  CALL_TO_ARMS_ALREADY_USED: "call_to_arms_already_used",
+  CALL_TO_ARMS_NO_WORKERS: "call_to_arms_no_workers",
+
   // 通用错误
   INVALID_UNIT: "invalid_unit",
   COMMAND_CRASHED: "command_crashed",
@@ -171,6 +176,17 @@ export interface CommandResultExtraDataMap {
   [RESULT_TYPES.HARVEST_LOOP_SUCCESS]: {
     targetX: number;
     targetY: number;
+  };
+  [RESULT_TYPES.CALL_TO_ARMS_SUCCESS]: {
+    affectedWorkerIds: string[];
+    activeUntilTick: number;
+    fatigueUntilTick: number;
+  };
+  [RESULT_TYPES.CALL_TO_ARMS_ALREADY_USED]: {
+    hint: string;
+  };
+  [RESULT_TYPES.CALL_TO_ARMS_NO_WORKERS]: {
+    hint: string;
   };
   [RESULT_TYPES.INVALID_UNIT]: {
     unitId: string;

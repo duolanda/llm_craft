@@ -29,6 +29,7 @@ const EVENT_TYPE_LABELS: Record<MatchDiagnosticReport["timeline"][number]["type"
   read_tool: "读取工具",
   action_tool: "行动工具",
   combat_command: "战斗命令",
+  call_to_arms: "民兵动员",
   invalid_unit: "失效单位",
   spawn: "生产",
   unit_death: "单位阵亡",
@@ -396,6 +397,7 @@ function buildFlowEvents(report: MatchDiagnosticReport, player: PlayerDiagnostic
   addFlowEvent(events, timelineAfterPressure.find((event) => event.type === "llm_request")?.tick ?? null, "模型请求", "压力出现后的首次 LLM 请求", "decision");
   addFlowEvent(events, timelineAfterPressure.find((event) => event.type === "read_tool")?.tick ?? null, "读取状态", "压力出现后的首次状态读取", "decision");
   addFlowEvent(events, timelineAfterPressure.find((event) => event.type === "action_tool")?.tick ?? null, "执行工具", "压力出现后的首次行动工具", "action");
+  addFlowEvent(events, timelineAfterPressure.find((event) => event.type === "call_to_arms")?.tick ?? null, "民兵动员", "压力出现后的民兵动员技能释放", "action");
   addFlowEvent(events, player.firstCombatCommandTick, "战斗命令", "第一次出现 attack / attack_move 等战斗命令", "action");
   addFlowEvent(events, player.firstDefensiveCommandTick, "防守命令", "第一次出现靠近总部压力区的防守动作", "action");
   addFlowEvent(events, player.hqDeathTick, "总部被毁", "总部归零，本方失败", "death");
@@ -528,6 +530,7 @@ function PlayerCard({ player }: { player: PlayerDiagnostic }) {
         <Metric label="总部被摧毁" value={formatTick(player.hqDeathTick)} />
         <Metric label="首次战斗命令" value={formatTick(player.firstCombatCommandTick)} />
         <Metric label="首次防守命令" value={formatTick(player.firstDefensiveCommandTick)} detail={defenseLag === null ? undefined : `延迟 ${defenseLag} tick`} />
+        <Metric label="民兵动员" value={formatTick(player.callToArmsTick)} detail={formatCallToArmsMetric(player)} />
         <Metric label="受压后模型请求" value={String(player.modelRequestsAfterPressure)} />
         <Metric label="受压后工具调用" value={String(player.toolCallsAfterPressure)} detail={`${player.readToolCallsAfterPressure} 次读取 / ${player.actionToolCallsAfterPressure} 次行动`} />
         <Metric label="受压后失效单位" value={String(player.invalidUnitAfterPressureCount)} />
@@ -555,6 +558,23 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
 
 function formatTick(tick: number | null) {
   return tick === null ? "从未发生" : `T${tick}`;
+}
+
+function formatCallToArmsMetric(player: PlayerDiagnostic) {
+  if (player.callToArmsTick === null) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  if (player.callToArmsAffectedWorkers !== null) {
+    parts.push(`${player.callToArmsAffectedWorkers} 个工人`);
+  }
+  if (player.callToArmsHqHp !== null) {
+    parts.push(`HQ ${player.callToArmsHqHp} HP`);
+  }
+  if (player.callToArmsDeathLag !== null) {
+    parts.push(`距毁灭 ${player.callToArmsDeathLag} tick`);
+  }
+  return parts.join(" / ");
 }
 
 function formatStatus(status: string) {

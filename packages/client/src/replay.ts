@@ -62,6 +62,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
       intent: change.intent ?? undefined,
+      statusEffects: change.statusEffects ?? undefined,
     };
     player.units.push(createdUnit);
     return;
@@ -80,6 +81,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
+    statusEffects: "statusEffects" in change ? change.statusEffects : current.statusEffects,
   };
 }
 

@@ -459,6 +459,11 @@ h/b/s/w enemy hq/barracks/soldier/worker
   canBuildBarracks: boolean;
   canSpawnWorker: boolean;
   canSpawnSoldier: boolean;
+  callToArms: {
+    used: boolean;
+    activeWorkerIds: string[];
+    fatiguedWorkerIds: string[];
+  };
 }
 ```
 
@@ -471,6 +476,14 @@ h/b/s/w enemy hq/barracks/soldier/worker
   tick: number;
   units: Array<Unit & { hasActivePlan: boolean }>;
 }
+```
+
+`Unit` 可能包含 `statusEffects`。当前可见状态效果：
+
+```ts
+type UnitStatusEffect =
+  | { type: "call_to_arms"; expiresTick: number; attack: number; attackRange: number }
+  | { type: "call_to_arms_fatigue"; expiresTick: number; gatherRateMultiplier: number };
 ```
 
 #### `get_active_plans`
@@ -601,6 +614,21 @@ h/b/s/w enemy hq/barracks/soldier/worker
   unitId: string;
 }
 ```
+
+#### `call_to_arms`
+
+```ts
+{}
+```
+
+说明：
+
+- 每方整局只能成功使用一次
+- 只影响激活瞬间仍存活的己方 `worker`
+- 受影响 worker 会临时获得近战攻击能力；可以在同一个 agent run 中先调用 `call_to_arms`，再立刻对这些 worker 调用 `attack`
+- 代价是受影响 worker 在 `40 tick` 内采矿效率降低
+- 新生产或之后出现的 worker 不会获得该效果
+- 这是关键转折技能，不是推荐开局动作，也不会由服务端自动触发
 
 这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。
 
@@ -858,7 +886,7 @@ Call an agent tool on behalf of the session's player. Control plane 只暴露可
 
 Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_active_plans`, `get_recent_events`
 
-Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
+Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`, `call_to_arms`
 
 Plan tool: `orchestrate_plan`
 

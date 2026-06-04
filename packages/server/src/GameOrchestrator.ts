@@ -619,6 +619,7 @@ export class GameOrchestrator {
           carryingCredits: unit.carryingCredits,
           carryCapacity: unit.carryCapacity,
           intent: unit.intent ?? null,
+          statusEffects: unit.statusEffects ?? [],
         });
         continue;
       }
@@ -629,7 +630,8 @@ export class GameOrchestrator {
       const updated =
         previousUnit.state !== unit.state ||
         carryingChanged ||
-        JSON.stringify(previousUnit.intent ?? null) !== JSON.stringify(unit.intent ?? null);
+        JSON.stringify(previousUnit.intent ?? null) !== JSON.stringify(unit.intent ?? null) ||
+        JSON.stringify(previousUnit.statusEffects ?? []) !== JSON.stringify(unit.statusEffects ?? []);
 
       if (moved || damaged || updated) {
         changes.push({
@@ -645,6 +647,7 @@ export class GameOrchestrator {
           carryingCredits: unit.carryingCredits,
           carryCapacity: unit.carryCapacity,
           intent: unit.intent ?? null,
+          statusEffects: unit.statusEffects ?? [],
         });
       }
     }

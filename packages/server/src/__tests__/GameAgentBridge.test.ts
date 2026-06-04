@@ -312,6 +312,29 @@ describe("GameAgentBridge", () => {
     game.stop();
   });
 
+  it("lets a run queue Call to Arms and then order a worker attack", () => {
+    const game = new Game();
+    game.start();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const enemy = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, worker.x + 1, worker.y, "player_2");
+
+    const callResult = bridge.callToArms();
+    const attackResult = bridge.attackTarget(worker.id, enemy.id);
+
+    expect(callResult.result).toMatchObject({ ok: true });
+    expect(attackResult.result).toMatchObject({ ok: true, mode: "attack" });
+    expect(bridge.takeIssuedCommands()).toEqual([
+      expect.objectContaining({ type: "call_to_arms" }),
+      expect.objectContaining({ type: "attack", unitId: worker.id, targetId: enemy.id }),
+    ]);
+
+    game.tickUpdate();
+    game.stop();
+
+    expect(enemy.hp).toBe(enemy.maxHp - 8);
+  });
+
   it("queues high-level attack as movement until the target is in range", () => {
     const game = new Game();
     game.start();

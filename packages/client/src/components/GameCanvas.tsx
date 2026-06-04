@@ -225,6 +225,14 @@ export function GameCanvas({ state }: GameCanvasProps) {
         ctx.lineWidth = 1;
         ctx.stroke();
 
+        if (unit.statusEffects?.some((effect) => effect.type === "call_to_arms")) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, TILE_SIZE / 3 + 2, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(255, 213, 79, 0.95)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
         // 血条背景
         ctx.fillStyle = "#1a2028";
         ctx.fillRect(ux + 4, uy - 5, TILE_SIZE - 8, 4);

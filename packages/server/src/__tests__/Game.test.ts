@@ -208,6 +208,114 @@ describe("Game", () => {
     expect(soldier.attackRange).toBe(1);
   });
 
+  it("activates Call to Arms for current living workers only", () => {
+    const unitManager = game.getUnitManager();
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = unitManager.getUnit(worker.id)!;
+
+    game.queueCommand({
+      id: "call_to_arms_once",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.type).toBe(RESULT_TYPES.CALL_TO_ARMS_SUCCESS);
+    expect(runtimeWorker.attackRange).toBe(1);
+    expect(runtimeWorker.statusEffects).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "call_to_arms", attack: 8, attackRange: 1 }),
+        expect.objectContaining({ type: "call_to_arms_fatigue", gatherRateMultiplier: 0.5 }),
+      ])
+    );
+
+    const lateWorker = unitManager.createUnit(UNIT_TYPES.WORKER, 5, 5, "player_1");
+    expect(lateWorker.attackRange).toBe(0);
+    expect(lateWorker.statusEffects).toBeUndefined();
+  });
+
+  it("allows militia workers to attack during Call to Arms", () => {
+    const unitManager = game.getUnitManager();
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const enemy = unitManager.createUnit(UNIT_TYPES.SOLDIER, worker.x + 1, worker.y, "player_2");
+
+    game.queueCommand({
+      id: "call_to_arms_before_attack",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.queueCommand({
+      id: "worker_attack_as_militia",
+      type: "attack",
+      unitId: worker.id,
+      targetId: enemy.id,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect(enemy.hp).toBe(enemy.maxHp - 8);
+  });
+
+  it("allows militia workers to retaliate with Call to Arms damage", () => {
+    const unitManager = game.getUnitManager();
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const enemy = unitManager.createUnit(UNIT_TYPES.SOLDIER, worker.x + 1, worker.y, "player_2");
+
+    game.queueCommand({
+      id: "call_to_arms_before_retaliation",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.queueCommand({
+      id: "enemy_attack_militia_worker",
+      type: "attack",
+      unitId: enemy.id,
+      targetId: worker.id,
+      playerId: "player_2",
+    });
+    game.processCommands();
+
+    expect(enemy.hp).toBe(enemy.maxHp - 8);
+  });
+
+  it("reduces affected worker gather rate during Call to Arms fatigue", () => {
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
+    runtimeWorker.x = 2;
+    runtimeWorker.y = 7;
+
+    game.queueCommand({
+      id: "call_to_arms_fatigue",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    expect(runtimeWorker.carryingCredits).toBe(5);
+  });
+
+  it("allows Call to Arms to succeed only once per player", () => {
+    game.queueCommand({
+      id: "call_to_arms_first",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    game.queueCommand({
+      id: "call_to_arms_second",
+      type: "call_to_arms",
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.type).toBe(RESULT_TYPES.CALL_TO_ARMS_ALREADY_USED);
+  });
+
   it("allows soldiers to attack diagonally adjacent targets", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");

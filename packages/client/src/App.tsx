@@ -9,8 +9,11 @@ import {
   MatchDebugOptions,
   MatchPrepareState,
   PlayerId,
+  RESULT_TYPES,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
+  LOG_TYPES,
+  CommandResultData,
 } from "@llmcraft/shared";
 import { GameCanvas } from "./components/GameCanvas";
 import { AIOutputPanel } from "./components/AIOutputPanel";
@@ -460,6 +463,7 @@ function App() {
   }, [mode, replayFrameIndex, replaySnapshots, snapshots]);
   const displayAITerminalEvents = mode === "replay" ? replayFrame?.terminalEvents ?? [] : aiTerminalEvents;
   const terminalAutoScroll = mode === "replay" ? replayPlaying : (isPlaying || benchmarkRunning);
+  const callToArmsBanner = useMemo(() => getRecentCallToArmsBanner(displayState), [displayState]);
 
   const replayProgress = replayFrames.length > 1
     ? replayFrameIndex / (replayFrames.length - 1)
@@ -800,6 +804,13 @@ function App() {
                 <span className="data-line dl-br" />
               </div>
               <div className="viewport">
+                {callToArmsBanner && (
+                  <div className={`battlefield-banner ${callToArmsBanner.playerId === "player_1" ? "red" : "cyan"}`}>
+                    <span className="battlefield-banner-kicker">CALL TO ARMS</span>
+                    <strong>{callToArmsBanner.playerName}发动民兵动员</strong>
+                    <span>{callToArmsBanner.affectedCount} 名工人进入战斗状态</span>
+                  </div>
+                )}
                 <GameCanvas state={displayState} />
               </div>
             </div>
@@ -923,6 +934,37 @@ function formatRoundList(rounds: number[]): string {
     return "";
   }
   return `第 ${rounds.join("、")} 局`;
+}
+
+function getRecentCallToArmsBanner(state: GameState | null): {
+  playerId: PlayerId;
+  playerName: string;
+  affectedCount: number;
+} | null {
+  if (!state) {
+    return null;
+  }
+
+  const log = [...state.logs].reverse().find((entry) => {
+    if (entry.type !== LOG_TYPES.COMMAND_RESULT || !entry.data) {
+      return false;
+    }
+    const data = entry.data as CommandResultData;
+    return data.type === RESULT_TYPES.CALL_TO_ARMS_SUCCESS && state.tick - entry.tick <= 24;
+  });
+
+  if (!log) {
+    return null;
+  }
+
+  const data = log.data as CommandResultData;
+  const resultData = data.result_data as { affectedWorkerIds?: string[] } | undefined;
+  const playerId = log.meta.owner === "player_2" ? "player_2" : "player_1";
+  return {
+    playerId,
+    playerName: playerId === "player_1" ? "红方" : "蓝方",
+    affectedCount: resultData?.affectedWorkerIds?.length ?? 0,
+  };
 }
 
 function getPrepareStatusClass(status: MatchPrepareState | undefined): string {

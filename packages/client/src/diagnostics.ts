@@ -38,6 +38,7 @@ export interface DiagnosticTimelineEvent {
     | "read_tool"
     | "action_tool"
     | "combat_command"
+    | "call_to_arms"
     | "invalid_unit"
     | "spawn"
     | "unit_death";
@@ -53,6 +54,10 @@ export interface PlayerDiagnostic {
   hqDeathTick: number | null;
   firstDefensiveCommandTick: number | null;
   firstCombatCommandTick: number | null;
+  callToArmsTick: number | null;
+  callToArmsAffectedWorkers: number | null;
+  callToArmsHqHp: number | null;
+  callToArmsDeathLag: number | null;
   modelRequestsAfterPressure: number;
   toolCallsAfterPressure: number;
   readToolCallsAfterPressure: number;
@@ -126,10 +131,11 @@ const ACTION_TOOL_NAMES = new Set([
   "build_structure",
   "start_harvest_loop",
   "hold_unit",
+  "call_to_arms",
   "orchestrate_plan",
 ]);
 const COMBAT_COMMANDS = new Set(["attack", "attack_in_range", "attack_move"]);
-const ACTION_COMMANDS = new Set(["move", "attack", "attack_in_range", "attack_move", "spawn", "build", "harvest_loop", "hold"]);
+const ACTION_COMMANDS = new Set(["move", "attack", "attack_in_range", "attack_move", "spawn", "build", "harvest_loop", "hold", "call_to_arms"]);
 
 export function buildMatchDiagnosticReport(record: GameRecord, recordName: string): MatchDiagnosticReport {
   const playerIds = getPlayerIds(record);
@@ -180,6 +186,10 @@ function createPlayerMetrics(playerIds: PlayerId[]) {
         hqDeathTick: null as number | null,
         firstDefensiveCommandTick: null as number | null,
         firstCombatCommandTick: null as number | null,
+        callToArmsTick: null as number | null,
+        callToArmsAffectedWorkers: null as number | null,
+        callToArmsHqHp: null as number | null,
+        callToArmsDeathLag: null as number | null,
         modelRequestsAfterPressure: 0,
         toolCallsAfterPressure: 0,
         readToolCallsAfterPressure: 0,
@@ -421,6 +431,27 @@ function applyCommandDiagnostics(
         detail: data.command.targetId ? `目标=${data.command.targetId}` : log.message,
         severity: data.result_code === RESULT_CODES.OK ? "success" : "warning",
       });
+    }
+
+    if (data.command.type === "call_to_arms") {
+      const hqHp = getHqHpAtTick(record, playerId, log.tick);
+      timeline.push({
+        tick: log.tick,
+        playerId,
+        type: "call_to_arms",
+        label: data.type === RESULT_TYPES.CALL_TO_ARMS_SUCCESS
+          ? `${playerLabel(playerId)}发动民兵动员`
+          : `${playerLabel(playerId)}民兵动员失败`,
+        detail: formatCallToArmsDetail(data, hqHp, metric.hqDeathTick, log.tick),
+        severity: data.type === RESULT_TYPES.CALL_TO_ARMS_SUCCESS ? "success" : "warning",
+      });
+
+      if (data.type === RESULT_TYPES.CALL_TO_ARMS_SUCCESS) {
+        metric.callToArmsTick = log.tick;
+        metric.callToArmsAffectedWorkers = data.result_data.affectedWorkerIds.length;
+        metric.callToArmsHqHp = hqHp;
+        metric.callToArmsDeathLag = metric.hqDeathTick === null ? null : metric.hqDeathTick - log.tick;
+      }
     }
 
     const pressureTick = metric.enemyNearHqTickByRadius[5];
@@ -666,8 +697,48 @@ function commandTypeLabel(commandType: string) {
     build: "建造命令",
     harvest_loop: "采矿循环命令",
     hold: "固守命令",
+    call_to_arms: "民兵动员",
   };
   return labels[commandType] ?? `${commandType} 命令`;
+}
+
+function getHqHpAtTick(record: GameRecord, playerId: PlayerId, tick: number) {
+  const initialPlayer = record.initialState.players.find((player) => player.id === playerId);
+  let hp = initialPlayer?.buildings.find((building) => building.type === BUILDING_TYPES.HQ)?.hp ?? null;
+
+  for (const delta of record.tickDeltas) {
+    if (delta.tick > tick) {
+      break;
+    }
+    const playerDelta = delta.players.find((entry) => entry.playerId === playerId);
+    if (!playerDelta) {
+      continue;
+    }
+    for (const buildingChange of playerDelta.buildings) {
+      if (buildingChange.type !== BUILDING_TYPES.HQ) {
+        continue;
+      }
+      if (buildingChange.change === "removed") {
+        hp = 0;
+      } else if (typeof buildingChange.hp === "number") {
+        hp = buildingChange.hp;
+      }
+    }
+  }
+
+  return hp;
+}
+
+function formatCallToArmsDetail(data: CommandResultData, hqHp: number | null, hqDeathTick: number | null, tick: number) {
+  const parts: string[] = [];
+  if (data.type === RESULT_TYPES.CALL_TO_ARMS_SUCCESS) {
+    parts.push(`影响 ${data.result_data.affectedWorkerIds.length} 个工人`);
+    parts.push(`总部 HP ${hqHp ?? "未知"}`);
+    parts.push(hqDeathTick === null ? "总部之后存活" : `距总部被毁 ${hqDeathTick - tick} tick`);
+  } else if (data.type === RESULT_TYPES.CALL_TO_ARMS_ALREADY_USED || data.type === RESULT_TYPES.CALL_TO_ARMS_NO_WORKERS) {
+    parts.push(data.result_data.hint);
+  }
+  return parts.join("，");
 }
 
 function dedupeTimeline(events: DiagnosticTimelineEvent[]) {
@@ -690,10 +761,11 @@ function eventPriority(type: DiagnosticTimelineEvent["type"]) {
     llm_request: 4,
     read_tool: 5,
     action_tool: 6,
-    combat_command: 7,
-    invalid_unit: 8,
-    spawn: 9,
-    unit_death: 10,
+    call_to_arms: 7,
+    combat_command: 8,
+    invalid_unit: 9,
+    spawn: 10,
+    unit_death: 11,
   };
   return priority[type];
 }

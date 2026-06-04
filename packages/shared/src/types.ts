@@ -156,6 +156,19 @@ export type UnitIntent =
       targetPriority?: string[];
     };
 
+export type UnitStatusEffect =
+  | {
+      type: "call_to_arms";
+      expiresTick: number;
+      attack: number;
+      attackRange: number;
+    }
+  | {
+      type: "call_to_arms_fatigue";
+      expiresTick: number;
+      gatherRateMultiplier: number;
+    };
+
 export interface Unit extends GameObject {
   type: UnitType;
   hp: number;
@@ -174,6 +187,8 @@ export interface Unit extends GameObject {
   pathTarget?: { x: number; y: number };
   // 防止同一 tick 重复攻击
   lastAttackTick?: number;
+  // 临时状态效果，用于回放、UI 与 agent 观察
+  statusEffects?: UnitStatusEffect[];
 }
 
 export interface Building extends GameObject {
@@ -438,6 +453,7 @@ export interface TickDeltaRecord {
       carryingCredits?: number;
       carryCapacity?: number;
       intent?: UnitIntent | null;
+      statusEffects?: UnitStatusEffect[];
     }>;
     buildings: Array<{
       id: string;

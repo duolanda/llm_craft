@@ -5,6 +5,7 @@ import {
   GameState,
   MatchDebugOptions,
   OpenAICompatibleRuntimeConfig,
+  ServerBenchmarkActiveRound,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
   ServerBenchmarkRoundResult,
@@ -17,6 +18,10 @@ import { fileURLToPath } from "node:url";
 type SendOnlyWebSocket = Pick<WebSocket, "send">;
 
 type BenchmarkGameFactory = (config: GameOrchestratorConfig) => GameOrchestrator;
+type BenchmarkActiveRound = {
+  orchestrator: GameOrchestrator;
+  llmSide: "player_1" | "player_2";
+};
 
 const EMPTY_GAME = {
   getState: (): GameState | null => null,
@@ -36,12 +41,15 @@ export interface BenchmarkConfig {
   rounds: number;
   recordReplay: boolean;
   decisionIntervalTicks?: number;
+  concurrency?: number;
   debug?: MatchDebugOptions;
 }
 
 export class BenchmarkOrchestrator {
   private readonly rounds: ServerBenchmarkRoundResult[] = [];
   private currentOrchestrator: GameOrchestrator | null = null;
+  private viewedRound: number | null = null;
+  private readonly activeRounds = new Map<number, BenchmarkActiveRound>();
   private currentRun: Promise<void> | null = null;
   private stopRequested = false;
   private ws: SendOnlyWebSocket | null;
@@ -77,6 +85,9 @@ export class BenchmarkOrchestrator {
 
   stop(): void {
     this.stopRequested = true;
+    for (const { orchestrator } of this.activeRounds.values()) {
+      orchestrator.stop();
+    }
     this.currentOrchestrator?.stop();
   }
 
@@ -99,38 +110,58 @@ export class BenchmarkOrchestrator {
   }
 
   private async run(): Promise<void> {
-    for (let index = 0; index < this.config.rounds; index++) {
-      if (this.stopRequested) {
-        break;
+    let nextRoundIndex = 0;
+    const concurrency = Math.min(this.config.rounds, this.config.concurrency ?? 1);
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (!this.stopRequested) {
+        const index = nextRoundIndex++;
+        if (index >= this.config.rounds) {
+          return;
+        }
+        await this.runRound(index);
       }
+    });
 
-      const llmSide = index % 2 === 0 ? "player_1" : "player_2";
-      const cpuSide = llmSide === "player_1" ? "player_2" : "player_1";
-      const cpuConfig: BuiltinCPURuntimeConfig = {
-        providerType: "builtin-cpu",
-        strategy: this.config.cpuStrategy,
-      };
-      const matchConfig: GameOrchestratorConfig = {
-        player1: llmSide === "player_1" ? this.config.llmConfig : cpuConfig,
-        player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
-        debug: this.config.debug,
-        runtime: {
-          aiIntervalTicksByPlayer: {
-            [llmSide]: 5,
-            [cpuSide]: this.config.decisionIntervalTicks ?? 5,
-          },
-          recordDir: BENCHMARK_RECORDS_DIR,
-          transcriptDir: BENCHMARK_LLM_DEBUG_DIR,
+    await Promise.all(workers);
+
+    this.send(this.buildCompleteMessage());
+  }
+
+  private async runRound(index: number): Promise<void> {
+    const llmSide = index % 2 === 0 ? "player_1" : "player_2";
+    const cpuSide = llmSide === "player_1" ? "player_2" : "player_1";
+    const cpuConfig: BuiltinCPURuntimeConfig = {
+      providerType: "builtin-cpu",
+      strategy: this.config.cpuStrategy,
+    };
+    const matchConfig: GameOrchestratorConfig = {
+      player1: llmSide === "player_1" ? this.config.llmConfig : cpuConfig,
+      player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
+      debug: this.config.debug,
+      runtime: {
+        aiIntervalTicksByPlayer: {
+          [llmSide]: 5,
+          [cpuSide]: this.config.decisionIntervalTicks ?? 5,
         },
-      };
+        recordDir: BENCHMARK_RECORDS_DIR,
+        transcriptDir: BENCHMARK_LLM_DEBUG_DIR,
+      },
+    };
 
-      const orchestrator = this.createGameOrchestrator(matchConfig);
-      this.currentOrchestrator = orchestrator;
+    const roundNumber = index + 1;
+    const orchestrator = this.createGameOrchestrator(matchConfig);
+    this.activeRounds.set(roundNumber, { orchestrator, llmSide });
+    if (this.viewedRound === null) {
+      this.setViewedRound(roundNumber);
+    }
+    this.sendProgress();
+    let completed = false;
+    try {
       await orchestrator.start();
       await this.waitForRoundEnd(orchestrator);
 
       if (this.stopRequested) {
-        break;
+        return;
       }
 
       const game = orchestrator.getGame();
@@ -143,7 +174,7 @@ export class BenchmarkOrchestrator {
 
       const transcriptPath = orchestrator.getTranscriptFilePath() ?? undefined;
       this.rounds.push({
-        round: index + 1,
+        round: roundNumber,
         llmSide,
         winner:
           winner === null
@@ -155,19 +186,52 @@ export class BenchmarkOrchestrator {
         recordPath,
         transcriptPath,
       });
-
-      this.send({
-        type: "benchmark_progress",
-        cpuStrategy: this.config.cpuStrategy,
-        completedRounds: this.rounds.length,
-        totalRounds: this.config.rounds,
-        llmWins: this.rounds.filter((round) => round.winner === "llm").length,
-        cpuWins: this.rounds.filter((round) => round.winner === "cpu").length,
-        draws: this.rounds.filter((round) => round.winner === "draw").length,
-      } satisfies ServerBenchmarkProgressMessage);
+      completed = true;
+    } finally {
+      this.activeRounds.delete(roundNumber);
+      if (this.viewedRound === roundNumber) {
+        this.setViewedRound(this.getNextActiveRoundNumber());
+      }
+      if (completed && !this.stopRequested) {
+        this.sendProgress();
+      }
     }
+  }
 
-    this.send(this.buildCompleteMessage());
+  private sendProgress(): void {
+    this.send({
+      type: "benchmark_progress",
+      cpuStrategy: this.config.cpuStrategy,
+      completedRounds: this.rounds.length,
+      totalRounds: this.config.rounds,
+      llmWins: this.rounds.filter((round) => round.winner === "llm").length,
+      cpuWins: this.rounds.filter((round) => round.winner === "cpu").length,
+      draws: this.rounds.filter((round) => round.winner === "draw").length,
+      viewedRound: this.viewedRound ?? undefined,
+      activeRounds: this.getActiveRoundSummaries(),
+    } satisfies ServerBenchmarkProgressMessage);
+  }
+
+  private setViewedRound(roundNumber: number | null): void {
+    this.viewedRound = roundNumber;
+    this.currentOrchestrator = roundNumber === null
+      ? null
+      : this.activeRounds.get(roundNumber)?.orchestrator ?? null;
+  }
+
+  private getNextActiveRoundNumber(): number | null {
+    const [roundNumber] = [...this.activeRounds.keys()].sort((a, b) => a - b);
+    return roundNumber ?? null;
+  }
+
+  private getActiveRoundSummaries(): ServerBenchmarkActiveRound[] {
+    return [...this.activeRounds.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([round, activeRound]) => ({
+        round,
+        llmSide: activeRound.llmSide,
+        tick: activeRound.orchestrator.getGame().getState().tick,
+      }));
   }
 
   private async waitForRoundEnd(orchestrator: GameOrchestrator): Promise<void> {
@@ -204,7 +268,7 @@ export class BenchmarkOrchestrator {
       llmWinRate: this.rounds.length === 0 ? 0 : Number(((llmWins / this.rounds.length) * 100).toFixed(1)),
       averageDurationTicks,
       stopped: this.stopRequested && this.rounds.length < this.config.rounds,
-      rounds: [...this.rounds],
+      rounds: [...this.rounds].sort((a, b) => a.round - b.round),
     };
   }
 

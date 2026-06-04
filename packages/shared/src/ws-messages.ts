@@ -51,6 +51,7 @@ export interface ClientStartBenchmarkMessage {
   rounds: number;
   recordReplay?: boolean;
   decisionIntervalTicks?: number;
+  concurrency?: number;
   debug?: MatchDebugOptions;
 }
 
@@ -103,6 +104,8 @@ export interface ServerBenchmarkProgressMessage {
   llmWins: number;
   cpuWins: number;
   draws: number;
+  viewedRound?: number;
+  activeRounds: ServerBenchmarkActiveRound[];
 }
 
 export interface ServerBenchmarkRoundResult {
@@ -112,6 +115,12 @@ export interface ServerBenchmarkRoundResult {
   durationTicks: number;
   recordPath?: string;
   transcriptPath?: string;
+}
+
+export interface ServerBenchmarkActiveRound {
+  round: number;
+  llmSide: "player_1" | "player_2";
+  tick: number;
 }
 
 export interface ServerBenchmarkCompleteMessage {

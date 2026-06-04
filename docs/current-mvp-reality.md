@@ -1,6 +1,6 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-05-31
+日期: 2026-06-04
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
@@ -101,6 +101,8 @@
 - metrics
 
 服务端提供 `pnpm --filter @llmcraft/server analyze:record <record.json> [--debug <llm-debug.log>]`，用于离线统计回放里的囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机；传入 debug log 时还会补充工具调用分布和粗略 token 体量。
+
+Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` 局 LLM vs CPU 对局；默认并发为 `1`，前端限制为 `1-10`。主画面会自动观战一局活跃 benchmark round，并在该 round 结束后切到剩余活跃 round 中编号最小的一局；前端状态条会显示当前画面对应的 round 和活跃 round 列表。最终结果按 round 编号排序，进度消息按实际完成顺序更新。
 
 ## 5. 当前 MVP 规则
 

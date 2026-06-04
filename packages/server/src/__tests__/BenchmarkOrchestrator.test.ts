@@ -131,4 +131,64 @@ describe("BenchmarkOrchestrator", () => {
 
     expect(orchestrator.getAITerminalFeed()).toEqual(round.getAITerminalFeed());
   });
+
+  it("limits active benchmark rounds by concurrency", async () => {
+    const ws = { send: vi.fn() };
+    let activeStarts = 0;
+    let maxActiveStarts = 0;
+    const rounds = Array.from({ length: 4 }, (_, index) => {
+      const round = createFakeRound({ winner: index % 2 === 0 ? "player_1" : "player_2", tick: 100 + index });
+      round.start = vi.fn(async () => {
+        activeStarts++;
+        maxActiveStarts = Math.max(maxActiveStarts, activeStarts);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        activeStarts--;
+        return undefined;
+      });
+      return round;
+    });
+
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "gpt-4.1-mini",
+        },
+        cpuStrategy: "random",
+        rounds: 4,
+        recordReplay: false,
+        concurrency: 2,
+      },
+      ws as any,
+      () => rounds.shift() as any
+    );
+
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const startupMessages = ws.send.mock.calls.map((call) => JSON.parse(call[0]));
+    const activeProgress = startupMessages.find((message) =>
+      message.type === "benchmark_progress" && message.activeRounds?.length === 2
+    );
+
+    expect(activeProgress).toMatchObject({
+      viewedRound: 1,
+      activeRounds: [
+        { round: 1 },
+        { round: 2 },
+      ],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const sentMessages = ws.send.mock.calls.map((call) => JSON.parse(call[0]));
+    const complete = sentMessages.find((message) => message.type === "benchmark_complete");
+
+    expect(maxActiveStarts).toBe(2);
+    expect(complete).toMatchObject({ completedRounds: 4 });
+    expect(complete.rounds.map((round: { round: number }) => round.round)).toEqual([1, 2, 3, 4]);
+  });
 });

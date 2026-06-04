@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-05-08
+日期: 2026-06-04
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -272,6 +272,7 @@ interface ServerRecordSavedMessage {
   "presetId": "preset-red",
   "cpuStrategy": "rush",
   "rounds": 10,
+  "concurrency": 4,
   "recordReplay": true,
   "decisionIntervalTicks": 10,
   "debug": {
@@ -285,6 +286,33 @@ interface ServerRecordSavedMessage {
 - benchmark 只支持 `LLM preset vs CPU strategy`
 - 当前 CPU 策略支持 `random` 和 `rush`
 - benchmark 与 live match 现在共用同一套 tool-calling runtime
+- `concurrency` 可选，默认 `1`，允许 `1` 到 `10`；并发运行时完成顺序可能不同于 round 编号，最终结果按 round 编号输出
+
+### 0.16 WebSocket `benchmark_progress`
+
+```ts
+interface ServerBenchmarkProgressMessage {
+  type: "benchmark_progress";
+  cpuStrategy: "random" | "rush";
+  completedRounds: number;
+  totalRounds: number;
+  llmWins: number;
+  cpuWins: number;
+  draws: number;
+  viewedRound?: number;
+  activeRounds: Array<{
+    round: number;
+    llmSide: "player_1" | "player_2";
+    tick: number;
+  }>;
+}
+```
+
+说明：
+
+- `viewedRound` 是当前主画面正在显示的 benchmark round；并发运行时由服务端自动选择
+- `activeRounds` 是仍在运行中的 round 列表，按 round 编号排序
+- 当 `viewedRound` 对应 round 结束时，服务端会自动切到剩余活跃 round 中编号最小的一局
 
 ## 1. Agent Run 输入
 

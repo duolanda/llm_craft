@@ -85,12 +85,13 @@ function App() {
   const [benchmarkRunSummary, setBenchmarkRunSummary] = useState<{
     cpuStrategy: CPUStrategyType;
     totalRounds: number;
+    concurrency: number;
   } | null>(null);
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (mode !== "live" || benchmarkRunning) {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult) {
       return;
     }
 
@@ -104,10 +105,10 @@ function App() {
     } else {
       lastAutoSavedWinnerRef.current = null;
     }
-  }, [benchmarkRunning, mode, send, state?.winner]);
+  }, [benchmarkResult, benchmarkRunning, mode, send, state?.winner]);
 
   useEffect(() => {
-    if (mode !== "live" || benchmarkRunning || !state?.winner || winnerOverlayDismissed) {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult || !state?.winner || winnerOverlayDismissed) {
       return;
     }
 
@@ -121,7 +122,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [benchmarkRunning, mode, state?.winner, winnerOverlayDismissed]);
+  }, [benchmarkResult, benchmarkRunning, mode, state?.winner, winnerOverlayDismissed]);
 
   useEffect(() => {
     if (!startPending) {
@@ -362,6 +363,7 @@ function App() {
     rounds: number;
     recordReplay: boolean;
     decisionIntervalTicks: number;
+    concurrency: number;
     debug?: MatchDebugOptions;
   }) => {
     clearServerMessage();
@@ -371,6 +373,7 @@ function App() {
     setBenchmarkRunSummary({
       cpuStrategy: input.cpuStrategy,
       totalRounds: input.rounds,
+      concurrency: input.concurrency,
     });
     setWinnerOverlayDismissed(true);
     setIsPlaying(false);
@@ -381,6 +384,7 @@ function App() {
       rounds: input.rounds,
       recordReplay: input.recordReplay,
       decisionIntervalTicks: input.decisionIntervalTicks,
+      concurrency: input.concurrency,
       debug: input.debug,
     });
   };
@@ -435,6 +439,10 @@ function App() {
   const benchmarkCurrentRound = benchmarkTotalRounds > 0
     ? Math.min((benchmarkProgress?.completedRounds ?? 0) + 1, benchmarkTotalRounds)
     : 0;
+  const benchmarkViewedRound = benchmarkProgress?.viewedRound ?? null;
+  const benchmarkActiveRoundLabel = benchmarkProgress?.activeRounds.length
+    ? formatRoundList(benchmarkProgress.activeRounds.map((round) => round.round))
+    : null;
 
   return (
     <>
@@ -590,9 +598,17 @@ function App() {
             {prepareMessage && <span>{prepareMessage}</span>}
             {benchmarkStatusVisible && (
               <span>
-                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 当前第 {benchmarkCurrentRound} / {benchmarkTotalRounds} 局
+                Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 已完成 {benchmarkProgress?.completedRounds ?? 0} / {benchmarkTotalRounds} 局
                 {" · "}
                 LLM / CPU / 平 {benchmarkProgress?.llmWins ?? 0} / {benchmarkProgress?.cpuWins ?? 0} / {benchmarkProgress?.draws ?? 0}
+                {" · "}
+                当前画面: {benchmarkViewedRound ? `第 ${benchmarkViewedRound} 局（自动观战）` : benchmarkCurrentRound ? `等待第 ${benchmarkCurrentRound} 局` : "等待活跃对局"}
+                {benchmarkActiveRoundLabel && (
+                  <>
+                    {" · "}
+                    活跃: {benchmarkActiveRoundLabel}
+                  </>
+                )}
               </span>
             )}
             {replayError && <span className="status-error">{replayError}</span>}
@@ -817,7 +833,7 @@ function App() {
           )}
         </SettingsOverlay>
 
-        {mode === "live" && !benchmarkRunning && state?.winner && !winnerOverlayDismissed && (
+        {mode === "live" && !benchmarkRunning && !benchmarkResult && state?.winner && !winnerOverlayDismissed && (
           <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>
             <div className="winner-card" onClick={(event) => event.stopPropagation()}>
               <div className="winner-label">Simulation Complete</div>
@@ -859,6 +875,13 @@ function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
     return "重试";
   }
   return "准备";
+}
+
+function formatRoundList(rounds: number[]): string {
+  if (rounds.length === 0) {
+    return "";
+  }
+  return `第 ${rounds.join("、")} 局`;
 }
 
 function getPrepareStatusClass(status: MatchPrepareState | undefined): string {

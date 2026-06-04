@@ -86,6 +86,7 @@ export interface ServerState {
       rounds: number;
       recordReplay: boolean;
       decisionIntervalTicks?: number;
+      concurrency?: number;
       debug?: ClientStartBenchmarkMessage["debug"];
     },
     ws: Pick<WebSocket, "send"> | null
@@ -736,6 +737,17 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      if (
+        message.concurrency !== undefined &&
+        (!Number.isInteger(message.concurrency) || message.concurrency <= 0 || message.concurrency > 10)
+      ) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "Benchmark 并发数必须是 1 到 10 之间的整数。",
+        } satisfies ServerMessage));
+        return;
+      }
+
       const llmConfig = await state.presetStore.getRuntimeConfig(message.presetId);
       if (llmConfig.providerType !== "openai-compatible") {
         throw new Error("BENCHMARK_PRESET_INVALID");
@@ -750,6 +762,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           rounds: message.rounds,
           recordReplay: message.recordReplay ?? true,
           decisionIntervalTicks: message.decisionIntervalTicks,
+          concurrency: message.concurrency,
           debug: message.debug,
         },
         ws

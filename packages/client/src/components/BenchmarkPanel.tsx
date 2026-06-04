@@ -11,6 +11,7 @@ interface BenchmarkPanelProps {
     rounds: number;
     recordReplay: boolean;
     decisionIntervalTicks: number;
+    concurrency: number;
     debug?: MatchDebugOptions;
   }) => void;
   onClose: () => void;
@@ -21,6 +22,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
   const [cpuStrategy, setCpuStrategy] = useState<CPUStrategyType>("random");
   const [rounds, setRounds] = useState("1");
   const [decisionIntervalTicks, setDecisionIntervalTicks] = useState("10");
+  const [concurrency, setConcurrency] = useState("1");
   const [recordReplay, setRecordReplay] = useState(true);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,6 +59,12 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       return;
     }
 
+    const parsedConcurrency = Number(concurrency);
+    if (!Number.isInteger(parsedConcurrency) || parsedConcurrency <= 0 || parsedConcurrency > 10) {
+      setError("并发数必须是 1 到 10 之间的整数。");
+      return;
+    }
+
     setError(null);
     onStart({
       presetId,
@@ -64,6 +72,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       rounds: parsedRounds,
       recordReplay,
       decisionIntervalTicks: parsedDecisionInterval,
+      concurrency: parsedConcurrency,
       debug: recordLLMTranscript ? { recordLLMTranscript: true } : undefined,
     });
   };
@@ -115,6 +124,19 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
         </label>
 
         <label className="settings-field">
+          <span>并发对局数</span>
+          <input
+            className="settings-input benchmark-number-input"
+            type="number"
+            min={1}
+            max={10}
+            value={concurrency}
+            onChange={(event) => setConcurrency(event.target.value)}
+            disabled={running}
+          />
+        </label>
+
+        <label className="settings-field">
           <span>决策间隔</span>
           <input
             className="settings-input benchmark-number-input"
@@ -152,7 +174,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
 
       <div className="settings-list-item" style={{ marginTop: "12px" }}>
         <span>本次将运行</span>
-        <strong>{rounds || "0"} 局</strong>
+        <strong>{rounds || "0"} 局，最多同时运行 {concurrency || "0"} 局</strong>
       </div>
 
       {error && <div className="settings-inline-error">{error}</div>}

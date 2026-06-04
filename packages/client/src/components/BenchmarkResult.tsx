@@ -24,6 +24,14 @@ export function BenchmarkResult({ progress, result }: BenchmarkResultProps) {
           <p>
             LLM 胜 / CPU 胜 / 平: {progress?.llmWins ?? 0} / {progress?.cpuWins ?? 0} / {progress?.draws ?? 0}
           </p>
+          <p>
+            当前画面: {progress?.viewedRound ? `第 ${progress.viewedRound} 局（自动观战）` : "等待活跃对局"}
+          </p>
+          {progress?.activeRounds.length ? (
+            <p>
+              活跃对局: {formatRoundList(progress.activeRounds.map((round) => round.round))}
+            </p>
+          ) : null}
         </div>
       </div>
     );
@@ -97,4 +105,11 @@ export function BenchmarkResult({ progress, result }: BenchmarkResultProps) {
       </div>
     </div>
   );
+}
+
+function formatRoundList(rounds: number[]): string {
+  if (rounds.length === 0) {
+    return "";
+  }
+  return `第 ${rounds.join("、")} 局`;
 }

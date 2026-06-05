@@ -5,7 +5,7 @@ interface GameCanvasProps {
   state: GameState | null;
 }
 
-const TILE_SIZE = 32;
+const TILE_SIZE = 24;
 const AXIS_GUTTER = 24;
 const BOARD_OFFSET_X = AXIS_GUTTER;
 const BOARD_OFFSET_Y = AXIS_GUTTER;
@@ -22,6 +22,7 @@ const COLORS = {
   player2: PLAYER_COLORS.player_2,
   hq: GAME_COLORS.hq,
   barracks: GAME_COLORS.barracks,
+  war_factory: GAME_COLORS.warFactory,
 };
 
 function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
@@ -195,7 +196,7 @@ export function GameCanvas({ state }: GameCanvasProps) {
         ctx.fillStyle = color;
 
         // 根据单位类型使用不同形状
-        if (unit.type === "soldier") {
+        if (unit.type === "soldier" || unit.type === "rifleman") {
           // 士兵: 带刺八边形
           const outer = TILE_SIZE / 3 - 1;
           const inner = TILE_SIZE / 4 - 2;
@@ -213,6 +214,19 @@ export function GameCanvas({ state }: GameCanvasProps) {
           }
           ctx.closePath();
           ctx.fill();
+        } else if (unit.type === "rocket_soldier") {
+          // 火箭兵: 三角箭头
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - TILE_SIZE / 3);
+          ctx.lineTo(cx + TILE_SIZE / 4, cy + TILE_SIZE / 4);
+          ctx.lineTo(cx - TILE_SIZE / 4, cy + TILE_SIZE / 4);
+          ctx.closePath();
+          ctx.fill();
+        } else if (unit.type === "light_tank") {
+          // 轻坦: 车体 + 炮管
+          drawRoundedRect(ctx, cx - 10, cy - 7, 20, 14, 3);
+          ctx.fill();
+          ctx.fillRect(cx - 2, cy - 12, 4, 12);
         } else if (unit.type === "worker") {
           // 工人: 纯圆形
           ctx.beginPath();

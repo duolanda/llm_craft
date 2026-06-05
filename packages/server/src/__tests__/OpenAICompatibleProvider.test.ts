@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentRunInput } from "@llmcraft/shared";
+import { AgentRunInput, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 
 function createInput(): AgentRunInput {
@@ -318,7 +318,7 @@ describe("OpenAICompatibleProvider", () => {
         if (runtimeStateCall === 1) {
           return {
             mapState: { units: [] },
-            myState: { hq: { id: "hq_1", x: 2, y: 10, hp: 1000, maxHp: 1000 } },
+            myState: { hq: { id: "hq_1", ...DEFAULT_MAP_LAYOUT.player1Hq, hp: 1000, maxHp: 1000 } },
             myUnits: null,
             activePlans: null,
             recentEvents: null,
@@ -328,11 +328,11 @@ describe("OpenAICompatibleProvider", () => {
         return {
           mapState: {
             units: [
-              { relation: "enemy", type: "soldier", x: 3, y: 10, attackRange: 1 },
-              { relation: "enemy", type: "soldier", x: 5, y: 10, attackRange: 1 },
+              { relation: "enemy", type: "soldier", x: DEFAULT_MAP_LAYOUT.player1Hq.x + 1, y: DEFAULT_MAP_LAYOUT.player1Hq.y, attackRange: 1 },
+              { relation: "enemy", type: "soldier", x: DEFAULT_MAP_LAYOUT.player1Hq.x + 3, y: DEFAULT_MAP_LAYOUT.player1Hq.y, attackRange: 1 },
             ],
           },
-          myState: { hq: { id: "hq_1", x: 2, y: 10, hp: 320, maxHp: 1000 } },
+          myState: { hq: { id: "hq_1", ...DEFAULT_MAP_LAYOUT.player1Hq, hp: 320, maxHp: 1000 } },
           myUnits: null,
           activePlans: null,
           recentEvents: null,
@@ -411,11 +411,11 @@ describe("OpenAICompatibleProvider", () => {
     const threatenedRuntimeState = {
       mapState: {
         units: [
-          { relation: "enemy", type: "soldier", x: 3, y: 10, attackRange: 1 },
-          { relation: "enemy", type: "soldier", x: 5, y: 10, attackRange: 1 },
+          { relation: "enemy", type: "soldier", x: DEFAULT_MAP_LAYOUT.player1Hq.x + 1, y: DEFAULT_MAP_LAYOUT.player1Hq.y, attackRange: 1 },
+          { relation: "enemy", type: "soldier", x: DEFAULT_MAP_LAYOUT.player1Hq.x + 3, y: DEFAULT_MAP_LAYOUT.player1Hq.y, attackRange: 1 },
         ],
       },
-      myState: { hq: { id: "hq_1", x: 2, y: 10, hp: 320, maxHp: 1000 } },
+      myState: { hq: { id: "hq_1", ...DEFAULT_MAP_LAYOUT.player1Hq, hp: 320, maxHp: 1000 } },
       myUnits: null,
       activePlans: null,
       recentEvents: null,
@@ -463,10 +463,10 @@ describe("OpenAICompatibleProvider", () => {
       getRuntimeState: () => ({
         mapState: {
           units: [
-            { relation: "enemy", type: "soldier", x: 5, y: 10, attackRange: 1 },
+            { relation: "enemy", type: "soldier", x: DEFAULT_MAP_LAYOUT.player1Hq.x + 3, y: DEFAULT_MAP_LAYOUT.player1Hq.y, attackRange: 1 },
           ],
         },
-        myState: { hq: { id: "hq_1", x: 2, y: 10, hp: 320, maxHp: 1000 } },
+        myState: { hq: { id: "hq_1", ...DEFAULT_MAP_LAYOUT.player1Hq, hp: 320, maxHp: 1000 } },
         myUnits: null,
         activePlans: null,
         recentEvents: null,

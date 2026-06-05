@@ -1,6 +1,7 @@
 import {
   Unit,
   UnitIntent,
+  AttackTargetType,
   Building,
   Player,
   PlayerId,
@@ -13,14 +14,22 @@ import {
   ResultCode,
   TILE_TYPES,
   UNIT_TYPES,
-  UNIT_STATS,
   BUILDING_TYPES,
   UNIT_STATES,
   RESULT_CODES,
   ECONOMY_RULES,
+  getAttackDamageAgainstBuilding,
+  getDefaultAttackMovePriority,
+  getBuildingCost as getRulesetBuildingCost,
+  getUnitCost as getRulesetUnitCost,
+  isBuildableBuildingType,
+  isBuildingType,
+  isUnitType,
+  unitCanAttack,
   TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
+  DEFAULT_MAP_LAYOUT,
   LOG_TYPES,
   LogType,
   defaultLogMeta,
@@ -42,7 +51,7 @@ type AttackIntent = {
   targetId?: string;
   targetX?: number;
   targetY?: number;
-  targetPriority?: string[];
+  targetPriority?: AttackTargetType[];
 };
 
 type AttackMoveIntent = {
@@ -50,7 +59,7 @@ type AttackMoveIntent = {
   targetX?: number;
   targetY?: number;
   targetId?: string;
-  targetPriority?: string[];
+  targetPriority?: AttackTargetType[];
 };
 
 type HarvestLoopIntent = {
@@ -86,10 +95,6 @@ export class Game {
   }
 
   private initializeGame(): void {
-    const centerY = Math.floor(MAP_HEIGHT / 2);
-    const leftHqX = 2;
-    const rightHqX = MAP_WIDTH - 3;
-
     // 1. Generate map
     this.tiles = MapGenerator.generate();
 
@@ -110,15 +115,27 @@ export class Game {
     ];
 
     // 3. Place HQ
-    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, leftHqX, centerY, "player_1");
-    this.buildingManager.createBuilding(BUILDING_TYPES.HQ, rightHqX, centerY, "player_2");
+    this.buildingManager.createBuilding(
+      BUILDING_TYPES.HQ,
+      DEFAULT_MAP_LAYOUT.player1Hq.x,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_1"
+    );
+    this.buildingManager.createBuilding(
+      BUILDING_TYPES.HQ,
+      DEFAULT_MAP_LAYOUT.player2Hq.x,
+      DEFAULT_MAP_LAYOUT.player2Hq.y,
+      "player_2"
+    );
 
     // 4. Place initial units: 2 workers for each player
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, leftHqX + 1, centerY - 1, "player_1");
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, leftHqX + 1, centerY + 1, "player_1");
+    for (const workerPosition of DEFAULT_MAP_LAYOUT.player1Workers) {
+      this.unitManager.createUnit(UNIT_TYPES.WORKER, workerPosition.x, workerPosition.y, "player_1");
+    }
 
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY - 1, "player_2");
-    this.unitManager.createUnit(UNIT_TYPES.WORKER, rightHqX - 1, centerY + 1, "player_2");
+    for (const workerPosition of DEFAULT_MAP_LAYOUT.player2Workers) {
+      this.unitManager.createUnit(UNIT_TYPES.WORKER, workerPosition.x, workerPosition.y, "player_2");
+    }
 
     this.addLog(LOG_TYPES.GAME_INIT, "Game initialized successfully");
     this.saveSnapshot();
@@ -776,16 +793,16 @@ export class Game {
             break;
           }
 
-          if (command.buildingType !== BUILDING_TYPES.BARRACKS) {
+          if (!isBuildableBuildingType(command.buildingType)) {
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
-              "Build command failed: only barracks can be built in MVP",
+              "Build command failed: invalid building type",
               {
                 command,
                 result_code: RESULT_CODES.ERR_INVALID_BUILDING,
                 type: RESULT_TYPES.BUILD_INVALID_BUILDING,
                 result_data: {
-                  hint: "Only barracks are buildable in the current MVP.",
+                  hint: "Buildable structures are barracks and war_factory. HQ cannot be built.",
                 },
               },
               {
@@ -811,7 +828,7 @@ export class Game {
                   y: command.position.y,
                   requiredCredits: buildingCost,
                   currentCredits: player.resources.credits,
-                  hint: `Need ${buildingCost} credits before building a barracks.`,
+                  hint: `Need ${buildingCost} credits before building ${command.buildingType}.`,
                 },
               },
               {
@@ -856,7 +873,7 @@ export class Game {
             command.position.y,
             command.playerId
           );
-          this.addLog(LOG_TYPES.COMMAND_RESULT, `Barracks constructed for ${command.playerId}`, {
+          this.addLog(LOG_TYPES.COMMAND_RESULT, `${command.buildingType} constructed for ${command.playerId}`, {
             command,
             result_code: RESULT_CODES.OK,
             type: RESULT_TYPES.BUILDING_CONSTRUCTED,
@@ -877,23 +894,11 @@ export class Game {
   }
 
   private getUnitCost(unitType: string): number {
-    switch (unitType) {
-      case UNIT_TYPES.WORKER:
-        return 50;
-      case UNIT_TYPES.SOLDIER:
-        return 80;
-      default:
-        return 0;
-    }
+    return isUnitType(unitType) ? getRulesetUnitCost(unitType) : 0;
   }
 
   private getBuildingCost(buildingType: string): number {
-    switch (buildingType) {
-      case BUILDING_TYPES.BARRACKS:
-        return 120;
-      default:
-        return 0;
-    }
+    return isBuildingType(buildingType) ? getRulesetBuildingCost(buildingType) : 0;
   }
 
   private attackBuilding(attacker: RuntimeUnit, target: Building): ResultCode {
@@ -910,7 +915,7 @@ export class Game {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = UNIT_STATS[attacker.type].attack;
+    const damage = getAttackDamageAgainstBuilding(attacker.type, target.type);
     this.buildingManager.takeDamage(target, damage);
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
@@ -954,7 +959,7 @@ export class Game {
       !attacker.exists ||
       defender.playerId === attacker.playerId ||
       defender.lastAttackTick === this.tick ||
-      UNIT_STATS[defender.type].attack <= 0 ||
+      !unitCanAttack(defender.type) ||
       defender.attackRange <= 0
     ) {
       return false;
@@ -1179,12 +1184,14 @@ export class Game {
   private findPrioritizedAttackTarget(
     attacker: Unit,
     playerId: PlayerId,
-    targetPriority?: string[]
+    targetPriority?: AttackTargetType[]
   ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
     const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
-    const priority = (hasExplicitPriority ? targetPriority! : ["hq", "soldier", "worker", "barracks"]).map((value) =>
-      String(value).toLowerCase()
-    );
+    const priority = (
+      hasExplicitPriority
+        ? targetPriority!
+        : getDefaultAttackMovePriority(attacker.type)
+    ).map((value) => String(value).toLowerCase());
 
     const enemyUnits = this.unitManager
       .getAllUnits()
@@ -1246,15 +1253,37 @@ export class Game {
       return null;
     }
 
-    let best: { x: number; y: number; distance: number } | null = null;
+    const assignedHarvesters = new Map<string, number>();
+    for (const unit of this.unitManager.getUnitsByPlayer(worker.playerId)) {
+      if (unit.id === worker.id || unit.type !== UNIT_TYPES.WORKER || unit.intent?.type !== "harvest_loop") {
+        continue;
+      }
+      const targetX = unit.intent.targetX;
+      const targetY = unit.intent.targetY;
+      if (targetX === undefined || targetY === undefined) {
+        continue;
+      }
+      assignedHarvesters.set(`${targetX},${targetY}`, (assignedHarvesters.get(`${targetX},${targetY}`) ?? 0) + 1);
+    }
+
+    let best: { x: number; y: number; distance: number; assignedHarvesters: number; score: number } | null = null;
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
         if (this.tiles[y][x] !== TILE_TYPES.RESOURCE) {
           continue;
         }
         const distance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
-        if (!best || distance < best.distance || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))) {
-          best = { x, y, distance };
+        const assigned = assignedHarvesters.get(`${x},${y}`) ?? 0;
+        const score = distance + assigned * 4;
+        if (
+          !best ||
+          score < best.score ||
+          (score === best.score &&
+            (assigned < best.assignedHarvesters ||
+              (assigned === best.assignedHarvesters &&
+                (distance < best.distance || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))))))
+        ) {
+          best = { x, y, distance, assignedHarvesters: assigned, score };
         }
       }
     }
@@ -1319,28 +1348,24 @@ export class Game {
 
       // Process building production queues
       const completedUnits = this.buildingManager.processProductionQueues();
-      for (const [playerId, unitTypes] of completedUnits) {
-        for (const unitType of unitTypes) {
-          // Find barracks to spawn unit near
-          const buildings = this.buildingManager.getBuildingsByPlayer(playerId);
-          const barracks = buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS);
-          const hq = buildings.find((b) => b.type === BUILDING_TYPES.HQ);
-          const spawnBuilding = barracks || hq;
+      for (const [playerId, completions] of completedUnits) {
+        for (const completion of completions) {
+          const spawnBuilding = this.buildingManager.getBuilding(completion.buildingId);
 
-          if (spawnBuilding) {
+          if (spawnBuilding && spawnBuilding.exists) {
             // Find an empty position near the building
             const spawnPos = this.findEmptySpawnPosition(spawnBuilding.x, spawnBuilding.y);
             if (spawnPos) {
-              this.unitManager.createUnit(unitType, spawnPos.x, spawnPos.y, playerId);
-              this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${unitType} spawned for ${playerId}`, {
-                unitType,
+              this.unitManager.createUnit(completion.unitType, spawnPos.x, spawnPos.y, playerId);
+              this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${completion.unitType} spawned for ${playerId}`, {
+                unitType: completion.unitType,
               }, {
                 owner: playerId,
                 feedbackTarget: playerId,
               });
             } else {
-              this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${unitType} for ${playerId}`, {
-                unitType,
+              this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${completion.unitType} for ${playerId}`, {
+                unitType: completion.unitType,
               }, { owner: playerId });
             }
           }
@@ -1672,7 +1697,7 @@ export class Game {
       buildingId: command.buildingId ? String(command.buildingId) : undefined,
       targetId: command.targetId ? String(command.targetId) : undefined,
       targetPriority: Array.isArray(command.targetPriority)
-        ? command.targetPriority.map((value) => String(value))
+        ? command.targetPriority.filter((value): value is AttackTargetType => isUnitType(value) || isBuildingType(value))
         : undefined,
       position: command.position
         ? {

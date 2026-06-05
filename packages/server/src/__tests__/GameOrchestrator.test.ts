@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentRunInput, Command, TICK_INTERVAL_MS } from "@llmcraft/shared";
+import { AgentRunInput, Command, DEFAULT_MAP_LAYOUT, MAP_WIDTH, TICK_INTERVAL_MS } from "@llmcraft/shared";
 import { GameOrchestrator } from "../GameOrchestrator";
 
 function createMatchConfig() {
@@ -263,7 +263,9 @@ describe("GameOrchestrator", () => {
   it("prepends the HQ-under-attack alert to summary when enemy soldiers are already in range", () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const game = orchestrator.getGame();
-    const enemySoldier = game.getUnitManager().createUnit("soldier", 3, 10, "player_2");
+    const enemySoldier = game
+      .getUnitManager()
+      .createUnit("soldier", DEFAULT_MAP_LAYOUT.player1Hq.x + 1, DEFAULT_MAP_LAYOUT.player1Hq.y, "player_2");
     enemySoldier.attackRange = 1;
 
     const runInput = (orchestrator as any).buildRunInput("player_1", game.getState()) as AgentRunInput;
@@ -316,7 +318,7 @@ describe("GameOrchestrator", () => {
         toolCallId: "tool_1",
         toolName: "get_map_state",
         args: {},
-        result: { width: 21 },
+        result: { width: MAP_WIDTH },
         isError: false,
       });
       return {
@@ -327,7 +329,7 @@ describe("GameOrchestrator", () => {
             toolCallId: "tool_1",
             toolName: "get_map_state",
             args: {},
-            result: { width: 21 },
+            result: { width: MAP_WIDTH },
             isError: false,
           },
         ],

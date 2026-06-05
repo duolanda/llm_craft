@@ -1,4 +1,4 @@
-import { GameState } from "@llmcraft/shared";
+import { BUILDING_TYPES, GameState, UNIT_TYPES, UnitType } from "@llmcraft/shared";
 
 interface StatsPanelProps {
   state: GameState | null;
@@ -7,12 +7,26 @@ interface StatsPanelProps {
 const UNIT_COLORS: Record<string, string> = {
   worker: "#ffb300",
   soldier: "#ff2a4a",
+  rifleman: "#8df2a6",
+  rocket_soldier: "#ff8840",
+  light_tank: "#7dd3fc",
 };
 
 const UNIT_LABELS: Record<string, string> = {
   worker: "工人",
   soldier: "士兵",
+  rifleman: "步兵",
+  rocket_soldier: "火箭",
+  light_tank: "轻坦",
 };
+
+const DISPLAY_UNIT_TYPES: UnitType[] = [
+  UNIT_TYPES.WORKER,
+  UNIT_TYPES.SOLDIER,
+  UNIT_TYPES.RIFLEMAN,
+  UNIT_TYPES.ROCKET_SOLDIER,
+  UNIT_TYPES.LIGHT_TANK,
+];
 
 export function StatsPanel({ state }: StatsPanelProps) {
   if (!state) {
@@ -29,24 +43,24 @@ export function StatsPanel({ state }: StatsPanelProps) {
 
   const getUnitCounts = (player: (typeof state.players)[0]) => {
     const units = player.units.filter((u) => u.exists);
-    return {
-      worker: units.filter((u) => u.type === "worker").length,
-      soldier: units.filter((u) => u.type === "soldier").length,
-      total: units.length,
-    };
+    return Object.fromEntries([
+      ...DISPLAY_UNIT_TYPES.map((unitType) => [unitType, units.filter((unit) => unit.type === unitType).length]),
+      ["total", units.length],
+    ]) as Record<UnitType, number> & { total: number };
   };
 
   const getBuildingCounts = (player: (typeof state.players)[0]) => {
     const buildings = player.buildings.filter((b) => b.exists);
     return {
-      hq: buildings.filter((b) => b.type === "hq").length,
-      barracks: buildings.filter((b) => b.type === "barracks").length,
+      hq: buildings.filter((b) => b.type === BUILDING_TYPES.HQ).length,
+      barracks: buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS).length,
+      warFactory: buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY).length,
       total: buildings.length,
     };
   };
 
   const getHQHealth = (player: (typeof state.players)[0]) => {
-    const hq = player.buildings.find((b) => b.type === "hq");
+    const hq = player.buildings.find((b) => b.type === BUILDING_TYPES.HQ);
     if (!hq) {
       return "0/0";
     }
@@ -89,8 +103,9 @@ export function StatsPanel({ state }: StatsPanelProps) {
           <span style={{ color: "var(--accent-purple)" }}>◈</span> 单位编制
         </div>
         <div className="unit-legend-bar">
-          <UnitLegend type="worker" />
-          <UnitLegend type="soldier" />
+          {DISPLAY_UNIT_TYPES.map((unitType) => (
+            <UnitLegend key={unitType} type={unitType} />
+          ))}
         </div>
         <div className="stat-row" style={{ justifyContent: "center", gap: "12px", marginTop: 4 }}>
           <UnitChips counts={p1Units} align="end" />
@@ -113,6 +128,7 @@ export function StatsPanel({ state }: StatsPanelProps) {
         <BuildingRow label="HQ" p1={p1Buildings.hq} p2={p2Buildings.hq} />
         <BuildingRow label="HP" p1={p1HQHealth} p2={p2HQHealth} />
         <BuildingRow label="兵营" p1={p1Buildings.barracks} p2={p2Buildings.barracks} />
+        <BuildingRow label="战车工厂" p1={p1Buildings.warFactory} p2={p2Buildings.warFactory} />
       </div>
 
       <div className="stat-block">
@@ -142,11 +158,12 @@ function UnitLegend({ type }: { type: string }) {
   );
 }
 
-function UnitChips({ counts, align }: { counts: { worker: number; soldier: number }; align: "start" | "end" }) {
+function UnitChips({ counts, align }: { counts: Record<UnitType, number> & { total: number }; align: "start" | "end" }) {
   return (
     <div className="unit-chips" style={{ justifyContent: align === "end" ? "flex-end" : "flex-start" }}>
-      <Chip type="worker" count={counts.worker} />
-      <Chip type="soldier" count={counts.soldier} />
+      {DISPLAY_UNIT_TYPES.map((unitType) => (
+        <Chip key={unitType} type={unitType} count={counts[unitType]} />
+      ))}
     </div>
   );
 }

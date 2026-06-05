@@ -6,7 +6,8 @@ import {
   ECONOMY_RULES,
   TILE_TYPES,
   UNIT_STATES,
-  UNIT_STATS,
+  getAttackDamageAgainstUnit,
+  getUnitStats,
   RESULT_CODES,
   ResultCode,
   MAP_WIDTH,
@@ -27,7 +28,7 @@ export class UnitManager {
   private idCounter = 0;
 
   createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): Unit {
-    const stats = UNIT_STATS[type];
+    const stats = getUnitStats(type);
     const unit: Unit = {
       id: `unit_${++this.idCounter}`,
       type,
@@ -99,7 +100,7 @@ export class UnitManager {
 
     // Check speed limit: cannot move farther than unit's speed per tick
     const distance = getDistance(unit.x, unit.y, targetX, targetY);
-    const maxSpeed = UNIT_STATS[unit.type].speed;
+    const maxSpeed = getUnitStats(unit.type).speed;
     if (distance > maxSpeed) {
       return RESULT_CODES.ERR_EXCEEDS_SPEED;
     }
@@ -142,7 +143,7 @@ export class UnitManager {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = UNIT_STATS[attacker.type].attack;
+    const damage = getAttackDamageAgainstUnit(attacker.type, target.type);
     target.hp -= damage;
     attacker.state = UNIT_STATES.ATTACKING;
     // Record attack intent for visualization
@@ -252,7 +253,7 @@ export class UnitManager {
       return RESULT_CODES.OK;
     }
 
-    const maxSpeed = UNIT_STATS[unit.type].speed;
+    const maxSpeed = getUnitStats(unit.type).speed;
     let stepsTaken = 0;
 
     while (stepsTaken < maxSpeed && unit.path.length > 0) {
@@ -320,8 +321,13 @@ export class UnitManager {
   private getOccupiedPositions(excludeUnitId?: string, blockedPositions?: Set<string>): Set<string> {
     const positions = new Set<string>();
     for (const unit of this.units.values()) {
-      if (unit.exists && unit.id !== excludeUnitId) {
-        positions.add(`${unit.x},${unit.y}`);
+      if (!unit.exists || unit.id === excludeUnitId) {
+        continue;
+      }
+
+      positions.add(`${unit.x},${unit.y}`);
+      if (unit.pathTarget) {
+        positions.add(`${unit.pathTarget.x},${unit.pathTarget.y}`);
       }
     }
     for (const position of blockedPositions || []) {

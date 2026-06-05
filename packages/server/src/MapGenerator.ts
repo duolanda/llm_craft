@@ -1,11 +1,10 @@
-import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
+import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
 
 export class MapGenerator {
   static generate(): TileType[][] {
     const tiles: TileType[][] = [];
-    const centerX = Math.floor(MAP_WIDTH / 2);
-    const centerY = Math.floor(MAP_HEIGHT / 2);
-    const edgeInset = 2;
+    const centerX = DEFAULT_MAP_LAYOUT.centerX;
+    const centerY = DEFAULT_MAP_LAYOUT.centerY;
 
     // Initialize empty map
     for (let y = 0; y < MAP_HEIGHT; y++) {
@@ -15,34 +14,27 @@ export class MapGenerator {
       }
     }
 
-    // Place obstacles at four corners
-    const cornerObstacles = [
-      { x: 5, y: 5 },
-      { x: MAP_WIDTH - 6, y: 5 },
-      { x: 5, y: MAP_HEIGHT - 6 },
-      { x: MAP_WIDTH - 6, y: MAP_HEIGHT - 6 },
+    const obstaclePoints = [
+      { x: 8, y: 6 },
+      { x: 8, y: 18 },
+      { x: MAP_WIDTH - 9, y: 6 },
+      { x: MAP_WIDTH - 9, y: 18 },
+      { x: centerX, y: centerY - 7 },
+      { x: centerX, y: centerY - 6 },
+      { x: centerX, y: centerY - 5 },
+      { x: centerX - 1, y: centerY - 4 },
+      { x: centerX + 1, y: centerY + 4 },
+      { x: centerX, y: centerY + 5 },
+      { x: centerX, y: centerY + 6 },
+      { x: centerX, y: centerY + 7 },
     ];
-    for (const pos of cornerObstacles) {
-      tiles[pos.y][pos.x] = TILE_TYPES.OBSTACLE;
+    for (const pos of obstaclePoints) {
+      if (pos.x >= 0 && pos.x < MAP_WIDTH && pos.y >= 0 && pos.y < MAP_HEIGHT) {
+        tiles[pos.y][pos.x] = TILE_TYPES.OBSTACLE;
+      }
     }
 
-    // Place central vertical obstacles
-    for (let y = centerY - 2; y <= centerY + 2; y++) {
-      tiles[y][centerX] = TILE_TYPES.OBSTACLE;
-    }
-
-    // Place resource points at edges
-    const resourcePoints = [
-      { x: edgeInset, y: centerY - 3 },
-      { x: edgeInset, y: centerY + 3 },
-      { x: MAP_WIDTH - edgeInset - 1, y: centerY - 3 },
-      { x: MAP_WIDTH - edgeInset - 1, y: centerY + 3 },
-      { x: centerX - 3, y: edgeInset },
-      { x: centerX + 3, y: edgeInset },
-      { x: centerX - 3, y: MAP_HEIGHT - edgeInset - 1 },
-      { x: centerX + 3, y: MAP_HEIGHT - edgeInset - 1 },
-    ];
-    for (const pos of resourcePoints) {
+    for (const pos of DEFAULT_MAP_LAYOUT.resources) {
       tiles[pos.y][pos.x] = TILE_TYPES.RESOURCE;
     }
 

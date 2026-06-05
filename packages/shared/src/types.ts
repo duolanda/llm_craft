@@ -1,4 +1,4 @@
-import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId } from "./constants";
+import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType } from "./constants";
 import type { GameLog } from "./logs";
 
 export type LLMProviderType = "openai-compatible";
@@ -112,21 +112,21 @@ export type UnitIntent =
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "attack";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "attack_move";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "harvest_loop";
@@ -139,21 +139,21 @@ export type UnitIntent =
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "gather";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "deposit";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     };
 
 export interface Unit extends GameObject {
@@ -216,7 +216,7 @@ export interface Command {
   unitId?: string;
   buildingId?: string;
   targetId?: string;
-  targetPriority?: string[];
+  targetPriority?: AttackTargetType[];
   position?: Position;
   unitType?: UnitType;
   buildingType?: BuildingType;
@@ -351,7 +351,9 @@ export type PlanStepCondition =
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
   | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "enemy_building_exists"; buildingType: BuildingType; count?: number }
   | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "enemy_unit_count_at_least"; unitType: UnitType; count: number }
   | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
 
 export interface PlanStep {
@@ -372,6 +374,15 @@ export interface OrchestratePlanInput {
   steps: PlanStep[];
 }
 
+export interface AgentPlanAttemptRecord {
+  tick: number;
+  stepIndex: number;
+  call: PlanCallToolName;
+  status: "waiting" | "command_created" | "advanced" | "failed";
+  detail?: string;
+  commandCount?: number;
+}
+
 export interface AgentPlanRecord {
   planId: string;
   unitIds: string[];
@@ -380,6 +391,9 @@ export interface AgentPlanRecord {
   steps: PlanStep[];
   currentStepIndex: number;
   status: "active" | "completed" | "interrupted" | "failed";
+  currentStep?: PlanStep;
+  waitingReason?: string;
+  lastAttempt?: AgentPlanAttemptRecord;
 }
 
 export interface AgentRunMetrics {

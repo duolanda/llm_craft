@@ -3,9 +3,14 @@ import {
   Building,
   BuildingType,
   UnitType,
-  BUILDING_TYPES,
-  BUILDING_STATS,
+  canBuildingProduce,
+  getBuildingStats,
 } from "@llmcraft/shared";
+
+export interface ProductionCompletion {
+  buildingId: string;
+  unitType: UnitType;
+}
 
 export class BuildingManager {
   private buildings: Map<string, Building> = new Map();
@@ -17,7 +22,7 @@ export class BuildingManager {
     y: number,
     playerId: PlayerId
   ): Building {
-    const stats = BUILDING_STATS[type];
+    const stats = getBuildingStats(type);
     const building: Building = {
       id: `building_${++this.idCounter}`,
       type,
@@ -77,15 +82,7 @@ export class BuildingManager {
   }
 
   canProduce(building: Building, unitType: UnitType): boolean {
-    if (building.type === BUILDING_TYPES.HQ) {
-      return unitType === "worker";
-    }
-
-    if (building.type === BUILDING_TYPES.BARRACKS) {
-      return unitType === "soldier";
-    }
-
-    return false;
+    return canBuildingProduce(building.type, unitType);
   }
 
   takeDamage(building: Building, damage: number): boolean {
@@ -104,8 +101,8 @@ export class BuildingManager {
     return false; // Building still alive
   }
 
-  processProductionQueues(): Map<PlayerId, UnitType[]> {
-    const completedUnits = new Map<PlayerId, UnitType[]>();
+  processProductionQueues(): Map<PlayerId, ProductionCompletion[]> {
+    const completedUnits = new Map<PlayerId, ProductionCompletion[]>();
 
     for (const building of this.buildings.values()) {
       if (building.exists && building.productionQueue.length > 0) {
@@ -113,7 +110,7 @@ export class BuildingManager {
         const completedType = building.productionQueue.shift();
         if (completedType) {
           const playerCompleted = completedUnits.get(building.playerId) || [];
-          playerCompleted.push(completedType);
+          playerCompleted.push({ buildingId: building.id, unitType: completedType });
           completedUnits.set(building.playerId, playerCompleted);
         }
       }

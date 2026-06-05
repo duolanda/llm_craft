@@ -181,8 +181,8 @@ $env:LLMCRAFT_SERVER = "http://localhost:3001"
 PowerShell treats commas in unquoted native-command arguments specially. Quote coordinates:
 
 ```powershell
-llmcraft build barracks --at '5,10'
-llmcraft attack-move --to '18,10'
+llmcraft build barracks --at '6,12'
+llmcraft attack-move --to '32,12'
 ```
 
 Check your current saved session:
@@ -257,11 +257,11 @@ Actions can take explicit IDs:
 ```bash
 llmcraft move --unit unit_1 --to 5,8
 llmcraft gather --unit unit_1
-llmcraft build barracks --unit unit_1 --at 5,10
+llmcraft build barracks --unit unit_1 --at 6,12
 llmcraft train worker --building building_1
 llmcraft train soldier --building building_3
 llmcraft attack --unit unit_7 --target building_2
-llmcraft attack-move --unit unit_7 --to 18,10
+llmcraft attack-move --unit unit_7 --to 32,12
 llmcraft hold --unit unit_7
 ```
 
@@ -312,7 +312,7 @@ llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 Use `attack-move` when you only want to move toward coordinates and fight enemy units encountered on the way:
 
 ```bash
-llmcraft units --type soldier | llmcraft attack-move --to 18,10
+llmcraft units --type soldier | llmcraft attack-move --to 32,12
 ```
 
 Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
@@ -323,17 +323,17 @@ At long range, `attack` may first appear as movement toward the target. Re-read 
 
 Current map starts with:
 
-- `player_1` HQ near `(2,10)`
-- `player_2` HQ near `(18,10)`
+- `player_1` HQ near `(4,12)`
+- `player_2` HQ near `(32,12)`
 
 Barracks cannot be adjacent to your HQ. Practical first barracks positions:
 
 ```bash
 # player_1
-llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 6,12
 
 # player_2
-llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 15,10
+llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 30,12
 ```
 
 If a build fails, read `events` or the action error `hint`, then choose another empty tile.

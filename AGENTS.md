@@ -20,10 +20,11 @@ LLMCraft —— 一个基于 LLM AI 代理的实时战略游戏。两个 AI 控�
 # 安装依赖
 pnpm install
 
-# 开发模式 - 同时启动前后端
+# 开发模式 - 同时启动 shared watch + 前后端
 pnpm dev
 
 # 或分别启动：
+pnpm dev:shared    # shared 包增量构建
 pnpm dev:server    # 仅后端 (端口 3001)
 pnpm dev:client    # 仅前端 (端口 3000)
 

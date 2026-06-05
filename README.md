@@ -72,7 +72,7 @@ PORT=3001
 ### 运行
 
 ```bash
-# 同时启动前后端
+# 同时启动 shared watch + 前后端
 pnpm dev
 
 # 访问 http://localhost:3000
@@ -82,10 +82,13 @@ pnpm dev
 或分开启动：
 
 ```bash
-# 终端 1 - 后端
+# 终端 1 - shared 包增量构建
+pnpm dev:shared
+
+# 终端 2 - 后端
 pnpm dev:server
 
-# 终端 2 - 前端
+# 终端 3 - 前端
 pnpm dev:client
 ```
 

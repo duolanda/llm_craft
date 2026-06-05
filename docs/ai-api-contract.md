@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-06-04
+日期: 2026-06-05
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -346,6 +346,21 @@ interface AgentRunInput {
 
 当前 `summary` 不承载完整状态快照。模型应通过工具主动读取战场信息。
 
+### 1.1 当前规则来源
+
+当前 MVP 规则由 shared 默认 ruleset（`DEFAULT_RULESET`）描述。Phase 1 已加入最小 OpenRA-lite 多兵种层：
+
+- 单位类型是 `worker | soldier | rifleman | rocket_soldier | light_tank`
+- 建筑类型是 `hq | barracks | war_factory`
+- `hq` 可生产 `worker`
+- `barracks` 可生产 `soldier | rifleman | rocket_soldier`
+- `war_factory` 可生产 `light_tank`
+- Phase 11 采用 37x25 大地图战斗尺度：`soldier` 100 HP / 12 attack / range 1 / cost 80；`rifleman` 90 HP / 14 attack / range 3 / cost 90；`rocket_soldier` 80 HP / 24 attack / range 4 / cost 140；`light_tank` 300 HP / 30 attack / range 3 / cost 300
+- 伤害按目标 armor 计算：`rifleman` 对 infantry 1.2x、vehicle 0.4x、structure 0.55x；`rocket_soldier` 对 infantry 0.45x、vehicle 2x、structure 1x；`light_tank` 对 infantry 0.7x、vehicle 1x、structure 1.2x
+- `UNIT_STATS` / `BUILDING_STATS` 仍作为兼容导出存在
+
+服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、生产关系、成本和攻击能力判断；工具 schema 已接受新增 unit/building 类型。
+
 ## 2. 工具体系
 
 ### 2.1 只读观察工具
@@ -408,7 +423,7 @@ interface AgentRunInput {
 
 说明：
 
-- 当前地图很小，且没有战争迷雾，所以默认返回全图可见的压缩信息
+- 当前默认地图为 `37 x 25`，且没有战争迷雾，所以默认返回全图可见的压缩信息
 - `asciiMap` 是无坐标轴的符号小地图，用于快速读取空间关系
 - 精确坐标默认看 `units` 和 `buildings`；只有需要逐格地形时才传 `includeCells=true`
 - `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
@@ -420,8 +435,10 @@ interface AgentRunInput {
 . empty
 # obstacle
 * resource
-H/B/S/W self hq/barracks/soldier/worker
-h/b/s/w enemy hq/barracks/soldier/worker
+H/B/F self hq/barracks/war_factory
+S/I/R/T/W self soldier/rifleman/rocket_soldier/light_tank/worker
+h/b/f enemy hq/barracks/war_factory
+s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
 ```
 - 默认不返回 `cells`，以降低上下文体积
 - 传 `includeCells=true` 时只返回“有信息量”的格子：资源、障碍、单位、建筑
@@ -457,10 +474,63 @@ h/b/s/w enemy hq/barracks/soldier/worker
   buildings: Building[];
   productionQueues: Array<{ buildingId: string; queue: UnitType[] }>;
   canBuildBarracks: boolean;
+  canBuildWarFactory: boolean;
   canSpawnWorker: boolean;
   canSpawnSoldier: boolean;
+  canSpawnRifleman: boolean;
+  canSpawnRocketSoldier: boolean;
+  canSpawnLightTank: boolean;
+  economyStatus: {
+    workers: number;
+    activeHarvesters: number;
+    idleWorkers: number;
+    carryingCredits: number;
+    resourceAssignments: Array<{
+      x: number;
+      y: number;
+      assignedHarvesters: number;
+      distanceToHq: number | null;
+    }>;
+    recommendations: Array<{
+      action: string;
+      reason: string;
+      unitIds?: string[];
+    }>;
+  };
+  unitCosts: Record<UnitType, number>;
+  buildingCosts: Partial<Record<BuildingType, number>>;
+  techStatus: {
+    own: {
+      workers: number;
+      combatUnits: number;
+      riflemen: number;
+      rocketSoldiers: number;
+      lightTanks: number;
+      barracks: number;
+      warFactories: number;
+    };
+    enemy: {
+      hasWarFactory: boolean;
+      lightTanks: number;
+    };
+    recommendedStructures: Array<{
+      buildingType: "barracks" | "war_factory";
+      cost: number;
+      reason: string;
+      suggestedSites: Position[];
+    }>;
+    recommendedProduction: Array<{
+      buildingType: "barracks" | "war_factory";
+      unitType: "rifleman" | "rocket_soldier" | "light_tank";
+      reason: string;
+    }>;
+  };
 }
 ```
+
+`economyStatus` 是派生提示字段，用于减少 agent 每轮重复检查 worker 经济：`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量，`idleWorkers` 表示还应优先安排采矿的 worker 数量，`resourceAssignments` 表示各资源点当前分配到的采矿 worker 数量。省略坐标调用 `start_harvest_loop` 时，系统会倾向选择较近且较少 worker 占用的资源点。
+
+`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有 `barracks` 时优先提示补兵营；已有 `barracks` 且钱够时提示补 `war_factory`；敌方出现 `light_tank` 或 `war_factory` 时提示从兵营补 `rocket_soldier`。
 
 #### `get_my_units`
 
@@ -483,6 +553,38 @@ h/b/s/w enemy hq/barracks/soldier/worker
   plans: AgentPlanRecord[];
 }
 ```
+
+`AgentPlanRecord` 包含计划的完整 steps、当前 step 下标和可选诊断字段：
+
+```ts
+interface AgentPlanAttemptRecord {
+  tick: number;
+  stepIndex: number;
+  call: PlanCallToolName;
+  status: "waiting" | "command_created" | "advanced" | "failed";
+  detail?: string;
+  commandCount?: number;
+}
+
+interface AgentPlanRecord {
+  planId: string;
+  unitIds: string[];
+  scope?: PlanStepScope;
+  loop: number;
+  steps: PlanStep[];
+  currentStepIndex: number;
+  status: "active" | "completed" | "interrupted" | "failed";
+  currentStep?: PlanStep;
+  waitingReason?: string;
+  lastAttempt?: AgentPlanAttemptRecord;
+}
+```
+
+说明：
+
+- `currentStep` 是当前正在等待或推进的 step
+- `waitingReason` 只在 active plan 当前没有生成命令时出现，例如等待 `when` 条件、等待 `until`、等待预算或等待命令前置条件
+- `lastAttempt` 记录最近一次推进尝试；`command_created` 表示该 tick 已生成命令，`advanced` 表示 step 已推进，`failed` 表示计划失败
 
 #### `get_recent_events`
 
@@ -510,7 +612,7 @@ h/b/s/w enemy hq/barracks/soldier/worker
 说明：
 
 - 主要用于 worker 移动或 combat unit 精确换位
-- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
+- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / war_factory / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
 
 #### `attack_move_unit`
 
@@ -519,17 +621,17 @@ h/b/s/w enemy hq/barracks/soldier/worker
   unitId: string;
   x: number;
   y: number;
-  priority?: Array<"soldier" | "worker">;
+  priority?: Array<"worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank" | "hq" | "barracks" | "war_factory">;
 }
 ```
 
 说明：
 
-- 只接受有攻击能力的己方单位，当前主要是 `soldier`
-- 单位会向目标点移动，并在到达前自动攻击范围内的敌方单位
+- 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
+- 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：`rifleman` 默认优先清步兵，`rocket_soldier` 默认优先打 `light_tank` / `war_factory`，`light_tank` 默认优先打 `hq` / `war_factory` / `barracks`
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
-- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks 应使用 `attack`
+- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory 应使用 `attack`
 - 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
 
 #### `attack`
@@ -543,10 +645,10 @@ h/b/s/w enemy hq/barracks/soldier/worker
 
 说明：
 
-- 只接受有攻击能力的己方单位，当前主要是 `soldier`
+- 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
 - `targetId` 必须来自最近的可见敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
-- 攻击敌方 HQ、barracks 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
+- 攻击敌方 HQ、barracks、war_factory 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
 - 目标已经消失但曾被看见过时，系统会自动降级为移动到该目标最后已知位置；调用方不需要也不能传坐标
 - 目标从未被看见过时，返回 `ok: false` 和 `hint`
 
@@ -555,7 +657,7 @@ h/b/s/w enemy hq/barracks/soldier/worker
 ```ts
 {
   buildingId: string;
-  unitType: "worker" | "soldier";
+  unitType: "worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank";
 }
 ```
 
@@ -564,7 +666,7 @@ h/b/s/w enemy hq/barracks/soldier/worker
 ```ts
 {
   unitId: string;
-  buildingType: "barracks";
+  buildingType: "barracks" | "war_factory";
   x: number;
   y: number;
 }
@@ -572,8 +674,8 @@ h/b/s/w enemy hq/barracks/soldier/worker
 
 说明：
 
-- 当前只允许建造 `barracks`
-- 兵营必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
+- 当前允许建造 `barracks` 和 `war_factory`
+- 建筑必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
 - 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
 
 #### `start_harvest_loop`
@@ -677,7 +779,9 @@ type PlanStepCondition =
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
   | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "enemy_building_exists"; buildingType: BuildingType; count?: number }
   | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "enemy_unit_count_at_least"; unitType: UnitType; count: number }
   | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
 ```
 
@@ -690,11 +794,14 @@ type PlanStepCondition =
 - `steps` 只接受 call step，把现有动作工具调用注册成持续计划
 - `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开；`scope = "global"` 只执行一次
 - `when` 是执行前置条件，未满足时等待；`until` 是完成条件，满足后推进到下一 step
+- `enemy_building_exists` / `enemy_unit_count_at_least` 用于表达反制触发，例如看到敌方 `war_factory` 或 `light_tank` 后补 `rocket_soldier`
 - `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
-- `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"` 或 `"$barracks"`，在执行时解析为当前友方建筑
+- `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"`、`"$barracks"` 或 `"$war_factory"`，在执行时解析为当前友方建筑
+- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；即时动作工具仍会返回 `insufficient_credits`
+- 多个 active plan 在同一 tick 推进时共享同一份预算；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
-示例：开局让两个 worker 挂矿，等钱够后造兵营，再持续造到 4 个 soldier。
+示例：开局让两个 worker 挂矿，等钱够后造兵营，再持续造到 4 个 rifleman。
 
 ```json
 {
@@ -712,17 +819,64 @@ type PlanStepCondition =
     },
     {
       "call": "spawn_unit",
-      "args": { "buildingId": "$barracks", "unitType": "soldier" },
+      "args": { "buildingId": "$barracks", "unitType": "rifleman" },
       "scope": "global",
       "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
-      "until": { "condition": "unit_count_at_least", "unitType": "soldier", "count": 4 },
+      "until": { "condition": "unit_count_at_least", "unitType": "rifleman", "count": 4 },
       "retry": true
     }
   ]
 }
 ```
 
-示例：一队士兵先移动攻击到敌方 HQ 附近，再集火 HQ。
+示例：已有稳定经济后，补 `war_factory` 并生产 1 台 `light_tank`。
+
+```json
+{
+  "unitIds": ["unit_1"],
+  "loop": 1,
+  "steps": [
+    {
+      "call": "build_structure",
+      "args": { "unitId": "unit_1", "buildingType": "war_factory", "x": 4, "y": 12 },
+      "scope": "global",
+      "when": { "condition": "credits_at_least", "amount": 220 },
+      "until": { "condition": "building_exists", "buildingType": "war_factory" },
+      "retry": true
+    },
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$war_factory", "unitType": "light_tank" },
+      "scope": "global",
+      "when": { "condition": "production_queue_empty", "buildingType": "war_factory" },
+      "until": { "condition": "unit_count_at_least", "unitType": "light_tank", "count": 1 },
+      "retry": true
+    }
+  ]
+}
+```
+
+示例：敌方出现 `light_tank` 后，从兵营补到 2 个 `rocket_soldier`。
+
+```json
+{
+  "unitIds": ["unit_1"],
+  "replaceExisting": false,
+  "loop": -1,
+  "steps": [
+    {
+      "call": "spawn_unit",
+      "args": { "buildingId": "$barracks", "unitType": "rocket_soldier" },
+      "scope": "global",
+      "when": { "condition": "enemy_unit_count_at_least", "unitType": "light_tank", "count": 1 },
+      "until": { "condition": "unit_count_at_least", "unitType": "rocket_soldier", "count": 2 },
+      "retry": true
+    }
+  ]
+}
+```
+
+示例：一队战斗单位先移动攻击到敌方 HQ 附近，再集火 HQ。
 
 ```json
 {

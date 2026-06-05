@@ -1,7 +1,12 @@
 import {
+  AgentPlanAttemptRecord,
   AgentPlanRecord,
   Building,
   Command,
+  getBuildingCost,
+  getUnitCost,
+  isBuildableBuildingType,
+  isUnitType,
   OrchestratePlanInput,
   PlanCallToolName,
   PlanStep,
@@ -21,13 +26,15 @@ interface PlanSnapshot {
 }
 
 interface InternalPlan {
-  record: Omit<AgentPlanRecord, "currentStepIndex" | "status">;
+  record: Omit<AgentPlanRecord, "currentStepIndex" | "status" | "currentStep" | "waitingReason" | "lastAttempt">;
   currentStepIndex: number;
   completedLoops: number;
   status: AgentPlanRecord["status"];
   stepStartedTick?: number;
   issuedGlobalStep?: boolean;
   issuedUnitIds: Set<string>;
+  waitingReason?: string;
+  lastAttempt?: AgentPlanAttemptRecord;
 }
 
 export interface PlanToolContext {
@@ -40,6 +47,7 @@ export interface PlanToolContext {
 export interface PlanToolHandler {
   defaultScope: PlanStepScope;
   defaultRetry?: boolean;
+  estimateCost?(context: PlanToolContext): number;
   createCommand(context: PlanToolContext): Command | null;
   validateArgs(args: Record<string, unknown>): boolean;
 }
@@ -103,11 +111,19 @@ export class AgentPlanRuntime {
 
   advance(snapshot: PlanSnapshot): Command[] {
     const commands: Command[] = [];
+    let availableCredits = snapshot.myCredits;
     for (const plan of this.plans.values()) {
       if (plan.status !== "active") {
         continue;
       }
-      commands.push(...this.advancePlan(plan, snapshot));
+      const planCommands = this.advancePlan(plan, {
+        ...snapshot,
+        myCredits: availableCredits,
+      });
+      for (const command of planCommands) {
+        availableCredits -= this.getCommandCost(command);
+        commands.push(command);
+      }
     }
     return commands;
   }
@@ -123,6 +139,7 @@ export class AgentPlanRuntime {
           this.resetStepState(plan);
           continue;
         }
+        plan.waitingReason = undefined;
         plan.status = "completed";
         return [];
       }
@@ -130,6 +147,7 @@ export class AgentPlanRuntime {
       const step = plan.record.steps[plan.currentStepIndex];
       const handler = this.toolHandlers[step.call];
       if (!handler) {
+        this.recordAttempt(plan, snapshot.tick, step, "failed", "unsupported plan tool");
         plan.status = "failed";
         return [];
       }
@@ -156,42 +174,63 @@ export class AgentPlanRuntime {
     this.ensureStepStarted(plan, snapshot.tick);
 
     if (step.until && this.matchesCondition(step.until, step, undefined, snapshot)) {
+      this.recordAttempt(plan, snapshot.tick, step, "advanced", `until matched: ${this.describeCondition(step.until)}`);
       this.advanceStep(plan);
       return "advance";
     }
 
     if (this.isStepExpired(plan, step, snapshot.tick)) {
+      this.recordAttempt(plan, snapshot.tick, step, "advanced", "maxTicks expired");
       this.advanceStep(plan);
       return "advance";
     }
 
     if (step.when && !this.matchesCondition(step.when, step, undefined, snapshot)) {
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for when: ${this.describeCondition(step.when)}`);
       return [];
     }
 
     const shouldRetry = step.retry === true || handler.defaultRetry === true;
     if (plan.issuedGlobalStep && !shouldRetry) {
       if (!step.until) {
+        this.recordAttempt(plan, snapshot.tick, step, "advanced", "one-shot global step already issued");
         this.advanceStep(plan);
         return "advance";
       }
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for until: ${this.describeCondition(step.until)}`);
       return [];
     }
 
-    const command = handler.createCommand({
+    const context = {
       args: step.args,
       snapshot,
       planUnitIds: plan.record.unitIds,
-    });
+    };
+    const estimatedCost = handler.estimateCost?.(context) ?? 0;
+    if (estimatedCost > snapshot.myCredits) {
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for budget: need ${estimatedCost} credits, available ${snapshot.myCredits}`);
+      return [];
+    }
+
+    const command = handler.createCommand(context);
     if (!command) {
       if (shouldRetry || step.when) {
+        this.recordWaiting(plan, snapshot.tick, step, "waiting for command prerequisites");
         return [];
       }
+      this.recordAttempt(plan, snapshot.tick, step, "failed", "command prerequisites failed");
       plan.status = "failed";
       return [];
     }
 
+    const commandCost = this.getCommandCost(command);
+    if (commandCost > snapshot.myCredits) {
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for budget: need ${commandCost} credits, available ${snapshot.myCredits}`);
+      return [];
+    }
+
     plan.issuedGlobalStep = true;
+    this.recordAttempt(plan, snapshot.tick, step, "command_created", undefined, 1);
     if (!step.until && !shouldRetry) {
       this.advanceStep(plan);
     }
@@ -210,44 +249,72 @@ export class AgentPlanRuntime {
       .map((unitId) => snapshot.myUnits.find((candidate) => candidate.id === unitId))
       .filter((unit): unit is Unit => Boolean(unit && unit.exists));
     if (units.length === 0) {
+      this.recordAttempt(plan, snapshot.tick, step, "failed", "no assigned units are alive");
       plan.status = "failed";
       return [];
     }
 
     if (step.until && units.every((unit) => this.matchesCondition(step.until!, step, unit, snapshot))) {
+      this.recordAttempt(plan, snapshot.tick, step, "advanced", `until matched for all units: ${this.describeCondition(step.until)}`);
       this.advanceStep(plan);
       return "advance";
     }
 
     if (this.isStepExpired(plan, step, snapshot.tick)) {
+      this.recordAttempt(plan, snapshot.tick, step, "advanced", "maxTicks expired");
       this.advanceStep(plan);
       return "advance";
     }
 
     const shouldRetry = step.retry === true || handler.defaultRetry === true;
     const commands: Command[] = [];
+    let availableCredits = snapshot.myCredits;
+    let waitingReason: string | undefined;
     for (const unit of units) {
       if (step.when && !this.matchesCondition(step.when, step, unit, snapshot)) {
+        waitingReason ??= `waiting for when: ${this.describeCondition(step.when)}`;
         continue;
       }
       if (plan.issuedUnitIds.has(unit.id) && !shouldRetry) {
+        waitingReason ??= "waiting for other units or step advance";
         continue;
       }
 
-      const command = handler.createCommand({
+      const context = {
         args: step.args,
         unit,
         snapshot,
         planUnitIds: plan.record.unitIds,
-      });
-      if (!command) {
+      };
+      const estimatedCost = handler.estimateCost?.(context) ?? 0;
+      if (estimatedCost > availableCredits) {
+        waitingReason = `waiting for budget: need ${estimatedCost} credits, available ${availableCredits}`;
         continue;
       }
+
+      const command = handler.createCommand(context);
+      if (!command) {
+        waitingReason ??= "waiting for command prerequisites";
+        continue;
+      }
+      const cost = this.getCommandCost(command);
+      if (cost > availableCredits) {
+        waitingReason = `waiting for budget: need ${cost} credits, available ${availableCredits}`;
+        continue;
+      }
+      availableCredits -= cost;
       plan.issuedUnitIds.add(unit.id);
       commands.push(command);
     }
 
+    if (commands.length > 0) {
+      this.recordAttempt(plan, snapshot.tick, step, "command_created", undefined, commands.length);
+    } else {
+      this.recordWaiting(plan, snapshot.tick, step, waitingReason ?? "waiting for eligible units");
+    }
+
     if (!step.until && !shouldRetry && units.every((unit) => plan.issuedUnitIds.has(unit.id))) {
+      this.recordAttempt(plan, snapshot.tick, step, "advanced", "one-shot per-unit step issued for all units", commands.length);
       this.advanceStep(plan);
     }
 
@@ -275,6 +342,7 @@ export class AgentPlanRuntime {
     plan.stepStartedTick = undefined;
     plan.issuedGlobalStep = false;
     plan.issuedUnitIds.clear();
+    plan.waitingReason = undefined;
   }
 
   private matchesCondition(
@@ -310,8 +378,20 @@ export class AgentPlanRuntime {
         return snapshot.myCredits >= condition.amount;
       case "building_exists":
         return snapshot.myBuildings.filter((building) => building.type === condition.buildingType).length >= (condition.count ?? 1);
+      case "enemy_building_exists":
+        return (
+          snapshot.visibleBuildings.filter(
+            (building) => building.relation === "enemy" && building.type === condition.buildingType
+          ).length >= (condition.count ?? 1)
+        );
       case "unit_count_at_least":
         return snapshot.myUnits.filter((candidate) => candidate.type === condition.unitType).length >= condition.count;
+      case "enemy_unit_count_at_least":
+        return (
+          snapshot.visibleUnits.filter(
+            (candidate) => candidate.relation === "enemy" && candidate.type === condition.unitType
+          ).length >= condition.count
+        );
       case "production_queue_empty": {
         const building = this.findFriendlyBuildingForCondition(condition, snapshot);
         return Boolean(building && building.productionQueue.length === 0);
@@ -373,11 +453,54 @@ export class AgentPlanRuntime {
     );
   }
 
+  private getCommandCost(command: Command): number {
+    if (command.type === "spawn" && isUnitType(command.unitType)) {
+      return getUnitCost(command.unitType);
+    }
+    if (command.type === "build" && isBuildableBuildingType(command.buildingType)) {
+      return getBuildingCost(command.buildingType);
+    }
+    return 0;
+  }
+
+  private recordWaiting(plan: InternalPlan, tick: number, step: PlanStep, detail: string): void {
+    plan.waitingReason = detail;
+    this.recordAttempt(plan, tick, step, "waiting", detail);
+  }
+
+  private recordAttempt(
+    plan: InternalPlan,
+    tick: number,
+    step: PlanStep,
+    status: AgentPlanAttemptRecord["status"],
+    detail?: string,
+    commandCount?: number
+  ): void {
+    if (status !== "waiting") {
+      plan.waitingReason = undefined;
+    }
+    plan.lastAttempt = {
+      tick,
+      stepIndex: plan.currentStepIndex,
+      call: step.call,
+      status,
+      ...(detail ? { detail } : {}),
+      ...(commandCount !== undefined ? { commandCount } : {}),
+    };
+  }
+
+  private describeCondition(condition: PlanStepCondition): string {
+    return JSON.stringify(condition);
+  }
+
   private summarizePlan(plan: InternalPlan): AgentPlanRecord {
     return {
       ...plan.record,
       currentStepIndex: plan.currentStepIndex,
       status: plan.status,
+      currentStep: plan.record.steps[plan.currentStepIndex],
+      waitingReason: plan.waitingReason,
+      lastAttempt: plan.lastAttempt,
     };
   }
 }

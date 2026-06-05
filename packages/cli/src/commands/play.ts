@@ -86,8 +86,8 @@ export async function handlePlay(
       "查看局势:   llmcraft state / units / enemies",
       "经济循环:   llmcraft units --type worker --idle | llmcraft nearest resource | llmcraft gather",
       "建造兵营:   llmcraft build barracks --unit worker_1 --at 6,8",
-      "训练士兵:   llmcraft train soldier --building barracks_1",
-      "攻击:       llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack",
+      "训练步兵:   llmcraft train rifleman --building barracks_1",
+      "攻击:       llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack",
       "下一轮:     由外部 agent 或调度器决定何时重新读取 state",
     ],
   });

@@ -4,8 +4,9 @@ import {
   AgentMapStateCell,
   AgentMapStateUnit,
   AgentPlanRecord,
-  BUILDING_STATS,
+  AttackTargetType,
   BUILDING_TYPES,
+  BuildingType,
   Command,
   OrchestratePlanInput,
   PlanCallToolName,
@@ -14,8 +15,18 @@ import {
   PlayerId,
   Position,
   TILE_TYPES,
-  UNIT_STATS,
   UNIT_TYPES,
+  UnitType,
+  canBuildingProduce,
+  getDefaultAttackMovePriority,
+  getBuildingCost,
+  getProducerBuildingType,
+  getUnitCost,
+  getProductionOptions,
+  isBuildableBuildingType,
+  isBuildingType,
+  isUnitType,
+  unitCanAttack,
 } from "@llmcraft/shared";
 import { Game } from "../Game";
 import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
@@ -46,7 +57,9 @@ const PLAN_UNTIL_CONDITIONS = [
   "target_destroyed",
   "credits_at_least",
   "building_exists",
+  "enemy_building_exists",
   "unit_count_at_least",
+  "enemy_unit_count_at_least",
   "production_queue_empty",
 ] as const;
 
@@ -243,14 +256,22 @@ export class GameAgentBridge {
         defaultRetry: true,
         validateArgs: (args) =>
           (args.buildingId === undefined || typeof args.buildingId === "string") &&
-          (args.buildingType === undefined || args.buildingType === BUILDING_TYPES.HQ || args.buildingType === BUILDING_TYPES.BARRACKS) &&
-          (args.unitType === UNIT_TYPES.WORKER || args.unitType === UNIT_TYPES.SOLDIER),
+          (args.buildingType === undefined || isBuildingType(args.buildingType)) &&
+          isUnitType(args.unitType),
+        estimateCost: (context) => isUnitType(context.args.unitType) ? getUnitCost(context.args.unitType) : 0,
         createCommand: (context) => {
           const unitType = context.args.unitType;
-          if (unitType !== UNIT_TYPES.WORKER && unitType !== UNIT_TYPES.SOLDIER) {
+          if (!isUnitType(unitType)) {
             return null;
           }
-          const buildingId = this.resolvePlanBuildingId(context, unitType === UNIT_TYPES.WORKER ? BUILDING_TYPES.HQ : BUILDING_TYPES.BARRACKS);
+          const fallbackType = getProducerBuildingType(unitType);
+          if (!fallbackType) {
+            return null;
+          }
+          if (context.snapshot.myCredits < getUnitCost(unitType)) {
+            return null;
+          }
+          const buildingId = this.resolvePlanBuildingId(context, fallbackType);
           return buildingId ? this.createCommand("spawn", { buildingId, unitType }) : null;
         },
       },
@@ -259,15 +280,19 @@ export class GameAgentBridge {
         defaultRetry: true,
         validateArgs: (args) =>
           this.hasOptionalPlanUnitId(args) &&
-          args.buildingType === BUILDING_TYPES.BARRACKS &&
+          isBuildableBuildingType(args.buildingType) &&
           Number.isInteger(args.x) &&
           Number.isInteger(args.y),
+        estimateCost: (context) => isBuildableBuildingType(context.args.buildingType) ? getBuildingCost(context.args.buildingType) : 0,
         createCommand: (context) => {
           const unitId = this.resolvePlanUnitId(context);
-          return unitId && context.args.buildingType === BUILDING_TYPES.BARRACKS && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
+          if (!isBuildableBuildingType(context.args.buildingType) || context.snapshot.myCredits < getBuildingCost(context.args.buildingType)) {
+            return null;
+          }
+          return unitId && isBuildableBuildingType(context.args.buildingType) && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
             ? this.createCommand("build", {
                 unitId,
-                buildingType: BUILDING_TYPES.BARRACKS,
+                buildingType: context.args.buildingType,
                 position: { x: Number(context.args.x), y: Number(context.args.y) },
               })
             : null;
@@ -316,27 +341,34 @@ export class GameAgentBridge {
     return context.planUnitIds.find((unitId) => context.snapshot.myUnits.some((unit) => unit.id === unitId && unit.exists)) ?? null;
   }
 
-  private resolvePlanBuildingId(context: PlanToolContext, fallbackType: "hq" | "barracks"): string | null {
+  private resolvePlanBuildingId(context: PlanToolContext, fallbackType: BuildingType): string | null {
     const requested = context.args.buildingId;
-    if (typeof requested === "string" && requested !== "$hq" && requested !== "$barracks") {
+    if (typeof requested === "string" && !requested.startsWith("$")) {
       return requested;
     }
-    const type =
-      requested === "$hq"
-        ? BUILDING_TYPES.HQ
-        : requested === "$barracks"
-          ? BUILDING_TYPES.BARRACKS
-          : context.args.buildingType === BUILDING_TYPES.HQ || context.args.buildingType === BUILDING_TYPES.BARRACKS
-            ? context.args.buildingType
-            : fallbackType;
+    const placeholderType = this.resolveBuildingPlaceholder(requested);
+    const type = placeholderType ?? (isBuildingType(context.args.buildingType) ? context.args.buildingType : fallbackType);
     return context.snapshot.myBuildings.find((building) => building.type === type && building.exists)?.id ?? null;
   }
 
-  private resolveTargetPriority(value: unknown): Array<"soldier" | "worker"> | undefined {
+  private resolveBuildingPlaceholder(value: unknown): BuildingType | null {
+    if (value === "$hq") {
+      return BUILDING_TYPES.HQ;
+    }
+    if (value === "$barracks") {
+      return BUILDING_TYPES.BARRACKS;
+    }
+    if (value === "$war_factory") {
+      return BUILDING_TYPES.WAR_FACTORY;
+    }
+    return null;
+  }
+
+  private resolveTargetPriority(value: unknown): AttackTargetType[] | undefined {
     if (!Array.isArray(value)) {
       return undefined;
     }
-    const priority = value.filter((entry): entry is "soldier" | "worker" => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER);
+    const priority = value.filter((entry): entry is AttackTargetType => isUnitType(entry) || isBuildingType(entry));
     return priority.length > 0 ? priority : undefined;
   }
 
@@ -362,11 +394,19 @@ export class GameAgentBridge {
           ? "H"
           : type === BUILDING_TYPES.BARRACKS
             ? "B"
-            : type === UNIT_TYPES.SOLDIER
-              ? "S"
-              : type === UNIT_TYPES.WORKER
-                ? "W"
-                : "?";
+            : type === BUILDING_TYPES.WAR_FACTORY
+              ? "F"
+              : type === UNIT_TYPES.LIGHT_TANK
+                ? "T"
+                : type === UNIT_TYPES.ROCKET_SOLDIER
+                  ? "R"
+                  : type === UNIT_TYPES.RIFLEMAN
+                    ? "I"
+                    : type === UNIT_TYPES.SOLDIER
+                      ? "S"
+                      : type === UNIT_TYPES.WORKER
+                        ? "W"
+                        : "?";
       return relation === "self" ? upper : upper.toLowerCase();
     };
 
@@ -395,20 +435,153 @@ export class GameAgentBridge {
     const state = this.game.getState();
     this.trackRead(state.tick, args?.trackRead);
     const me = state.players.find((player) => player.id === this.playerId)!;
+    const enemies = state.players.filter((player) => player.id !== this.playerId);
+    const myBuildings = me.buildings.filter((building) => building.exists);
+    const myUnits = me.units.filter((unit) => unit.exists);
+    const enemyBuildings = enemies.flatMap((player) => player.buildings.filter((building) => building.exists));
+    const enemyUnits = enemies.flatMap((player) => player.units.filter((unit) => unit.exists));
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ) ?? null;
+    const countUnits = (unitType: UnitType) => myUnits.filter((unit) => unit.type === unitType).length;
+    const countBuildings = (buildingType: BuildingType) => myBuildings.filter((building) => building.type === buildingType).length;
+    const hasBarracks = countBuildings(BUILDING_TYPES.BARRACKS) > 0;
+    const hasWarFactory = countBuildings(BUILDING_TYPES.WAR_FACTORY) > 0;
+    const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY);
+    const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
+    const suggestedBuildSites = this.getSuggestedBuildSites();
+    const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
+    const activeHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
+    const idleWorkers = workers.filter((unit) => unit.state === "idle" && unit.intent?.type !== "harvest_loop");
+    const resourceAssignments = state.tiles
+      .flat()
+      .filter((tile) => tile.type === TILE_TYPES.RESOURCE)
+      .map((tile) => {
+        const assignedHarvesters = activeHarvesters.filter((unit) =>
+          unit.intent?.type === "harvest_loop" &&
+          unit.intent.targetX === tile.x &&
+          unit.intent.targetY === tile.y
+        ).length;
+        const distanceToHq = hq ? Math.max(Math.abs(tile.x - hq.x), Math.abs(tile.y - hq.y)) : null;
+        return {
+          x: tile.x,
+          y: tile.y,
+          assignedHarvesters,
+          distanceToHq,
+        };
+      })
+      .sort((a, b) => {
+        if (a.assignedHarvesters !== b.assignedHarvesters) {
+          return b.assignedHarvesters - a.assignedHarvesters;
+        }
+        const aDistance = a.distanceToHq ?? Number.POSITIVE_INFINITY;
+        const bDistance = b.distanceToHq ?? Number.POSITIVE_INFINITY;
+        if (aDistance !== bDistance) {
+          return aDistance - bDistance;
+        }
+        return a.y - b.y || a.x - b.x;
+      });
+    const economyRecommendations: Array<Record<string, unknown>> = [];
+    if (idleWorkers.length > 0) {
+      economyRecommendations.push({
+        action: "start_harvest_loop",
+        reason: "Idle workers should usually be assigned to automatic harvesting before adding more production.",
+        unitIds: idleWorkers.map((unit) => unit.id),
+      });
+    }
+    if (activeHarvesters.length < Math.min(2, workers.length)) {
+      economyRecommendations.push({
+        action: "keep_two_harvesters",
+        reason: "The opening economy expects both starting workers to be on harvest_loop.",
+      });
+    }
+    const recommendedStructures: Array<Record<string, unknown>> = [];
+    if (!hasBarracks) {
+      recommendedStructures.push({
+        buildingType: BUILDING_TYPES.BARRACKS,
+        cost: getBuildingCost(BUILDING_TYPES.BARRACKS),
+        reason: "Unlock infantry production before floating credits.",
+        suggestedSites: suggestedBuildSites,
+      });
+    } else if (!hasWarFactory && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY)) {
+      recommendedStructures.push({
+        buildingType: BUILDING_TYPES.WAR_FACTORY,
+        cost: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        reason: "Tech to light_tank once barracks exists and credits can pay for the factory.",
+        suggestedSites: suggestedBuildSites,
+      });
+    }
+    const recommendedProduction: Array<Record<string, unknown>> = [];
+    if (hasBarracks) {
+      recommendedProduction.push({
+        buildingType: BUILDING_TYPES.BARRACKS,
+        unitType: enemyVehicleCount > 0 || enemyHasWarFactory ? UNIT_TYPES.ROCKET_SOLDIER : UNIT_TYPES.RIFLEMAN,
+        reason: enemyVehicleCount > 0 || enemyHasWarFactory
+          ? "Enemy vehicle tech detected; rocket_soldier is the infantry counter."
+          : "Rifleman is the default low-cost infantry baseline.",
+      });
+    }
+    if (hasWarFactory) {
+      recommendedProduction.push({
+        buildingType: BUILDING_TYPES.WAR_FACTORY,
+        unitType: UNIT_TYPES.LIGHT_TANK,
+        reason: "Light tanks convert factory tech into high-HP structure pressure.",
+      });
+    }
     return {
       effect: "read",
       result: {
         tick: state.tick,
         credits: me.resources.credits,
         hq,
-        buildings: me.buildings.filter((building) => building.exists),
-        productionQueues: me.buildings
-          .filter((building) => building.exists)
+        buildings: myBuildings,
+        productionQueues: myBuildings
           .map((building) => ({ buildingId: building.id, queue: building.productionQueue })),
-        canBuildBarracks: me.resources.credits >= BUILDING_STATS.barracks.cost,
-        canSpawnWorker: me.resources.credits >= UNIT_STATS.worker.cost,
-        canSpawnSoldier: me.resources.credits >= UNIT_STATS.soldier.cost,
+        canBuildBarracks: me.resources.credits >= getBuildingCost(BUILDING_TYPES.BARRACKS),
+        canBuildWarFactory: me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        canSpawnWorker: me.resources.credits >= getUnitCost(UNIT_TYPES.WORKER),
+        canSpawnSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.SOLDIER),
+        canSpawnRifleman: me.resources.credits >= getUnitCost(UNIT_TYPES.RIFLEMAN),
+        canSpawnRocketSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER),
+        canSpawnLightTank: me.resources.credits >= getUnitCost(UNIT_TYPES.LIGHT_TANK),
+        economyStatus: {
+          workers: workers.length,
+          activeHarvesters: activeHarvesters.length,
+          idleWorkers: idleWorkers.length,
+          carryingCredits: workers.reduce((sum, unit) => sum + unit.carryingCredits, 0),
+          resourceAssignments,
+          recommendations: economyRecommendations,
+        },
+        unitCosts: {
+          [UNIT_TYPES.WORKER]: getUnitCost(UNIT_TYPES.WORKER),
+          [UNIT_TYPES.SOLDIER]: getUnitCost(UNIT_TYPES.SOLDIER),
+          [UNIT_TYPES.RIFLEMAN]: getUnitCost(UNIT_TYPES.RIFLEMAN),
+          [UNIT_TYPES.ROCKET_SOLDIER]: getUnitCost(UNIT_TYPES.ROCKET_SOLDIER),
+          [UNIT_TYPES.LIGHT_TANK]: getUnitCost(UNIT_TYPES.LIGHT_TANK),
+        },
+        buildingCosts: {
+          [BUILDING_TYPES.BARRACKS]: getBuildingCost(BUILDING_TYPES.BARRACKS),
+          [BUILDING_TYPES.WAR_FACTORY]: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        },
+        techStatus: {
+          own: {
+            workers: countUnits(UNIT_TYPES.WORKER),
+            combatUnits:
+              countUnits(UNIT_TYPES.SOLDIER) +
+              countUnits(UNIT_TYPES.RIFLEMAN) +
+              countUnits(UNIT_TYPES.ROCKET_SOLDIER) +
+              countUnits(UNIT_TYPES.LIGHT_TANK),
+            riflemen: countUnits(UNIT_TYPES.RIFLEMAN),
+            rocketSoldiers: countUnits(UNIT_TYPES.ROCKET_SOLDIER),
+            lightTanks: countUnits(UNIT_TYPES.LIGHT_TANK),
+            barracks: countBuildings(BUILDING_TYPES.BARRACKS),
+            warFactories: countBuildings(BUILDING_TYPES.WAR_FACTORY),
+          },
+          enemy: {
+            hasWarFactory: enemyHasWarFactory,
+            lightTanks: enemyVehicleCount,
+          },
+          recommendedStructures,
+          recommendedProduction,
+        },
       },
     };
   }
@@ -478,7 +651,7 @@ export class GameAgentBridge {
     };
   }
 
-  attackMoveUnit(unitId: string, position: Position, targetPriority?: Array<"soldier" | "worker">): ExecutedToolResult {
+  attackMoveUnit(unitId: string, position: Position, targetPriority?: AttackTargetType[]): ExecutedToolResult {
     const state = this.game.getState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit) {
@@ -489,11 +662,11 @@ export class GameAgentBridge {
       });
     }
 
-    if (UNIT_STATS[unit.type].attack <= 0) {
+    if (!unitCanAttack(unit.type)) {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier.",
+        hint: "Choose a friendly unit with attack capability, such as a soldier, rifleman, rocket_soldier, or light_tank.",
       });
     }
 
@@ -512,7 +685,7 @@ export class GameAgentBridge {
       });
     }
 
-    const priority = targetPriority && targetPriority.length > 0 ? targetPriority : [UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER];
+    const priority = targetPriority && targetPriority.length > 0 ? targetPriority : getDefaultAttackMovePriority(unit.type);
     this.planRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("attack_move", { unitId, position, targetPriority: priority }));
@@ -535,11 +708,11 @@ export class GameAgentBridge {
       });
     }
 
-    if (UNIT_STATS[attacker.type].attack <= 0) {
+    if (!unitCanAttack(attacker.type)) {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier.",
+        hint: "Choose a friendly unit with attack capability, such as a soldier, rifleman, rocket_soldier, or light_tank.",
       });
     }
 
@@ -569,7 +742,7 @@ export class GameAgentBridge {
     };
   }
 
-  spawnUnit(buildingId: string, unitType: "worker" | "soldier"): ExecutedToolResult {
+  spawnUnit(buildingId: string, unitType: UnitType): ExecutedToolResult {
     const state = this.game.getState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const building = me.buildings.find((candidate) => candidate.id === buildingId && candidate.exists);
@@ -584,24 +757,30 @@ export class GameAgentBridge {
       };
     }
 
-    const canProduce =
-      (building.type === BUILDING_TYPES.HQ && unitType === "worker") ||
-      (building.type === BUILDING_TYPES.BARRACKS && unitType === "soldier");
+    if (!isUnitType(unitType)) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "invalid_spawn_request",
+          hint: "Unknown unit type. Supported unit types are worker, soldier, rifleman, rocket_soldier, and light_tank.",
+        }),
+      };
+    }
+
+    const canProduce = canBuildingProduce(building.type, unitType);
     if (!canProduce) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_spawn_request",
-          hint:
-            building.type === BUILDING_TYPES.HQ
-              ? "HQ can only spawn workers."
-              : "Barracks can only spawn soldiers.",
+          hint: `${building.type} can produce: ${getProductionOptions(building.type).join(", ")}.`,
         }),
       };
     }
 
-    const cost = UNIT_STATS[unitType].cost;
+    const cost = getUnitCost(unitType);
     if (me.resources.credits < cost) {
       return {
         effect: "action",
@@ -623,11 +802,11 @@ export class GameAgentBridge {
     };
   }
 
-  buildStructure(unitId: string, buildingType: "barracks", position: Position): ExecutedToolResult {
+  buildStructure(unitId: string, buildingType: BuildingType, position: Position): ExecutedToolResult {
     const state = this.game.getState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const worker = me.units.find((candidate) => candidate.id === unitId && candidate.exists);
-    if (!worker || worker.type !== "worker") {
+    if (!worker || worker.type !== UNIT_TYPES.WORKER) {
       return {
         effect: "action",
         result: this.withActionMetadata({
@@ -638,26 +817,37 @@ export class GameAgentBridge {
       };
     }
 
-    const cost = BUILDING_STATS[buildingType].cost;
+    if (!isBuildableBuildingType(buildingType)) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "invalid_building",
+          hint: "Buildable structures are barracks and war_factory. HQ cannot be built.",
+        }),
+      };
+    }
+
+    const cost = getBuildingCost(buildingType);
     if (me.resources.credits < cost) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "insufficient_credits",
-          hint: this.buildBarracksHint(`Need ${cost} credits before building a barracks.`),
+          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`),
         }),
       };
     }
 
-    const validation = this.validateBarracksBuildPosition(position);
+    const validation = this.validateBuildPosition(position);
     if (!validation.ok) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_build_position",
-          hint: this.buildBarracksHint(validation.hint),
+          hint: this.buildPlacementHint(validation.hint),
         }),
       };
     }
@@ -891,7 +1081,7 @@ export class GameAgentBridge {
     const commands: Command[] = [];
     for (const [unitId, order] of this.attackOrders) {
       const unit = this.getFriendlyUnit(unitId);
-      if (!unit || UNIT_STATS[unit.type].attack <= 0) {
+      if (!unit || !unitCanAttack(unit.type)) {
         this.attackOrders.delete(unitId);
         continue;
       }
@@ -980,7 +1170,7 @@ export class GameAgentBridge {
     };
   }
 
-  private getSuggestedBarracksSites(limit = 3): Position[] {
+  private getSuggestedBuildSites(limit = 3): Position[] {
     const state = this.game.getState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
@@ -992,7 +1182,7 @@ export class GameAgentBridge {
     const candidates: Position[] = [];
     for (let y = 0; y < state.tiles.length; y++) {
       for (let x = 0; x < (state.tiles[y]?.length ?? 0); x++) {
-        const validation = this.validateBarracksBuildPosition({ x, y });
+        const validation = this.validateBuildPosition({ x, y });
         if (validation.ok) {
           candidates.push({ x, y });
         }
@@ -1011,17 +1201,17 @@ export class GameAgentBridge {
       .slice(0, limit);
   }
 
-  private buildBarracksHint(baseHint: string): string {
-    const suggestions = this.getSuggestedBarracksSites()
+  private buildPlacementHint(baseHint: string): string {
+    const suggestions = this.getSuggestedBuildSites()
       .map((site) => `(${site.x}, ${site.y})`)
       .join(", ");
     if (!suggestions) {
-      return `${baseHint} Barracks must be on an empty tile and leave one empty ring around HQ.`;
+      return `${baseHint} Structures must be on an empty tile and leave one empty ring around HQ.`;
     }
     return `${baseHint} Try an empty tile that leaves one empty ring around HQ, for example: ${suggestions}.`;
   }
 
-  private validateBarracksBuildPosition(position: Position): { ok: true } | { ok: false; hint: string } {
+  private validateBuildPosition(position: Position): { ok: true } | { ok: false; hint: string } {
     const state = this.game.getState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
@@ -1173,20 +1363,22 @@ export class GameAgentBridge {
       case "credits_at_least":
         return typeof value.amount === "number" && Number.isInteger(value.amount) && value.amount >= 0;
       case "building_exists":
+      case "enemy_building_exists":
         return (
-          (value.buildingType === BUILDING_TYPES.HQ || value.buildingType === BUILDING_TYPES.BARRACKS) &&
+          isBuildingType(value.buildingType) &&
           (value.count === undefined || (Number.isInteger(value.count) && Number(value.count) > 0))
         );
       case "unit_count_at_least":
+      case "enemy_unit_count_at_least":
         return (
-          (value.unitType === UNIT_TYPES.WORKER || value.unitType === UNIT_TYPES.SOLDIER) &&
+          isUnitType(value.unitType) &&
           Number.isInteger(value.count) &&
           Number(value.count) >= 0
         );
       case "production_queue_empty":
         return (
           (value.buildingId === undefined || typeof value.buildingId === "string") &&
-          (value.buildingType === undefined || value.buildingType === BUILDING_TYPES.HQ || value.buildingType === BUILDING_TYPES.BARRACKS) &&
+          (value.buildingType === undefined || isBuildingType(value.buildingType)) &&
           (value.buildingId !== undefined || value.buildingType !== undefined)
         );
       default:
@@ -1197,7 +1389,7 @@ export class GameAgentBridge {
   private isOptionalTargetPriority(value: unknown): boolean {
     return (
       value === undefined ||
-      (Array.isArray(value) && value.every((entry) => entry === UNIT_TYPES.SOLDIER || entry === UNIT_TYPES.WORKER))
+      (Array.isArray(value) && value.every((entry) => isUnitType(entry) || isBuildingType(entry)))
     );
   }
 

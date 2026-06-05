@@ -1,8 +1,12 @@
 import type { ControlClient } from "../client.js";
+import { ALL_BUILDING_TYPES, ALL_UNIT_TYPES, BUILDING_TYPES } from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
 import { printBatchResult } from "./batch.js";
+
+const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
+const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
 
 function parseCoord(raw: string): { x: number; y: number } {
   const parts = raw.split(",");
@@ -144,14 +148,13 @@ export async function handleAttackMove(
   const unitId = flags.get("unit");
   const toRaw = flags.get("to");
   const priorityRaw = flags.get("priority");
-  const validPriorities = ["soldier", "worker"] as const;
 
   let priority: string[] | undefined;
   if (priorityRaw) {
     priority = priorityRaw.split(",").map((s) => s.trim());
     for (const p of priority) {
-      if (!validPriorities.includes(p as typeof validPriorities[number])) {
-        exit(ExitCode.ArgError, `Invalid priority: ${p}. Valid: soldier, worker`);
+      if (!ATTACK_TARGET_TYPES.includes(p as typeof ATTACK_TARGET_TYPES[number])) {
+        exit(ExitCode.ArgError, `Invalid priority: ${p}. Valid: ${ATTACK_TARGET_TYPES.join(", ")}`);
       }
     }
   }
@@ -263,9 +266,8 @@ export async function handleBuild(
     exit(ExitCode.ArgError, "build requires a building type (e.g., build barracks)");
   }
   const buildingType = subcommand;
-  const validTypes = ["barracks"];
-  if (!validTypes.includes(buildingType)) {
-    exit(ExitCode.ArgError, `Unknown building type: ${buildingType}. Valid: barracks`);
+  if (!BUILDABLE_BUILDING_TYPES.includes(buildingType as typeof BUILDABLE_BUILDING_TYPES[number])) {
+    exit(ExitCode.ArgError, `Unknown building type: ${buildingType}. Valid: ${BUILDABLE_BUILDING_TYPES.join(", ")}`);
   }
 
   const unitId = flags.get("unit");
@@ -317,9 +319,8 @@ export async function handleTrain(
   flags: Map<string, string>,
 ): Promise<void> {
   const unitType = subcommand;
-  const validTypes = ["worker", "soldier"];
-  if (!validTypes.includes(unitType)) {
-    exit(ExitCode.ArgError, `train requires unit type (worker or soldier), got: ${subcommand || "(none)"}`);
+  if (!ALL_UNIT_TYPES.includes(unitType as typeof ALL_UNIT_TYPES[number])) {
+    exit(ExitCode.ArgError, `train requires unit type (${ALL_UNIT_TYPES.join(", ")}), got: ${subcommand || "(none)"}`);
   }
 
   const buildingId = flags.get("building");

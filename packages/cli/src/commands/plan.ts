@@ -1,4 +1,5 @@
 import type { ControlClient } from "../client.js";
+import { BUILDING_TYPES, UNIT_TYPES, getBuildingCost, getCombatUnitTypes, getUnitCost } from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
@@ -56,9 +57,11 @@ export async function handlePlan(
   const queueData = (stateData.productionQueues as Array<{ buildingId: string; queue: unknown[] }>) ?? [];
 
   const idleWorkers = units.filter((u) => u.type === "worker" && u.state === "idle");
-  const soldierUnits = units.filter((u) => u.type === "soldier");
+  const combatUnitTypes = new Set(getCombatUnitTypes());
+  const combatUnits = units.filter((u) => typeof u.type === "string" && combatUnitTypes.has(u.type as any));
   const hqBuilding = buildings.find((b) => b.type === "hq");
   const barracksBuildings = buildings.filter((b) => b.type === "barracks");
+  const warFactoryBuildings = buildings.filter((b) => b.type === "war_factory");
   const emptyBarracks = barracksBuildings.filter((b) => {
     const q = queueData.find((qd) => qd.buildingId === b.id);
     return !q || q.queue.length === 0;
@@ -86,14 +89,25 @@ export async function handlePlan(
         call: "build_structure",
         args: { unitId: idleWorkers[0].id as string, buildingType: "barracks", x: 6, y: 6 },
         scope: "global",
-        when: { condition: "credits_at_least", amount: 120 },
+        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.BARRACKS) },
         until: { condition: "building_exists", buildingType: "barracks" },
         retry: true,
       });
     }
 
+    if (barracksBuildings.length > 0 && warFactoryBuildings.length === 0 && idleWorkers.length > 0) {
+      steps.push({
+        call: "build_structure",
+        args: { unitId: idleWorkers[0].id as string, buildingType: "war_factory", x: 6, y: 8 },
+        scope: "global",
+        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.WAR_FACTORY) },
+        until: { condition: "building_exists", buildingType: "war_factory" },
+        retry: true,
+      });
+    }
+
     // Step 3: train workers from HQ when queue is empty
-    if (hqBuilding && credits >= 50) {
+    if (hqBuilding && credits >= getUnitCost(UNIT_TYPES.WORKER)) {
       steps.push({
         call: "spawn_unit",
         args: { buildingId: "$hq", unitType: "worker" },
@@ -108,10 +122,84 @@ export async function handlePlan(
       loop: -1,
       steps,
     };
-  } else if (subcommand === "defend") {
-    const unitIds = soldierUnits.map((s) => s.id as string);
+  } else if (subcommand === "tech") {
+    const unitIds = idleWorkers.map((worker) => worker.id as string);
     if (unitIds.length === 0) {
-      exit(ExitCode.BackendFailure, "No soldiers available for defend plan. Train soldiers first.");
+      exit(ExitCode.BackendFailure, "No idle workers available for tech plan.");
+    }
+
+    const hqX = typeof hqBuilding?.x === "number" ? hqBuilding.x : 2;
+    const hqY = typeof hqBuilding?.y === "number" ? hqBuilding.y : 10;
+    const side = hqX < 10 ? 1 : -1;
+    const barracksSite = { x: hqX + side * 2, y: hqY };
+    const factorySite = { x: hqX + side * 2, y: hqY + 2 };
+    const steps: Array<Record<string, unknown>> = [
+      {
+        call: "start_harvest_loop",
+        args: { unitId: "$unitId" },
+        scope: "per_unit",
+      },
+    ];
+
+    if (barracksBuildings.length === 0) {
+      steps.push({
+        call: "build_structure",
+        args: { unitId: unitIds[0], buildingType: "barracks", x: barracksSite.x, y: barracksSite.y },
+        scope: "global",
+        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.BARRACKS) },
+        until: { condition: "building_exists", buildingType: "barracks" },
+        retry: true,
+      });
+    }
+
+    steps.push({
+      call: "spawn_unit",
+      args: { buildingId: "$barracks", unitType: "rifleman" },
+      scope: "global",
+      when: { condition: "production_queue_empty", buildingType: "barracks" },
+      until: { condition: "unit_count_at_least", unitType: "rifleman", count: 3 },
+      retry: true,
+    });
+
+    if (warFactoryBuildings.length === 0) {
+      steps.push({
+        call: "build_structure",
+        args: { unitId: unitIds[0], buildingType: "war_factory", x: factorySite.x, y: factorySite.y },
+        scope: "global",
+        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.WAR_FACTORY) },
+        until: { condition: "building_exists", buildingType: "war_factory" },
+        retry: true,
+      });
+    }
+
+    steps.push(
+      {
+        call: "spawn_unit",
+        args: { buildingId: "$war_factory", unitType: "light_tank" },
+        scope: "global",
+        when: { condition: "production_queue_empty", buildingType: "war_factory" },
+        until: { condition: "unit_count_at_least", unitType: "light_tank", count: 1 },
+        retry: true,
+      },
+      {
+        call: "spawn_unit",
+        args: { buildingId: "$barracks", unitType: "rocket_soldier" },
+        scope: "global",
+        when: { condition: "enemy_unit_count_at_least", unitType: "light_tank", count: 1 },
+        until: { condition: "unit_count_at_least", unitType: "rocket_soldier", count: 2 },
+        retry: true,
+      },
+    );
+
+    plan = {
+      unitIds,
+      loop: 1,
+      steps,
+    };
+  } else if (subcommand === "defend") {
+    const unitIds = combatUnits.map((unit) => unit.id as string);
+    if (unitIds.length === 0) {
+      exit(ExitCode.BackendFailure, "No combat units available for defend plan. Train soldiers, riflemen, rocket soldiers, or light tanks first.");
     }
     if (!hqBuilding) {
       exit(ExitCode.BackendFailure, "No HQ found for defend plan.");
@@ -136,9 +224,9 @@ export async function handlePlan(
       ],
     };
   } else if (subcommand === "attack-hq") {
-    const unitIds = soldierUnits.map((s) => s.id as string);
+    const unitIds = combatUnits.map((unit) => unit.id as string);
     if (unitIds.length === 0) {
-      exit(ExitCode.BackendFailure, "No soldiers available for attack-hq plan. Train soldiers first.");
+      exit(ExitCode.BackendFailure, "No combat units available for attack-hq plan. Train soldiers, riflemen, rocket soldiers, or light tanks first.");
     }
 
     // Get map state to find enemy HQ
@@ -178,7 +266,7 @@ export async function handlePlan(
       ],
     };
   } else {
-    exit(ExitCode.ArgError, `Unknown plan type: ${subcommand || "(none)"}. Valid: economy, defend, attack-hq, custom`);
+    exit(ExitCode.ArgError, `Unknown plan type: ${subcommand || "(none)"}. Valid: economy, tech, defend, attack-hq, custom`);
   }
 
   printJson({

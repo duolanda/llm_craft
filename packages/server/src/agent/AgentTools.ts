@@ -1,6 +1,10 @@
 import {
+  ALL_BUILDING_TYPES,
+  ALL_UNIT_TYPES,
+  BUILDING_TYPES,
   CONTROL_PROVIDER_ONLY_TOOL_NAMES,
   CONTROL_READ_TOOL_NAMES,
+  DEFAULT_MAP_LAYOUT,
   OrchestratePlanInput,
 } from "@llmcraft/shared";
 import { GameAgentBridge } from "./GameAgentBridge";
@@ -17,6 +21,13 @@ export interface AgentToolExecution {
 }
 
 type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
+
+const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
+const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
+const OPENING_BARRACKS_SITE = {
+  x: DEFAULT_MAP_LAYOUT.player1Hq.x + 2,
+  y: DEFAULT_MAP_LAYOUT.player1Hq.y,
+};
 
 const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
@@ -51,7 +62,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "get_active_plans",
-    description: "Read active orchestration plans currently attached to my units.",
+    description: "Read active orchestration plans currently attached to my units, including currentStep, waitingReason, and lastAttempt diagnostics.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: (bridge) => bridge.getActivePlansTool(),
   },
@@ -80,7 +91,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_unit",
     description:
-      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking enemy units encountered before arrival. Once the unit reaches the destination, this order ends. If an enemy HQ, barracks, or specific unit id is visible, prefer attack instead.",
+      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking role-appropriate enemy targets encountered before arrival. Defaults are role-aware: riflemen prefer infantry, rocket soldiers prefer vehicles, and light tanks prefer structures. Once the unit reaches the destination, this order ends. If an enemy HQ, barracks, or specific unit id is visible, prefer attack instead.",
     parameters: {
       type: "object",
       required: ["unitId", "x", "y"],
@@ -90,7 +101,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
         y: { type: "integer" },
         priority: {
           type: "array",
-          items: { type: "string", enum: ["soldier", "worker"] },
+          items: { type: "string", enum: ATTACK_TARGET_TYPES },
         },
       },
       additionalProperties: false,
@@ -121,7 +132,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       required: ["buildingId", "unitType"],
       properties: {
         buildingId: { type: "string" },
-        unitType: { type: "string", enum: ["worker", "soldier"] },
+        unitType: { type: "string", enum: ALL_UNIT_TYPES },
       },
       additionalProperties: false,
     },
@@ -129,13 +140,13 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "build_structure",
-    description: "Queue a build command for one worker. Barracks must be placed on an empty tile and leave one empty ring around your HQ; if placement fails, the error hint will suggest valid nearby tiles.",
+    description: "Queue a build command for one worker. Buildable structures must be placed on an empty tile and leave one empty ring around your HQ; if placement fails, the error hint will suggest valid nearby tiles.",
     parameters: {
       type: "object",
       required: ["unitId", "buildingType", "x", "y"],
       properties: {
         unitId: { type: "string" },
-        buildingType: { type: "string", enum: ["barracks"] },
+        buildingType: { type: "string", enum: BUILDABLE_BUILDING_TYPES },
         x: { type: "integer" },
         y: { type: "integer" },
       },
@@ -249,13 +260,16 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Supported call tools in plans: move_unit, attack_move_unit, attack, spawn_unit, build_structure, start_harvest_loop, hold_unit.",
       "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for production/building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
-      "- In global production args, buildingId can be \"$hq\" or \"$barracks\" to resolve the current friendly building at execution time.",
-      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, unit_count_at_least, production_queue_empty.",
+      "- In global production args, buildingId can be \"$hq\", \"$barracks\", or \"$war_factory\" to resolve the current friendly building at execution time.",
+      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
+      "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; they do not emit unaffordable commands just to retry.",
+      "- Multiple active plans share the same tick budget. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining budget cannot cover them.",
+      "- Use get_active_plans to inspect currentStep, waitingReason, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train soldiers:",
+      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train riflemen:",
       JSON.stringify({
         unitIds: ["worker_1", "worker_2"],
         loop: 1,
@@ -263,7 +277,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
           { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
           {
             call: "build_structure",
-            args: { unitId: "worker_1", buildingType: "barracks", x: 4, y: 10 },
+            args: { unitId: "worker_1", buildingType: "barracks", x: OPENING_BARRACKS_SITE.x, y: OPENING_BARRACKS_SITE.y },
             scope: "global",
             when: { condition: "credits_at_least", amount: 120 },
             until: { condition: "building_exists", buildingType: "barracks" },
@@ -271,10 +285,10 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
           },
           {
             call: "spawn_unit",
-            args: { buildingId: "$barracks", unitType: "soldier" },
+            args: { buildingId: "$barracks", unitType: "rifleman" },
             scope: "global",
             when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "soldier", count: 4 },
+            until: { condition: "unit_count_at_least", unitType: "rifleman", count: 4 },
             retry: true,
           },
         ],
@@ -286,9 +300,9 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
         steps: [
           {
             call: "attack_move_unit",
-            args: { unitId: "$unitId", x: 18, y: 10 },
-            until: { condition: "near_position", x: 18, y: 10, distance: 2 },
-            maxTicks: 40,
+            args: { unitId: "$unitId", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y },
+            until: { condition: "near_position", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y, distance: 2 },
+            maxTicks: 80,
           },
           {
             call: "attack",
@@ -323,14 +337,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                 properties: {
                   unitId: { type: "string" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   x: { type: "integer" },
                   y: { type: "integer" },
                   targetId: { type: "string" },
                   priority: {
                     type: "array",
-                    items: { type: "string", enum: ["soldier", "worker"] },
+                    items: { type: "string", enum: ATTACK_TARGET_TYPES },
                   },
                 },
                 additionalProperties: false,
@@ -350,7 +364,9 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "target_destroyed",
                       "credits_at_least",
                       "building_exists",
+                      "enemy_building_exists",
                       "unit_count_at_least",
+                      "enemy_unit_count_at_least",
                       "production_queue_empty",
                     ],
                   },
@@ -360,8 +376,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                   targetId: { type: "string" },
                   amount: { type: "integer" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   count: { type: "integer" },
                 },
                 additionalProperties: false,
@@ -381,7 +397,9 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "target_destroyed",
                       "credits_at_least",
                       "building_exists",
+                      "enemy_building_exists",
                       "unit_count_at_least",
+                      "enemy_unit_count_at_least",
                       "production_queue_empty",
                     ],
                   },
@@ -391,8 +409,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                   targetId: { type: "string" },
                   amount: { type: "integer" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   count: { type: "integer" },
                 },
                 additionalProperties: false,

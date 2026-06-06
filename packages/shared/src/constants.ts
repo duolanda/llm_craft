@@ -103,6 +103,7 @@ export interface RulesetUnitDefinition {
   attack: number;
   cost: number;
   attackRange: number;
+  visionRange: number;
   armor: ArmorType;
   damageModifiers?: Partial<Record<ArmorType, number>>;
 }
@@ -110,6 +111,7 @@ export interface RulesetUnitDefinition {
 export interface RulesetBuildingDefinition {
   hp: number;
   cost: number;
+  visionRange: number;
   armor: ArmorType;
   produces: UnitType[];
 }
@@ -126,14 +128,15 @@ export const DEFAULT_RULESET = {
   id: "mvp",
   name: "LLMCraft MVP",
   units: {
-    [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, armor: ARMOR_TYPES.INFANTRY },
-    [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 12, cost: 80, attackRange: 1, armor: ARMOR_TYPES.INFANTRY },
+    [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY },
+    [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 12, cost: 80, attackRange: 1, visionRange: 5, armor: ARMOR_TYPES.INFANTRY },
     [UNIT_TYPES.RIFLEMAN]: {
       hp: 90,
       speed: 1,
       attack: 14,
       cost: 90,
       attackRange: 3,
+      visionRange: 6,
       armor: ARMOR_TYPES.INFANTRY,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 1.2,
@@ -147,6 +150,7 @@ export const DEFAULT_RULESET = {
       attack: 24,
       cost: 140,
       attackRange: 4,
+      visionRange: 6,
       armor: ARMOR_TYPES.INFANTRY,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 0.45,
@@ -160,6 +164,7 @@ export const DEFAULT_RULESET = {
       attack: 30,
       cost: 300,
       attackRange: 3,
+      visionRange: 7,
       armor: ARMOR_TYPES.VEHICLE,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 0.7,
@@ -169,14 +174,15 @@ export const DEFAULT_RULESET = {
     },
   },
   buildings: {
-    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER] },
+    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER] },
     [BUILDING_TYPES.BARRACKS]: {
       hp: 420,
       cost: 120,
+      visionRange: 6,
       armor: ARMOR_TYPES.STRUCTURE,
       produces: [UNIT_TYPES.SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
     },
-    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK] },
+    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK] },
   },
   economy: ECONOMY_RULES,
 } satisfies GameRuleset;
@@ -188,16 +194,19 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
   [BUILDING_TYPES.HQ]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].cost,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].armor,
   },
   [BUILDING_TYPES.BARRACKS]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].cost,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].armor,
   },
   [BUILDING_TYPES.WAR_FACTORY]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].cost,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].armor,
   },
 };

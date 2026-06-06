@@ -31,7 +31,7 @@
 
 模型通过工具读取局面：
 
-- `get_map_state`: 全图可见战场信息；默认返回无坐标轴 ASCII 小地图、单位列表和建筑列表，需要逐格地形时才请求 `cells`
+- `get_map_state`: 当前己方视野内的战场信息；默认返回带 `?` 迷雾的无坐标轴 ASCII 小地图、可见单位列表和可见建筑列表，需要逐格可见地形时才请求 `cells`
 - `get_my_state`: 我方经济、HQ、建筑、生产能力
 - `get_my_units`: 我方可直接控制单位
 - `get_active_plans`: 当前高层计划
@@ -131,7 +131,7 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - 开局每方 `1 HQ + 2 Worker + 400 credits`
 - 胜负条件是摧毁敌方 `HQ`
 - 当前地图 `37 x 25`
-- 当前没有战争迷雾
+- Phase 12 启用基础战争迷雾读取层：`get_map_state`、`get_my_state.techStatus.enemy` 和 active plan 的 enemy 条件只使用己方视野内的敌方单位/建筑；未侦察地图格在 ASCII 小地图中显示为 `?`。底层 Game 胜负、战斗结算和客户端全局回放仍保留真实全局状态，本阶段还没有探索历史或 last-seen 地图层。
 - `worker` 自动采矿，回 HQ 周围 1 格自动交付；当前没有资源枯竭、矿量储备或精炼厂链路
 - `barracks` 和 `war_factory` 不能紧贴己方 `HQ`
 - idle/hold 的有攻击力单位被敌方单位攻击时，会在射程内自动还击攻击者

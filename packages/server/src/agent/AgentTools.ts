@@ -33,7 +33,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "get_map_state",
     description:
-      "Read the full visible battlefield. By default returns a compact no-axis ASCII tactical map plus visible unit/building lists with coordinates. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need the full grid including empty cells.",
+      "Read the currently visible battlefield under basic fog of war. By default returns a compact no-axis ASCII tactical map with ? for unseen tiles plus visible unit/building lists with coordinates. Set includeCells=true only when you need visible terrain cells; set includeEmptyTiles=true only when you explicitly need all visible grid cells including empty cells.",
     parameters: {
       type: "object",
       properties: {

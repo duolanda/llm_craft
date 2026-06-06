@@ -48,16 +48,11 @@ describe("CLI Control Plane Integration", () => {
           x: DEFAULT_MAP_LAYOUT.player1Hq.x,
           y: DEFAULT_MAP_LAYOUT.player1Hq.y,
         }),
-        expect.objectContaining({
-          type: BUILDING_TYPES.HQ,
-          relation: "enemy",
-          x: DEFAULT_MAP_LAYOUT.player2Hq.x,
-          y: DEFAULT_MAP_LAYOUT.player2Hq.y,
-        }),
       ])
     );
+    expect(buildings.some((building) => building.relation === "enemy")).toBe(false);
     expect(cells).toEqual(
-      expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.map((position) =>
+      expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.slice(0, 2).map((position) =>
         expect.objectContaining({ ...position, tile: TILE_TYPES.RESOURCE })
       ))
     );
@@ -249,9 +244,15 @@ describe("CLI Control Plane Integration", () => {
     expect(response.ok).toBe(true);
   });
 
-  it("enemies shows opponent units", () => {
+  it("enemies shows opponent units inside vision", () => {
     const game = new Game();
     game.start();
+    game.getUnitManager().createUnit(
+      UNIT_TYPES.SOLDIER,
+      DEFAULT_MAP_LAYOUT.player1Hq.x + 5,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_2"
+    );
     const manager = new ControlSessionManager();
     const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
 
@@ -262,7 +263,6 @@ describe("CLI Control Plane Integration", () => {
     const data = result.result as Record<string, unknown>;
     const units = data.units as Array<Record<string, unknown>>;
 
-    // There should be enemy units (player_2's units)
     const enemies = units.filter((u) => u.relation === "enemy");
     expect(enemies.length).toBeGreaterThan(0);
   });

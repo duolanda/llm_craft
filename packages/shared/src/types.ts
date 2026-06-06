@@ -298,6 +298,8 @@ export interface AgentMapState {
   tick: number;
   width: number;
   height: number;
+  fogOfWar: boolean;
+  visibleTileCount: number;
   asciiMap: string;
   units: AgentMapStateUnit[];
   buildings: AgentMapStateBuilding[];

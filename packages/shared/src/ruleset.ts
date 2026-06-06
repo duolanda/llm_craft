@@ -45,6 +45,14 @@ export function getBuildingCost(buildingType: BuildingType, ruleset: GameRuleset
   return getBuildingStats(buildingType, ruleset).cost;
 }
 
+export function getUnitVisionRange(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): number {
+  return getUnitStats(unitType, ruleset).visionRange;
+}
+
+export function getBuildingVisionRange(buildingType: BuildingType, ruleset: GameRuleset = DEFAULT_RULESET): number {
+  return getBuildingStats(buildingType, ruleset).visionRange;
+}
+
 export function getProductionOptions(
   buildingType: BuildingType,
   ruleset: GameRuleset = DEFAULT_RULESET,

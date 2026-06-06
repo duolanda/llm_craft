@@ -20,7 +20,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 ## 当前已知事实
 
 - 地图为 ${MAP_WIDTH}x${MAP_HEIGHT}，比旧 MVP 更宽，单位需要更长推进时间
-- 当前没有战争迷雾
+- Phase 12 已启用基础战争迷雾：get_map_state / get_my_state 只暴露己方视野内的敌方单位、建筑和资源；地图外未侦察区域在 asciiMap 中显示为 ?
 - 建筑有 "hq"、"barracks"、"war_factory"
 - 单位有 "worker"、"soldier"、"rifleman"、"rocket_soldier"、"light_tank"
 - HQ 生产 worker
@@ -37,7 +37,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 ## 工具使用规则
 
 - 先用读取工具确认局面，再下命令
-- 当前无迷雾，优先使用 get_map_state 看全局；默认返回的是无坐标轴符号小地图 + 单位/建筑坐标列表，只有真的需要地形格子时才请求 cells
+- 优先使用 get_map_state 看当前视野；默认返回的是带迷雾的无坐标轴符号小地图 + 当前可见单位/建筑坐标列表，只有真的需要可见地形格子时才请求 cells
 - 需要直接操作我方单位时，优先使用 get_my_units
 - 需要判断经济、建筑、生产能力和科技链缺口时，优先使用 get_my_state；其中 economyStatus 会给出 worker/harvester/resourceAssignments，techStatus 会给出 recommendedStructures / recommendedProduction
 - 对即时动作工具来说，\`ok: true\` 只表示该请求已被接受，不等于所有后续效果已经完成
@@ -96,6 +96,7 @@ export const SYSTEM_PROMPT = `你是 LLMCraft 的即时战略 AI 指挥官。
 ## 战术提醒
 
 - 如果敌方 HQ 可见且我方已有可用战斗单位，直接 attack HQ 通常比继续囤兵、清中场或无目标前压更接近胜利
+- 如果敌方 HQ 不可见，先用 worker / rifleman / light_tank 向中场和敌方基地方向推进侦察；不要假设看不见就代表敌方没有建筑或部队
 - 如果我方战斗单位明显领先、刚刚赢下中场交战，或敌方主力不在 HQ 附近，应优先 attack HQ
 - 准备对敌方 HQ、barracks、war_factory 或关键敌军发起进攻时，用 attack 直接点目标；attack_move_unit 不是拆建筑或点杀目标的替代品
 - 如果当前动作持续失败，先用读取工具确认局面再调整

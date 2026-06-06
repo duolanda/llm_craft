@@ -13,6 +13,8 @@ import {
   getProductionOptions,
   getUnitCost,
   getUnitStats,
+  getBuildingVisionRange,
+  getUnitVisionRange,
   unitCanAttack,
 } from "@llmcraft/shared";
 
@@ -33,6 +35,15 @@ describe("default ruleset", () => {
     expect(unitCanAttack(UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.LIGHT_TANK)).toBe(true);
+  });
+
+  it("defines vision ranges for units and buildings", () => {
+    expect(getUnitVisionRange(UNIT_TYPES.WORKER)).toBe(5);
+    expect(getUnitVisionRange(UNIT_TYPES.RIFLEMAN)).toBe(6);
+    expect(getUnitVisionRange(UNIT_TYPES.ROCKET_SOLDIER)).toBe(6);
+    expect(getUnitVisionRange(UNIT_TYPES.LIGHT_TANK)).toBe(7);
+    expect(getBuildingVisionRange(BUILDING_TYPES.HQ)).toBe(8);
+    expect(getBuildingVisionRange(BUILDING_TYPES.BARRACKS)).toBe(6);
   });
 
   it("applies armor-based damage modifiers", () => {

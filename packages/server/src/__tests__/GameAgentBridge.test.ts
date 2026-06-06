@@ -399,8 +399,18 @@ describe("GameAgentBridge", () => {
     const bridge = new GameAgentBridge(game, "player_1");
 
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
-    game.getBuildingManager().createBuilding(BUILDING_TYPES.WAR_FACTORY, DEFAULT_MAP_LAYOUT.player2Hq.x - 2, DEFAULT_MAP_LAYOUT.player2Hq.y, "player_2");
-    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, DEFAULT_MAP_LAYOUT.player2Hq.x - 4, DEFAULT_MAP_LAYOUT.player2Hq.y, "player_2");
+    game.getBuildingManager().createBuilding(
+      BUILDING_TYPES.WAR_FACTORY,
+      DEFAULT_MAP_LAYOUT.player1Hq.x + 7,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_2"
+    );
+    game.getUnitManager().createUnit(
+      UNIT_TYPES.LIGHT_TANK,
+      DEFAULT_MAP_LAYOUT.player1Hq.x + 6,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_2"
+    );
 
     const result = bridge.getMyState().result as {
       techStatus: {
@@ -478,7 +488,12 @@ describe("GameAgentBridge", () => {
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
-    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, DEFAULT_MAP_LAYOUT.player2Hq.x - 4, DEFAULT_MAP_LAYOUT.player2Hq.y, "player_2");
+    game.getUnitManager().createUnit(
+      UNIT_TYPES.LIGHT_TANK,
+      DEFAULT_MAP_LAYOUT.player1Hq.x + 6,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_2"
+    );
 
     const result = bridge.orchestratePlan({
       unitIds: [worker.id],
@@ -546,6 +561,8 @@ describe("GameAgentBridge", () => {
     const result = bridge.getMapState();
     const mapState = result.result as {
       tick: number;
+      fogOfWar: boolean;
+      visibleTileCount: number;
       asciiMap: string;
       units: Array<Record<string, unknown>>;
       buildings: Array<Record<string, unknown>>;
@@ -553,9 +570,11 @@ describe("GameAgentBridge", () => {
     };
 
     expect(mapState.tick).toBe(0);
+    expect(mapState.fogOfWar).toBe(true);
+    expect(mapState.visibleTileCount).toBeGreaterThan(0);
     expect(mapState.asciiMap.split("\n")).toHaveLength(MAP_HEIGHT);
-    expect(mapState.asciiMap).toContain("h");
     expect(mapState.asciiMap).toContain("H");
+    expect(mapState.asciiMap).toContain("?");
     expect(mapState).not.toHaveProperty("legend");
     expect(mapState.cells).toBeUndefined();
     expect(mapState.units).toEqual(
@@ -570,28 +589,49 @@ describe("GameAgentBridge", () => {
           state: "idle",
           relation: "self",
         }),
-        expect.objectContaining({
-          x: DEFAULT_MAP_LAYOUT.player1Workers[0].x,
-          y: DEFAULT_MAP_LAYOUT.player1Workers[0].y,
-          id: "unit_1",
-          type: "worker",
-          hp: 50,
-          maxHp: 50,
-          state: "idle",
-          relation: "enemy",
-        }),
       ])
     );
+    expect(mapState.units.some((unit) => unit.relation === "enemy")).toBe(false);
     expect(mapState.buildings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y, type: "hq", relation: "self" }),
-        expect.objectContaining({ x: DEFAULT_MAP_LAYOUT.player1Hq.x, y: DEFAULT_MAP_LAYOUT.player1Hq.y, type: "hq", relation: "enemy" }),
       ])
     );
+    expect(mapState.buildings.some((building) => building.relation === "enemy")).toBe(false);
     expect(mapState.units[0]).not.toHaveProperty("my");
     expect(mapState.units[0]).not.toHaveProperty("playerId");
     expect(mapState.units[0]).not.toHaveProperty("carryingCredits");
     expect(mapState.units[0]).not.toHaveProperty("attackRange");
+  });
+
+  it("reveals enemy units and buildings only inside friendly vision", () => {
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const enemyScout = game.getUnitManager().createUnit(
+      UNIT_TYPES.RIFLEMAN,
+      DEFAULT_MAP_LAYOUT.player1Hq.x + 7,
+      DEFAULT_MAP_LAYOUT.player1Hq.y,
+      "player_2"
+    );
+    const hiddenEnemy = game.getUnitManager().createUnit(
+      UNIT_TYPES.LIGHT_TANK,
+      DEFAULT_MAP_LAYOUT.player2Hq.x - 2,
+      DEFAULT_MAP_LAYOUT.player2Hq.y,
+      "player_2"
+    );
+
+    const mapState = bridge.getMapState().result as {
+      units: Array<Record<string, unknown>>;
+      buildings: Array<Record<string, unknown>>;
+    };
+
+    expect(mapState.units).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: enemyScout.id, relation: "enemy", type: UNIT_TYPES.RIFLEMAN }),
+      ])
+    );
+    expect(mapState.units.some((unit) => unit.id === hiddenEnemy.id)).toBe(false);
+    expect(mapState.buildings.some((building) => building.relation === "enemy")).toBe(false);
   });
 
   it("queues attack-move commands with role-aware target priority by default", () => {

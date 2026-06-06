@@ -5,8 +5,8 @@ interface GameCanvasProps {
   state: GameState | null;
 }
 
-const TILE_SIZE = 24;
-const AXIS_GUTTER = 24;
+const TILE_SIZE = 28;
+const AXIS_GUTTER = 28;
 const BOARD_OFFSET_X = AXIS_GUTTER;
 const BOARD_OFFSET_Y = AXIS_GUTTER;
 const BOARD_WIDTH = MAP_WIDTH * TILE_SIZE;

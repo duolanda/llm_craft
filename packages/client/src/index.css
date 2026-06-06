@@ -622,7 +622,7 @@ body {
 .viewport {
   position: relative;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 16px;
   background: radial-gradient(120% 80% at 50% 10%, rgba(0, 229, 255, 0.04), transparent 60%),
@@ -634,8 +634,9 @@ body {
 
 .viewport canvas {
   display: block;
-  width: min(100%, 664px);
+  width: auto;
   max-width: 100%;
+  max-height: 100%;
   height: auto;
   border: 1px solid var(--border-base);
   border-radius: 4px;

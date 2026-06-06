@@ -43,6 +43,12 @@ export interface RunAgentOptions {
   getRuntimeState: () => AgentRuntimeState;
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
+  onPerformanceWarning?: (warning: {
+    phase: string;
+    elapsedMs?: number;
+    bytes?: number;
+    details?: Record<string, unknown>;
+  }) => void;
   signal?: AbortSignal;
   spawnSubAgent?: (args: unknown, context: SubAgentParentContext) => AgentToolExecutionResult;
   drainSubAgentNotifications?: () => string[];

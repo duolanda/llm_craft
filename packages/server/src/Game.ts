@@ -42,6 +42,7 @@ import {
   GameLogDataMap,
   RESULT_TYPES
 } from "@llmcraft/shared";
+import { performance } from "node:perf_hooks";
 import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
 import { BuildingManager } from "./BuildingManager";
@@ -74,13 +75,25 @@ type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
   lastAttackTick?: number;
 };
 
+export interface AgentReadState {
+  tick: number;
+  players: Player[];
+  tiles: Tile[][];
+  winner: PlayerId | null;
+}
+
 const STARTING_CREDITS = 400;
+const TICK_LAG_WARNING_MS = TICK_INTERVAL_MS * 1.8;
+const TICK_DURATION_WARNING_MS = 250;
+const SNAPSHOT_DURATION_WARNING_MS = 100;
+const PERF_WARNING_THROTTLE_MS = 2000;
 
 export class Game {
   private tick = 0;
   private unitManager = new UnitManager();
   private buildingManager = new BuildingManager();
   private tiles: TileType[][] = [];
+  private tileView: Tile[][] = [];
   private players: Player[] = [];
   private logs: GameLog[] = [];
   private commandQueue: Command[] = [];
@@ -89,6 +102,9 @@ export class Game {
   private winner: PlayerId | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
+  private lastTickStartTimeMs: number | null = null;
+  private lastTickLagWarningAtMs = 0;
+  private lastTickDurationWarningAtMs = 0;
 
   constructor() {
     this.initializeGame();
@@ -97,6 +113,7 @@ export class Game {
   private initializeGame(): void {
     // 1. Generate map
     this.tiles = MapGenerator.generate();
+    this.tileView = this.createTileView();
 
     // 2. Create two players
     this.players = [
@@ -142,13 +159,35 @@ export class Game {
   }
 
   getState(): GameState {
-    // Update player units and buildings from managers
+    this.refreshPlayerCollections();
+
+    return this.cloneValue({
+      tick: this.tick,
+      players: this.players,
+      tiles: this.tileView,
+      winner: this.winner,
+      logs: this.logs,
+    });
+  }
+
+  getAgentReadState(): AgentReadState {
+    this.refreshPlayerCollections();
+    return {
+      tick: this.tick,
+      players: this.players,
+      tiles: this.tileView,
+      winner: this.winner,
+    };
+  }
+
+  private refreshPlayerCollections(): void {
     for (const player of this.players) {
       player.units = this.unitManager.getUnitsByPlayer(player.id);
       player.buildings = this.buildingManager.getBuildingsByPlayer(player.id);
     }
+  }
 
-    // Convert TileType[][] to Tile[][]
+  private createTileView(): Tile[][] {
     const tiles: Tile[][] = [];
     for (let y = 0; y < MAP_HEIGHT; y++) {
       tiles[y] = [];
@@ -160,14 +199,7 @@ export class Game {
         };
       }
     }
-
-    return this.cloneValue({
-      tick: this.tick,
-      players: this.players,
-      tiles,
-      winner: this.winner,
-      logs: this.logs,
-    });
+    return tiles;
   }
 
   queueCommand(command: Command): void {
@@ -1324,6 +1356,22 @@ export class Game {
   tickUpdate(): void {
     if (!this.isRunning) return;
 
+    const tickStartedAt = performance.now();
+    if (this.lastTickStartTimeMs !== null) {
+      const elapsedMs = tickStartedAt - this.lastTickStartTimeMs;
+      if (elapsedMs > TICK_LAG_WARNING_MS && tickStartedAt - this.lastTickLagWarningAtMs > PERF_WARNING_THROTTLE_MS) {
+        this.lastTickLagWarningAtMs = tickStartedAt;
+        this.addLog(LOG_TYPES.PERF_WARNING, `Tick interval lagged by ${Math.round(elapsedMs - TICK_INTERVAL_MS)}ms`, {
+          scope: "game_tick",
+          phase: "interval",
+          elapsedMs: Math.round(elapsedMs),
+          expectedMs: TICK_INTERVAL_MS,
+          tick: this.tick,
+        });
+      }
+    }
+    this.lastTickStartTimeMs = tickStartedAt;
+
     try {
       this.tick++;
 
@@ -1381,7 +1429,25 @@ export class Game {
       console.error("Tick 更新异常:", error);
     } finally {
       // Save snapshot even if the tick had partial failure so the client stays connected.
+      const snapshotStartedAt = performance.now();
       this.saveSnapshot();
+      const snapshotMs = performance.now() - snapshotStartedAt;
+      const tickDurationMs = performance.now() - tickStartedAt;
+      if (
+        (tickDurationMs > TICK_DURATION_WARNING_MS || snapshotMs > SNAPSHOT_DURATION_WARNING_MS) &&
+        tickStartedAt - this.lastTickDurationWarningAtMs > PERF_WARNING_THROTTLE_MS
+      ) {
+        this.lastTickDurationWarningAtMs = tickStartedAt;
+        this.addLog(LOG_TYPES.PERF_WARNING, `Tick work took ${Math.round(tickDurationMs)}ms`, {
+          scope: "game_tick",
+          phase: "work",
+          elapsedMs: Math.round(tickDurationMs),
+          tick: this.tick,
+          details: {
+            snapshotMs: Math.round(snapshotMs),
+          },
+        });
+      }
     }
   }
 
@@ -1389,6 +1455,7 @@ export class Game {
     if (this.isRunning) return;
 
     this.isRunning = true;
+    this.lastTickStartTimeMs = null;
     this.addLog(LOG_TYPES.GAME_STARTED, "Game started");
 
     this.tickInterval = setInterval(() => {
@@ -1402,6 +1469,7 @@ export class Game {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
     }
+    this.lastTickStartTimeMs = null;
     this.addLog(LOG_TYPES.GAME_STOPPED, "Game stopped");
   }
 

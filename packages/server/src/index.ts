@@ -2,6 +2,7 @@ import * as dotenv from "dotenv";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
   AITerminalEvent,
@@ -17,6 +18,8 @@ import {
   OpenAICompatibleRuntimeConfig,
   PlayerId,
   PLAYER_IDS,
+  GameLogDataMap,
+  LOG_TYPES,
   ServerPrepareStatusMessage,
   ServerMessage,
   TestLLMPresetRequest,
@@ -45,6 +48,10 @@ const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LIVE_STATE_SNAPSHOT_LIMIT = 1;
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
+const BROADCAST_TOTAL_WARNING_MS = 250;
+const BROADCAST_PHASE_WARNING_MS = 150;
+const BROADCAST_BUFFERED_WARNING_BYTES = 1_000_000;
+const BROADCAST_PERF_WARNING_THROTTLE_MS = 2000;
 
 export function getDefaultPresetPaths() {
   return {
@@ -65,6 +72,11 @@ interface OrchestratorLike {
     getState(): GameState | null;
     getSnapshots(): GameSnapshot[];
     getLatestSnapshot?: () => GameSnapshot | null;
+    addLog?: (
+      type: typeof LOG_TYPES.PERF_WARNING,
+      message: string,
+      data: GameLogDataMap[typeof LOG_TYPES.PERF_WARNING]
+    ) => unknown;
   };
 }
 
@@ -813,6 +825,43 @@ function createServer(state: ServerState) {
     let isSendingState = false;
     let lastAITerminalSessionId: string | null = null;
     let lastAITerminalEventCount = 0;
+    let lastStateBroadcastWarningAtMs = 0;
+    let lastAITerminalBroadcastWarningAtMs = 0;
+
+    const logBroadcastPerfWarning = (
+      phase: "state" | "ai_terminal",
+      elapsedMs: number,
+      details: Record<string, unknown>,
+      lastWarningAtMs: number
+    ): number => {
+      const now = performance.now();
+      const bytes = typeof details.bytes === "number" ? details.bytes : undefined;
+      const shouldWarn =
+        elapsedMs > BROADCAST_TOTAL_WARNING_MS ||
+        (typeof details.buildMs === "number" && details.buildMs > BROADCAST_PHASE_WARNING_MS) ||
+        (typeof details.stringifyMs === "number" && details.stringifyMs > BROADCAST_PHASE_WARNING_MS) ||
+        (typeof details.sendMs === "number" && details.sendMs > BROADCAST_PHASE_WARNING_MS) ||
+        ws.bufferedAmount > BROADCAST_BUFFERED_WARNING_BYTES;
+
+      if (!shouldWarn || now - lastWarningAtMs <= BROADCAST_PERF_WARNING_THROTTLE_MS) {
+        return lastWarningAtMs;
+      }
+
+      const game = state.orchestrator?.getGame();
+      const tick = typeof details.tick === "number" ? details.tick : game?.getState()?.tick;
+      game?.addLog?.(LOG_TYPES.PERF_WARNING, `${phase} broadcast took ${Math.round(elapsedMs)}ms`, {
+        scope: "state_broadcast",
+        phase,
+        elapsedMs: Math.round(elapsedMs),
+        tick: typeof tick === "number" ? tick : undefined,
+        bytes,
+        details: {
+          ...details,
+          bufferedAmount: ws.bufferedAmount,
+        },
+      });
+      return now;
+    };
 
     const sendState = async () => {
       if (isSendingState) {
@@ -823,7 +872,30 @@ function createServer(state: ServerState) {
         if (state.liveEnabled === null) {
           await refreshLiveEnabled(state);
         }
-        ws.send(JSON.stringify(buildStateMessagePayload(state)));
+        const startedAt = performance.now();
+        const buildStartedAt = performance.now();
+        const payload = buildStateMessagePayload(state);
+        const buildMs = performance.now() - buildStartedAt;
+        const stringifyStartedAt = performance.now();
+        const serialized = JSON.stringify(payload);
+        const stringifyMs = performance.now() - stringifyStartedAt;
+        const sendStartedAt = performance.now();
+        ws.send(serialized);
+        const sendMs = performance.now() - sendStartedAt;
+        const elapsedMs = performance.now() - startedAt;
+        lastStateBroadcastWarningAtMs = logBroadcastPerfWarning(
+          "state",
+          elapsedMs,
+          {
+            buildMs: Math.round(buildMs),
+            stringifyMs: Math.round(stringifyMs),
+            sendMs: Math.round(sendMs),
+            bytes: Buffer.byteLength(serialized, "utf8"),
+            snapshots: payload.snapshots.length,
+            tick: payload.state?.tick,
+          },
+          lastStateBroadcastWarningAtMs
+        );
       } finally {
         isSendingState = false;
       }
@@ -833,18 +905,44 @@ function createServer(state: ServerState) {
       const feed = state.orchestrator?.getAITerminalFeed?.() ?? null;
       const sessionId = feed?.sessionId ?? null;
       const events = feed?.events ?? [];
+      const sendPayload = (reset: boolean, nextEvents: AITerminalEvent[]) => {
+        const startedAt = performance.now();
+        const buildStartedAt = performance.now();
+        const payload = buildAITerminalMessagePayload(sessionId, reset, nextEvents);
+        const buildMs = performance.now() - buildStartedAt;
+        const stringifyStartedAt = performance.now();
+        const serialized = JSON.stringify(payload);
+        const stringifyMs = performance.now() - stringifyStartedAt;
+        const sendStartedAt = performance.now();
+        ws.send(serialized);
+        const sendMs = performance.now() - sendStartedAt;
+        const elapsedMs = performance.now() - startedAt;
+        lastAITerminalBroadcastWarningAtMs = logBroadcastPerfWarning(
+          "ai_terminal",
+          elapsedMs,
+          {
+            buildMs: Math.round(buildMs),
+            stringifyMs: Math.round(stringifyMs),
+            sendMs: Math.round(sendMs),
+            bytes: Buffer.byteLength(serialized, "utf8"),
+            reset,
+            events: nextEvents.length,
+          },
+          lastAITerminalBroadcastWarningAtMs
+        );
+      };
 
       if (sessionId !== lastAITerminalSessionId) {
         lastAITerminalSessionId = sessionId;
         lastAITerminalEventCount = events.length;
-        ws.send(JSON.stringify(buildAITerminalMessagePayload(sessionId, true, events)));
+        sendPayload(true, events);
         return;
       }
 
       if (events.length > lastAITerminalEventCount) {
         const nextEvents = events.slice(lastAITerminalEventCount);
         lastAITerminalEventCount = events.length;
-        ws.send(JSON.stringify(buildAITerminalMessagePayload(sessionId, false, nextEvents)));
+        sendPayload(false, nextEvents);
       }
     };
 

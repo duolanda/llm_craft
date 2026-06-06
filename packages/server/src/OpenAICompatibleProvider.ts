@@ -24,6 +24,8 @@ const CONNECTION_TEST_MAX_TOKENS = 8;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
+const PROVIDER_SYNC_WARNING_MS = 100;
+const PROVIDER_LARGE_PAYLOAD_WARNING_BYTES = 250_000;
 const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_map_state",
   "get_my_state",
@@ -144,12 +146,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
     const preparedTurn = this.takePreparedTurn(input);
+    const inputStringifyStartedAt = Date.now();
+    const inputContent = preparedTurn ? null : JSON.stringify(input);
+    this.maybeEmitProviderWarning(options, "input_stringify", Date.now() - inputStringifyStartedAt, {
+      bytes: inputContent ? Buffer.byteLength(inputContent, "utf8") : 0,
+      details: {
+        preparedTurn: Boolean(preparedTurn),
+      },
+    });
     const messages: any[] = preparedTurn
       ? [{ role: "system", content: SYSTEM_PROMPT }, ...this.history]
       : [
           { role: "system", content: SYSTEM_PROMPT },
           ...this.history,
-          { role: "user", content: JSON.stringify(input, null, 2) },
+          { role: "user", content: inputContent },
         ];
     const persistentHistory = messages.slice(1);
     const assistantMessages: string[] = preparedTurn?.assistantText ? [preparedTurn.assistantText] : [];
@@ -178,11 +188,32 @@ export class OpenAICompatibleProvider implements LLMProvider {
         pendingFinishReason = null;
       } else {
         this.injectSubAgentNotifications(messages, persistentHistory, options);
-        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
+        const runtimeStateStartedAt = Date.now();
+        const runtimeState = options.getRuntimeState();
+        this.maybeEmitProviderWarning(options, "get_runtime_state", Date.now() - runtimeStateStartedAt, {
+          details: {
+            messages: messages.length,
+          },
+        });
+        const urgentAlertStartedAt = Date.now();
+        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, runtimeState, lastRuntimeAlertSignature);
+        this.maybeEmitProviderWarning(options, "inject_urgent_alert", Date.now() - urgentAlertStartedAt, {
+          details: {
+            messages: messages.length,
+            hasAlert: Boolean(lastRuntimeAlertSignature),
+          },
+        });
 
         let response;
         try {
+          const completionStartedAt = Date.now();
           response = await this.createAgentCompletion(messages, options);
+          this.maybeEmitProviderWarning(options, "create_completion", Date.now() - completionStartedAt, {
+            details: {
+              messages: messages.length,
+              modelRequests: modelRequests + 1,
+            },
+          });
         } catch (error) {
           if (this.isAbortError(error, options.signal)) {
             stopReason = ABORT_STOP_REASON;
@@ -207,7 +238,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
       if (assistantText && shouldEmitAssistant) {
         assistantMessages.push(assistantText);
+        const assistantCallbackStartedAt = Date.now();
         options.onAssistantMessage?.(assistantText);
+        this.maybeEmitProviderWarning(options, "assistant_callback", Date.now() - assistantCallbackStartedAt, {
+          bytes: Buffer.byteLength(assistantText, "utf8"),
+        });
       }
 
       const requestedToolCalls = assistantMessage.tool_calls ?? [];
@@ -218,19 +253,40 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
       let shouldStopForStall = false;
       for (const toolCall of requestedToolCalls) {
+        const parseArgsStartedAt = Date.now();
         const args = this.parseToolArgs(toolCall.function.arguments);
+        this.maybeEmitProviderWarning(options, "parse_tool_args", Date.now() - parseArgsStartedAt, {
+          bytes: Buffer.byteLength(String(toolCall.function.arguments ?? ""), "utf8"),
+          details: {
+            toolName: toolCall.function.name,
+          },
+        });
         let execution: AgentToolExecutionResult;
         if (toolCall.function.name === "spawn_agent") {
           if (options.spawnSubAgent) {
+            const spawnRuntimeStateStartedAt = Date.now();
+            const runtimeState = options.getRuntimeState();
+            this.maybeEmitProviderWarning(options, "spawn_get_runtime_state", Date.now() - spawnRuntimeStateStartedAt, {
+              details: {
+                messages: messages.length,
+                toolName: toolCall.function.name,
+              },
+            });
             const parentContext: SubAgentParentContext = {
               playerId: input.playerId,
               input,
               messages: [...messages],
-              runtimeState: options.getRuntimeState(),
+              runtimeState,
               tools: options.tools,
               executeTool: options.executeTool,
             };
+            const spawnStartedAt = Date.now();
             execution = options.spawnSubAgent(args, parentContext);
+            this.maybeEmitProviderWarning(options, "spawn_agent", Date.now() - spawnStartedAt, {
+              details: {
+                messages: messages.length,
+              },
+            });
           } else {
             execution = {
               effect: "read",
@@ -239,7 +295,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
           }
         } else {
           try {
+            const executeToolStartedAt = Date.now();
             execution = await options.executeTool(toolCall.function.name, args);
+            this.maybeEmitProviderWarning(options, "execute_tool", Date.now() - executeToolStartedAt, {
+              details: {
+                toolName: toolCall.function.name,
+                effect: execution.effect,
+              },
+            });
           } catch (error) {
             execution = {
               effect: "read",
@@ -250,7 +313,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
         if (execution.effect === "read") {
           consecutiveReadOnlyToolCalls++;
+          const expireStartedAt = Date.now();
           this.expireSupersededReadToolResults(messages, toolCall.id, toolCall.function.name, args);
+          this.maybeEmitProviderWarning(options, "expire_read_results", Date.now() - expireStartedAt, {
+            details: {
+              toolName: toolCall.function.name,
+              messages: messages.length,
+            },
+          });
         } else {
           consecutiveReadOnlyToolCalls = 0;
         }
@@ -264,12 +334,27 @@ export class OpenAICompatibleProvider implements LLMProvider {
             : false,
         };
         toolCalls.push(toolCallRecord);
+        const toolCallbackStartedAt = Date.now();
         options.onToolCall?.(toolCallRecord);
+        this.maybeEmitProviderWarning(options, "tool_callback", Date.now() - toolCallbackStartedAt, {
+          details: {
+            toolName: toolCall.function.name,
+          },
+        });
 
+        const toolResultStringifyStartedAt = Date.now();
+        const toolResultContent = JSON.stringify(execution.result);
+        this.maybeEmitProviderWarning(options, "tool_result_stringify", Date.now() - toolResultStringifyStartedAt, {
+          bytes: Buffer.byteLength(toolResultContent, "utf8"),
+          details: {
+            toolName: toolCall.function.name,
+            effect: execution.effect,
+          },
+        });
         const toolMessage = {
           role: "tool",
           tool_call_id: toolCall.id,
-          content: JSON.stringify(execution.result),
+          content: toolResultContent,
           name: toolCall.function.name,
         };
         messages.push(toolMessage);
@@ -380,6 +465,28 @@ export class OpenAICompatibleProvider implements LLMProvider {
       } as any,
       { signal: options.signal },
     );
+  }
+
+  private maybeEmitProviderWarning(
+    options: RunAgentOptions,
+    phase: string,
+    elapsedMs: number,
+    input?: {
+      bytes?: number;
+      details?: Record<string, unknown>;
+    }
+  ): void {
+    const bytes = input?.bytes;
+    if (elapsedMs <= PROVIDER_SYNC_WARNING_MS && (bytes ?? 0) <= PROVIDER_LARGE_PAYLOAD_WARNING_BYTES) {
+      return;
+    }
+
+    options.onPerformanceWarning?.({
+      phase,
+      elapsedMs,
+      bytes,
+      details: input?.details,
+    });
   }
 
   private takePreparedTurn(input: AgentRunInput): PreparedTurn | null {

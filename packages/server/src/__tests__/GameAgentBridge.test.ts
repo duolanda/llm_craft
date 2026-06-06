@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameAgentBridge } from "../agent/GameAgentBridge";
 import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, MAP_HEIGHT, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
@@ -785,5 +785,38 @@ describe("GameAgentBridge", () => {
     expect(myUnits.tick).toBe(0);
     expect(myUnits.units).toHaveLength(2);
     expect(myUnits.units[0]).toHaveProperty("hasActivePlan", false);
+  });
+
+  it("shares one lightweight read state across same-tick read tools", () => {
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const readStateSpy = vi.spyOn(game, "getAgentReadState");
+    const fullStateSpy = vi.spyOn(game, "getState");
+
+    bridge.getMapState();
+    bridge.getMyState();
+    bridge.getMyUnits();
+    bridge.getActivePlansTool();
+    bridge.getRecentEvents();
+
+    expect(readStateSpy).toHaveBeenCalledTimes(1);
+    expect(fullStateSpy).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the lightweight read cache on the next tick", () => {
+    const game = new Game();
+    game.start();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const readStateSpy = vi.spyOn(game, "getAgentReadState");
+
+    bridge.getMyUnits();
+    bridge.getMyState();
+    expect(readStateSpy).toHaveBeenCalledTimes(1);
+
+    game.tickUpdate();
+    bridge.getMyUnits();
+    game.stop();
+
+    expect(readStateSpy).toHaveBeenCalledTimes(2);
   });
 });

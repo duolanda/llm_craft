@@ -203,6 +203,18 @@ export interface AIExecutionErrorData {
   errorType: string;
 }
 
+export interface PerfWarningData {
+  scope: "game_tick" | "state_broadcast" | "ai_runtime";
+  phase?: string;
+  elapsedMs?: number;
+  expectedMs?: number;
+  tick?: number;
+  requestTick?: number;
+  playerId?: PlayerId;
+  bytes?: number;
+  details?: Record<string, unknown>;
+}
+
 // ============================================================
 // LOG_TYPES：日志类型名称的简单映射
 // ============================================================
@@ -230,6 +242,9 @@ export const LOG_TYPES = {
 
   // Tick 错误
   TICK_ERROR: "tick_error",
+
+  // 性能诊断
+  PERF_WARNING: "perf_warning",
 } as const;
 
 export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
@@ -259,6 +274,7 @@ export interface GameLogDataMap {
   [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
   [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;
   [LOG_TYPES.TICK_ERROR]: { error: string };
+  [LOG_TYPES.PERF_WARNING]: PerfWarningData;
 }
 
 // ============================================================
@@ -298,6 +314,7 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.AI_GENERATION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.AI_EXECUTION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.TICK_ERROR]: { level: LOG_LEVELS.ERROR },
+  [LOG_TYPES.PERF_WARNING]: { level: LOG_LEVELS.WARNING, displayTarget: LOG_DISPLAY_TARGETS.BACKEND },
 };
 
 // ============================================================

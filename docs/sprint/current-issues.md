@@ -4,19 +4,23 @@
 
 ## 高优先级
 
-### 1. WebSocket 状态同步仍是定时推送
+### 1. 实时对局 tick 存在可观察卡顿
+- **描述**: OpenRA 迁移后 live match 中出现 tick 26s 到 27s 实际耗时明显超过 1s、单位移动冻结后跳变的现象；诊断确认主要由 agent read path 反复同步 `game.getState()`、重复 deep clone 完整 state/logs，以及 `get_my_state` 建造点推荐每格重复状态读取放大导致。已增加 backend-only `perf_warning`，并将 agent read path 改为同 tick 共享轻量 read state，待 live 复测确认
+- **影响**: 直接破坏实时观战和操控反馈；后续地图和机制继续扩展时，AI hot path 必须避免完整 client/replay state clone
+
+### 2. WebSocket 状态同步仍是定时推送
 - **描述**: 当前 `state` 仍然是每连接 `100ms` 固定推送一次，不是严格事件驱动
 - **影响**: 有额外序列化和无效推送开销，后续做更细粒度同步会受限
 
-### 2. tool-calling runtime 缺少更细的行为指标下发
+### 3. tool-calling runtime 缺少更细的行为指标下发
 - **描述**: 服务端内部已记录 `modelRequests / toolCalls / stallDetected`，但 benchmark 对外消息还没有把这些指标完整暴露到前端
 - **影响**: 能做离线分析，但前端实时面板还看不到完整的 agent 行为统计
 
-### 3. `summary` 仍然是字符串拼装
+### 4. `summary` 仍然是字符串拼装
 - **描述**: 当前 `summary` 已经取代旧 `full/delta` 主输入，但仍是服务端拼接文本
 - **影响**: 可工作，但结构化程度不高，不利于后续精细优化
 
-### 4. 计划推进与 tick 执行之间仍有轻微延迟
+### 5. 计划推进与 tick 执行之间仍有轻微延迟
 - **描述**: 当前计划推进由 orchestrator 轮询观察 tick 后再入队
 - **影响**: 相比直接嵌入 tick 前阶段，存在轻微的一 tick 级延迟风险
 
@@ -80,4 +84,4 @@
 
 ---
 
-*最后更新: 2026-06-05*
+*最后更新: 2026-06-06*

@@ -21,6 +21,7 @@ export interface AgentRuntimeResult {
 export interface AgentRuntimeCallbacks {
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
+  onPerformanceWarning?: RunAgentOptions["onPerformanceWarning"];
   spawnSubAgent?: RunAgentOptions["spawnSubAgent"];
   drainSubAgentNotifications?: RunAgentOptions["drainSubAgentNotifications"];
 }
@@ -47,6 +48,7 @@ export class AgentRuntime {
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
+      onPerformanceWarning: callbacks?.onPerformanceWarning,
       signal,
     });
   }
@@ -65,6 +67,7 @@ export class AgentRuntime {
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
+      onPerformanceWarning: callbacks?.onPerformanceWarning,
       spawnSubAgent: callbacks?.spawnSubAgent,
       drainSubAgentNotifications: callbacks?.drainSubAgentNotifications,
       signal,

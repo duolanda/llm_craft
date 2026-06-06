@@ -30,7 +30,7 @@ import {
   isUnitType,
   unitCanAttack,
 } from "@llmcraft/shared";
-import { Game } from "../Game";
+import { AgentReadState, Game } from "../Game";
 import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
 
 type ToolEffect = "read" | "action" | "plan";
@@ -88,6 +88,7 @@ export class GameAgentBridge {
   private readonly planToolHandlers: PlanToolHandlers;
   private targetMemory = new Map<string, CachedEnemyTarget>();
   private attackOrders = new Map<string, { unitId: string; targetId: string }>();
+  private readStateCache: AgentReadState | null = null;
 
   constructor(private readonly game: Game, private readonly playerId: PlayerId) {
     this.planToolHandlers = this.createPlanToolHandlers();
@@ -98,11 +99,13 @@ export class GameAgentBridge {
     this.issuedCommands = [];
     this.runPlanRecords = [];
     this.lastReadTick = null;
+    this.readStateCache = null;
   }
 
   beginToolCall(): void {
     this.issuedCommands = [];
     this.runPlanRecords = [];
+    this.readStateCache = null;
   }
 
   takeIssuedCommands(): Command[] {
@@ -125,8 +128,16 @@ export class GameAgentBridge {
     return this.planRuntime.getActivePlans();
   }
 
+  private getReadState(): AgentReadState {
+    const tick = this.game.getTick();
+    if (!this.readStateCache || this.readStateCache.tick !== tick) {
+      this.readStateCache = this.game.getAgentReadState();
+    }
+    return this.readStateCache;
+  }
+
   getMapState(args?: { includeCells?: boolean; includeEmptyTiles?: boolean; trackRead?: boolean }): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
     const visibleTiles = this.getVisibleTiles(state);
     this.rememberVisibleEnemyTargets(state, visibleTiles);
@@ -385,7 +396,7 @@ export class GameAgentBridge {
     return priority.length > 0 ? priority : undefined;
   }
 
-  private getVisibleTiles(state: ReturnType<Game["getState"]>): VisibilityMap {
+  private getVisibleTiles(state: AgentReadState): VisibilityMap {
     const me = state.players.find((player) => player.id === this.playerId);
     const visibleTiles: VisibilityMap = new Set();
     if (!me) {
@@ -422,7 +433,7 @@ export class GameAgentBridge {
     return visibleTiles.has(`${x},${y}`);
   }
 
-  private renderAsciiMap(state: ReturnType<Game["getState"]>, visibleTiles: VisibilityMap): string {
+  private renderAsciiMap(state: AgentReadState, visibleTiles: VisibilityMap): string {
     const height = state.tiles.length;
     const width = state.tiles[0]?.length ?? 0;
     const grid: string[][] = state.tiles.map((row) =>
@@ -497,7 +508,7 @@ export class GameAgentBridge {
   }
 
   getMyState(args?: { trackRead?: boolean }): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
     const visibleTiles = this.getVisibleTiles(state);
     const me = state.players.find((player) => player.id === this.playerId)!;
@@ -517,7 +528,7 @@ export class GameAgentBridge {
     const hasWarFactory = countBuildings(BUILDING_TYPES.WAR_FACTORY) > 0;
     const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY);
     const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
-    const suggestedBuildSites = this.getSuggestedBuildSites();
+    const suggestedBuildSites = this.getSuggestedBuildSites(state);
     const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const activeHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
     const idleWorkers = workers.filter((unit) => unit.state === "idle" && unit.intent?.type !== "harvest_loop");
@@ -657,7 +668,7 @@ export class GameAgentBridge {
   }
 
   getMyUnits(args?: { trackRead?: boolean }): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
     const me = state.players.find((player) => player.id === this.playerId)!;
     const plannedUnitIds = new Set(this.planRuntime.getActivePlans().flatMap((plan) => plan.unitIds));
@@ -676,19 +687,19 @@ export class GameAgentBridge {
   }
 
   getRecentEvents(args?: { trackRead?: boolean }): ExecutedToolResult {
-    const state = this.game.getState();
-    this.trackRead(state.tick, args?.trackRead);
+    const tick = this.game.getTick();
+    this.trackRead(tick, args?.trackRead);
     return {
       effect: "read",
       result: {
-        tick: state.tick,
+        tick,
         events: this.game.getAIFeedback(this.playerId).slice(-20),
       },
     };
   }
 
   getActivePlansTool(args?: { trackRead?: boolean }): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
     return {
       effect: "read",
@@ -722,7 +733,7 @@ export class GameAgentBridge {
   }
 
   attackMoveUnit(unitId: string, position: Position, targetPriority?: AttackTargetType[]): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit) {
       return this.actionResult({
@@ -813,7 +824,7 @@ export class GameAgentBridge {
   }
 
   spawnUnit(buildingId: string, unitType: UnitType): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const building = me.buildings.find((candidate) => candidate.id === buildingId && candidate.exists);
     if (!building) {
@@ -873,7 +884,7 @@ export class GameAgentBridge {
   }
 
   buildStructure(unitId: string, buildingType: BuildingType, position: Position): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const worker = me.units.find((candidate) => candidate.id === unitId && candidate.exists);
     if (!worker || worker.type !== UNIT_TYPES.WORKER) {
@@ -905,19 +916,19 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "insufficient_credits",
-          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`),
+          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`, state),
         }),
       };
     }
 
-    const validation = this.validateBuildPosition(position);
+    const validation = this.validateBuildPosition(position, state);
     if (!validation.ok) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_build_position",
-          hint: this.buildPlacementHint(validation.hint),
+          hint: this.buildPlacementHint(validation.hint, state),
         }),
       };
     }
@@ -935,7 +946,7 @@ export class GameAgentBridge {
   }
 
   startHarvestLoop(unitId: string, position?: Position): ExecutedToolResult {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit || unit.type !== UNIT_TYPES.WORKER) {
       return this.actionResult({
@@ -1067,7 +1078,7 @@ export class GameAgentBridge {
   }
 
   private withActionMetadata<T extends Record<string, unknown>>(result: T): T & Record<string, unknown> {
-    const currentTick = this.game.getState().tick;
+    const currentTick = this.game.getTick();
     const staleWarning = this.getStaleReadWarning(currentTick);
     return {
       tick: currentTick,
@@ -1102,13 +1113,13 @@ export class GameAgentBridge {
   }
 
   private getFriendlyUnit(unitId: string) {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     return me.units.find((candidate) => candidate.id === unitId && candidate.exists) ?? null;
   }
 
   private getEnemyTarget(targetId: string) {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const visibleTiles = this.getVisibleTiles(state);
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       const unit = player.units.find((candidate) => candidate.id === targetId && candidate.exists);
@@ -1137,7 +1148,7 @@ export class GameAgentBridge {
     return null;
   }
 
-  private rememberVisibleEnemyTargets(state: ReturnType<Game["getState"]>, visibleTiles: VisibilityMap): void {
+  private rememberVisibleEnemyTargets(state: AgentReadState, visibleTiles: VisibilityMap): void {
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       for (const unit of player.units.filter((candidate) => candidate.exists)) {
         if (!this.isVisiblePosition(unit.x, unit.y, visibleTiles)) {
@@ -1227,7 +1238,7 @@ export class GameAgentBridge {
   }
 
   private getPlanSnapshot() {
-    const state = this.game.getState();
+    const state = this.getReadState();
     const visibleTiles = this.getVisibleTiles(state);
     const me = state.players.find((player) => player.id === this.playerId)!;
     return {
@@ -1256,8 +1267,7 @@ export class GameAgentBridge {
     };
   }
 
-  private getSuggestedBuildSites(limit = 3): Position[] {
-    const state = this.game.getState();
+  private getSuggestedBuildSites(state = this.getReadState(), limit = 3): Position[] {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     if (!hq) {
@@ -1268,7 +1278,7 @@ export class GameAgentBridge {
     const candidates: Position[] = [];
     for (let y = 0; y < state.tiles.length; y++) {
       for (let x = 0; x < (state.tiles[y]?.length ?? 0); x++) {
-        const validation = this.validateBuildPosition({ x, y });
+        const validation = this.validateBuildPosition({ x, y }, state);
         if (validation.ok) {
           candidates.push({ x, y });
         }
@@ -1287,8 +1297,8 @@ export class GameAgentBridge {
       .slice(0, limit);
   }
 
-  private buildPlacementHint(baseHint: string): string {
-    const suggestions = this.getSuggestedBuildSites()
+  private buildPlacementHint(baseHint: string, state = this.getReadState()): string {
+    const suggestions = this.getSuggestedBuildSites(state)
       .map((site) => `(${site.x}, ${site.y})`)
       .join(", ");
     if (!suggestions) {
@@ -1297,8 +1307,7 @@ export class GameAgentBridge {
     return `${baseHint} Try an empty tile that leaves one empty ring around HQ, for example: ${suggestions}.`;
   }
 
-  private validateBuildPosition(position: Position): { ok: true } | { ok: false; hint: string } {
-    const state = this.game.getState();
+  private validateBuildPosition(position: Position, state = this.getReadState()): { ok: true } | { ok: false; hint: string } {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     const { x, y } = position;
@@ -1338,7 +1347,7 @@ export class GameAgentBridge {
       return { ok: false, hint: "unitIds must contain at least one friendly unit id." };
     }
 
-    const state = this.game.getState();
+    const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const myUnitIds = new Set(me.units.filter((unit) => unit.exists).map((unit) => unit.id));
     const normalizedUnitIds = [...new Set(input.unitIds.map((unitId) => String(unitId)))];

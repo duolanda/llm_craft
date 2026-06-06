@@ -20,6 +20,7 @@ import {
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Game } from "./Game";
 import { createLLMProvider } from "./createLLMProvider";
@@ -36,6 +37,9 @@ const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
 export const MATCH_START_ABORTED = "MATCH_START_ABORTED";
+const AI_RUNTIME_TOTAL_WARNING_MS = 5000;
+const AI_RUNTIME_SYNC_PHASE_WARNING_MS = 150;
+const AI_RUNTIME_WARNING_THROTTLE_MS = 2000;
 
 type RuntimeMap = Record<PlayerId, AgentRuntime>;
 type BridgeMap = Record<PlayerId, GameAgentBridge>;
@@ -89,6 +93,7 @@ export class GameOrchestrator {
   private aiRequestCounts = { player_1: 0, player_2: 0 };
   private warmupRequestNumbers: Partial<Record<PlayerId, number>> = {};
   private subAgentTaskRegistry = new SubAgentTaskRegistry();
+  private lastAIRuntimeWarningAtMs: Partial<Record<PlayerId, number>> = {};
 
   constructor(config: GameOrchestratorConfig) {
     this.game = new Game();
@@ -134,12 +139,21 @@ export class GameOrchestrator {
       return;
     }
     this.isRunningAI[playerId] = true;
+    const runStartedAt = performance.now();
+    const timings: Record<string, number> = {};
+    let requestTick: number | undefined;
+    let runtimeResult: AgentRuntimeResult | undefined;
 
     try {
+      const stateStartedAt = performance.now();
       const state = this.game.getState();
+      timings.getStateMs = performance.now() - stateStartedAt;
+      requestTick = state.tick;
       this.aiDirty[playerId] = false;
       this.lastAIDispatchTick[playerId] = state.tick;
+      const buildInputStartedAt = performance.now();
       const runInput = this.buildRunInput(playerId, state);
+      timings.buildInputMs = performance.now() - buildInputStartedAt;
       const runtime = this.runtimeByPlayer[playerId];
       const controller = new AbortController();
       this.activeRunControllers[playerId] = controller;
@@ -149,21 +163,48 @@ export class GameOrchestrator {
       if (warmupRequestNumber === undefined) {
         this.appendTerminalRequestEvent(playerId, requestNumber, state.tick);
       }
+      const transcriptStartStartedAt = performance.now();
       await this.writeTranscriptRequestStart(transcriptRunId, playerId, state.tick, runInput);
+      timings.transcriptStartMs = performance.now() - transcriptStartStartedAt;
+      let callbackSyncMs = 0;
+      const runtimeStartedAt = performance.now();
       const result = await runtime.run(runInput, {
         onAssistantMessage: (message) => {
+          const callbackStartedAt = performance.now();
           this.appendTerminalAssistantEvent(playerId, requestNumber, state.tick, message);
           void this.writeTranscriptAssistantMessage(transcriptRunId, playerId, state.tick, message);
+          callbackSyncMs += performance.now() - callbackStartedAt;
         },
         onToolCall: (record) => {
+          const callbackStartedAt = performance.now();
           this.appendTerminalToolCallEvent(playerId, requestNumber, state.tick, record);
           void this.writeTranscriptToolCall(transcriptRunId, playerId, state.tick, record);
+          callbackSyncMs += performance.now() - callbackStartedAt;
+        },
+        onPerformanceWarning: (warning) => {
+          this.game.addLog(LOG_TYPES.PERF_WARNING, `Provider phase ${warning.phase} took ${Math.round(warning.elapsedMs ?? 0)}ms`, {
+            scope: "ai_runtime",
+            phase: `provider:${warning.phase}`,
+            elapsedMs: warning.elapsedMs !== undefined ? Math.round(warning.elapsedMs) : undefined,
+            requestTick: state.tick,
+            playerId,
+            bytes: warning.bytes,
+            details: warning.details,
+          });
         },
         spawnSubAgent: (args, context) => this.handleSpawnSubAgent(playerId, args, context),
         drainSubAgentNotifications: () => this.subAgentTaskRegistry.drainNotifications(playerId),
       }, controller.signal);
+      timings.runtimeMs = performance.now() - runtimeStartedAt;
+      timings.callbackSyncMs = callbackSyncMs;
+      runtimeResult = result;
+      const latestStateStartedAt = performance.now();
       const latestState = this.game.getState();
+      timings.latestStateMs = performance.now() - latestStateStartedAt;
+      const transcriptCompleteStartedAt = performance.now();
       await this.writeTranscriptRunComplete(transcriptRunId, playerId, state.tick, latestState.tick, result);
+      timings.transcriptCompleteMs = performance.now() - transcriptCompleteStartedAt;
+      this.maybeLogAIRuntimePerformance(playerId, state.tick, performance.now() - runStartedAt, timings, result);
       if (!this.isPolling || sessionId !== this.runSession) {
         return;
       }
@@ -207,6 +248,13 @@ export class GameOrchestrator {
       });
 
     } catch (error) {
+      this.maybeLogAIRuntimePerformance(
+        playerId,
+        requestTick ?? this.game.getState().tick,
+        performance.now() - runStartedAt,
+        timings,
+        runtimeResult
+      );
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.game.addLog(
         LOG_TYPES.AI_GENERATION_ERROR,
@@ -794,12 +842,58 @@ export class GameOrchestrator {
     ].join("\n");
   }
 
+  private maybeLogAIRuntimePerformance(
+    playerId: PlayerId,
+    requestTick: number,
+    elapsedMs: number,
+    timings: Record<string, number>,
+    result?: AgentRuntimeResult
+  ): void {
+    const slowSyncPhase = Object.entries(timings).find(([phase, durationMs]) => {
+      if (phase === "runtimeMs") {
+        return false;
+      }
+      return durationMs > AI_RUNTIME_SYNC_PHASE_WARNING_MS;
+    });
+    const shouldWarn = elapsedMs > AI_RUNTIME_TOTAL_WARNING_MS || Boolean(slowSyncPhase);
+    const now = performance.now();
+    const lastWarningAtMs = this.lastAIRuntimeWarningAtMs[playerId] ?? 0;
+
+    if (!shouldWarn || now - lastWarningAtMs <= AI_RUNTIME_WARNING_THROTTLE_MS) {
+      return;
+    }
+
+    this.lastAIRuntimeWarningAtMs[playerId] = now;
+    this.game.addLog(LOG_TYPES.PERF_WARNING, `AI runtime for ${playerId} took ${Math.round(elapsedMs)}ms`, {
+      scope: "ai_runtime",
+      phase: slowSyncPhase?.[0] ?? "run",
+      elapsedMs: Math.round(elapsedMs),
+      requestTick,
+      playerId,
+      details: {
+        timings: Object.fromEntries(
+          Object.entries(timings).map(([phase, durationMs]) => [phase, Math.round(durationMs)])
+        ),
+        stopReason: result?.stopReason,
+        modelRequests: result?.metrics.modelRequests,
+        toolCalls: result?.metrics.toolCalls,
+        commands: result?.commands.length,
+        plans: result?.plans.length,
+        assistantMessages: result?.assistantMessages.length,
+      },
+    });
+  }
+
   private async writeTranscriptRequestStart(
     transcriptRunId: string,
     playerId: PlayerId,
     requestTick: number,
     input: AgentRunInput
   ): Promise<void> {
+    if (!this.transcriptEnabled || !this.transcriptFilePath) {
+      return;
+    }
+
     await this.writeTranscript(this.formatTranscriptRequestStart(transcriptRunId, playerId, requestTick, input));
   }
 
@@ -809,6 +903,10 @@ export class GameOrchestrator {
     requestTick: number,
     message: string
   ): Promise<void> {
+    if (!this.transcriptEnabled || !this.transcriptFilePath) {
+      return;
+    }
+
     await this.writeTranscript(this.formatTranscriptAssistantMessage(transcriptRunId, playerId, requestTick, message));
   }
 
@@ -818,6 +916,10 @@ export class GameOrchestrator {
     requestTick: number,
     toolCall: AgentToolCallRecord
   ): Promise<void> {
+    if (!this.transcriptEnabled || !this.transcriptFilePath) {
+      return;
+    }
+
     await this.writeTranscript(this.formatTranscriptToolCall(transcriptRunId, playerId, requestTick, toolCall));
   }
 
@@ -828,6 +930,10 @@ export class GameOrchestrator {
     executeTick: number,
     result: AgentRuntimeResult
   ): Promise<void> {
+    if (!this.transcriptEnabled || !this.transcriptFilePath) {
+      return;
+    }
+
     await this.writeTranscript(this.formatTranscriptRunComplete(transcriptRunId, playerId, requestTick, executeTick, result));
   }
 

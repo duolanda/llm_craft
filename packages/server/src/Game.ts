@@ -3,6 +3,7 @@ import {
   UnitIntent,
   AttackTargetType,
   Building,
+  BuildingType,
   Player,
   PlayerId,
   GameLog,
@@ -21,7 +22,10 @@ import {
   getAttackDamageAgainstBuilding,
   getDefaultAttackMovePriority,
   getBuildingCost as getRulesetBuildingCost,
+  getBuildingFootprint,
+  getBuildingFootprintCells,
   getUnitCost as getRulesetUnitCost,
+  getUnitVisionRange,
   isBuildableBuildingType,
   isBuildingType,
   isUnitType,
@@ -82,17 +86,21 @@ export interface AgentReadState {
   winner: PlayerId | null;
 }
 
-const STARTING_CREDITS = 400;
+const STARTING_CREDITS = 800;
 const TICK_LAG_WARNING_MS = TICK_INTERVAL_MS * 1.8;
 const TICK_DURATION_WARNING_MS = 250;
 const SNAPSHOT_DURATION_WARNING_MS = 100;
 const PERF_WARNING_THROTTLE_MS = 2000;
+const MAX_PATH_COMMANDS_PER_TICK = 4;
+const MAX_PURSUIT_PATHS_PER_TICK = 4;
+const MAX_BLOCKED_REPATHS_PER_TICK = 4;
 
 export class Game {
   private tick = 0;
   private unitManager = new UnitManager();
   private buildingManager = new BuildingManager();
   private tiles: TileType[][] = [];
+  private resourceRemaining = new Map<string, number>();
   private tileView: Tile[][] = [];
   private players: Player[] = [];
   private logs: GameLog[] = [];
@@ -113,6 +121,10 @@ export class Game {
   private initializeGame(): void {
     // 1. Generate map
     this.tiles = MapGenerator.generate();
+    this.resourceRemaining.clear();
+    for (const position of DEFAULT_MAP_LAYOUT.resources) {
+      this.resourceRemaining.set(`${position.x},${position.y}`, ECONOMY_RULES.RESOURCE_DEPOSIT_CAPACITY);
+    }
     this.tileView = this.createTileView();
 
     // 2. Create two players
@@ -196,6 +208,9 @@ export class Game {
           x,
           y,
           type: this.tiles[y][x],
+          ...(this.tiles[y][x] === TILE_TYPES.RESOURCE
+            ? { resourceRemaining: this.resourceRemaining.get(`${x},${y}`) ?? 0 }
+            : {}),
         };
       }
     }
@@ -207,7 +222,16 @@ export class Game {
   }
 
   processCommands(): void {
-    for (const command of this.commandQueue) {
+    const pendingCommands = this.commandQueue;
+    this.commandQueue = [];
+    let remainingPathCommands = MAX_PATH_COMMANDS_PER_TICK;
+    for (const command of pendingCommands) {
+      const requiresPath = command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
+      if (requiresPath && remainingPathCommands <= 0) {
+        this.commandQueue.push(command);
+        continue;
+      }
+      if (requiresPath) remainingPathCommands -= 1;
       try {
         this.processCommand(command);
       } catch (error) {
@@ -225,7 +249,6 @@ export class Game {
         console.error("命令处理异常:", error, command);
       }
     }
-    this.commandQueue = [];
   }
 
   private processCommand(command: Command): void {
@@ -872,9 +895,9 @@ export class Game {
             break;
           }
 
-          const result = this.validateBuildPosition(command.playerId, command.position.x, command.position.y);
+          const result = this.validateBuildPosition(command.playerId, command.buildingType, command.position.x, command.position.y);
           if (result !== RESULT_CODES.OK) {
-            const buildFailure = this.describeBuildFailure(command.playerId, command.position.x, command.position.y);
+            const buildFailure = this.describeBuildFailure(command.playerId, command.buildingType, command.position.x, command.position.y);
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
               "Build command failed: invalid build position",
@@ -942,7 +965,7 @@ export class Game {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    const distance = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
+    const distance = this.buildingManager.getDistanceToBuilding(target, attacker.x, attacker.y);
     if (distance > attacker.attackRange) {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
@@ -1055,6 +1078,7 @@ export class Game {
   }
 
   private processAttackMoveIntents(): void {
+    let remainingPursuitPaths = MAX_PURSUIT_PATHS_PER_TICK;
     for (const unit of this.unitManager.getAllUnits()) {
       const runtimeUnit = unit as RuntimeUnit;
       if (!runtimeUnit.exists || runtimeUnit.intent?.type !== "attack_move") {
@@ -1090,6 +1114,31 @@ export class Game {
             runtimeUnit.lastAttackTick = this.tick;
             this.unitManager.clearPath(runtimeUnit);
             continue;
+          }
+          if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
+            if (attackMoveIntent.targetId === prioritizedTarget.target.id && runtimeUnit.pathTarget) {
+              continue;
+            }
+            if (remainingPursuitPaths <= 0) {
+              continue;
+            }
+            remainingPursuitPaths -= 1;
+            const blockedPositions = this.buildingManager.getOccupiedPositions();
+            const moveResult = this.unitManager.setMoveTarget(
+              runtimeUnit,
+              prioritizedTarget.target.x,
+              prioritizedTarget.target.y,
+              this.tiles,
+              blockedPositions,
+              true,
+            );
+            if (moveResult === RESULT_CODES.OK) {
+              runtimeUnit.intent = {
+                ...attackMoveIntent,
+                targetId: prioritizedTarget.target.id,
+              };
+              continue;
+            }
           }
         }
       }
@@ -1157,10 +1206,14 @@ export class Game {
       }
 
       const harvestIntent = runtimeUnit.intent;
-      const hq = this.buildingManager
+      const deliveryBuilding = this.buildingManager
         .getBuildingsByPlayer(runtimeUnit.playerId)
-        .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
-      if (!hq) {
+        .filter((building) => this.isResourceDeliveryBuilding(building))
+        .sort((left, right) =>
+          this.buildingManager.getDistanceToBuilding(left, runtimeUnit.x, runtimeUnit.y) -
+          this.buildingManager.getDistanceToBuilding(right, runtimeUnit.x, runtimeUnit.y)
+        )[0];
+      if (!deliveryBuilding) {
         continue;
       }
 
@@ -1179,9 +1232,9 @@ export class Game {
       };
 
       if (runtimeUnit.carryingCredits >= runtimeUnit.carryCapacity) {
-        if (!this.isWithinDeliveryRange(runtimeUnit, hq) && !this.isPathingIntoDeliveryRange(runtimeUnit, hq)) {
+        if (!this.isWithinDeliveryRange(runtimeUnit, deliveryBuilding) && !this.isPathingIntoDeliveryRange(runtimeUnit, deliveryBuilding)) {
           const blockedPositions = this.buildingManager.getOccupiedPositions();
-          if (this.unitManager.setMoveTarget(runtimeUnit, hq.x, hq.y, this.tiles, blockedPositions) === RESULT_CODES.OK) {
+          if (this.unitManager.setMoveTarget(runtimeUnit, deliveryBuilding.x, deliveryBuilding.y, this.tiles, blockedPositions) === RESULT_CODES.OK) {
             runtimeUnit.intent = {
               type: "harvest_loop",
               targetX: resourceTarget.x,
@@ -1225,16 +1278,17 @@ export class Game {
         : getDefaultAttackMovePriority(attacker.type)
     ).map((value) => String(value).toLowerCase());
 
+    const acquisitionRange = getUnitVisionRange(attacker.type);
     const enemyUnits = this.unitManager
       .getAllUnits()
       .filter((unit) => unit.exists && unit.playerId !== playerId)
-      .filter((unit) => Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <= attacker.attackRange);
+      .filter((unit) => Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <= acquisitionRange);
     const enemyBuildings = this.buildingManager
       .getAllBuildings()
       .filter((building) => building.exists && building.playerId !== playerId)
       .filter(
         (building) =>
-          Math.max(Math.abs(attacker.x - building.x), Math.abs(attacker.y - building.y)) <= attacker.attackRange
+          this.buildingManager.getDistanceToBuilding(building, attacker.x, attacker.y) <= acquisitionRange
       );
 
     const fallbackUnits = enemyUnits.sort((a, b) => a.id.localeCompare(b.id));
@@ -1301,7 +1355,10 @@ export class Game {
     let best: { x: number; y: number; distance: number; assignedHarvesters: number; score: number } | null = null;
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
-        if (this.tiles[y][x] !== TILE_TYPES.RESOURCE) {
+        if (
+          this.tiles[y][x] !== TILE_TYPES.RESOURCE ||
+          (this.resourceRemaining.get(`${x},${y}`) ?? 0) <= 0
+        ) {
           continue;
         }
         const distance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
@@ -1323,11 +1380,10 @@ export class Game {
     return best ? { x: best.x, y: best.y } : null;
   }
 
-  private isPathingIntoDeliveryRange(unit: RuntimeUnit, hq: Building): boolean {
+  private isPathingIntoDeliveryRange(unit: RuntimeUnit, building: Building): boolean {
     return Boolean(
       unit.pathTarget &&
-      Math.abs(unit.pathTarget.x - hq.x) <= ECONOMY_RULES.HQ_DELIVERY_RANGE &&
-      Math.abs(unit.pathTarget.y - hq.y) <= ECONOMY_RULES.HQ_DELIVERY_RANGE
+      this.buildingManager.getDistanceToBuilding(building, unit.pathTarget.x, unit.pathTarget.y) <= this.getDeliveryRange(building)
     );
   }
 
@@ -1380,8 +1436,9 @@ export class Game {
 
       // Process unit path movement (自动寻路移动)
       const blockedPositions = this.buildingManager.getOccupiedPositions();
+      const repathBudget = { remaining: MAX_BLOCKED_REPATHS_PER_TICK };
       for (const unit of this.unitManager.getAllUnits()) {
-        this.unitManager.processPathMovement(unit, this.tiles, blockedPositions);
+        this.unitManager.processPathMovement(unit, this.tiles, blockedPositions, repathBudget);
       }
 
       // Process worker economy loop: gather on resource tiles, then deliver near HQ
@@ -1402,7 +1459,7 @@ export class Game {
 
           if (spawnBuilding && spawnBuilding.exists) {
             // Find an empty position near the building
-            const spawnPos = this.findEmptySpawnPosition(spawnBuilding.x, spawnBuilding.y);
+            const spawnPos = this.findEmptySpawnPosition(spawnBuilding);
             if (spawnPos) {
               this.unitManager.createUnit(completion.unitType, spawnPos.x, spawnPos.y, playerId);
               this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${completion.unitType} spawned for ${playerId}`, {
@@ -1507,10 +1564,34 @@ export class Game {
   }
 
   private saveSnapshot(): void {
+    this.refreshPlayerCollections();
+    const players = this.players.map((player) => ({
+      ...player,
+      resources: { ...player.resources },
+      units: player.units.map((unit) => {
+        const { path: _path, ...snapshotUnit } = unit;
+        return {
+          ...snapshotUnit,
+          intent: snapshotUnit.intent ? { ...snapshotUnit.intent } : undefined,
+          pathTarget: snapshotUnit.pathTarget ? { ...snapshotUnit.pathTarget } : undefined,
+        };
+      }),
+      buildings: player.buildings.map((building) => ({
+        ...building,
+        productionQueue: [...building.productionQueue],
+        productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
+      })),
+    }));
     this.snapshots.push({
       tick: this.tick,
-      state: this.getState(),
-      aiOutputs: this.cloneValue(this.aiOutputs),
+      state: {
+        tick: this.tick,
+        players,
+        tiles: this.tileView,
+        winner: this.winner,
+        logs: [...this.logs],
+      },
+      aiOutputs: { ...this.aiOutputs },
     });
   }
 
@@ -1542,11 +1623,11 @@ export class Game {
 
   private processWorkerEconomy(): void {
     for (const player of this.players) {
-      const hq = this.buildingManager
+      const deliveryBuildings = this.buildingManager
         .getBuildingsByPlayer(player.id)
-        .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+        .filter((building) => this.isResourceDeliveryBuilding(building));
 
-      if (!hq) {
+      if (deliveryBuildings.length === 0) {
         continue;
       }
 
@@ -1557,17 +1638,43 @@ export class Game {
 
         const preserveHarvestLoop = unit.intent?.type === "harvest_loop" ? unit.intent : null;
         const onResourceTile = this.tiles[unit.y]?.[unit.x] === TILE_TYPES.RESOURCE;
-        const isNearFriendlyHQ = this.isWithinDeliveryRange(unit, hq);
+        const deliveryBuilding = deliveryBuildings
+          .filter((building) => this.isWithinDeliveryRange(unit, building))
+          .sort((left, right) =>
+            this.buildingManager.getDistanceToBuilding(left, unit.x, unit.y) -
+            this.buildingManager.getDistanceToBuilding(right, unit.x, unit.y)
+          )[0];
         let economyActionTaken = false;
 
         if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
+          const resourceKey = `${unit.x},${unit.y}`;
+          const depositRemaining = this.resourceRemaining.get(resourceKey) ?? 0;
           const gatheredCredits = Math.min(
             ECONOMY_RULES.WORKER_GATHER_RATE,
-            unit.carryCapacity - unit.carryingCredits
+            unit.carryCapacity - unit.carryingCredits,
+            depositRemaining,
           );
 
           if (gatheredCredits > 0) {
             unit.carryingCredits += gatheredCredits;
+            const nextDepositRemaining = depositRemaining - gatheredCredits;
+            this.resourceRemaining.set(resourceKey, nextDepositRemaining);
+            const currentTile = this.tileView[unit.y]?.[unit.x];
+            const nextTile: Tile | undefined = currentTile
+              ? nextDepositRemaining <= 0
+                ? { x: currentTile.x, y: currentTile.y, type: TILE_TYPES.EMPTY }
+                : { ...currentTile, resourceRemaining: nextDepositRemaining }
+              : undefined;
+            if (nextDepositRemaining <= 0) {
+              this.tiles[unit.y][unit.x] = TILE_TYPES.EMPTY;
+            }
+            if (nextTile) {
+              const nextRow = [...this.tileView[unit.y]];
+              nextRow[unit.x] = nextTile;
+              const nextTileView = [...this.tileView];
+              nextTileView[unit.y] = nextRow;
+              this.tileView = nextTileView;
+            }
             unit.state = UNIT_STATES.GATHERING;
             unit.intent = preserveHarvestLoop ?? { type: "gather", targetX: unit.x, targetY: unit.y };
             this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
@@ -1582,15 +1689,15 @@ export class Game {
           }
         }
 
-        if (isNearFriendlyHQ && !onResourceTile && unit.carryingCredits > 0) {
+        if (deliveryBuilding && !onResourceTile && unit.carryingCredits > 0) {
           const deliveredCredits = unit.carryingCredits;
           player.resources.credits += deliveredCredits;
           unit.carryingCredits = 0;
           unit.state = UNIT_STATES.IDLE;
-          unit.intent = preserveHarvestLoop ?? { type: "deposit", targetX: hq.x, targetY: hq.y, targetId: hq.id };
+          unit.intent = preserveHarvestLoop ?? { type: "deposit", targetX: deliveryBuilding.x, targetY: deliveryBuilding.y, targetId: deliveryBuilding.id };
           this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
             unitId: unit.id,
-            buildingId: hq.id,
+            buildingId: deliveryBuilding.id,
             amount: deliveredCredits,
             credits: player.resources.credits,
           }, {
@@ -1616,17 +1723,17 @@ export class Game {
    * Find an empty position near the given coordinates for spawning a unit
    * Searches in expanding circles around the center point
    */
-  private findEmptySpawnPosition(centerX: number, centerY: number): { x: number; y: number } | null {
-    // Check positions in expanding distance from center
-    for (let distance = 1; distance <= 3; distance++) {
-      // Check all positions at current distance
-      for (let dx = -distance; dx <= distance; dx++) {
-        for (let dy = -distance; dy <= distance; dy++) {
-          // Only check positions at exactly this Manhattan distance
-          if (Math.abs(dx) + Math.abs(dy) !== distance) continue;
+  private findEmptySpawnPosition(building: Building): { x: number; y: number } | null {
+    const footprint = getBuildingFootprint(building.type);
+    const halfWidth = Math.floor(footprint.width / 2);
+    const halfHeight = Math.floor(footprint.height / 2);
+    for (let distance = 1; distance <= 4; distance++) {
+      for (let dx = -halfWidth - distance; dx <= halfWidth + distance; dx++) {
+        for (let dy = -halfHeight - distance; dy <= halfHeight + distance; dy++) {
+          if (this.buildingManager.getDistanceToBuilding(building, building.x + dx, building.y + dy) !== distance) continue;
 
-          const x = centerX + dx;
-          const y = centerY + dy;
+          const x = building.x + dx;
+          const y = building.y + dy;
 
           // Check bounds
           if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
@@ -1670,34 +1777,43 @@ export class Game {
     return this.buildingManager;
   }
 
-  private isWithinDeliveryRange(unit: Unit, hq: Building): boolean {
-    return (
-      Math.abs(unit.x - hq.x) <= ECONOMY_RULES.HQ_DELIVERY_RANGE &&
-      Math.abs(unit.y - hq.y) <= ECONOMY_RULES.HQ_DELIVERY_RANGE
-    );
+  private isResourceDeliveryBuilding(building: Building): boolean {
+    return building.exists && (building.type === BUILDING_TYPES.HQ || building.type === BUILDING_TYPES.REFINERY);
   }
 
-  private validateBuildPosition(playerId: PlayerId, x: number, y: number): ResultCode {
+  private getDeliveryRange(building: Building): number {
+    return building.type === BUILDING_TYPES.REFINERY
+      ? ECONOMY_RULES.REFINERY_DELIVERY_RANGE
+      : ECONOMY_RULES.HQ_DELIVERY_RANGE;
+  }
+
+  private isWithinDeliveryRange(unit: Unit, building: Building): boolean {
+    return this.buildingManager.getDistanceToBuilding(building, unit.x, unit.y) <= this.getDeliveryRange(building);
+  }
+
+  private validateBuildPosition(playerId: PlayerId, buildingType: BuildingType, x: number, y: number): ResultCode {
     if (!Number.isInteger(x) || !Number.isInteger(y)) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
-    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
-      return RESULT_CODES.ERR_POSITION_OCCUPIED;
-    }
-
-    if (this.unitManager.hasUnitAt(x, y) || this.buildingManager.hasBuildingAt(x, y)) {
-      return RESULT_CODES.ERR_POSITION_OCCUPIED;
+    const footprintCells = getBuildingFootprintCells(buildingType, x, y);
+    for (const cell of footprintCells) {
+      if (cell.x < 0 || cell.x >= MAP_WIDTH || cell.y < 0 || cell.y >= MAP_HEIGHT) {
+        return RESULT_CODES.ERR_INVALID_TARGET;
+      }
+      if (
+        this.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY ||
+        this.unitManager.hasUnitAt(cell.x, cell.y) ||
+        this.buildingManager.hasBuildingAt(cell.x, cell.y)
+      ) {
+        return RESULT_CODES.ERR_POSITION_OCCUPIED;
+      }
     }
 
     const hq = this.buildingManager
       .getBuildingsByPlayer(playerId)
       .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
-    if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
+    if (hq && footprintCells.some((cell) => this.buildingManager.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
@@ -1728,24 +1844,25 @@ export class Game {
     return { type: "move_unreachable", hint: "No reachable nearby tile found." };
   }
 
-  private describeBuildFailure(playerId: PlayerId, x: number, y: number): { type: string; hint: string } {
+  private describeBuildFailure(playerId: PlayerId, buildingType: BuildingType, x: number, y: number): { type: string; hint: string } {
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
       return { type: "build_bad_target", hint: "Choose an empty tile inside the map bounds." };
     }
 
-    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
-      return { type: "build_blocked_tile", hint: "That tile is blocked by terrain." };
-    }
-
-    if (this.buildingManager.hasBuildingAt(x, y) || this.unitManager.hasUnitAt(x, y)) {
-      return { type: "build_blocked_tile", hint: "That tile is already occupied." };
+    const footprintCells = getBuildingFootprintCells(buildingType, x, y);
+    if (footprintCells.some((cell) => cell.x < 0 || cell.x >= MAP_WIDTH || cell.y < 0 || cell.y >= MAP_HEIGHT)) {
+      return { type: "build_bad_target", hint: "The full building footprint must stay inside the map." };
     }
 
     const hq = this.buildingManager
       .getBuildingsByPlayer(playerId)
       .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
-    if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
-      return { type: "build_too_close_to_hq", hint: "Leave at least one empty tile around HQ before placing barracks." };
+    if (hq && footprintCells.some((cell) => this.buildingManager.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
+      return { type: "build_too_close_to_hq", hint: "Leave at least one clear tile between the full building footprint and HQ." };
+    }
+
+    if (footprintCells.some((cell) => this.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY || this.buildingManager.hasBuildingAt(cell.x, cell.y) || this.unitManager.hasUnitAt(cell.x, cell.y))) {
+      return { type: "build_blocked_tile", hint: "The building footprint overlaps terrain, resources, units, or another structure." };
     }
 
     return { type: "build_bad_target", hint: "Choose another empty tile." };

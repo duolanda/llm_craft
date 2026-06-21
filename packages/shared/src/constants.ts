@@ -1,6 +1,6 @@
 export const TICK_INTERVAL_MS = 500;
-export const MAP_WIDTH = 37;
-export const MAP_HEIGHT = 25;
+export const MAP_WIDTH = 144;
+export const MAP_HEIGHT = 96;
 
 export interface MapCoordinate {
   x: number;
@@ -8,27 +8,32 @@ export interface MapCoordinate {
 }
 
 export const DEFAULT_MAP_LAYOUT = {
-  centerX: 18,
-  centerY: 12,
-  player1Hq: { x: 4, y: 12 },
-  player2Hq: { x: 32, y: 12 },
+  centerX: 72,
+  centerY: 48,
+  player1Hq: { x: 14, y: 48 },
+  player2Hq: { x: 129, y: 48 },
   player1Workers: [
-    { x: 5, y: 11 },
-    { x: 5, y: 13 },
+    { x: 18, y: 44 },
+    { x: 18, y: 46 },
+    { x: 18, y: 50 },
+    { x: 18, y: 52 },
   ],
   player2Workers: [
-    { x: 31, y: 11 },
-    { x: 31, y: 13 },
+    { x: 125, y: 44 },
+    { x: 125, y: 46 },
+    { x: 125, y: 50 },
+    { x: 125, y: 52 },
   ],
   resources: [
-    { x: 4, y: 8 },
-    { x: 4, y: 16 },
-    { x: 32, y: 8 },
-    { x: 32, y: 16 },
-    { x: 12, y: 5 },
-    { x: 24, y: 5 },
-    { x: 12, y: 19 },
-    { x: 24, y: 19 },
+    { x: 21, y: 44 }, { x: 22, y: 48 }, { x: 21, y: 52 },
+    { x: 122, y: 44 }, { x: 121, y: 48 }, { x: 122, y: 52 },
+    { x: 47, y: 18 }, { x: 50, y: 22 },
+    { x: 47, y: 74 }, { x: 50, y: 78 },
+    { x: 96, y: 18 }, { x: 93, y: 22 },
+    { x: 96, y: 74 }, { x: 93, y: 78 },
+    { x: 69, y: 44 }, { x: 74, y: 44 },
+    { x: 69, y: 52 }, { x: 74, y: 52 },
+    { x: 72, y: 48 },
   ],
 } as const;
 
@@ -60,6 +65,7 @@ export const BUILDING_TYPES = {
   HQ: "hq",
   BARRACKS: "barracks",
   WAR_FACTORY: "war_factory",
+  REFINERY: "refinery",
 } as const;
 
 export type BuildingType = typeof BUILDING_TYPES[keyof typeof BUILDING_TYPES];
@@ -95,6 +101,8 @@ export const ECONOMY_RULES = {
   WORKER_CARRY_CAPACITY: 100,
   WORKER_GATHER_RATE: 10,
   HQ_DELIVERY_RANGE: 1,
+  REFINERY_DELIVERY_RANGE: 1,
+  RESOURCE_DEPOSIT_CAPACITY: 5000,
 } as const;
 
 export interface RulesetUnitDefinition {
@@ -105,6 +113,7 @@ export interface RulesetUnitDefinition {
   attackRange: number;
   visionRange: number;
   armor: ArmorType;
+  productionTicks: number;
   damageModifiers?: Partial<Record<ArmorType, number>>;
 }
 
@@ -114,6 +123,7 @@ export interface RulesetBuildingDefinition {
   visionRange: number;
   armor: ArmorType;
   produces: UnitType[];
+  footprint: { width: number; height: number };
 }
 
 export interface GameRuleset {
@@ -128,16 +138,17 @@ export const DEFAULT_RULESET = {
   id: "mvp",
   name: "LLMCraft MVP",
   units: {
-    [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY },
-    [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 12, cost: 80, attackRange: 1, visionRange: 5, armor: ARMOR_TYPES.INFANTRY },
+    [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
+    [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 12, cost: 60, attackRange: 1, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
     [UNIT_TYPES.RIFLEMAN]: {
       hp: 90,
       speed: 1,
       attack: 14,
-      cost: 90,
+      cost: 70,
       attackRange: 3,
       visionRange: 6,
       armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 6,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 1.2,
         [ARMOR_TYPES.VEHICLE]: 0.4,
@@ -148,10 +159,11 @@ export const DEFAULT_RULESET = {
       hp: 80,
       speed: 1,
       attack: 24,
-      cost: 140,
+      cost: 110,
       attackRange: 4,
       visionRange: 6,
       armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 8,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 0.45,
         [ARMOR_TYPES.VEHICLE]: 2,
@@ -162,10 +174,11 @@ export const DEFAULT_RULESET = {
       hp: 300,
       speed: 1,
       attack: 30,
-      cost: 300,
+      cost: 240,
       attackRange: 3,
       visionRange: 7,
       armor: ARMOR_TYPES.VEHICLE,
+      productionTicks: 14,
       damageModifiers: {
         [ARMOR_TYPES.INFANTRY]: 0.7,
         [ARMOR_TYPES.VEHICLE]: 1,
@@ -174,15 +187,17 @@ export const DEFAULT_RULESET = {
     },
   },
   buildings: {
-    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER] },
+    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER], footprint: { width: 7, height: 7 } },
     [BUILDING_TYPES.BARRACKS]: {
       hp: 420,
       cost: 120,
       visionRange: 6,
       armor: ARMOR_TYPES.STRUCTURE,
       produces: [UNIT_TYPES.SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+      footprint: { width: 5, height: 5 },
     },
-    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK] },
+    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK], footprint: { width: 7, height: 5 } },
+    [BUILDING_TYPES.REFINERY]: { hp: 560, cost: 300, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [], footprint: { width: 5, height: 5 } },
   },
   economy: ECONOMY_RULES,
 } satisfies GameRuleset;
@@ -196,18 +211,28 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].cost,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].footprint,
   },
   [BUILDING_TYPES.BARRACKS]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].cost,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].footprint,
   },
   [BUILDING_TYPES.WAR_FACTORY]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].cost,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].footprint,
+  },
+  [BUILDING_TYPES.REFINERY]: {
+    hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].hp,
+    cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].cost,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].visionRange,
+    armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].footprint,
   },
 };
 

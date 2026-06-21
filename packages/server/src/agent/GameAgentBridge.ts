@@ -20,10 +20,10 @@ import {
   canBuildingProduce,
   getDefaultAttackMovePriority,
   getBuildingCost,
-  getBuildingVisionRange,
+  getBuildingFootprintCells,
+  getDistanceToBuildingFootprint,
   getProducerBuildingType,
   getUnitCost,
-  getUnitVisionRange,
   getProductionOptions,
   isBuildableBuildingType,
   isBuildingType,
@@ -34,6 +34,7 @@ import { AgentReadState, Game } from "../Game";
 import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
 
 type ToolEffect = "read" | "action" | "plan";
+type GroupFormation = "line" | "column" | "wedge" | "dispersed";
 
 export interface ExecutedToolResult {
   effect: ToolEffect;
@@ -72,8 +73,6 @@ type CachedEnemyTarget = {
   y: number;
   tick: number;
 };
-
-type VisibilityMap = Set<string>;
 
 type AttackOrderResolution =
   | { ok: true; command: Command; mode: "attack" | "move_to_target" | "move_to_last_seen"; completedAfterCommand: boolean }
@@ -139,8 +138,7 @@ export class GameAgentBridge {
   getMapState(args?: { includeCells?: boolean; includeEmptyTiles?: boolean; trackRead?: boolean }): ExecutedToolResult {
     const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
-    const visibleTiles = this.getVisibleTiles(state);
-    this.rememberVisibleEnemyTargets(state, visibleTiles);
+    this.rememberEnemyTargets(state);
     const includeCells = args?.includeCells === true || args?.includeEmptyTiles === true;
     const includeEmptyTiles = args?.includeEmptyTiles === true;
     const cells = new Map<string, AgentMapStateCell>();
@@ -157,6 +155,9 @@ export class GameAgentBridge {
         x,
         y,
         tile: tile?.type ?? "empty",
+        ...(tile?.resourceRemaining !== undefined
+          ? { resourceRemaining: tile.resourceRemaining }
+          : {}),
       };
       cells.set(key, created);
       return created;
@@ -165,7 +166,7 @@ export class GameAgentBridge {
     if (includeCells) {
       for (const row of state.tiles) {
         for (const tile of row) {
-          if (this.isVisiblePosition(tile.x, tile.y, visibleTiles) && (includeEmptyTiles || tile.type !== "empty")) {
+          if (includeEmptyTiles || tile.type !== "empty") {
             getOrCreateCell(tile.x, tile.y);
           }
         }
@@ -175,9 +176,6 @@ export class GameAgentBridge {
     for (const player of state.players) {
       const relation = player.id === this.playerId ? "self" : "enemy";
       for (const unit of player.units.filter((candidate) => candidate.exists)) {
-        if (relation === "enemy" && !this.isVisiblePosition(unit.x, unit.y, visibleTiles)) {
-          continue;
-        }
         const mapUnit = {
           id: unit.id,
           type: unit.type,
@@ -195,9 +193,6 @@ export class GameAgentBridge {
         }
       }
       for (const building of player.buildings.filter((candidate) => candidate.exists)) {
-        if (relation === "enemy" && !this.isVisiblePosition(building.x, building.y, visibleTiles)) {
-          continue;
-        }
         const mapBuilding = {
           id: building.id,
           type: building.type,
@@ -219,9 +214,9 @@ export class GameAgentBridge {
       tick: state.tick,
       width: state.tiles[0]?.length ?? 0,
       height: state.tiles.length,
-      fogOfWar: true,
-      visibleTileCount: visibleTiles.size,
-      asciiMap: this.renderAsciiMap(state, visibleTiles),
+      fogOfWar: false,
+      visibleTileCount: (state.tiles[0]?.length ?? 0) * state.tiles.length,
+      asciiMap: this.renderAsciiMap(state),
       units,
       buildings,
     };
@@ -385,6 +380,9 @@ export class GameAgentBridge {
     if (value === "$war_factory") {
       return BUILDING_TYPES.WAR_FACTORY;
     }
+    if (value === "$refinery") {
+      return BUILDING_TYPES.REFINERY;
+    }
     return null;
   }
 
@@ -396,51 +394,11 @@ export class GameAgentBridge {
     return priority.length > 0 ? priority : undefined;
   }
 
-  private getVisibleTiles(state: AgentReadState): VisibilityMap {
-    const me = state.players.find((player) => player.id === this.playerId);
-    const visibleTiles: VisibilityMap = new Set();
-    if (!me) {
-      return visibleTiles;
-    }
-    const height = state.tiles.length;
-    const width = state.tiles[0]?.length ?? 0;
-    const markVisible = (source: Position, range: number): void => {
-      for (let y = source.y - range; y <= source.y + range; y++) {
-        if (y < 0 || y >= height) {
-          continue;
-        }
-        for (let x = source.x - range; x <= source.x + range; x++) {
-          if (x < 0 || x >= width) {
-            continue;
-          }
-          if (Math.max(Math.abs(source.x - x), Math.abs(source.y - y)) <= range) {
-            visibleTiles.add(`${x},${y}`);
-          }
-        }
-      }
-    };
-
-    for (const unit of me.units.filter((candidate) => candidate.exists)) {
-      markVisible(unit, getUnitVisionRange(unit.type));
-    }
-    for (const building of me.buildings.filter((candidate) => candidate.exists)) {
-      markVisible(building, getBuildingVisionRange(building.type));
-    }
-    return visibleTiles;
-  }
-
-  private isVisiblePosition(x: number, y: number, visibleTiles: VisibilityMap): boolean {
-    return visibleTiles.has(`${x},${y}`);
-  }
-
-  private renderAsciiMap(state: AgentReadState, visibleTiles: VisibilityMap): string {
+  private renderAsciiMap(state: AgentReadState): string {
     const height = state.tiles.length;
     const width = state.tiles[0]?.length ?? 0;
     const grid: string[][] = state.tiles.map((row) =>
       row.map((tile) => {
-        if (!this.isVisiblePosition(tile.x, tile.y, visibleTiles)) {
-          return "?";
-        }
         switch (tile.type) {
           case TILE_TYPES.OBSTACLE:
             return "#";
@@ -460,6 +418,8 @@ export class GameAgentBridge {
             ? "B"
             : type === BUILDING_TYPES.WAR_FACTORY
               ? "F"
+              : type === BUILDING_TYPES.REFINERY
+                ? "D"
               : type === UNIT_TYPES.LIGHT_TANK
                 ? "T"
                 : type === UNIT_TYPES.ROCKET_SOLDIER
@@ -482,7 +442,7 @@ export class GameAgentBridge {
           building.y < height &&
           building.x >= 0 &&
           building.x < width &&
-          (relation === "self" || this.isVisiblePosition(building.x, building.y, visibleTiles))
+          building.exists
         ) {
           grid[building.y][building.x] = symbolFor(relation, building.type);
         }
@@ -497,7 +457,7 @@ export class GameAgentBridge {
           unit.y < height &&
           unit.x >= 0 &&
           unit.x < width &&
-          (relation === "self" || this.isVisiblePosition(unit.x, unit.y, visibleTiles))
+          unit.exists
         ) {
           grid[unit.y][unit.x] = symbolFor(relation, unit.type);
         }
@@ -510,22 +470,18 @@ export class GameAgentBridge {
   getMyState(args?: { trackRead?: boolean }): ExecutedToolResult {
     const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
-    const visibleTiles = this.getVisibleTiles(state);
     const me = state.players.find((player) => player.id === this.playerId)!;
     const enemies = state.players.filter((player) => player.id !== this.playerId);
     const myBuildings = me.buildings.filter((building) => building.exists);
     const myUnits = me.units.filter((unit) => unit.exists);
-    const enemyBuildings = enemies.flatMap((player) =>
-      player.buildings.filter((building) => building.exists && this.isVisiblePosition(building.x, building.y, visibleTiles))
-    );
-    const enemyUnits = enemies.flatMap((player) =>
-      player.units.filter((unit) => unit.exists && this.isVisiblePosition(unit.x, unit.y, visibleTiles))
-    );
+    const enemyBuildings = enemies.flatMap((player) => player.buildings.filter((building) => building.exists));
+    const enemyUnits = enemies.flatMap((player) => player.units.filter((unit) => unit.exists));
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ) ?? null;
     const countUnits = (unitType: UnitType) => myUnits.filter((unit) => unit.type === unitType).length;
     const countBuildings = (buildingType: BuildingType) => myBuildings.filter((building) => building.type === buildingType).length;
     const hasBarracks = countBuildings(BUILDING_TYPES.BARRACKS) > 0;
     const hasWarFactory = countBuildings(BUILDING_TYPES.WAR_FACTORY) > 0;
+    const hasRefinery = countBuildings(BUILDING_TYPES.REFINERY) > 0;
     const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY);
     const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
     const suggestedBuildSites = this.getSuggestedBuildSites(state);
@@ -582,6 +538,13 @@ export class GameAgentBridge {
         reason: "Unlock infantry production before floating credits.",
         suggestedSites: suggestedBuildSites,
       });
+    } else if (!hasRefinery && me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY)) {
+      recommendedStructures.push({
+        buildingType: BUILDING_TYPES.REFINERY,
+        cost: getBuildingCost(BUILDING_TYPES.REFINERY),
+        reason: "Expand toward a flank deposit so additional workers can sustain multiple production buildings.",
+        suggestedSites: suggestedBuildSites,
+      });
     } else if (!hasWarFactory && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY)) {
       recommendedStructures.push({
         buildingType: BUILDING_TYPES.WAR_FACTORY,
@@ -615,9 +578,10 @@ export class GameAgentBridge {
         hq,
         buildings: myBuildings,
         productionQueues: myBuildings
-          .map((building) => ({ buildingId: building.id, queue: building.productionQueue })),
+          .map((building) => ({ buildingId: building.id, queue: building.productionQueue, progress: building.productionProgress ?? null })),
         canBuildBarracks: me.resources.credits >= getBuildingCost(BUILDING_TYPES.BARRACKS),
         canBuildWarFactory: me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        canBuildRefinery: me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY),
         canSpawnWorker: me.resources.credits >= getUnitCost(UNIT_TYPES.WORKER),
         canSpawnSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.SOLDIER),
         canSpawnRifleman: me.resources.credits >= getUnitCost(UNIT_TYPES.RIFLEMAN),
@@ -641,6 +605,7 @@ export class GameAgentBridge {
         buildingCosts: {
           [BUILDING_TYPES.BARRACKS]: getBuildingCost(BUILDING_TYPES.BARRACKS),
           [BUILDING_TYPES.WAR_FACTORY]: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+          [BUILDING_TYPES.REFINERY]: getBuildingCost(BUILDING_TYPES.REFINERY),
         },
         techStatus: {
           own: {
@@ -655,6 +620,7 @@ export class GameAgentBridge {
             lightTanks: countUnits(UNIT_TYPES.LIGHT_TANK),
             barracks: countBuildings(BUILDING_TYPES.BARRACKS),
             warFactories: countBuildings(BUILDING_TYPES.WAR_FACTORY),
+            refineries: countBuildings(BUILDING_TYPES.REFINERY),
           },
           enemy: {
             hasWarFactory: enemyHasWarFactory,
@@ -921,7 +887,7 @@ export class GameAgentBridge {
       };
     }
 
-    const validation = this.validateBuildPosition(position, state);
+    const validation = this.validateBuildPosition(position, buildingType, state);
     if (!validation.ok) {
       return {
         effect: "action",
@@ -1120,21 +1086,14 @@ export class GameAgentBridge {
 
   private getEnemyTarget(targetId: string) {
     const state = this.getReadState();
-    const visibleTiles = this.getVisibleTiles(state);
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       const unit = player.units.find((candidate) => candidate.id === targetId && candidate.exists);
       if (unit) {
-        if (!this.isVisiblePosition(unit.x, unit.y, visibleTiles)) {
-          return null;
-        }
         this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
         return unit;
       }
       const building = player.buildings.find((candidate) => candidate.id === targetId && candidate.exists);
       if (building) {
-        if (!this.isVisiblePosition(building.x, building.y, visibleTiles)) {
-          return null;
-        }
         this.targetMemory.set(building.id, {
           id: building.id,
           type: building.type,
@@ -1148,18 +1107,86 @@ export class GameAgentBridge {
     return null;
   }
 
-  private rememberVisibleEnemyTargets(state: AgentReadState, visibleTiles: VisibilityMap): void {
+  attackMoveGroup(unitIds: string[], position: Position, formation: GroupFormation = "line"): ExecutedToolResult {
+    const state = this.getReadState();
+    const uniqueUnitIds = [...new Set(unitIds.map(String))];
+    if (uniqueUnitIds.length === 0 || uniqueUnitIds.length > 100) {
+      return this.actionResult({ ok: false, error: "invalid_group", hint: "Choose between 1 and 100 friendly combat units." });
+    }
+    if (
+      !Number.isInteger(position.x) || !Number.isInteger(position.y) ||
+      position.y < 0 || position.y >= state.tiles.length ||
+      position.x < 0 || position.x >= (state.tiles[position.y]?.length ?? 0)
+    ) {
+      return this.actionResult({ ok: false, error: "invalid_position", hint: "Choose a formation center inside the map bounds." });
+    }
+
+    const units = uniqueUnitIds.map((unitId) => this.getFriendlyUnit(unitId));
+    if (units.some((unit) => !unit || !unitCanAttack(unit.type))) {
+      return this.actionResult({ ok: false, error: "invalid_group_unit", hint: "Every group member must be an existing friendly combat unit." });
+    }
+
+    const assignments = this.createFormationAssignments(uniqueUnitIds, position, formation, state.tiles[0]?.length ?? 1, state.tiles.length);
+    const commandIds: string[] = [];
+    for (const assignment of assignments) {
+      const unit = this.getFriendlyUnit(assignment.unitId)!;
+      this.planRuntime.interruptUnit(unit.id);
+      this.attackOrders.delete(unit.id);
+      const command = this.enqueue(this.createCommand("attack_move", {
+        unitId: unit.id,
+        position: assignment.position,
+        targetPriority: getDefaultAttackMovePriority(unit.type),
+      }));
+      commandIds.push(command.id);
+    }
+    return {
+      effect: "action",
+      result: this.withActionMetadata({ ok: true, commandIds, formation, assignments }),
+    };
+  }
+
+  private createFormationAssignments(
+    unitIds: string[],
+    center: Position,
+    formation: GroupFormation,
+    mapWidth: number,
+    mapHeight: number,
+  ): Array<{ unitId: string; position: Position }> {
+    const backward = this.playerId === "player_1" ? -1 : 1;
+    const clamp = (value: number, max: number) => Math.max(0, Math.min(max - 1, value));
+    return unitIds.map((unitId, index) => {
+      let offsetX = 0;
+      let offsetY = 0;
+      if (formation === "column") {
+        offsetX = backward * Math.floor(index / 3) * 2;
+        offsetY = (index % 3 - 1) * 2;
+      } else if (formation === "wedge") {
+        const rank = Math.floor(Math.sqrt(index));
+        const rankStart = rank * rank;
+        offsetX = backward * rank * 2;
+        offsetY = (index - rankStart - rank) * 2;
+      } else if (formation === "dispersed") {
+        const columns = Math.ceil(Math.sqrt(unitIds.length));
+        offsetX = backward * Math.floor(index / columns) * 3;
+        offsetY = (index % columns - (columns - 1) / 2) * 3;
+      } else {
+        const frontWidth = Math.min(12, unitIds.length);
+        offsetX = backward * Math.floor(index / frontWidth) * 2;
+        offsetY = (index % frontWidth - (frontWidth - 1) / 2) * 2;
+      }
+      return {
+        unitId,
+        position: { x: clamp(Math.round(center.x + offsetX), mapWidth), y: clamp(Math.round(center.y + offsetY), mapHeight) },
+      };
+    });
+  }
+
+  private rememberEnemyTargets(state: AgentReadState): void {
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       for (const unit of player.units.filter((candidate) => candidate.exists)) {
-        if (!this.isVisiblePosition(unit.x, unit.y, visibleTiles)) {
-          continue;
-        }
         this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
       }
       for (const building of player.buildings.filter((candidate) => candidate.exists)) {
-        if (!this.isVisiblePosition(building.x, building.y, visibleTiles)) {
-          continue;
-        }
         this.targetMemory.set(building.id, {
           id: building.id,
           type: building.type,
@@ -1239,7 +1266,6 @@ export class GameAgentBridge {
 
   private getPlanSnapshot() {
     const state = this.getReadState();
-    const visibleTiles = this.getVisibleTiles(state);
     const me = state.players.find((player) => player.id === this.playerId)!;
     return {
       tick: state.tick,
@@ -1249,7 +1275,6 @@ export class GameAgentBridge {
       visibleUnits: state.players.flatMap((player) =>
         player.units
           .filter((unit) => unit.exists)
-          .filter((unit) => player.id === this.playerId || this.isVisiblePosition(unit.x, unit.y, visibleTiles))
           .map((unit) => {
             const relation: "self" | "enemy" = player.id === this.playerId ? "self" : "enemy";
             return { ...unit, relation };
@@ -1258,7 +1283,6 @@ export class GameAgentBridge {
       visibleBuildings: state.players.flatMap((player) =>
         player.buildings
           .filter((building) => building.exists)
-          .filter((building) => player.id === this.playerId || this.isVisiblePosition(building.x, building.y, visibleTiles))
           .map((building) => {
             const relation: "self" | "enemy" = player.id === this.playerId ? "self" : "enemy";
             return { ...building, relation };
@@ -1267,20 +1291,26 @@ export class GameAgentBridge {
     };
   }
 
-  private getSuggestedBuildSites(state = this.getReadState(), limit = 3): Position[] {
+  private getSuggestedBuildSites(state = this.getReadState(), buildingType: BuildingType = BUILDING_TYPES.WAR_FACTORY, limit = 3): Position[] {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     if (!hq) {
       return [];
     }
 
-    const preferredX = hq.x + (hq.x < state.tiles[0]?.length / 2 ? 2 : -2);
+    const preferredX = hq.x + (hq.x < state.tiles[0]?.length / 2 ? 12 : -12);
     const candidates: Position[] = [];
-    for (let y = 0; y < state.tiles.length; y++) {
-      for (let x = 0; x < (state.tiles[y]?.length ?? 0); x++) {
-        const validation = this.validateBuildPosition({ x, y }, state);
-        if (validation.ok) {
-          candidates.push({ x, y });
+    for (let radius = 5; radius <= 32 && candidates.length < limit * 4; radius++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (const dx of [-radius, radius]) {
+          const position = { x: hq.x + dx, y: hq.y + dy };
+          if (this.validateBuildPosition(position, buildingType, state).ok) candidates.push(position);
+        }
+      }
+      for (let dx = -radius + 1; dx < radius && candidates.length < limit * 4; dx++) {
+        for (const dy of [-radius, radius]) {
+          const position = { x: hq.x + dx, y: hq.y + dy };
+          if (this.validateBuildPosition(position, buildingType, state).ok) candidates.push(position);
         }
       }
     }
@@ -1307,36 +1337,36 @@ export class GameAgentBridge {
     return `${baseHint} Try an empty tile that leaves one empty ring around HQ, for example: ${suggestions}.`;
   }
 
-  private validateBuildPosition(position: Position, state = this.getReadState()): { ok: true } | { ok: false; hint: string } {
+  private validateBuildPosition(position: Position, buildingType: BuildingType, state = this.getReadState()): { ok: true } | { ok: false; hint: string } {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     const { x, y } = position;
 
-    if (!Number.isInteger(x) || !Number.isInteger(y) || y < 0 || y >= state.tiles.length || x < 0 || x >= (state.tiles[y]?.length ?? 0)) {
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
       return { ok: false, hint: "Choose an empty tile inside the map bounds." };
     }
 
-    const tile = state.tiles[y]?.[x];
-    if (!tile || tile.type !== "empty") {
-      return { ok: false, hint: tile?.type === "obstacle" ? "That tile is blocked by terrain." : "That tile is not buildable." };
+    const footprint = getBuildingFootprintCells(buildingType, x, y);
+    for (const cell of footprint) {
+      const tile = state.tiles[cell.y]?.[cell.x];
+      if (!tile) {
+        return { ok: false, hint: "The full building footprint must stay inside the map." };
+      }
+      if (tile.type !== "empty") {
+        return { ok: false, hint: "The building footprint overlaps terrain or resources." };
+      }
+      if (state.players.some((player) => player.units.some((unit) => unit.exists && unit.x === cell.x && unit.y === cell.y))) {
+        return { ok: false, hint: "The building footprint is occupied by a unit right now." };
+      }
+      if (state.players.some((player) => player.buildings.some((building) =>
+        building.exists && getBuildingFootprintCells(building.type, building.x, building.y).some((occupied) => occupied.x === cell.x && occupied.y === cell.y)
+      ))) {
+        return { ok: false, hint: "The building footprint overlaps another structure." };
+      }
     }
 
-    const occupiedByBuilding = state.players.some((player) =>
-      player.buildings.some((building) => building.exists && building.x === x && building.y === y)
-    );
-    if (occupiedByBuilding) {
-      return { ok: false, hint: "That tile is already occupied by a building." };
-    }
-
-    const occupiedByUnit = state.players.some((player) =>
-      player.units.some((unit) => unit.exists && unit.x === x && unit.y === y)
-    );
-    if (occupiedByUnit) {
-      return { ok: false, hint: "That tile is occupied by a unit right now." };
-    }
-
-    if (hq && Math.max(Math.abs(hq.x - x), Math.abs(hq.y - y)) <= 1) {
-      return { ok: false, hint: "Leave at least one empty tile around HQ before placing barracks." };
+    if (hq && footprint.some((cell) => getDistanceToBuildingFootprint(hq.type, hq.x, hq.y, cell.x, cell.y) <= 1)) {
+      return { ok: false, hint: "Leave at least one clear tile between the full building footprint and HQ." };
     }
 
     return { ok: true };

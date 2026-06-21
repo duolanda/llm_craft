@@ -727,13 +727,15 @@ export class GameOrchestrator {
           hp: building.hp,
           maxHp: building.maxHp,
           productionQueue: building.productionQueue,
+          productionProgress: building.productionProgress ?? null,
         });
         continue;
       }
 
       const damaged = previousBuilding.hp !== building.hp;
       const updated =
-        JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue);
+        JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue) ||
+        JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress);
 
       if (damaged || updated) {
         changes.push({
@@ -745,6 +747,7 @@ export class GameOrchestrator {
           hp: building.hp,
           maxHp: building.maxHp,
           productionQueue: building.productionQueue,
+          productionProgress: building.productionProgress ?? null,
         });
       }
     }

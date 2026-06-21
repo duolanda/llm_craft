@@ -37,8 +37,8 @@ describe("CLI Control Plane Integration", () => {
     const cells = mapData.cells as Array<Record<string, unknown>>;
     const buildings = mapData.buildings as Array<Record<string, unknown>>;
 
-    expect(MAP_WIDTH).toBe(37);
-    expect(MAP_HEIGHT).toBe(25);
+    expect(MAP_WIDTH).toBe(144);
+    expect(MAP_HEIGHT).toBe(96);
     expect(rows).toHaveLength(MAP_HEIGHT);
     expect(buildings).toEqual(
       expect.arrayContaining([
@@ -50,10 +50,19 @@ describe("CLI Control Plane Integration", () => {
         }),
       ])
     );
-    expect(buildings.some((building) => building.relation === "enemy")).toBe(false);
+    expect(buildings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: BUILDING_TYPES.HQ,
+          relation: "enemy",
+          x: DEFAULT_MAP_LAYOUT.player2Hq.x,
+          y: DEFAULT_MAP_LAYOUT.player2Hq.y,
+        }),
+      ])
+    );
     expect(cells).toEqual(
       expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.slice(0, 2).map((position) =>
-        expect.objectContaining({ ...position, tile: TILE_TYPES.RESOURCE })
+        expect.objectContaining({ ...position, tile: TILE_TYPES.RESOURCE, resourceRemaining: 5000 })
       ))
     );
 
@@ -69,7 +78,7 @@ describe("CLI Control Plane Integration", () => {
     });
     expect(buildControlResponse(harvestResult).ok).toBe(true);
 
-    const buildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 2, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
+    const buildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
     const buildResult = executeControlTool(session.bridge, "build_structure", {
       unitId: workers[1].id,
       buildingType: BUILDING_TYPES.BARRACKS,

@@ -8,6 +8,7 @@
     "build": "tsc --build",
     "start": "node dist/index.js",
     "analyze:record": "node scripts/analyze-record.mjs",
+    "smoke:strategic": "tsx scripts/strategic-scale-smoke.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

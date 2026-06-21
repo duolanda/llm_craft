@@ -248,7 +248,12 @@ export class UnitManager {
    * 处理单位沿路径移动（每 tick 调用）
    * 按照单位速度移动相应步数
    */
-  processPathMovement(unit: Unit, tiles: TileType[][], blockedPositions?: Set<string>): ResultCode {
+  processPathMovement(
+    unit: Unit,
+    tiles: TileType[][],
+    blockedPositions?: Set<string>,
+    repathBudget?: { remaining: number },
+  ): ResultCode {
     if (!unit.exists || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
     }
@@ -264,6 +269,10 @@ export class UnitManager {
         this.hasUnitAt(nextStep.x, nextStep.y, unit.id) ||
         blockedPositions?.has(`${nextStep.x},${nextStep.y}`)
       ) {
+        if (repathBudget && repathBudget.remaining <= 0) {
+          return RESULT_CODES.ERR_BUSY;
+        }
+        if (repathBudget) repathBudget.remaining -= 1;
         // 路径被阻挡，需要重新寻路
         const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
         const newPath = PathFinder.findPath(

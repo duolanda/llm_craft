@@ -4,7 +4,10 @@ import {
   BuildingType,
   UnitType,
   canBuildingProduce,
+  getBuildingFootprintCells,
+  getDistanceToBuildingFootprint,
   getBuildingStats,
+  getUnitProductionTicks,
 } from "@llmcraft/shared";
 
 export interface ProductionCompletion {
@@ -57,7 +60,7 @@ export class BuildingManager {
     for (const building of this.buildings.values()) {
       if (!building.exists) continue;
       if (excludeBuildingId && building.id === excludeBuildingId) continue;
-      if (building.x === x && building.y === y) return true;
+      if (getBuildingFootprintCells(building.type, building.x, building.y).some((cell) => cell.x === x && cell.y === y)) return true;
     }
     return false;
   }
@@ -67,7 +70,9 @@ export class BuildingManager {
     for (const building of this.buildings.values()) {
       if (!building.exists) continue;
       if (excludeBuildingId && building.id === excludeBuildingId) continue;
-      positions.add(`${building.x},${building.y}`);
+      for (const cell of getBuildingFootprintCells(building.type, building.x, building.y)) {
+        positions.add(`${cell.x},${cell.y}`);
+      }
     }
     return positions;
   }
@@ -83,6 +88,10 @@ export class BuildingManager {
 
   canProduce(building: Building, unitType: UnitType): boolean {
     return canBuildingProduce(building.type, unitType);
+  }
+
+  getDistanceToBuilding(building: Building, x: number, y: number): number {
+    return getDistanceToBuildingFootprint(building.type, building.x, building.y, x, y);
   }
 
   takeDamage(building: Building, damage: number): boolean {
@@ -106,13 +115,27 @@ export class BuildingManager {
 
     for (const building of this.buildings.values()) {
       if (building.exists && building.productionQueue.length > 0) {
-        // For simplicity, complete the first unit in queue each tick
-        const completedType = building.productionQueue.shift();
-        if (completedType) {
+        const queuedType = building.productionQueue[0];
+        if (!queuedType) {
+          continue;
+        }
+        if (!building.productionProgress || building.productionProgress.unitType !== queuedType) {
+          const totalTicks = getUnitProductionTicks(queuedType);
+          building.productionProgress = { unitType: queuedType, remainingTicks: totalTicks, totalTicks };
+        }
+        building.productionProgress.remainingTicks -= 1;
+        if (building.productionProgress.remainingTicks <= 0) {
+          const completedType = building.productionQueue.shift();
+          building.productionProgress = undefined;
+          if (!completedType) {
+            continue;
+          }
           const playerCompleted = completedUnits.get(building.playerId) || [];
           playerCompleted.push({ buildingId: building.id, unitType: completedType });
           completedUnits.set(building.playerId, playerCompleted);
         }
+      } else if (building.productionProgress) {
+        building.productionProgress = undefined;
       }
     }
 

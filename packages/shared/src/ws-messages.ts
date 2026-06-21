@@ -1,5 +1,5 @@
-import { PlayerId } from "./constants";
-import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types";
+import type { PlayerId } from "./constants.js";
+import type { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types.js";
 
 // ============================================================
 // WebSocket 消息类型契约

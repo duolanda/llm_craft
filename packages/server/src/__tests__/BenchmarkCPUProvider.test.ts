@@ -50,7 +50,7 @@ describe("BenchmarkCPUProvider", () => {
     expect(result.toolCalls.length).toBeGreaterThan(0);
   });
 
-  it("uses Phase 2 combat roles in rush strategy", async () => {
+  it("produces counters while massing before a multi-front advance", async () => {
     const provider = createLLMProvider({
       providerType: "builtin-cpu",
       strategy: "rush",
@@ -102,15 +102,8 @@ describe("BenchmarkCPUProvider", () => {
           toolName: "spawn_unit",
           args: expect.objectContaining({ buildingId: "war-factory-1", unitType: "light_tank" }),
         }),
-        expect.objectContaining({
-          toolName: "attack",
-          args: expect.objectContaining({ unitId: "rocket-1", targetId: "enemy-tank" }),
-        }),
-        expect.objectContaining({
-          toolName: "attack",
-          args: expect.objectContaining({ unitId: "tank-1", targetId: "enemy-hq" }),
-        }),
       ])
     );
+    expect(result.toolCalls.some((call) => call.toolName === "attack" || call.toolName === "attack_move_group")).toBe(false);
   });
 });

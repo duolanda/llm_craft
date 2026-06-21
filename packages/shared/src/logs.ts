@@ -1,5 +1,6 @@
-import { ResultCode, PLAYER_IDS, PlayerId, ActorId, ACTOR_IDS } from "./constants";
-import type { Command } from "./types";
+import { PLAYER_IDS, ACTOR_IDS } from "./constants.js";
+import type { ResultCode, PlayerId, ActorId } from "./constants.js";
+import type { Command } from "./types.js";
 
 // ============================================================
 // 日志等级

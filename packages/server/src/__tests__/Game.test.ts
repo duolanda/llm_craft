@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Game } from "../Game";
+import { MapGenerator } from "../MapGenerator";
+import { PathFinder } from "../PathFinder";
 import {
   BUILDING_TYPES,
   MAP_HEIGHT,
@@ -13,26 +15,27 @@ import {
   DEFAULT_MAP_LAYOUT,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
+  getUnitProductionTicks,
 } from "@llmcraft/shared";
 
 describe("Game", () => {
   let game: Game;
-  const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 2, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
+  const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
 
   beforeEach(() => {
     game = new Game();
   });
 
-  it("initializes each player with one HQ, two workers and credits", () => {
+  it("initializes each player with one HQ, four workers and expansion credits", () => {
     const state = game.getState();
     const [player1, player2] = state.players;
 
     expect(player1.buildings.filter((b) => b.type === BUILDING_TYPES.HQ)).toHaveLength(1);
     expect(player2.buildings.filter((b) => b.type === BUILDING_TYPES.HQ)).toHaveLength(1);
-    expect(player1.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(2);
-    expect(player2.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(2);
+    expect(player1.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(4);
+    expect(player2.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toHaveLength(4);
     expect(player1.units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(0);
-    expect(player1.resources.credits).toBe(400);
+    expect(player1.resources.credits).toBe(800);
     expect(player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject(DEFAULT_MAP_LAYOUT.player1Hq);
     expect(player2.buildings.find((b) => b.type === BUILDING_TYPES.HQ)).toMatchObject(DEFAULT_MAP_LAYOUT.player2Hq);
     expect(player1.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toEqual(
@@ -43,16 +46,24 @@ describe("Game", () => {
     );
   });
 
-  it("uses the expanded OpenRA migration map baseline", () => {
-    expect(MAP_WIDTH).toBe(37);
-    expect(MAP_HEIGHT).toBe(25);
-    expect(DEFAULT_MAP_LAYOUT.player2Hq.x - DEFAULT_MAP_LAYOUT.player1Hq.x).toBeGreaterThanOrEqual(24);
+  it("uses the three-front strategic map baseline", () => {
+    expect(MAP_WIDTH).toBe(144);
+    expect(MAP_HEIGHT).toBe(96);
+    expect(DEFAULT_MAP_LAYOUT.player2Hq.x - DEFAULT_MAP_LAYOUT.player1Hq.x).toBeGreaterThanOrEqual(110);
 
     const state = game.getState();
     const resourceTiles = state.tiles.flat().filter((tile) => tile.type === TILE_TYPES.RESOURCE);
     expect(resourceTiles).toEqual(
       expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.map((position) => expect.objectContaining(position)))
     );
+  });
+
+  it("keeps north, center and south fronts connected through cross-lane gaps", () => {
+    const tiles = MapGenerator.generate();
+    expect(PathFinder.findPath(20, 20, 123, 20, tiles).length).toBeGreaterThan(0);
+    expect(PathFinder.findPath(20, 48, 123, 48, tiles).length).toBeGreaterThan(0);
+    expect(PathFinder.findPath(20, 76, 123, 76, tiles).length).toBeGreaterThan(0);
+    expect(PathFinder.findPath(72, 20, 72, 76, tiles).length).toBeGreaterThan(0);
   });
 
   it("keeps resource tiles outside the HQ delivery ring", () => {
@@ -86,7 +97,7 @@ describe("Game", () => {
 
     game.processCommands();
 
-    expect(game.getState().players[0].resources.credits).toBe(350);
+    expect(game.getState().players[0].resources.credits).toBe(750);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
@@ -106,7 +117,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
-    expect(game.getState().players[0].resources.credits).toBe(400);
+    expect(game.getState().players[0].resources.credits).toBe(800);
   });
 
   it("allows a worker to build a barracks on a valid tile", () => {
@@ -128,7 +139,7 @@ describe("Game", () => {
 
     const state = game.getState();
     expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS)).toHaveLength(1);
-    expect(state.players[0].resources.credits).toBe(280);
+    expect(state.players[0].resources.credits).toBe(680);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
@@ -223,7 +234,9 @@ describe("Game", () => {
     });
     game.processCommands();
     game.start();
-    game.tickUpdate();
+    for (let tick = 0; tick < getUnitProductionTicks(UNIT_TYPES.SOLDIER); tick++) {
+      game.tickUpdate();
+    }
     game.stop();
 
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
@@ -247,8 +260,25 @@ describe("Game", () => {
 
     const state = game.getState();
     expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY)).toHaveLength(1);
-    expect(state.players[0].resources.credits).toBe(180);
+    expect(state.players[0].resources.credits).toBe(580);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+  });
+
+  it("allows workers to build a refinery for forward resource delivery", () => {
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    game.queueCommand({
+      id: "build_refinery",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.REFINERY,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const state = game.getState();
+    expect(state.players[0].buildings.filter((building) => building.type === BUILDING_TYPES.REFINERY)).toHaveLength(1);
+    expect(state.players[0].resources.credits).toBe(500);
   });
 
   it("spawns light tanks near the war factory that produced them", () => {
@@ -268,11 +298,14 @@ describe("Game", () => {
     });
     game.processCommands();
     game.start();
-    game.tickUpdate();
+    for (let tick = 0; tick < getUnitProductionTicks(UNIT_TYPES.LIGHT_TANK); tick++) {
+      game.tickUpdate();
+    }
     game.stop();
 
     const tank = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK);
-    expect(tank).toMatchObject({ x: player1BuildSite.x - 1, y: player1BuildSite.y });
+    expect(tank).toBeDefined();
+    expect(game.getBuildingManager().getDistanceToBuilding(warFactory, tank!.x, tank!.y)).toBe(1);
   });
 
   it("keeps worker unable to attack and applies large-map OpenRA-lite combat ranges", () => {
@@ -655,6 +688,31 @@ describe("Game", () => {
     expect(attacker.intent?.type).not.toBe("attack_move");
   });
 
+  it("attack_move detects enemies in vision, closes to range, and preserves the army destination", () => {
+    const unitManager = game.getUnitManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 10, 5, "player_2");
+
+    game.queueCommand({
+      id: "attack_move_vision_acquisition",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: 30, y: 5 },
+      targetPriority: [UNIT_TYPES.SOLDIER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    game.tickUpdate();
+    expect(attacker.intent).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5, targetId: target.id });
+    expect(target.hp).toBe(target.maxHp);
+    for (let tick = 0; tick < 4; tick++) game.tickUpdate();
+    game.stop();
+
+    expect(target.hp).toBeLessThan(target.maxHp);
+    expect(attacker.intent).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5 });
+  });
+
   it("attack_move stops auto-attacking after reaching its destination", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
@@ -682,7 +740,7 @@ describe("Game", () => {
   it("attack_move ends when a blocked requested target resolves to the unit's current tile", () => {
     const unitManager = game.getUnitManager();
     const enemyHq = game.getState().players[1].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
-    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, enemyHq.x - 1, enemyHq.y, "player_1");
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, enemyHq.x - 4, enemyHq.y, "player_1");
 
     game.queueCommand({
       id: "attack_move_to_blocked_hq_from_adjacent_tile",
@@ -697,7 +755,7 @@ describe("Game", () => {
     game.tickUpdate();
     game.stop();
 
-    expect(attacker.x).toBe(enemyHq.x - 1);
+    expect(attacker.x).toBe(enemyHq.x - 4);
     expect(attacker.y).toBe(enemyHq.y);
     expect(attacker.intent?.type).toBe("hold");
     expect(attacker.intent).not.toMatchObject({
@@ -820,7 +878,7 @@ describe("Game", () => {
     game.start();
     game.tickUpdate();
 
-    expect(game.getState().players[0].resources.credits).toBe(400);
+    expect(game.getState().players[0].resources.credits).toBe(800);
     expect(runtimeWorker.carryingCredits).toBe(10);
     expect(runtimeWorker.state).toBe("gathering");
 
@@ -830,7 +888,7 @@ describe("Game", () => {
     game.tickUpdate();
     game.stop();
 
-    expect(game.getState().players[0].resources.credits).toBe(410);
+    expect(game.getState().players[0].resources.credits).toBe(810);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.state).toBe("idle");
   });
@@ -887,12 +945,12 @@ describe("Game", () => {
     expect(runtimeWorker.intent?.type).toBe("harvest_loop");
 
     game.start();
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 40 && game.getState().players[0].resources.credits === 800; i++) {
       game.tickUpdate();
     }
     game.stop();
 
-    expect(game.getState().players[0].resources.credits).toBe(500);
+    expect(game.getState().players[0].resources.credits).toBe(900);
     expect(runtimeWorker.carryingCredits).toBe(0);
     expect(runtimeWorker.intent?.type).toBe("harvest_loop");
     expect(runtimeWorker.intent).toMatchObject({
@@ -930,6 +988,22 @@ describe("Game", () => {
     });
   });
 
+  it("delivers carried resources to the nearest refinery footprint", () => {
+    const worker = game.getUnitManager().getUnitsByPlayer("player_1")[0];
+    const refinery = game.getBuildingManager().createBuilding(BUILDING_TYPES.REFINERY, 44, 18, "player_1");
+    worker.x = 47;
+    worker.y = 19;
+    worker.carryingCredits = 100;
+
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    expect(game.getBuildingManager().getDistanceToBuilding(refinery, worker.x, worker.y)).toBe(1);
+    expect(game.getState().players[0].resources.credits).toBe(900);
+    expect(worker.carryingCredits).toBe(0);
+  });
+
   it("harvest_loop auto-picks less saturated nearby resources", () => {
     const workers = game
       .getState()
@@ -963,12 +1037,27 @@ describe("Game", () => {
       `${runtimeWorker2.intent?.targetX},${runtimeWorker2.intent?.targetY}`,
     ]);
 
-    expect(assignedTargets).toEqual(
-      new Set([
-        `${DEFAULT_MAP_LAYOUT.resources[0].x},${DEFAULT_MAP_LAYOUT.resources[0].y}`,
-        `${DEFAULT_MAP_LAYOUT.resources[1].x},${DEFAULT_MAP_LAYOUT.resources[1].y}`,
-      ])
-    );
+    expect(assignedTargets.size).toBe(2);
+    for (const target of assignedTargets) {
+      expect(DEFAULT_MAP_LAYOUT.resources.some((position) => `${position.x},${position.y}` === target)).toBe(true);
+    }
+  });
+
+  it("depletes finite resource deposits and turns exhausted tiles into open ground", () => {
+    const resource = DEFAULT_MAP_LAYOUT.resources[0];
+    const worker = game.getUnitManager().getUnitsByPlayer("player_1")[0];
+    worker.x = resource.x;
+    worker.y = resource.y;
+    (game as unknown as { resourceRemaining: Map<string, number> }).resourceRemaining.set(`${resource.x},${resource.y}`, 10);
+
+    game.start();
+    game.tickUpdate();
+    game.stop();
+
+    const tile = game.getState().tiles[resource.y][resource.x];
+    expect(worker.carryingCredits).toBe(10);
+    expect(tile.type).toBe(TILE_TYPES.EMPTY);
+    expect(tile.resourceRemaining).toBeUndefined();
   });
 
   it("keeps snapshot history without mutating earlier snapshots", () => {

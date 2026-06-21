@@ -13,6 +13,7 @@ import {
   getProductionOptions,
   getUnitCost,
   getUnitStats,
+  getUnitProductionTicks,
   getBuildingVisionRange,
   getUnitVisionRange,
   unitCanAttack,
@@ -26,15 +27,17 @@ describe("default ruleset", () => {
     expect(getUnitStats(UNIT_TYPES.ROCKET_SOLDIER)).toEqual(UNIT_STATS.rocket_soldier);
     expect(getUnitStats(UNIT_TYPES.LIGHT_TANK)).toEqual(UNIT_STATS.light_tank);
     expect(getUnitCost(UNIT_TYPES.WORKER)).toBe(50);
-    expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(80);
-    expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(90);
-    expect(getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)).toBe(140);
-    expect(getUnitCost(UNIT_TYPES.LIGHT_TANK)).toBe(300);
+    expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(60);
+    expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(70);
+    expect(getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)).toBe(110);
+    expect(getUnitCost(UNIT_TYPES.LIGHT_TANK)).toBe(240);
     expect(unitCanAttack(UNIT_TYPES.WORKER)).toBe(false);
     expect(unitCanAttack(UNIT_TYPES.SOLDIER)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.LIGHT_TANK)).toBe(true);
+    expect(getUnitProductionTicks(UNIT_TYPES.SOLDIER)).toBe(4);
+    expect(getUnitProductionTicks(UNIT_TYPES.LIGHT_TANK)).toBe(14);
   });
 
   it("defines vision ranges for units and buildings", () => {
@@ -44,6 +47,7 @@ describe("default ruleset", () => {
     expect(getUnitVisionRange(UNIT_TYPES.LIGHT_TANK)).toBe(7);
     expect(getBuildingVisionRange(BUILDING_TYPES.HQ)).toBe(8);
     expect(getBuildingVisionRange(BUILDING_TYPES.BARRACKS)).toBe(6);
+    expect(getBuildingVisionRange(BUILDING_TYPES.REFINERY)).toBe(6);
   });
 
   it("applies armor-based damage modifiers", () => {
@@ -87,9 +91,11 @@ describe("default ruleset", () => {
     expect(getBuildingStats(BUILDING_TYPES.HQ)).toMatchObject(BUILDING_STATS.hq);
     expect(getBuildingStats(BUILDING_TYPES.BARRACKS)).toMatchObject(BUILDING_STATS.barracks);
     expect(getBuildingStats(BUILDING_TYPES.WAR_FACTORY)).toMatchObject(BUILDING_STATS.war_factory);
+    expect(getBuildingStats(BUILDING_TYPES.REFINERY)).toMatchObject(BUILDING_STATS.refinery);
     expect(getBuildingCost(BUILDING_TYPES.HQ)).toBe(0);
     expect(getBuildingCost(BUILDING_TYPES.BARRACKS)).toBe(120);
     expect(getBuildingCost(BUILDING_TYPES.WAR_FACTORY)).toBe(220);
+    expect(getBuildingCost(BUILDING_TYPES.REFINERY)).toBe(300);
   });
 
   it("centralizes current production rules in the default ruleset", () => {
@@ -100,6 +106,7 @@ describe("default ruleset", () => {
       UNIT_TYPES.ROCKET_SOLDIER,
     ]);
     expect(getProductionOptions(BUILDING_TYPES.WAR_FACTORY)).toEqual([UNIT_TYPES.LIGHT_TANK]);
+    expect(getProductionOptions(BUILDING_TYPES.REFINERY)).toEqual([]);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.WORKER)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.SOLDIER)).toBe(false);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.SOLDIER)).toBe(true);

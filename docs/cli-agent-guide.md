@@ -286,11 +286,11 @@ llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gathe
 # Pair each soldier with enemy HQ, then issue target attack
 llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 
-# Pair each soldier with weakest visible enemy
+# Pair each soldier with weakest known enemy
 llmcraft units --type soldier | llmcraft target weakest | llmcraft attack
 ```
 
-`target weakest` is a global visible-target helper. Do not use it as a defense heuristic when enemies are already near your HQ; read `enemies --near <hq x,y>` or use an explicit `--target` for the immediate threat.
+`target weakest` is a global target helper. Do not use it as a defense heuristic when enemies are already near your HQ; read `enemies --near <hq x,y>` or use an explicit `--target` for the immediate threat.
 
 Available transformers:
 

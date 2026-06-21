@@ -25,7 +25,7 @@ type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
 const OPENING_BARRACKS_SITE = {
-  x: DEFAULT_MAP_LAYOUT.player1Hq.x + 2,
+  x: DEFAULT_MAP_LAYOUT.player1Hq.x + 12,
   y: DEFAULT_MAP_LAYOUT.player1Hq.y,
 };
 
@@ -110,6 +110,27 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       bridge.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
   },
   {
+    name: "attack_move_group",
+    description:
+      "Order 1-100 friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies anywhere inside vision, close to weapon range, fight, and then resume the advance. Use this for army-scale north/center/south fronts instead of issuing one tool call per unit.",
+    parameters: {
+      type: "object",
+      required: ["unitIds", "x", "y"],
+      properties: {
+        unitIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string" } },
+        x: { type: "integer" },
+        y: { type: "integer" },
+        formation: { type: "string", enum: ["line", "column", "wedge", "dispersed"], default: "line" },
+      },
+      additionalProperties: false,
+    },
+    execute: (bridge, args) => bridge.attackMoveGroup(
+      Array.isArray(args.unitIds) ? args.unitIds.map(String) : [],
+      { x: Number(args.x), y: Number(args.y) },
+      args.formation === "column" || args.formation === "wedge" || args.formation === "dispersed" ? args.formation : "line",
+    ),
+  },
+  {
     name: "attack",
     description:
       "Order one combat unit to attack one enemy target id. This is the default combat command whenever a visible target id exists, including far-away HQ or barracks targets: the unit will move toward the target until in range and then keep attacking. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
@@ -140,7 +161,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "build_structure",
-    description: "Queue a build command for one worker. Buildable structures must be placed on an empty tile and leave one empty ring around your HQ; if placement fails, the error hint will suggest valid nearby tiles.",
+    description: "Queue a build command for one worker. Barracks, war factories, and refineries use multi-tile footprints that must remain clear and leave one empty ring around HQ. Refineries accept worker resource deliveries near their footprint.",
     parameters: {
       type: "object",
       required: ["unitId", "buildingType", "x", "y"],
@@ -158,7 +179,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "start_harvest_loop",
     description:
-      "Assign one friendly worker to the built-in mining loop. Prefer this for routine economy instead of hand-writing mining with orchestrate_plan. Omit x/y to auto-pick the nearest resource; once accepted, do not repeatedly reissue it unless the worker is idle, blocked, or needs reassignment.",
+      "Assign one friendly worker to the built-in mining loop. The worker delivers to the nearest HQ or refinery. Omit x/y for nearby mining, or specify a forward finite deposit after constructing a refinery. Do not repeatedly reissue unless the worker is idle, blocked, or needs reassignment.",
     parameters: {
       type: "object",
       required: ["unitId"],

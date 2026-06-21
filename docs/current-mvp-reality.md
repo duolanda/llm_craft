@@ -1,12 +1,12 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-06-05
+日期: 2026-06-17
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
 ## 1. 当前系统边界
 
-- 前端: React + Vite + Canvas
+- 前端: React + Vite + React Three Fiber / Three.js 3D 战场
 - 后端: Node.js + TypeScript
 - 游戏 Tick: `500ms`
 - AI 唤醒频率: 默认每 `5 tick` 触发一次
@@ -31,7 +31,7 @@
 
 模型通过工具读取局面：
 
-- `get_map_state`: 当前己方视野内的战场信息；默认返回带 `?` 迷雾的无坐标轴 ASCII 小地图、可见单位列表和可见建筑列表，需要逐格可见地形时才请求 `cells`
+- `get_map_state`: 全图战场信息；默认返回无坐标轴 ASCII 小地图、全图单位列表和建筑列表，需要逐格地形时才请求 `cells`
 - `get_my_state`: 我方经济、HQ、建筑、生产能力
 - `get_my_units`: 我方可直接控制单位
 - `get_active_plans`: 当前高层计划
@@ -115,30 +115,37 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - `hq` 生产 `worker`
 - `barracks` 生产 `soldier`、`rifleman`、`rocket_soldier`
 - `war_factory` 生产 `light_tank`
-- 当前 OpenRA-lite 战斗数值（Phase 11 大地图尺度）：`soldier` 100 HP / 12 attack / range 1 / cost 80；`rifleman` 90 HP / 14 attack / range 3 / cost 90；`rocket_soldier` 80 HP / 24 attack / range 4 / cost 140；`light_tank` 300 HP / 30 attack / range 3 / cost 300。
-- Phase 2 引入轻量 armor / 伤害倍率，Phase 11 按 37x25 地图重调：单位 armor 为 `infantry` 或 `vehicle`，建筑 armor 为 `structure`。`rifleman` 对 infantry 1.2x、vehicle 0.4x、structure 0.55x；`rocket_soldier` 对 infantry 0.45x、vehicle 2x、structure 1x；`light_tank` 对 infantry 0.7x、vehicle 1x、structure 1.2x。伤害结算四舍五入为整数。
-- Phase 11 同步提高建筑耐久：`hq` 1400 HP、`barracks` 420 HP、`war_factory` 650 HP；单个 `light_tank` 拆 HQ 约需 39 tick，四个 `rocket_soldier` 拆 HQ 约需 15 tick，给 37x25 地图上的侦察、回防和反制留下反应窗口。
+- 当前 OpenRA-lite 战斗数值（Phase 13 大战场尺度）：`soldier` 100 HP / 12 attack / range 1 / cost 80；`rifleman` 90 HP / 14 attack / range 3 / cost 90；`rocket_soldier` 80 HP / 24 attack / range 4 / cost 140；`light_tank` 300 HP / 30 attack / range 3 / cost 300。
+- Phase 2 引入轻量 armor / 伤害倍率，Phase 13 按 96x64 地图重调战场尺度：单位 armor 为 `infantry` 或 `vehicle`，建筑 armor 为 `structure`。`rifleman` 对 infantry 1.2x、vehicle 0.4x、structure 0.55x；`rocket_soldier` 对 infantry 0.45x、vehicle 2x、structure 1x；`light_tank` 对 infantry 0.7x、vehicle 1x、structure 1.2x。伤害结算四舍五入为整数。
+- Phase 11 同步提高建筑耐久：`hq` 1400 HP、`barracks` 420 HP、`war_factory` 650 HP；单个 `light_tank` 拆 HQ 约需 39 tick，四个 `rocket_soldier` 拆 HQ 约需 15 tick，给大地图上的侦察、回防和反制留下反应窗口。
 - 内置 CPU benchmark 策略已开始使用新角色：有敌方 vehicle 时优先从 barracks 生产 `rocket_soldier`，否则优先 `rifleman`；有 war_factory 时生产 `light_tank`；rush 策略会在有 barracks 和足够 credits 后尝试建 `war_factory`。
 - Phase 3 增强 agent 决策脚手架：`get_my_state.techStatus` 汇总己方 worker / rifleman / rocket_soldier / light_tank / barracks / war_factory 数量、敌方 `war_factory` / `light_tank` 迹象，并给出推荐建造和生产项；`orchestrate_plan` 可用 `enemy_building_exists` / `enemy_unit_count_at_least` 表达看到敌方科技后触发反制生产。
 - Phase 4 增强角色化目标选择：默认 `attack_move_unit` 和无显式 priority 的 `attack_in_range` 会按攻击者类型选择目标；内置 CPU rush 会让 `rocket_soldier` 点敌方 `light_tank`，让 `light_tank` 点敌方 HQ / 生产建筑。
 - Phase 5 降低计划噪声：计划内生产/建造会先检查 credits，余额不足时等待收入，不再刷 `spawn_insufficient_credits` / `build_insufficient_credits` 日志。
 - Phase 6 增强计划预算协调：同 tick 多个 active plan 推进时会按顺序预留生产/建造成本，避免不同计划基于同一份 credits 同时下达超额付费命令。
 - Phase 7 增强 active plan 可解释性：计划记录会暴露当前 step、等待原因和最近一次推进尝试，帮助 agent 判断计划是在等钱/等条件还是已经生成命令。
-- Phase 8 建立 OpenRA 迁移地图基线：默认地图从旧 `21 x 21` 扩大到 `37 x 25`，双方 HQ 固定在 `(4,12)` / `(32,12)`，资源点和中心障碍改为更长推进距离下的测试布局。
+- Phase 8 建立 OpenRA 迁移地图基线：默认地图从旧 `21 x 21` 扩大到 `37 x 25`。Phase 13 进一步扩大到 `96 x 64`，双方 HQ 固定在 `(10,32)` / `(85,32)`，资源点和中心障碍改为适合长距离推进、侧翼机动和大军团观战的布局。
 - Phase 9 增强资源分配：省略坐标调用 `start_harvest_loop` 时会倾向选择较近且较少 worker 占用的资源点；`get_my_state.economyStatus` 会暴露 worker / activeHarvester / idleWorker 数量、携带中的 credits、资源点分配和经济建议。
 - Phase 10 增强移动目标预约：寻路会把其他单位的当前格和已预约 `pathTarget` 都视为占用；多个单位同 tick 移动或 attack-move 到同一目标时，后续单位会自动解析到附近可达格，降低大地图集群推进时的同格拥堵。
 - Phase 11 重调战斗尺度：射程层级调整为 `soldier` 1、`rifleman` 3、`rocket_soldier` 4、`light_tank` 3；rocket 更专注反装甲，light_tank 保持主力攻坚定位，建筑 HP 提高以避免大地图上少量单位过快结束对局。
+- Phase 13 启用 3D 战场表现层：前端主战术视口从 2D Canvas 网格切换为 React Three Fiber / Three.js；HQ、兵营、工厂、工人、步兵、火箭兵、轻坦、资源和障碍加载 `packages/client/public/assets/models/battlefield/*.glb`。这些 GLB 由本机 Blender 后台脚本生成，运行时通过 `team_primary` / `team_accent` 材质名替换红蓝队色。底层仍保留离散战术坐标供 AI、寻路、攻击范围、回放和控制面使用，但前端默认不显示格线或坐标轴。
+- Phase 14 将首版几何占位资产替换为可复现的生产资产管线：步兵以 Quaternius CC0 `Animated Men` 人体网格为基础追加原创军装、护甲、武器和工程装备，轻坦基于 Quaternius CC0 `Animated Tanks` 重制材质和附加装甲；HQ 扩大为约 `7.2 x 6.5` 世界单位的指挥中心，并重制兵营和战车工厂。Blender 导出模型嵌入程序生成的 Albedo / Normal / Roughness 贴图，地面和道路也使用重复 PBR 纹理。
+- Phase 14 同时加入军团 LOD 和实例运动：单位总数达到 `100` 时自动切换为单网格、单材质的 mass-battle GLB；高细节版本仍用于小规模/近景。单位、矿石和岩石均通过 `InstancedMesh` 合批，移动步兵以 30 Hz 更新实例矩阵形成错相步态起伏。开发地址 `/?showcase=mass-battle` 可在没有服务端对局状态时独立生成 `80 vs 80` 压力场景，`&units=<每方数量>` 可用于资产审查。
+- Phase 15 增加客户端战斗表现层：轻坦由 Blender 分别导出车体和炮塔的详细版/LOD GLB，运行时车体保持移动朝向、炮塔独立追踪 `targetId`；`lastAttackTick` 驱动实例化后坐、弹丸、枪口焰和命中闪光，单位或建筑从状态中消失时生成短生命周期的实例化爆炸与碎片。该层只消费权威游戏状态，不修改服务器战斗规则。默认 `80 vs 80` 展示场景实测约 `24.3` 万三角形、`144` 次 draw call，应用内诊断为 `60 FPS`。
+- Phase 16 将视觉验收顺序改为画质优先：`/?showcase=mass-battle` 默认使用 `20 vs 20` 高细节 GLB、完整 PBR 材质和单位阴影，单材质 mass-battle LOD 仅在显式传入 `&lod=mass` 时启用。地表替换为 Poly Haven CC0 `Aerial Grass Rock` 2K PBR，临时十字道路和默认意图线已移除，展示模式使用全屏战场、紧凑交战编队和较低战术镜头；`&units=<每方数量>` 仍可用于逐级扩军验收。
+- Phase 17 修正坦克坐标契约并重做模型本体辨识：Blender 导出将 Tank 4 全部零件重定位到炮塔座圈中心，运行时按源模型 `-X` 前向轴增加 `90°` 校准，因此车体与炮塔可分别正确朝向移动/攻击目标。远景兵种图标已完全删除；普通步兵保持轻型突击步枪轮廓，`rifleman` 视觉改为配备长重机枪、弹药箱、两脚架和大型弹药背包的机枪兵，火箭筒兵改为肩扛大型发射管并携带两枚备用火箭，工人使用黄色工程护甲。服装与兵种主护甲保留中性、深色、沙色和工程黄色差异，同时约 30% 的头盔、肩甲、背包外壳、发射器环带和载具装甲使用连续队色区域；低透明度地环仅作选中反馈，不承担阵营识别。`/?showcase=mass-battle&view=far` 用于无图标远景辨识验收。
+- Phase 18 重建四类生产建筑的一级轮廓：HQ 使用分层指挥要塞、雷达阵列和双侧防御塔；兵营使用 U 形双营房、开放集结院、武器架和训练靶；战车工厂使用无外墙双装配工位、车体轨道、吊装炮塔和出车坡道；精炼厂使用发光晶矿卸料坑、斜向输送带、棱角破碎塔和方形储矿仓，并移除油罐、火炬塔等油气设施语汇。建筑继续共享工业 PBR 与阵营材质，但不再依赖屋顶颜色区分功能。
 - 开局每方 `1 HQ + 2 Worker + 400 credits`
 - 胜负条件是摧毁敌方 `HQ`
-- 当前地图 `37 x 25`
-- Phase 12 启用基础战争迷雾读取层：`get_map_state`、`get_my_state.techStatus.enemy` 和 active plan 的 enemy 条件只使用己方视野内的敌方单位/建筑；未侦察地图格在 ASCII 小地图中显示为 `?`。底层 Game 胜负、战斗结算和客户端全局回放仍保留真实全局状态，本阶段还没有探索历史或 last-seen 地图层。
+- 当前地图 `96 x 64`
+- 当前关闭战争迷雾读取层：`get_map_state`、`get_my_state.techStatus.enemy` 和 active plan 的 enemy 条件使用全图真实状态，ASCII 小地图不再隐藏未侦察格。单位自动索敌仍受各自 `visionRange` 限制；等侦察兵、雷达和 last-seen 系统完整后再重新评估迷雾。
 - `worker` 自动采矿，回 HQ 周围 1 格自动交付；当前没有资源枯竭、矿量储备或精炼厂链路
 - `barracks` 和 `war_factory` 不能紧贴己方 `HQ`
 - idle/hold 的有攻击力单位被敌方单位攻击时，会在射程内自动还击攻击者
 
 ## 6. CLI 控制面
 
-新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。agent-facing 命令是构建后的 `llmcraft`；`pnpm cli -- ...` 仅作为开发调试入口。
+新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。agent-facing 命令是构建后的 `llmcraft`；`pnpm cli -- ...` 仅作为开发调试入口。shared 包现在按 Node ESM 运行时规则声明 `"type": "module"`，内部导入导出使用 `.js` 后缀，确保 CLI 通过 workspace 包加载 `@llmcraft/shared` 时能正常取得 ruleset helper 和常量导出。
 
 ### 架构
 

@@ -1,5 +1,5 @@
-import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType } from "./constants";
-import type { GameLog } from "./logs";
+import type { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType } from "./constants.js";
+import type { GameLog } from "./logs.js";
 
 export type LLMProviderType = "openai-compatible";
 
@@ -183,6 +183,11 @@ export interface Building extends GameObject {
   my: boolean;
   playerId: PlayerId;
   productionQueue: UnitType[];
+  productionProgress?: {
+    unitType: UnitType;
+    remainingTicks: number;
+    totalTicks: number;
+  };
 }
 
 export interface Resources {
@@ -200,6 +205,7 @@ export interface Tile {
   x: number;
   y: number;
   type: TileType;
+  resourceRemaining?: number;
 }
 
 export interface GameState {
@@ -290,6 +296,7 @@ export interface AgentMapStateCell {
   x: number;
   y: number;
   tile: TileType;
+  resourceRemaining?: number;
   unit?: AgentMapStateUnit;
   building?: AgentMapStateBuilding;
 }
@@ -464,6 +471,7 @@ export interface TickDeltaRecord {
       hp?: number;
       maxHp?: number;
       productionQueue?: UnitType[];
+      productionProgress?: Building["productionProgress"] | null;
     }>;
   }>;
   newLogs: GameLog[];

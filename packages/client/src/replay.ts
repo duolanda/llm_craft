@@ -105,6 +105,7 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       playerId: player.id,
       exists: true,
       productionQueue: change.productionQueue ?? [],
+      productionProgress: change.productionProgress ?? undefined,
     };
     player.buildings.push(createdBuilding);
     return;
@@ -119,6 +120,7 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
     hp: change.hp ?? current.hp,
     maxHp: change.maxHp ?? current.maxHp,
     productionQueue: change.productionQueue ?? current.productionQueue,
+    productionProgress: change.productionProgress === null ? undefined : change.productionProgress ?? current.productionProgress,
   };
 }
 

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameAgentBridge } from "../agent/GameAgentBridge";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, MAP_HEIGHT, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, MAP_HEIGHT, MAP_WIDTH, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
 
 describe("GameAgentBridge", () => {
-  const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 2, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
+  const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
 
   it("queues action commands into the game immediately", () => {
     const game = new Game();
@@ -24,7 +24,7 @@ describe("GameAgentBridge", () => {
     game.tickUpdate();
 
     const updatedWorker = game.getState().players[0].units.find((unit) => unit.id === worker.id)!;
-    expect(updatedWorker.x).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].x - 1);
+    expect(updatedWorker.x).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].x + 1);
     expect(updatedWorker.y).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].y);
   });
 
@@ -70,9 +70,11 @@ describe("GameAgentBridge", () => {
   });
 
   it("returns an immediate validation error for barracks positions adjacent to HQ", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_2");
+    const worker = game.getState().players[1].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
-    const result = bridge.buildStructure("unit_4", "barracks", {
+    const result = bridge.buildStructure(worker.id, "barracks", {
       x: DEFAULT_MAP_LAYOUT.player2Hq.x,
       y: DEFAULT_MAP_LAYOUT.player2Hq.y - 1,
     });
@@ -81,16 +83,17 @@ describe("GameAgentBridge", () => {
       ok: false,
       error: "invalid_build_position",
     });
-    expect((result.result as { hint: string }).hint).toContain("Leave at least one empty tile around HQ");
-    expect((result.result as { hint: string }).hint).toContain(`(${DEFAULT_MAP_LAYOUT.player2Hq.x - 2}, ${DEFAULT_MAP_LAYOUT.player2Hq.y})`);
+    expect((result.result as { hint: string }).hint).toContain("building footprint");
     expect(bridge.takeIssuedCommands()).toHaveLength(0);
   });
 
   it("rejects old non-call orchestrate_plan steps instead of registering a stuck plan", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_2");
+    const worker = game.getState().players[1].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
     const result = bridge.orchestratePlan({
-      unitIds: ["unit_3"],
+      unitIds: [worker.id],
       steps: [{ type: "move_to_resource" }] as any,
     });
 
@@ -273,7 +276,7 @@ describe("GameAgentBridge", () => {
     const [worker] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const hq = game.getState().players[0].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 12; i++) {
       game.queueCommand({
         id: `spend_worker_${i}`,
         type: "spawn",
@@ -300,7 +303,7 @@ describe("GameAgentBridge", () => {
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(game.getState().players[0].resources.credits).toBe(250);
+    expect(game.getState().players[0].resources.credits).toBe(200);
     expect(bridge.advancePlans()).toEqual([]);
     expect(bridge.getActivePlans()).toEqual([
       expect.objectContaining({
@@ -308,11 +311,11 @@ describe("GameAgentBridge", () => {
           call: "spawn_unit",
           args: { buildingId: "$war_factory", unitType: "light_tank" },
         }),
-        waitingReason: "waiting for budget: need 300 credits, available 250",
+        waitingReason: "waiting for budget: need 240 credits, available 200",
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for budget: need 300 credits, available 250",
+          detail: "waiting for budget: need 240 credits, available 200",
         }),
       }),
     ]);
@@ -326,7 +329,7 @@ describe("GameAgentBridge", () => {
     const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const hq = game.getState().players[0].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
 
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 10; i++) {
       game.queueCommand({
         id: `spend_worker_${i}`,
         type: "spawn",
@@ -382,11 +385,11 @@ describe("GameAgentBridge", () => {
         }),
       }),
       expect.objectContaining({
-        waitingReason: "waiting for budget: need 140 credits, available 0",
+        waitingReason: "waiting for budget: need 110 credits, available 60",
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for budget: need 140 credits, available 0",
+          detail: "waiting for budget: need 110 credits, available 60",
         }),
       }),
     ]);
@@ -425,7 +428,7 @@ describe("GameAgentBridge", () => {
     expect(result.techStatus.enemy).toMatchObject({ hasWarFactory: true, lightTanks: 1 });
     expect(result.techStatus.recommendedStructures).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ buildingType: "war_factory" }),
+        expect.objectContaining({ buildingType: "refinery" }),
       ])
     );
     expect(result.techStatus.recommendedProduction).toEqual(
@@ -458,9 +461,9 @@ describe("GameAgentBridge", () => {
     };
 
     expect(result.economyStatus).toMatchObject({
-      workers: 2,
+      workers: 4,
       activeHarvesters: 2,
-      idleWorkers: 0,
+      idleWorkers: 2,
       carryingCredits: 0,
     });
     expect(result.economyStatus.resourceAssignments).toEqual(
@@ -477,7 +480,9 @@ describe("GameAgentBridge", () => {
         }),
       ])
     );
-    expect(result.economyStatus.recommendations).toEqual([]);
+    expect(result.economyStatus.recommendations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ action: "start_harvest_loop" })])
+    );
     game.stop();
   });
 
@@ -570,11 +575,11 @@ describe("GameAgentBridge", () => {
     };
 
     expect(mapState.tick).toBe(0);
-    expect(mapState.fogOfWar).toBe(true);
-    expect(mapState.visibleTileCount).toBeGreaterThan(0);
+    expect(mapState.fogOfWar).toBe(false);
+    expect(mapState.visibleTileCount).toBe(MAP_WIDTH * MAP_HEIGHT);
     expect(mapState.asciiMap.split("\n")).toHaveLength(MAP_HEIGHT);
     expect(mapState.asciiMap).toContain("H");
-    expect(mapState.asciiMap).toContain("?");
+    expect(mapState.asciiMap).not.toContain("?");
     expect(mapState).not.toHaveProperty("legend");
     expect(mapState.cells).toBeUndefined();
     expect(mapState.units).toEqual(
@@ -582,7 +587,6 @@ describe("GameAgentBridge", () => {
         expect.objectContaining({
           x: DEFAULT_MAP_LAYOUT.player2Workers[0].x,
           y: DEFAULT_MAP_LAYOUT.player2Workers[0].y,
-          id: "unit_3",
           type: "worker",
           hp: 50,
           maxHp: 50,
@@ -591,20 +595,24 @@ describe("GameAgentBridge", () => {
         }),
       ])
     );
-    expect(mapState.units.some((unit) => unit.relation === "enemy")).toBe(false);
+    expect(mapState.units.some((unit) => unit.relation === "enemy")).toBe(true);
     expect(mapState.buildings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y, type: "hq", relation: "self" }),
       ])
     );
-    expect(mapState.buildings.some((building) => building.relation === "enemy")).toBe(false);
+    expect(mapState.buildings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ x: DEFAULT_MAP_LAYOUT.player1Hq.x, y: DEFAULT_MAP_LAYOUT.player1Hq.y, type: "hq", relation: "enemy" }),
+      ])
+    );
     expect(mapState.units[0]).not.toHaveProperty("my");
     expect(mapState.units[0]).not.toHaveProperty("playerId");
     expect(mapState.units[0]).not.toHaveProperty("carryingCredits");
     expect(mapState.units[0]).not.toHaveProperty("attackRange");
   });
 
-  it("reveals enemy units and buildings only inside friendly vision", () => {
+  it("reveals enemy units and buildings across the full battlefield", () => {
     const game = new Game();
     const bridge = new GameAgentBridge(game, "player_1");
     const enemyScout = game.getUnitManager().createUnit(
@@ -630,8 +638,8 @@ describe("GameAgentBridge", () => {
         expect.objectContaining({ id: enemyScout.id, relation: "enemy", type: UNIT_TYPES.RIFLEMAN }),
       ])
     );
-    expect(mapState.units.some((unit) => unit.id === hiddenEnemy.id)).toBe(false);
-    expect(mapState.buildings.some((building) => building.relation === "enemy")).toBe(false);
+    expect(mapState.units.some((unit) => unit.id === hiddenEnemy.id)).toBe(true);
+    expect(mapState.buildings.some((building) => building.relation === "enemy")).toBe(true);
   });
 
   it("queues attack-move commands with role-aware target priority by default", () => {
@@ -651,16 +659,32 @@ describe("GameAgentBridge", () => {
         type: "attack_move",
         unitId: soldier.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["rifleman", "rocket_soldier", "soldier", "worker", "light_tank", "hq", "war_factory", "barracks"],
+        targetPriority: ["rifleman", "rocket_soldier", "soldier", "worker", "light_tank", "hq", "war_factory", "barracks", "refinery"],
       }),
       expect.objectContaining({
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["hq", "war_factory", "barracks", "light_tank", "rocket_soldier", "rifleman", "soldier", "worker"],
+        targetPriority: ["hq", "war_factory", "barracks", "refinery", "light_tank", "rocket_soldier", "rifleman", "soldier", "worker"],
       }),
     ]);
     game.stop();
+  });
+
+  it("assigns distinct formation destinations to a 100-unit army in one command", () => {
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const unitIds = Array.from({ length: 100 }, (_, index) =>
+      game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20 + (index % 10), 12 + Math.floor(index / 10), "player_1").id
+    );
+
+    const result = bridge.attackMoveGroup(unitIds, { x: 108, y: 48 }, "line");
+    const payload = result.result as { ok: boolean; assignments: Array<{ position: { x: number; y: number } }> };
+
+    expect(payload.ok).toBe(true);
+    expect(payload.assignments).toHaveLength(100);
+    expect(new Set(payload.assignments.map((assignment) => `${assignment.position.x},${assignment.position.y}`)).size).toBe(100);
+    expect(bridge.takeIssuedCommands()).toHaveLength(100);
   });
 
   it("queues high-level attack as movement until the target is in range", () => {
@@ -735,7 +759,6 @@ describe("GameAgentBridge", () => {
           y: DEFAULT_MAP_LAYOUT.player2Workers[0].y,
           tile: "empty",
           unit: expect.objectContaining({
-            id: "unit_3",
             type: "worker",
             x: DEFAULT_MAP_LAYOUT.player2Workers[0].x,
             y: DEFAULT_MAP_LAYOUT.player2Workers[0].y,
@@ -783,7 +806,7 @@ describe("GameAgentBridge", () => {
     const myUnits = result.result as { tick: number; units: Array<Record<string, unknown>> };
 
     expect(myUnits.tick).toBe(0);
-    expect(myUnits.units).toHaveLength(2);
+    expect(myUnits.units).toHaveLength(4);
     expect(myUnits.units[0]).toHaveProperty("hasActivePlan", false);
   });
 

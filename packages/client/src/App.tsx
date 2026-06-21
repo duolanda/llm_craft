@@ -12,7 +12,7 @@ import {
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
-import { GameCanvas } from "./components/GameCanvas";
+import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
 import { StatsPanel } from "./components/StatsPanel";
@@ -24,6 +24,7 @@ import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
+import { createMassBattleState } from "./dev/createMassBattleState";
 
 type AppMode = "live" | "replay";
 
@@ -38,6 +39,12 @@ const SERVER_HOST = window.location.hostname || "localhost";
 const WS_URL = `ws://${SERVER_HOST}:3001`;
 const API_BASE_URL = `http://${SERVER_HOST}:3001`;
 const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
+const MASS_BATTLE_SHOWCASE = import.meta.env.DEV
+  && new URLSearchParams(window.location.search).get("showcase") === "mass-battle";
+const requestedShowcaseUnits = Number(new URLSearchParams(window.location.search).get("units"));
+const MASS_BATTLE_UNIT_COUNT = Number.isFinite(requestedShowcaseUnits) && requestedShowcaseUnits > 0
+  ? Math.min(100, Math.floor(requestedShowcaseUnits))
+  : 60;
 
 interface LivePresetSelection {
   player1PresetId: string;
@@ -87,7 +94,7 @@ function App() {
     send,
     clearServerMessage,
     clearBenchmarkResult,
-  } = useWebSocket(WS_URL);
+  } = useWebSocket(WS_URL, !MASS_BATTLE_SHOWCASE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [winnerOverlayDismissed, setWinnerOverlayDismissed] = useState(false);
   const [mode, setMode] = useState<AppMode>("live");
@@ -251,6 +258,9 @@ function App() {
   };
 
   useEffect(() => {
+    if (MASS_BATTLE_SHOWCASE) {
+      return;
+    }
     void fetchRecordEntries();
     void refreshPresets();
   }, []);
@@ -450,7 +460,13 @@ function App() {
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
-  const displayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
+  const sourceDisplayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
+  const displayState = useMemo(
+    () => MASS_BATTLE_SHOWCASE
+      ? createMassBattleState(sourceDisplayState, MASS_BATTLE_UNIT_COUNT)
+      : sourceDisplayState,
+    [sourceDisplayState],
+  );
   const displaySnapshots = useMemo(() => {
     if (mode === "replay") {
       const snapshot = replaySnapshots[replayFrameIndex];
@@ -484,6 +500,14 @@ function App() {
   const benchmarkActiveRoundLabel = benchmarkProgress?.activeRounds.length
     ? formatRoundList(benchmarkProgress.activeRounds.map((round) => round.round))
     : null;
+
+  if (MASS_BATTLE_SHOWCASE) {
+    return (
+      <main className="battlefield-showcase">
+        <Battlefield3D state={displayState} />
+      </main>
+    );
+  }
 
   return (
     <>
@@ -800,7 +824,7 @@ function App() {
                 <span className="data-line dl-br" />
               </div>
               <div className="viewport">
-                <GameCanvas state={displayState} />
+                <Battlefield3D state={displayState} />
               </div>
             </div>
 

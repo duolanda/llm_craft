@@ -3,10 +3,51 @@ import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
 interface Node {
   x: number;
   y: number;
-  g: number; // 从起点到当前节点的代价
-  h: number; // 启发函数：到终点的估计代价
-  f: number; // g + h
-  parent?: Node;
+  g: number;
+  h: number;
+  f: number;
+}
+
+class MinHeap {
+  private items: Node[] = [];
+
+  private comesBefore(left: Node, right: Node): boolean {
+    return left.f < right.f || (left.f === right.f && left.h < right.h);
+  }
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  push(node: Node): void {
+    this.items.push(node);
+    let index = this.items.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (!this.comesBefore(this.items[index], this.items[parent])) break;
+      [this.items[parent], this.items[index]] = [this.items[index], this.items[parent]];
+      index = parent;
+    }
+  }
+
+  pop(): Node | undefined {
+    const first = this.items[0];
+    const last = this.items.pop();
+    if (!first || !last || this.items.length === 0) return first;
+    this.items[0] = last;
+    let index = 0;
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let smallest = index;
+      if (left < this.items.length && this.comesBefore(this.items[left], this.items[smallest])) smallest = left;
+      if (right < this.items.length && this.comesBefore(this.items[right], this.items[smallest])) smallest = right;
+      if (smallest === index) break;
+      [this.items[index], this.items[smallest]] = [this.items[smallest], this.items[index]];
+      index = smallest;
+    }
+    return first;
+  }
 }
 
 export class PathFinder {
@@ -48,38 +89,30 @@ export class PathFinder {
       return [];
     }
 
-    const openList: Node[] = [];
-    const closedList = new Set<string>();
+    const width = MAP_WIDTH;
+    const nodeCount = MAP_WIDTH * MAP_HEIGHT;
+    const startIndex = startY * width + startX;
+    const targetIndex = targetY * width + targetX;
+    const open = new MinHeap();
+    const closed = new Uint8Array(nodeCount);
+    const gScores = new Int32Array(nodeCount);
+    const cameFrom = new Int32Array(nodeCount);
+    gScores.fill(-1);
+    cameFrom.fill(-1);
+    gScores[startIndex] = 0;
+    const startH = this.heuristic(startX, startY, targetX, targetY);
+    open.push({ x: startX, y: startY, g: 0, h: startH, f: startH });
 
-    const startNode: Node = {
-      x: startX,
-      y: startY,
-      g: 0,
-      h: this.heuristic(startX, startY, targetX, targetY),
-      f: 0,
-    };
-    startNode.f = startNode.g + startNode.h;
-    openList.push(startNode);
+    while (open.size > 0) {
+      const currentNode = open.pop()!;
+      const currentIndex = currentNode.y * width + currentNode.x;
+      if (closed[currentIndex] || currentNode.g !== gScores[currentIndex]) continue;
 
-    while (openList.length > 0) {
-      // 找出 f 值最小的节点
-      let currentIndex = 0;
-      for (let i = 1; i < openList.length; i++) {
-        if (openList[i].f < openList[currentIndex].f) {
-          currentIndex = i;
-        }
+      if (currentIndex === targetIndex) {
+        return this.reconstructPath(cameFrom, startIndex, targetIndex, width);
       }
 
-      const currentNode = openList[currentIndex];
-
-      // 到达目标
-      if (currentNode.x === targetX && currentNode.y === targetY) {
-        return this.reconstructPath(currentNode);
-      }
-
-      // 移到关闭列表
-      openList.splice(currentIndex, 1);
-      closedList.add(`${currentNode.x},${currentNode.y}`);
+      closed[currentIndex] = 1;
 
       // 检查邻居（4方向或8方向）
       const neighbors = this.getNeighbors(currentNode.x, currentNode.y);
@@ -93,7 +126,8 @@ export class PathFinder {
         }
 
         // 已经在关闭列表
-        if (closedList.has(`${x},${y}`)) {
+        const neighborIndex = y * width + x;
+        if (closed[neighborIndex]) {
           continue;
         }
 
@@ -107,28 +141,12 @@ export class PathFinder {
           continue;
         }
 
-        const gScore = currentNode.g + 1;
-        const hScore = this.heuristic(x, y, targetX, targetY);
-        const fScore = gScore + hScore;
-
-        // 检查是否已经在开放列表中
-        const existingNode = openList.find((n) => n.x === x && n.y === y);
-        if (existingNode) {
-          if (gScore < existingNode.g) {
-            existingNode.g = gScore;
-            existingNode.f = fScore;
-            existingNode.parent = currentNode;
-          }
-        } else {
-          openList.push({
-            x,
-            y,
-            g: gScore,
-            h: hScore,
-            f: fScore,
-            parent: currentNode,
-          });
-        }
+        const nextG = currentNode.g + 1;
+        if (gScores[neighborIndex] !== -1 && nextG >= gScores[neighborIndex]) continue;
+        gScores[neighborIndex] = nextG;
+        cameFrom[neighborIndex] = currentIndex;
+        const h = this.heuristic(x, y, targetX, targetY);
+        open.push({ x, y, g: nextG, h, f: nextG + h });
       }
     }
 
@@ -167,17 +185,20 @@ export class PathFinder {
    * 重建路径
    */
   private static reconstructPath(
-    endNode: Node
+    cameFrom: Int32Array,
+    startIndex: number,
+    endIndex: number,
+    width: number,
   ): Array<{ x: number; y: number }> {
     const path: Array<{ x: number; y: number }> = [];
-    let current: Node | undefined = endNode;
-
-    while (current?.parent) {
-      path.unshift({ x: current.x, y: current.y });
-      current = current.parent;
+    let currentIndex = endIndex;
+    while (currentIndex !== startIndex) {
+      path.push({ x: currentIndex % width, y: Math.floor(currentIndex / width) });
+      const parent = cameFrom[currentIndex];
+      if (parent < 0) return [];
+      currentIndex = parent;
     }
-
-    return path;
+    return path.reverse();
   }
 
   /**

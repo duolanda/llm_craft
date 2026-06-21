@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-06-05
+日期: 2026-06-17
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -355,9 +355,9 @@ interface AgentRunInput {
 - `hq` 可生产 `worker`
 - `barracks` 可生产 `soldier | rifleman | rocket_soldier`
 - `war_factory` 可生产 `light_tank`
-- Phase 11 采用 37x25 大地图战斗尺度：`soldier` 100 HP / 12 attack / range 1 / vision 5 / cost 80；`rifleman` 90 HP / 14 attack / range 3 / vision 6 / cost 90；`rocket_soldier` 80 HP / 24 attack / range 4 / vision 6 / cost 140；`light_tank` 300 HP / 30 attack / range 3 / vision 7 / cost 300
+- 当前采用 144x96 三战线大战场尺度：`soldier` 100 HP / 12 attack / range 1 / vision 5 / cost 60；`rifleman` 90 HP / 14 attack / range 3 / vision 6 / cost 70；`rocket_soldier` 80 HP / 24 attack / range 4 / vision 6 / cost 110；`light_tank` 300 HP / 30 attack / range 3 / vision 7 / cost 240
 - 伤害按目标 armor 计算：`rifleman` 对 infantry 1.2x、vehicle 0.4x、structure 0.55x；`rocket_soldier` 对 infantry 0.45x、vehicle 2x、structure 1x；`light_tank` 对 infantry 0.7x、vehicle 1x、structure 1.2x
-- Phase 12 启用基础战争迷雾读取层：`hq` vision 8，`barracks` / `war_factory` vision 6；agent 观察工具只返回当前己方视野内的敌方实体和资源。
+- 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
 - `UNIT_STATS` / `BUILDING_STATS` 仍作为兼容导出存在
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、生产关系、成本和攻击能力判断；工具 schema 已接受新增 unit/building 类型。
@@ -426,11 +426,11 @@ interface AgentRunInput {
 
 说明：
 
-- 当前默认地图为 `37 x 25`，`fogOfWar=true`；默认返回当前己方视野内的压缩信息，未侦察格在 `asciiMap` 中显示为 `?`
-- `visibleTileCount` 是当前己方视野覆盖的 tile 数量
-- `asciiMap` 是无坐标轴的符号小地图，用于快速读取空间关系；它不包含视野外敌方实体
-- 精确坐标默认看 `units` 和 `buildings`；只有需要逐格可见地形时才传 `includeCells=true`
-- `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的可见地形与占用物
+- 当前默认地图为 `144 x 96`，`fogOfWar=false`；默认返回全图压缩信息。前端默认使用 3D 战场表现层，但 AI 工具仍使用底层战术坐标。
+- `visibleTileCount` 为兼容字段；无迷雾时等于地图 tile 总数
+- `asciiMap` 是无坐标轴的全图符号小地图，用于快速读取空间关系
+- 精确坐标默认看 `units` 和 `buildings`；只有需要逐格地形时才传 `includeCells=true`
+- `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
 - 单位和建筑子项带 `relation` 字段，表示是己方还是敌方
 
 默认符号约定：
@@ -440,14 +440,14 @@ interface AgentRunInput {
 # obstacle
 * resource
 ? unseen
-H/B/F self hq/barracks/war_factory
+H/B/F/D self hq/barracks/war_factory/refinery
 S/I/R/T/W self soldier/rifleman/rocket_soldier/light_tank/worker
-h/b/f enemy hq/barracks/war_factory
+h/b/f/d enemy hq/barracks/war_factory/refinery
 s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
 ```
 - 默认不返回 `cells`，以降低上下文体积
-- 传 `includeCells=true` 时只返回视野内“有信息量”的格子：资源、障碍、单位、建筑
-- 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整可见格子信息（包括 empty），但不返回未侦察格
+- 传 `includeCells=true` 时只返回全图“有信息量”的格子：资源、障碍、单位、建筑
+- 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整地图格子信息（包括 empty）
 - `unit` 是精简视图，不返回 `my / playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段
 
 ### 2.1.1 旧读取结果折叠
@@ -651,11 +651,11 @@ interface AgentPlanRecord {
 说明：
 
 - 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
-- `targetId` 必须来自最近的可见敌方单位或建筑 ID
+- `targetId` 必须来自全图情报中的敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
 - 攻击敌方 HQ、barracks、war_factory 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
-- 目标已经消失但曾被看见过时，系统会自动降级为移动到该目标最后已知位置；调用方不需要也不能传坐标
-- 目标从未被看见过时，返回 `ok: false` 和 `hint`
+- 目标已经消失但曾被读取过时，系统会自动降级为移动到该目标最后记录的位置；调用方不需要也不能传坐标
+- 未知目标 ID 返回 `ok: false` 和 `hint`
 
 #### `spawn_unit`
 

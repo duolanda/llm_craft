@@ -1,11 +1,14 @@
 import {
   BUILDING_TYPES,
   CPUStrategyType,
+  DEFAULT_MAP_LAYOUT,
   UNIT_TYPES,
   getBuildingCost,
   getCombatUnitTypes,
   getUnitCost,
 } from "@llmcraft/shared";
+
+const ARMY_MASSING_THRESHOLD = 24;
 
 function chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
@@ -23,11 +26,12 @@ function findBuildSite(
 ): { x: number; y: number } {
   const side = hq.x < mapWidth / 2 ? 1 : -1;
   const candidates = [
-    { x: hq.x + side * 2, y: hq.y },
-    { x: hq.x + side * 2, y: hq.y - 2 },
-    { x: hq.x + side * 2, y: hq.y + 2 },
-    { x: hq.x + side * 3, y: hq.y - 1 },
-    { x: hq.x + side * 3, y: hq.y + 1 },
+    { x: hq.x + side * 12, y: hq.y },
+    { x: hq.x + side * 20, y: hq.y },
+    { x: hq.x + side * 28, y: hq.y },
+    { x: hq.x + side * 12, y: hq.y - 9 },
+    { x: hq.x + side * 12, y: hq.y + 9 },
+    { x: hq.x + side * 22, y: hq.y + 9 },
   ];
   const occupied = new Set([...buildings, ...units].map((item) => `${item.x},${item.y}`));
   return candidates.find((candidate) => !occupied.has(`${candidate.x},${candidate.y}`)) ?? candidates[0]!;
@@ -65,6 +69,10 @@ function findRoleTarget(
   return null;
 }
 
+function findForwardRefinerySite(hq: { x: number; y: number }, mapWidth: number): { x: number; y: number } {
+  return hq.x < mapWidth / 2 ? { x: 44, y: 18 } : { x: 99, y: 18 };
+}
+
 export interface BuiltinCPURuntimeState {
   myState?: unknown;
   myUnits?: unknown;
@@ -97,6 +105,8 @@ export async function runBuiltinCPUStrategy(options: {
   const warFactoryBuildings = buildings.filter((building: any) => building.type === "war_factory");
   const hasBarracks = barracksBuildings.length > 0;
   const hasWarFactory = warFactoryBuildings.length > 0;
+  const refineryBuildings = buildings.filter((building: any) => building.type === BUILDING_TYPES.REFINERY);
+  const hasRefinery = refineryBuildings.length > 0;
   const workers = myUnits.filter((unit: any) => unit.type === "worker");
   const combatUnitTypes = new Set(getCombatUnitTypes());
   const combatUnits = myUnits.filter((unit: any) => combatUnitTypes.has(unit.type));
@@ -108,9 +118,13 @@ export async function runBuiltinCPUStrategy(options: {
     ? mapState.units
     : mapCells.filter((cell: any) => cell?.unit).map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.unit }));
   const enemyHQ = mapBuildings.find((building: any) => building?.relation === "enemy" && building.type === "hq") ?? null;
+  const enemyBase = enemyHQ ?? (hq?.x < (mapState?.width ?? 144) / 2
+    ? DEFAULT_MAP_LAYOUT.player2Hq
+    : DEFAULT_MAP_LAYOUT.player1Hq);
 
   const canBuildBarracks = credits >= getBuildingCost(BUILDING_TYPES.BARRACKS);
   const canBuildWarFactory = credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY);
+  const canBuildRefinery = credits >= getBuildingCost(BUILDING_TYPES.REFINERY);
   const canSpawnWorker = credits >= getUnitCost(UNIT_TYPES.WORKER);
   const canSpawnSoldier = credits >= getUnitCost(UNIT_TYPES.SOLDIER);
   const canSpawnRifleman = credits >= getUnitCost(UNIT_TYPES.RIFLEMAN);
@@ -126,10 +140,48 @@ export async function runBuiltinCPUStrategy(options: {
       : UNIT_TYPES.SOLDIER;
 
   const callTool = options.callTool;
+  const issueMultiFrontAdvance = async (): Promise<boolean> => {
+    if (!enemyBase || combatUnits.length < ARMY_MASSING_THRESHOLD) {
+      return false;
+    }
+    const awaitingOrders = combatUnits.filter((unit: any) =>
+      unit.intent?.type !== "attack_move" && unit.intent?.type !== "attack"
+    );
+    if (awaitingOrders.length === 0) {
+      return true;
+    }
+    const frontY = [20, 48, 76];
+    const stagingX = enemyBase.x + (hq?.x < enemyBase.x ? -9 : 9);
+    for (let front = 0; front < frontY.length; front++) {
+      const unitIds = awaitingOrders.filter((_: any, index: number) => index % 3 === front).map((unit: any) => unit.id);
+      if (unitIds.length > 0) {
+        await callTool("attack_move_group", {
+          unitIds,
+          x: stagingX,
+          y: frontY[front],
+          formation: front === 1 ? "wedge" : "line",
+        });
+      }
+    }
+    return true;
+  };
   const issueWorkerEconomy = async () => {
-    for (const worker of workers) {
-      if (worker.intent?.type !== "harvest_loop" && worker.state === "idle") {
-        await callTool("start_harvest_loop", { unitId: worker.id });
+    for (const [index, worker] of workers.entries()) {
+      const forwardResource = hq?.x < (mapState?.width ?? 144) / 2
+        ? DEFAULT_MAP_LAYOUT.resources[6]
+        : DEFAULT_MAP_LAYOUT.resources[10];
+      const needsForwardAssignment = hasRefinery && index >= 2 && forwardResource && (
+        worker.intent?.type !== "harvest_loop" ||
+        worker.intent?.targetX !== forwardResource.x ||
+        worker.intent?.targetY !== forwardResource.y
+      );
+      if (needsForwardAssignment || (worker.intent?.type !== "harvest_loop" && worker.state === "idle")) {
+        await callTool(
+          "start_harvest_loop",
+          needsForwardAssignment
+            ? { unitId: worker.id, x: forwardResource.x, y: forwardResource.y }
+            : { unitId: worker.id },
+        );
       }
     }
   };
@@ -146,12 +198,15 @@ export async function runBuiltinCPUStrategy(options: {
         y: site.y,
       });
     } else {
-      const candidatePlans: Array<"mine" | "spawn-worker" | "build-war-factory" | "spawn-infantry" | "spawn-tank" | "attack"> = ["mine"];
+      const candidatePlans: Array<"mine" | "spawn-worker" | "build-refinery" | "build-war-factory" | "spawn-infantry" | "spawn-tank" | "attack"> = ["mine"];
       if (canSpawnWorker && workers.length < 4 && hq) {
         candidatePlans.push("spawn-worker");
       }
       if (hasBarracks && !hasWarFactory && canBuildWarFactory && workers[0]) {
         candidatePlans.push("build-war-factory");
+      }
+      if (hasBarracks && !hasRefinery && canBuildRefinery && workers[0] && hq) {
+        candidatePlans.push("build-refinery");
       }
       if (hasBarracks && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
         candidatePlans.push("spawn-infantry");
@@ -168,6 +223,9 @@ export async function runBuiltinCPUStrategy(options: {
 
       if (selectedPlan === "spawn-worker" && hq) {
         await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
+      } else if (selectedPlan === "build-refinery" && workers[0] && hq) {
+        const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
+        await callTool("build_structure", { unitId: workers[0].id, buildingType: BUILDING_TYPES.REFINERY, x: site.x, y: site.y });
       } else if (selectedPlan === "build-war-factory" && workers[0] && hq) {
         const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
         await callTool("build_structure", {
@@ -184,13 +242,13 @@ export async function runBuiltinCPUStrategy(options: {
         for (const warFactory of warFactoryBuildings) {
           await callTool("spawn_unit", { buildingId: warFactory.id, unitType: UNIT_TYPES.LIGHT_TANK });
         }
-      } else if (selectedPlan === "attack" && enemyHQ) {
+      } else if (selectedPlan === "attack") {
         const shouldAttackThisTurn = Math.random() > 0.75;
         if (combatUnits.length === 0 && barracksBuildings.length > 0 && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
           for (const barracks of barracksBuildings) {
             await callTool("spawn_unit", { buildingId: barracks.id, unitType: preferredBarracksUnit });
           }
-        } else {
+        } else if (!(await issueMultiFrontAdvance())) {
           for (const combatUnit of combatUnits) {
             const roleTarget = findRoleTarget(combatUnit, enemyUnits, enemyBuildings);
             if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER || shouldAttackThisTurn)) {
@@ -199,7 +257,7 @@ export async function runBuiltinCPUStrategy(options: {
                 targetId: roleTarget.id,
               });
             } else {
-              await callTool("attack_move_unit", { unitId: combatUnit.id, x: enemyHQ.x, y: enemyHQ.y });
+              await callTool("attack_move_unit", { unitId: combatUnit.id, x: enemyBase.x, y: enemyBase.y });
             }
           }
         }
@@ -212,7 +270,7 @@ export async function runBuiltinCPUStrategy(options: {
     ? enemyUnits.some((enemy: any) => chebyshevDistance(enemy, hq) <= 2)
     : false;
 
-  if (hq && workers.length < 2 && canSpawnWorker) {
+  if (hq && workers.length < 4 && canSpawnWorker) {
     await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
   }
 
@@ -221,6 +279,16 @@ export async function runBuiltinCPUStrategy(options: {
     await callTool("build_structure", {
       unitId: workers[0].id,
       buildingType: "barracks",
+      x: site.x,
+      y: site.y,
+    });
+  }
+
+  if (hasBarracks && !hasRefinery && canBuildRefinery && workers[0] && hq) {
+    const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
+    await callTool("build_structure", {
+      unitId: workers[0].id,
+      buildingType: BUILDING_TYPES.REFINERY,
       x: site.x,
       y: site.y,
     });
@@ -250,6 +318,26 @@ export async function runBuiltinCPUStrategy(options: {
 
   await issueWorkerEconomy();
 
+  if (
+    barracksBuildings.length < 2 &&
+    hasRefinery &&
+    hasWarFactory &&
+    credits >= getBuildingCost(BUILDING_TYPES.BARRACKS) + getUnitCost(UNIT_TYPES.RIFLEMAN) &&
+    workers[0] && hq
+  ) {
+    const site = findBuildSite(hq, mapState?.width ?? 144, buildings, myUnits);
+    await callTool("build_structure", {
+      unitId: workers[0].id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      x: site.x,
+      y: site.y,
+    });
+  }
+
+  if (!isHQUnderPressure && combatUnits.length < ARMY_MASSING_THRESHOLD) {
+    return;
+  }
+
   if (isHQUnderPressure) {
     const pressuredEnemies = enemyUnits.filter((enemy: any) => hq && chebyshevDistance(enemy, hq) <= 2);
     for (const combatUnit of combatUnits) {
@@ -274,11 +362,16 @@ export async function runBuiltinCPUStrategy(options: {
       }
     }
   } else {
+    if (await issueMultiFrontAdvance()) {
+      return;
+    }
     for (const combatUnit of combatUnits) {
       if (!enemyHQ) {
         const closestEnemy = enemyUnits[0];
         if (closestEnemy) {
           await callTool("attack", { unitId: combatUnit.id, targetId: closestEnemy.id });
+        } else {
+          await callTool("attack_move_unit", { unitId: combatUnit.id, x: enemyBase.x, y: enemyBase.y });
         }
         continue;
       }

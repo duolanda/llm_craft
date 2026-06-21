@@ -12,12 +12,12 @@ export function LegendPanel() {
       <div className="legend-section">
         <div className="legend-title">单位 / 建筑</div>
         <div className="legend-row">
-          <LegendItem shape="circle" color="#aaa" label="Worker 圆形" />
-          <LegendItem shape="diamond" color="#aaa" label="Soldier 刺角八边形" />
-          <LegendItem shape="diamond" color="#8df2a6" label="Rifleman 远程步兵" />
-          <LegendItem shape="triangle" color="#ff8840" label="Rocket 火箭兵" />
-          <LegendItem shape="bar" color="#7dd3fc" label="Light tank 轻坦" />
-          <LegendItem shape="square" color="#aaa" label="建筑" />
+          <LegendItem shape="circle" color="#aaa" label="Worker 工程装" />
+          <LegendItem shape="diamond" color="#aaa" label="Soldier 突击兵" />
+          <LegendItem shape="diamond" color="#8df2a6" label="Rifleman 机枪兵" />
+          <LegendItem shape="triangle" color="#ff8840" label="Rocket 反装甲兵" />
+          <LegendItem shape="bar" color="#7dd3fc" label="Light tank 轻坦模型" />
+          <LegendItem shape="square" color="#aaa" label="3D 建筑" />
         </div>
       </div>
 

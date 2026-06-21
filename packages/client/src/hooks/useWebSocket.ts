@@ -11,7 +11,7 @@ import {
   isServerMessage,
 } from "@llmcraft/shared";
 
-export function useWebSocket(url: string) {
+export function useWebSocket(url: string, enabled = true) {
   const [state, setState] = useState<GameState | null>(null);
   const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
   const [aiTerminalEvents, setAiTerminalEvents] = useState<AITerminalEvent[]>([]);
@@ -41,6 +41,9 @@ export function useWebSocket(url: string) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -112,7 +115,7 @@ export function useWebSocket(url: string) {
     return () => {
       ws.close();
     };
-  }, [url]);
+  }, [enabled, url]);
 
   return {
     state,

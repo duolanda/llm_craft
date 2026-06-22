@@ -45,7 +45,6 @@ const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
-const LIVE_STATE_SNAPSHOT_LIMIT = 1;
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const BROADCAST_TOTAL_WARNING_MS = 250;
@@ -67,10 +66,21 @@ interface OrchestratorLike {
   start(): Promise<void>;
   stop(): void;
   saveRecord(): Promise<string>;
-  getAITerminalFeed?: () => { sessionId: string; events: AITerminalEvent[] };
+  getAITerminalFeed?: (sinceSequence?: number) => {
+    sessionId: string;
+    events: AITerminalEvent[];
+    latestSequence: number;
+    reset: boolean;
+    hasMore: boolean;
+  };
+  getTerminalHistory?: (beforeSequence?: number, limit?: number) => Promise<{
+    events: AITerminalEvent[];
+    hasMore: boolean;
+  }>;
   getGame(): {
     getState(): GameState | null;
-    getSnapshots(): GameSnapshot[];
+    getTick?: () => number;
+    getAIOutputs?: () => Record<string, string>;
     getLatestSnapshot?: () => GameSnapshot | null;
     addLog?: (
       type: typeof LOG_TYPES.PERF_WARNING,
@@ -140,6 +150,7 @@ export function createServerState(
 type StateMessagePayload = {
   type: "state";
   state: GameState | null;
+  aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
 };
@@ -149,6 +160,7 @@ type AITerminalMessagePayload = {
   sessionId: string | null;
   reset: boolean;
   events: AITerminalEvent[];
+  hasMore: boolean;
 };
 
 async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
@@ -160,12 +172,13 @@ async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
 export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
   const currentOrchestrator = state.orchestrator;
   const game = currentOrchestrator?.getGame();
-  const latestSnapshot = game?.getLatestSnapshot?.() ?? game?.getSnapshots()?.slice(-LIVE_STATE_SNAPSHOT_LIMIT) ?? [];
+  const latestSnapshot = game?.getLatestSnapshot?.();
 
   return {
     type: "state",
     state: game?.getState() ?? null,
-    snapshots: Array.isArray(latestSnapshot) ? latestSnapshot : latestSnapshot ? [latestSnapshot] : [],
+    aiOutputs: game?.getAIOutputs?.() ?? {},
+    snapshots: latestSnapshot ? [latestSnapshot] : [],
     liveEnabled: Boolean(state.liveEnabled),
   };
 }
@@ -173,13 +186,15 @@ export function buildStateMessagePayload(state: ServerState): StateMessagePayloa
 function buildAITerminalMessagePayload(
   sessionId: string | null,
   reset: boolean,
-  events: AITerminalEvent[]
+  events: AITerminalEvent[],
+  hasMore = false,
 ): AITerminalMessagePayload {
   return {
     type: "ai_terminal_events",
     sessionId,
     reset,
     events,
+    hasMore,
   };
 }
 
@@ -695,6 +710,21 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       return;
     }
 
+    if (message.type === "load_terminal_history") {
+      const orchestrator = state.orchestrator;
+      if (!orchestrator?.getTerminalHistory || !orchestrator.getAITerminalFeed) {
+        return;
+      }
+      const page = await orchestrator.getTerminalHistory(message.beforeSequence, message.limit);
+      ws.send(JSON.stringify({
+        type: "terminal_history_page",
+        sessionId: orchestrator.getAITerminalFeed().sessionId,
+        events: page.events,
+        hasMore: page.hasMore,
+      } satisfies ServerMessage));
+      return;
+    }
+
     if (message.type === "reset") {
       if (!message.player1PresetId || !message.player2PresetId) {
         ws.send(JSON.stringify({
@@ -824,7 +854,10 @@ function createServer(state: ServerState) {
     console.log("客户端已连接");
     let isSendingState = false;
     let lastAITerminalSessionId: string | null = null;
-    let lastAITerminalEventCount = 0;
+    let lastAITerminalEventSequence = 0;
+    let lastStateTick: number | null | undefined;
+    let lastStateOrchestrator: OrchestratorLike | null = null;
+    let lastStateLiveEnabled: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
 
@@ -863,8 +896,18 @@ function createServer(state: ServerState) {
       return now;
     };
 
-    const sendState = async () => {
+    const sendState = async (force = false) => {
       if (isSendingState) {
+        return;
+      }
+      const currentOrchestrator = state.orchestrator;
+      const currentTick = currentOrchestrator?.getGame().getTick?.();
+      if (
+        !force
+        && currentOrchestrator === lastStateOrchestrator
+        && currentTick === lastStateTick
+        && state.liveEnabled === lastStateLiveEnabled
+      ) {
         return;
       }
       isSendingState = true;
@@ -881,6 +924,9 @@ function createServer(state: ServerState) {
         const stringifyMs = performance.now() - stringifyStartedAt;
         const sendStartedAt = performance.now();
         ws.send(serialized);
+        lastStateOrchestrator = currentOrchestrator;
+        lastStateTick = currentTick;
+        lastStateLiveEnabled = state.liveEnabled;
         const sendMs = performance.now() - sendStartedAt;
         const elapsedMs = performance.now() - startedAt;
         lastStateBroadcastWarningAtMs = logBroadcastPerfWarning(
@@ -891,7 +937,6 @@ function createServer(state: ServerState) {
             stringifyMs: Math.round(stringifyMs),
             sendMs: Math.round(sendMs),
             bytes: Buffer.byteLength(serialized, "utf8"),
-            snapshots: payload.snapshots.length,
             tick: payload.state?.tick,
           },
           lastStateBroadcastWarningAtMs
@@ -902,13 +947,16 @@ function createServer(state: ServerState) {
     };
 
     const sendAITerminalEvents = () => {
-      const feed = state.orchestrator?.getAITerminalFeed?.() ?? null;
+      let feed = state.orchestrator?.getAITerminalFeed?.(lastAITerminalEventSequence) ?? null;
+      if (feed && feed.sessionId !== lastAITerminalSessionId) {
+        feed = state.orchestrator?.getAITerminalFeed?.() ?? feed;
+      }
       const sessionId = feed?.sessionId ?? null;
       const events = feed?.events ?? [];
       const sendPayload = (reset: boolean, nextEvents: AITerminalEvent[]) => {
         const startedAt = performance.now();
         const buildStartedAt = performance.now();
-        const payload = buildAITerminalMessagePayload(sessionId, reset, nextEvents);
+        const payload = buildAITerminalMessagePayload(sessionId, reset, nextEvents, feed?.hasMore ?? false);
         const buildMs = performance.now() - buildStartedAt;
         const stringifyStartedAt = performance.now();
         const serialized = JSON.stringify(payload);
@@ -934,19 +982,18 @@ function createServer(state: ServerState) {
 
       if (sessionId !== lastAITerminalSessionId) {
         lastAITerminalSessionId = sessionId;
-        lastAITerminalEventCount = events.length;
+        lastAITerminalEventSequence = feed?.latestSequence ?? 0;
         sendPayload(true, events);
         return;
       }
 
-      if (events.length > lastAITerminalEventCount) {
-        const nextEvents = events.slice(lastAITerminalEventCount);
-        lastAITerminalEventCount = events.length;
-        sendPayload(false, nextEvents);
+      if (events.length > 0) {
+        lastAITerminalEventSequence = feed?.latestSequence ?? lastAITerminalEventSequence;
+        sendPayload(Boolean(feed?.reset), events);
       }
     };
 
-    void sendState();
+    void sendState(true);
     sendAITerminalEvents();
     const interval = setInterval(() => {
       void sendState();

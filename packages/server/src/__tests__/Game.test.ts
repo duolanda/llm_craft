@@ -16,6 +16,7 @@ import {
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
   getUnitProductionTicks,
+  LOG_TYPES,
 } from "@llmcraft/shared";
 
 describe("Game", () => {
@@ -1060,7 +1061,7 @@ describe("Game", () => {
     expect(tile.resourceRemaining).toBeUndefined();
   });
 
-  it("keeps snapshot history without mutating earlier snapshots", () => {
+  it("keeps immutable initial/latest snapshots and records intermediate tick deltas", () => {
     game.start();
     game.tickUpdate();
     const snapshots = game.getSnapshots();
@@ -1075,21 +1076,47 @@ describe("Game", () => {
     game.stop();
 
     const updatedSnapshots = game.getSnapshots();
-    expect(updatedSnapshots.length).toBe(3);
+    expect(updatedSnapshots.length).toBe(2);
+    expect(game.getTickDeltas()).toHaveLength(2);
     expect(initialSnapshot.tick).toBe(0);
     expect(initialSnapshot.state.players[0].units[0].x).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].x);
     expect(initialSnapshot.state.players[0].units[0].y).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].y);
     expect(updatedSnapshots[0].state.players[0].units[0].x).toBe(DEFAULT_MAP_LAYOUT.player1Workers[0].x);
-    expect(updatedSnapshots[2].state.players[0].units[0].x).toBe(9);
+    expect(updatedSnapshots[1].state.players[0].units[0].x).toBe(9);
+    expect(game.getTickDeltas()[1]?.players[0]?.units).toContainEqual(
+      expect.objectContaining({ id: workerId, change: "moved", x: 9, y: 9 }),
+    );
   });
 
-  it("keeps more than 1000 snapshots for recording", () => {
+  it("keeps full snapshots bounded while preserving more than 1000 recording deltas", () => {
     game.start();
     for (let i = 0; i < 1001; i++) {
       game.tickUpdate();
     }
     game.stop();
 
-    expect(game.getSnapshots().length).toBe(1002);
+    expect(game.getSnapshots()).toHaveLength(2);
+    expect(game.getTickDeltas()).toHaveLength(1001);
+  });
+
+  it("preserves command results after the live log window is trimmed", () => {
+    for (let index = 0; index < 1200; index += 1) {
+      game.addLog(LOG_TYPES.COMMAND_RESULT, `result-${index}`, {
+        command: {
+          id: `command-${index}`,
+          type: "hold",
+          unitId: "unit-1",
+          playerId: "player_1",
+        },
+        result_code: RESULT_CODES.OK,
+        type: RESULT_TYPES.HOLD_SUCCESS,
+        result_data: { unitId: "unit-1" },
+      });
+    }
+
+    expect(game.getState().logs.length).toBeLessThan(1200);
+    expect(game.getCommandResults()).toHaveLength(1200);
+    expect((game.getCommandResults()[0]?.data as CommandResultData).command.id).toBe("command-0");
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData).command.id).toBe("command-1199");
   });
 });

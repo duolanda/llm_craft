@@ -683,7 +683,7 @@ describe("server settings", () => {
     expect(state.orchestrator).toBe(benchmarkOrchestrator);
   });
 
-  it("builds live state payloads without hitting preset storage and only includes the latest snapshot", async () => {
+  it("builds live state payloads without hitting preset storage or duplicating snapshots", async () => {
     const presetStore = await createStore();
     const listSpy = vi.spyOn(presetStore, "list");
     const snapshots = Array.from({ length: 25 }, (_, index) => ({
@@ -700,7 +700,8 @@ describe("server settings", () => {
         saveRecord: vi.fn(async () => "logs/records/mock.json"),
         getGame: vi.fn(() => ({
           getState: () => createMockGameState(24),
-          getSnapshots: () => snapshots,
+          getAIOutputs: () => snapshots.at(-1)?.aiOutputs ?? {},
+          getLatestSnapshot: () => snapshots.at(-1) ?? null,
         })),
       }))
     );
@@ -724,6 +725,7 @@ describe("server settings", () => {
 
     expect(listSpy).not.toHaveBeenCalled();
     expect(payload.liveEnabled).toBe(true);
+    expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
     expect(payload.snapshots).toHaveLength(1);
     expect(payload.snapshots[0]?.tick).toBe(24);
   });

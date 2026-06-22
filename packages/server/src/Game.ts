@@ -9,6 +9,7 @@ import {
   GameLog,
   Command,
   GameSnapshot,
+  TickDeltaRecord,
   GameState,
   Tile,
   TileType,
@@ -46,7 +47,9 @@ import {
   GameLogDataMap,
   RESULT_TYPES
 } from "@llmcraft/shared";
+import { buildTickDelta } from "./GameHistory";
 import { performance } from "node:perf_hooks";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
 import { BuildingManager } from "./BuildingManager";
@@ -94,6 +97,7 @@ const PERF_WARNING_THROTTLE_MS = 2000;
 const MAX_PATH_COMMANDS_PER_TICK = 4;
 const MAX_PURSUIT_PATHS_PER_TICK = 4;
 const MAX_BLOCKED_REPATHS_PER_TICK = 4;
+const TICK_DELTA_CHUNK_SIZE = 100;
 
 export class Game {
   private tick = 0;
@@ -104,8 +108,12 @@ export class Game {
   private tileView: Tile[][] = [];
   private players: Player[] = [];
   private logs: GameLog[] = [];
+  private pendingSnapshotLogs: GameLog[] = [];
   private commandQueue: Command[] = [];
-  private snapshots: GameSnapshot[] = [];
+  private initialSnapshot: GameSnapshot | null = null;
+  private latestSnapshot: GameSnapshot | null = null;
+  private tickDeltaBuffer: TickDeltaRecord[] = [];
+  private tickDeltaChunks: string[] = [];
   private aiOutputs: Record<string, string> = {};
   private winner: PlayerId | null = null;
   private isRunning = false;
@@ -1556,6 +1564,7 @@ export class Game {
       },
     } as GameLog;
     this.logs.push(log);
+    this.pendingSnapshotLogs.push(log);
     // 限制日志数量，防止内存泄漏
     if (this.logs.length > 1000) {
       this.logs = this.logs.slice(-500);
@@ -1582,7 +1591,7 @@ export class Game {
         productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
       })),
     }));
-    this.snapshots.push({
+    const snapshot: GameSnapshot = {
       tick: this.tick,
       state: {
         tick: this.tick,
@@ -1592,7 +1601,19 @@ export class Game {
         logs: [...this.logs],
       },
       aiOutputs: { ...this.aiOutputs },
-    });
+    };
+
+    if (!this.initialSnapshot) {
+      this.initialSnapshot = snapshot;
+    } else if (this.latestSnapshot) {
+      this.tickDeltaBuffer.push(buildTickDelta(this.latestSnapshot, snapshot, [...this.pendingSnapshotLogs]));
+      if (this.tickDeltaBuffer.length >= TICK_DELTA_CHUNK_SIZE) {
+        this.tickDeltaChunks.push(gzipSync(JSON.stringify(this.tickDeltaBuffer)).toString("base64"));
+        this.tickDeltaBuffer = [];
+      }
+    }
+    this.latestSnapshot = snapshot;
+    this.pendingSnapshotLogs = [];
   }
 
   getWinner(): PlayerId | null {
@@ -1752,20 +1773,57 @@ export class Game {
   }
 
   getSnapshots(): GameSnapshot[] {
-    return this.cloneValue(this.snapshots);
+    const snapshots = this.initialSnapshot && this.latestSnapshot && this.initialSnapshot !== this.latestSnapshot
+      ? [this.initialSnapshot, this.latestSnapshot]
+      : this.latestSnapshot
+        ? [this.latestSnapshot]
+        : [];
+    return this.cloneValue(snapshots);
   }
 
   getLatestSnapshot(): GameSnapshot | null {
-    const latest = this.snapshots[this.snapshots.length - 1];
-    return latest ? this.cloneValue(latest) : null;
+    return this.latestSnapshot ? this.cloneValue(this.latestSnapshot) : null;
+  }
+
+  getInitialSnapshot(): GameSnapshot | null {
+    return this.initialSnapshot ? this.cloneValue(this.initialSnapshot) : null;
+  }
+
+  getTickDeltas(): TickDeltaRecord[] {
+    return Array.from(this.iterateTickDeltas(), (delta) => this.cloneValue(delta));
+  }
+
+  *iterateTickDeltas(): Generator<TickDeltaRecord> {
+    for (const chunk of this.tickDeltaChunks) {
+      const deltas = JSON.parse(
+        gunzipSync(Buffer.from(chunk, "base64")).toString("utf8"),
+      ) as TickDeltaRecord[];
+      yield* deltas;
+    }
+    yield* this.tickDeltaBuffer;
+  }
+
+  getAIOutputs(): Record<string, string> {
+    return { ...this.aiOutputs };
   }
 
   getCommandResults(sinceTick?: number): GameLog[] {
-    return this.logs.filter((log) => {
-      if (log.type !== LOG_TYPES.COMMAND_RESULT) return false;
-      if (sinceTick !== undefined && log.tick <= sinceTick) return false;
-      return true;
-    });
+    return Array.from(this.iterateCommandResults(sinceTick), (log) => this.cloneValue(log));
+  }
+
+  *iterateCommandResults(sinceTick?: number): Generator<GameLog> {
+    const recordedLogs = function* (game: Game): Generator<GameLog> {
+      yield* game.initialSnapshot?.state.logs ?? [];
+      for (const delta of game.iterateTickDeltas()) {
+        yield* delta.newLogs;
+      }
+      yield* game.pendingSnapshotLogs;
+    }(this);
+    for (const log of recordedLogs) {
+      if (log.type !== LOG_TYPES.COMMAND_RESULT) continue;
+      if (sinceTick !== undefined && log.tick <= sinceTick) continue;
+      yield log;
+    }
   }
 
   // For testing purposes

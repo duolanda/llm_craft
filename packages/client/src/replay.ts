@@ -27,6 +27,30 @@ function cloneState<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function cloneReplayFrameState(state: GameState): GameState {
+  return {
+    ...state,
+    players: state.players.map((player) => ({
+      ...player,
+      resources: { ...player.resources },
+      units: player.units.map((unit) => ({
+        ...unit,
+        intent: unit.intent ? { ...unit.intent } : undefined,
+        pathTarget: unit.pathTarget ? { ...unit.pathTarget } : undefined,
+      })),
+      buildings: player.buildings.map((building) => ({
+        ...building,
+        productionQueue: [...building.productionQueue],
+        productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
+      })),
+    })),
+    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in compact-v2.
+    // Sharing these immutable structures avoids duplicating the complete log history and map for every frame.
+    logs: state.logs,
+    tiles: state.tiles,
+  };
+}
+
 function clearTransientIntentState(state: GameState) {
   for (const player of state.players) {
     for (const unit of player.units) {
@@ -387,7 +411,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const frames: ReplayFrame[] = [
     {
       tick: currentState.tick,
-      state: cloneState(currentState),
+      state: cloneReplayFrameState(currentState),
       aiOutputs: {},
       terminalEvents: [],
     },
@@ -436,7 +460,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
 
     frames.push({
       tick: delta.tick,
-      state: cloneState(currentState),
+      state: cloneReplayFrameState(currentState),
       aiOutputs: { ...currentAIOutputs },
       terminalEvents: buildReplayTurnEvents(currentTerminalTurns),
     });

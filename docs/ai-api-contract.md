@@ -179,10 +179,13 @@ interface TestLLMPresetResponse {
 interface ServerStateMessage {
   type: "state";
   state: GameState | null;
+  aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
 }
 ```
+
+`state` 只在对局实例、tick 或 `liveEnabled` 变化时推送，不再每 `100ms` 重复发送相同状态。`snapshots` 为兼容字段，仍返回最新一帧；`aiOutputs` 是最新文本摘要，实时工具流使用下方 `ai_terminal_events`。
 
 ### 0.11 WebSocket `error`
 
@@ -207,7 +210,7 @@ interface ServerPrepareStatusMessage {
 
 ### 0.13 WebSocket `ai_terminal_events`
 
-右侧 AI 指挥终端使用增量事件流，不复用 `state.snapshots[].aiOutputs`。
+右侧 AI 指挥终端使用增量事件流。完整事件会原样追加到当前对局的磁盘 journal；服务端和浏览器的实时缓存只驻留最近 `500` 条，旧事件通过 `load_terminal_history` 分页读取，不截断模型文本、工具参数或工具结果。游标落后于实时窗口时会发送 `reset=true` 和当前窗口。
 
 ```ts
 interface ServerAITerminalEventsMessage {
@@ -215,6 +218,7 @@ interface ServerAITerminalEventsMessage {
   sessionId: string | null;
   reset: boolean;
   events: AITerminalEvent[];
+  hasMore?: boolean;
 }
 
 type AITerminalEvent =
@@ -254,6 +258,23 @@ type AITerminalEvent =
 - `assistant` 事件显示模型文本输出
 - `tool_call` 事件显示工具 badge；其参数和结果在展开后查看
 - `request_error` 和 `request_finished` 不进入终端正文，错误仍通过 `error` 或游戏日志查看
+
+历史分页：
+
+```ts
+interface ClientLoadTerminalHistoryMessage {
+  type: "load_terminal_history";
+  beforeSequence?: number;
+  limit?: number; // 1-500
+}
+
+interface ServerTerminalHistoryPageMessage {
+  type: "terminal_history_page";
+  sessionId: string;
+  events: AITerminalEvent[];
+  hasMore: boolean;
+}
+```
 
 ### 0.14 WebSocket `record_saved`
 

@@ -102,11 +102,19 @@ export class BenchmarkOrchestrator {
     return this.currentOrchestrator?.getGame() ?? EMPTY_GAME;
   }
 
-  getAITerminalFeed(): { sessionId: string; events: AITerminalEvent[] } {
-    return this.currentOrchestrator?.getAITerminalFeed?.() ?? {
+  getAITerminalFeed(sinceSequence?: number) {
+    return this.currentOrchestrator?.getAITerminalFeed?.(sinceSequence) ?? {
       sessionId: "benchmark-idle",
       events: [],
+      latestSequence: 0,
+      reset: sinceSequence === undefined,
+      hasMore: false,
     };
+  }
+
+  getTerminalHistory(beforeSequence?: number, limit?: number) {
+    return this.currentOrchestrator?.getTerminalHistory(beforeSequence, limit)
+      ?? Promise.resolve({ events: [], hasMore: false });
   }
 
   private async run(): Promise<void> {

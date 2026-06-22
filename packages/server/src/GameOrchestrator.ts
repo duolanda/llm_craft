@@ -19,6 +19,7 @@ import {
   TICK_INTERVAL_MS,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -30,6 +31,7 @@ import { GameAgentBridge } from "./agent/GameAgentBridge";
 import { AgentRuntime, AgentRuntimeResult } from "./agent/AgentRuntime";
 import { SubAgentTaskRegistry, SubAgentRunner, SpawnAgentInput } from "./agent/SubAgentTaskRegistry";
 import { getHQUnderAttackAlertFromGameState } from "./HQAlert";
+import { MatchJournal } from "./MatchJournal";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
@@ -40,6 +42,7 @@ export const MATCH_START_ABORTED = "MATCH_START_ABORTED";
 const AI_RUNTIME_TOTAL_WARNING_MS = 5000;
 const AI_RUNTIME_SYNC_PHASE_WARNING_MS = 150;
 const AI_RUNTIME_WARNING_THROTTLE_MS = 2000;
+const MAX_TERMINAL_EVENTS = 500;
 
 type RuntimeMap = Record<PlayerId, AgentRuntime>;
 type BridgeMap = Record<PlayerId, GameAgentBridge>;
@@ -47,6 +50,9 @@ type BridgeMap = Record<PlayerId, GameAgentBridge>;
 export interface AITerminalFeed {
   sessionId: string;
   events: AITerminalEvent[];
+  latestSequence: number;
+  reset: boolean;
+  hasMore: boolean;
 }
 
 export interface GameOrchestratorRuntimeOptions {
@@ -79,7 +85,7 @@ export class GameOrchestrator {
   private pollTimeout: NodeJS.Timeout | null = null;
   private runSession = 0;
   private startedAt = new Date().toISOString();
-  private aiTurns: AITurnRecord[] = [];
+  private journal: MatchJournal;
   private readonly transcriptEnabled: boolean;
   private readonly transcriptFilePath: string | null;
   private readonly recordDir: string;
@@ -96,13 +102,14 @@ export class GameOrchestrator {
   private lastAIRuntimeWarningAtMs: Partial<Record<PlayerId, number>> = {};
 
   constructor(config: GameOrchestratorConfig) {
+    this.recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
+    this.journal = new MatchJournal(this.recordDir, this.aiTerminalSessionId);
     this.game = new Game();
     this.aiInterval = config.runtime?.aiIntervalTicks ?? 5;
     this.aiIntervals = {
       player_1: config.runtime?.aiIntervalTicksByPlayer?.player_1 ?? this.aiInterval,
       player_2: config.runtime?.aiIntervalTicksByPlayer?.player_2 ?? this.aiInterval,
     };
-    this.recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
     this.transcriptEnabled = Boolean(config.debug?.recordLLMTranscript);
     this.transcriptFilePath = this.transcriptEnabled
       ? path.join(config.runtime?.transcriptDir ?? LLM_DEBUG_DIR, `match-${this.startedAt.replace(/[:.]/g, "-")}.log`)
@@ -127,11 +134,25 @@ export class GameOrchestrator {
     return this.transcriptFilePath;
   }
 
-  getAITerminalFeed(): AITerminalFeed {
+  getAITerminalFeed(sinceSequence?: number): AITerminalFeed {
+    const firstSequence = this.aiTerminalEvents.length > 0
+      ? this.getTerminalEventSequence(this.aiTerminalEvents[0])
+      : this.aiTerminalEventSequence + 1;
+    const reset = sinceSequence === undefined || sinceSequence < firstSequence - 1;
+    const events = reset
+      ? this.aiTerminalEvents
+      : this.aiTerminalEvents.filter((event) => this.getTerminalEventSequence(event) > sinceSequence);
     return {
       sessionId: this.aiTerminalSessionId,
-      events: structuredClone(this.aiTerminalEvents),
+      events: structuredClone(events),
+      latestSequence: this.aiTerminalEventSequence,
+      reset,
+      hasMore: firstSequence > 1,
     };
+  }
+
+  getTerminalHistory(beforeSequence?: number, limit?: number) {
+    return this.journal.readTerminalHistory(beforeSequence, limit);
   }
 
   async runAI(playerId: PlayerId, sessionId = this.runSession): Promise<void> {
@@ -231,7 +252,7 @@ export class GameOrchestrator {
       this.game.setAIOutput(playerId, assistantPreview);
 
       const createdAt = new Date().toISOString();
-      this.aiTurns.push({
+      this.journal.appendAITurn({
         playerId,
         requestTick: state.tick,
         executeTick: latestState.tick,
@@ -426,7 +447,7 @@ export class GameOrchestrator {
       tick: state.tick,
       winner: this.game.getWinner(),
       status: recordStatus,
-      aiTurns: this.aiTurns.length,
+      aiTurns: this.journal.aiTurnCount,
       commandResults: this.game.getCommandResults().length,
     });
 
@@ -434,68 +455,75 @@ export class GameOrchestrator {
       return this.lastSavedRecordPath;
     }
 
-    const snapshots = this.game.getSnapshots();
-    const initialState = snapshots[0]?.state || state;
-    const record: GameRecord = {
-      metadata: {
-        startedAt: this.startedAt,
-        savedAt: new Date().toISOString(),
-        endedAt: this.game.getWinner() || !this.game.isGameRunning() ? new Date().toISOString() : undefined,
-        status: recordStatus,
-        winner: this.game.getWinner(),
-        aiIntervalTicks: this.aiInterval,
-        aiContextWindowTurns: this.aiTurns.length,
-        map: {
-          width: MAP_WIDTH,
-          height: MAP_HEIGHT,
-        },
-        recordFormat: "compact-v2",
-        systemPrompt: SYSTEM_PROMPT,
-        players: [
-          {
-            playerId: PLAYER_IDS.PLAYER_1,
-            model: this.llm1.getModel(),
-            baseURL: this.llm1.getBaseURL(),
-          },
-          {
-            playerId: PLAYER_IDS.PLAYER_2,
-            model: this.llm2.getModel(),
-            baseURL: this.llm2.getBaseURL(),
-          },
-        ],
+    const initialState = this.game.getInitialSnapshot()?.state || state;
+    const metadata: GameRecord["metadata"] = {
+      startedAt: this.startedAt,
+      savedAt: new Date().toISOString(),
+      endedAt: this.game.getWinner() || !this.game.isGameRunning() ? new Date().toISOString() : undefined,
+      status: recordStatus,
+      winner: this.game.getWinner(),
+      aiIntervalTicks: this.aiInterval,
+      aiContextWindowTurns: this.journal.aiTurnCount,
+      map: {
+        width: MAP_WIDTH,
+        height: MAP_HEIGHT,
       },
-      initialState,
-      finalState: state,
-      tickDeltas: this.buildTickDeltas(snapshots),
-      commandResults: this.game.getCommandResults(),
-      aiTurns: this.buildSavedAITurns(),
+      recordFormat: "compact-v2",
+      systemPrompt: SYSTEM_PROMPT,
+      players: [
+        {
+          playerId: PLAYER_IDS.PLAYER_1,
+          model: this.llm1.getModel(),
+          baseURL: this.llm1.getBaseURL(),
+        },
+        {
+          playerId: PLAYER_IDS.PLAYER_2,
+          model: this.llm2.getModel(),
+          baseURL: this.llm2.getBaseURL(),
+        },
+      ],
     };
 
     await fs.mkdir(this.recordDir, { recursive: true });
-    const fileName = `match-${record.metadata.savedAt.replace(/[:.]/g, "-")}.json`;
+    const fileName = `match-${metadata.savedAt.replace(/[:.]/g, "-")}.json`;
     const filePath = path.join(this.recordDir, fileName);
-    await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
+    const temporaryPath = `${filePath}.tmp`;
+    const handle = await fs.open(temporaryPath, "w");
+    try {
+      await handle.write(`{"metadata":${JSON.stringify(metadata)},"initialState":${JSON.stringify(initialState)},"finalState":${JSON.stringify(state)},"tickDeltas":[`);
+      await this.writeJsonIterable(handle, this.game.iterateTickDeltas());
+      await handle.write(`],"commandResults":[`);
+      await this.writeJsonIterable(handle, this.game.iterateCommandResults());
+      await handle.write(`],"aiTurns":[`);
+      await this.writeJsonAsyncIterable(handle, this.journal.readAITurns());
+      await handle.write("]}");
+      await handle.sync();
+    } catch (error) {
+      await handle.close();
+      await fs.rm(temporaryPath, { force: true });
+      throw error;
+    }
+    await handle.close();
+    await fs.rename(temporaryPath, filePath);
     this.lastSavedRecordSignature = recordSignature;
     this.lastSavedRecordPath = filePath;
     return filePath;
   }
 
-  private buildSavedAITurns(): SavedAITurnRecord[] {
-    return this.aiTurns.map((turn) => ({
-      playerId: turn.playerId,
-      requestTick: turn.requestTick,
-      executeTick: turn.executeTick,
-      runInput: turn.runInput,
-      assistantMessages: turn.assistantMessages,
-      toolCalls: turn.toolCalls,
-      plans: turn.plans,
-      commands: turn.commands,
-      stopReason: turn.stopReason,
-      metrics: turn.metrics,
-      model: turn.model,
-      baseURL: turn.baseURL,
-      createdAt: turn.createdAt,
-    }));
+  private async writeJsonIterable(handle: FileHandle, values: Iterable<unknown>): Promise<void> {
+    let first = true;
+    for (const value of values) {
+      await handle.write(`${first ? "" : ","}${JSON.stringify(value)}`);
+      first = false;
+    }
+  }
+
+  private async writeJsonAsyncIterable(handle: FileHandle, values: AsyncIterable<unknown>): Promise<void> {
+    let first = true;
+    for await (const value of values) {
+      await handle.write(`${first ? "" : ","}${JSON.stringify(value)}`);
+      first = false;
+    }
   }
 
   private buildRunInput(playerId: PlayerId, state: GameState): AgentRunInput {
@@ -534,7 +562,7 @@ export class GameOrchestrator {
   }
 
   private appendTerminalRequestEvent(playerId: PlayerId, requestNumber: number, requestTick: number): void {
-    this.aiTerminalEvents.push({
+    this.appendTerminalEvent({
       id: `evt_${++this.aiTerminalEventSequence}`,
       kind: "request",
       playerId,
@@ -550,7 +578,7 @@ export class GameOrchestrator {
     requestTick: number,
     text: string
   ): void {
-    this.aiTerminalEvents.push({
+    this.appendTerminalEvent({
       id: `evt_${++this.aiTerminalEventSequence}`,
       kind: "assistant",
       playerId,
@@ -567,7 +595,7 @@ export class GameOrchestrator {
     requestTick: number,
     toolCall: AgentToolCallRecord
   ): void {
-    this.aiTerminalEvents.push({
+    this.appendTerminalEvent({
       id: `evt_${++this.aiTerminalEventSequence}`,
       kind: "tool_call",
       playerId,
@@ -576,6 +604,19 @@ export class GameOrchestrator {
       createdAt: new Date().toISOString(),
       toolCall: structuredClone(toolCall),
     });
+  }
+
+  private appendTerminalEvent(event: AITerminalEvent): void {
+    this.journal.appendTerminalEvent(event);
+    this.aiTerminalEvents.push(event);
+    if (this.aiTerminalEvents.length > MAX_TERMINAL_EVENTS) {
+      this.aiTerminalEvents.splice(0, this.aiTerminalEvents.length - MAX_TERMINAL_EVENTS);
+    }
+  }
+
+  private getTerminalEventSequence(event: AITerminalEvent): number {
+    const sequence = Number(event.id.replace(/^evt_/, ""));
+    return Number.isFinite(sequence) ? sequence : 0;
   }
 
   private handleSpawnSubAgent(

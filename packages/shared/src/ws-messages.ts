@@ -1,5 +1,5 @@
 import type { PlayerId } from "./constants.js";
-import type { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types.js";
+import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchWarmupOptions } from "./types.js";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -43,6 +43,12 @@ export interface ClientSaveRecordMessage {
   type: "save_record";
 }
 
+export interface ClientLoadTerminalHistoryMessage {
+  type: "load_terminal_history";
+  beforeSequence?: number;
+  limit?: number;
+}
+
 /** 开始 LLM 对 CPU 的 benchmark */
 export interface ClientStartBenchmarkMessage {
   type: "start_benchmark";
@@ -62,6 +68,7 @@ export type ClientMessage =
   | ClientResetMatchMessage
   | ClientStopMessage
   | ClientSaveRecordMessage
+  | ClientLoadTerminalHistoryMessage
   | ClientStartBenchmarkMessage;
 
 /** 客户端消息类型字符串（用于路由） */
@@ -73,6 +80,7 @@ export type ClientMessageType = ClientMessage["type"];
 export interface ServerStateMessage {
   type: "state";
   state: GameState | null;
+  aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
 }
@@ -82,6 +90,14 @@ export interface ServerAITerminalEventsMessage {
   sessionId: string | null;
   reset: boolean;
   events: AITerminalEvent[];
+  hasMore?: boolean;
+}
+
+export interface ServerTerminalHistoryPageMessage {
+  type: "terminal_history_page";
+  sessionId: string;
+  events: AITerminalEvent[];
+  hasMore: boolean;
 }
 
 /** 错误通知 */
@@ -150,6 +166,7 @@ export interface ServerPrepareStatusMessage {
 export type ServerMessage =
   | ServerStateMessage
   | ServerAITerminalEventsMessage
+  | ServerTerminalHistoryPageMessage
   | ServerErrorMessage
   | ServerRecordSavedMessage
   | ServerBenchmarkProgressMessage

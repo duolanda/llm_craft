@@ -3,7 +3,6 @@ import {
   CPUStrategyType,
   CreateLLMPresetRequest,
   GameRecord,
-  GameSnapshot,
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
@@ -23,7 +22,7 @@ import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
-import { buildReplayFrames, buildReplaySnapshots, formatTickTime, ReplayFrame } from "./replay";
+import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createMassBattleState } from "./dev/createMassBattleState";
 
 type AppMode = "live" | "replay";
@@ -79,8 +78,10 @@ function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
 function App() {
   const {
     state,
-    snapshots,
+    aiOutputs,
     aiTerminalEvents,
+    terminalHistoryHasMore,
+    loadEarlierTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,
@@ -102,7 +103,6 @@ function App() {
   const [selectedRecordFile, setSelectedRecordFile] = useState("");
   const [activeReplayRecord, setActiveReplayRecord] = useState<GameRecord | null>(null);
   const [replayFrames, setReplayFrames] = useState<ReplayFrame[]>([]);
-  const [replaySnapshots, setReplaySnapshots] = useState<GameSnapshot[]>([]);
   const [replayFrameIndex, setReplayFrameIndex] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(1);
@@ -292,10 +292,8 @@ function App() {
 
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
-    const builtSnapshots = buildReplaySnapshots(frames);
     setActiveReplayRecord(record);
     setReplayFrames(frames);
-    setReplaySnapshots(builtSnapshots);
     setReplayFrameIndex(0);
     setReplayPlaying(false);
     setReplaySourceName(sourceName);
@@ -467,13 +465,7 @@ function App() {
       : sourceDisplayState,
     [sourceDisplayState],
   );
-  const displaySnapshots = useMemo(() => {
-    if (mode === "replay") {
-      const snapshot = replaySnapshots[replayFrameIndex];
-      return snapshot ? [snapshot] : [];
-    }
-    return snapshots;
-  }, [mode, replayFrameIndex, replaySnapshots, snapshots]);
+  const displayAIOutputs = mode === "replay" ? replayFrame?.aiOutputs ?? {} : aiOutputs;
   const displayAITerminalEvents = mode === "replay" ? replayFrame?.terminalEvents ?? [] : aiTerminalEvents;
   const terminalAutoScroll = mode === "replay" ? replayPlaying : (isPlaying || benchmarkRunning);
 
@@ -846,9 +838,11 @@ function App() {
                 <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
               </div>
               <AIOutputPanel
-                snapshots={displaySnapshots}
+                aiOutputs={displayAIOutputs}
                 events={displayAITerminalEvents}
                 autoScroll={terminalAutoScroll}
+                canLoadEarlier={mode === "live" && terminalHistoryHasMore}
+                onLoadEarlier={loadEarlierTerminalEvents}
               />
             </div>
           </div>

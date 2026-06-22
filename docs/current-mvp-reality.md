@@ -225,7 +225,8 @@ CLI 本身只执行单次读/动作命令，不内置 turn loop，也不要求�
 
 ## 7. 当前限制
 
-- 当前仍然是服务端每连接 `100ms` 推一次 `state`
+- WebSocket 每 `100ms` 检查一次状态，但只在对局实例、tick 或 `liveEnabled` 变化时发送 `state`；兼容字段 `snapshots` 只携带最新一帧，不再发送完整历史
+- 录像历史在 tick 当场转为 compact-v2 delta，每 `100 tick` gzip 分块；内存中只保留初始和最新两个完整快照。AI turn 与 terminal event 原样追加到系统临时目录中的每局 journal，实时 terminal 只缓存最近 `500` 条，旧记录可分页读取；最终 compact-v2 录像通过临时文件流式组装并原子改名，不做数量、字节或字段裁剪
 - 当前 `summary` 仍是服务端拼装的轻量文本，不是严格结构化状态摘要
 - 当前 tool-calling provider 基于 OpenAI-compatible chat completions 工具调用
 - 当前 plan 推进是 orchestrator 轮询驱动，实际执行相对 tick 有一个轻微的观察/入队延迟

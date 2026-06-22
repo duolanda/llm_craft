@@ -89,6 +89,45 @@ describe("GameOrchestrator", () => {
     orchestrator.stop();
   });
 
+  it("keeps the live terminal cache bounded while retaining exact journal history", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    for (let requestNumber = 1; requestNumber <= 600; requestNumber += 1) {
+      (orchestrator as any).appendTerminalRequestEvent("player_1", requestNumber, requestNumber);
+    }
+
+    const resetFeed = orchestrator.getAITerminalFeed();
+    expect(resetFeed.reset).toBe(true);
+    expect(resetFeed.events).toHaveLength(500);
+    expect(resetFeed.events[0]?.id).toBe("evt_101");
+    expect(resetFeed.latestSequence).toBe(600);
+
+    const deltaFeed = orchestrator.getAITerminalFeed(590);
+    expect(deltaFeed.reset).toBe(false);
+    expect(deltaFeed.events).toHaveLength(10);
+    expect(deltaFeed.events[0]?.id).toBe("evt_591");
+
+    const staleFeed = orchestrator.getAITerminalFeed(50);
+    expect(staleFeed.reset).toBe(true);
+    expect(staleFeed.events).toHaveLength(500);
+
+    const olderPage = await orchestrator.getTerminalHistory(101, 100);
+    expect(olderPage.hasMore).toBe(false);
+    expect(olderPage.events).toHaveLength(100);
+    expect(olderPage.events[0]?.id).toBe("evt_1");
+    expect(olderPage.events.at(-1)?.id).toBe("evt_100");
+
+    const largeResult = "x".repeat(256 * 1024);
+    (orchestrator as any).appendTerminalToolCallEvent("player_1", 601, 601, {
+      toolCallId: "large-tool",
+      toolName: "get_map_state",
+      args: { includeCells: true },
+      result: { payload: largeResult },
+      isError: false,
+    });
+    const latestPage = await orchestrator.getTerminalHistory(undefined, 1);
+    expect((latestPage.events[0] as any).toolCall.result.payload).toBe(largeResult);
+  });
+
   it("prepares selected first turns before the game clock starts", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");
@@ -189,7 +228,11 @@ describe("GameOrchestrator", () => {
   });
 
   it("records tool-runtime results in ai turn records", async () => {
-    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-record-"));
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      runtime: { recordDir },
+    });
     (orchestrator as any).isPolling = true;
     (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (input: AgentRunInput) =>
       createRunResult({
@@ -207,13 +250,16 @@ describe("GameOrchestrator", () => {
 
     await orchestrator.runAI("player_1");
 
-    const turns = (orchestrator as any).aiTurns;
+    const recordPath = await orchestrator.saveRecord();
+    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+    const turns = record.aiTurns;
     expect(turns).toHaveLength(1);
     expect(turns[0].runInput.tick).toBe(0);
     expect(turns[0].stopReason).toBe("stall_detected");
     expect(turns[0].metrics.stallDetected).toBe(true);
     expect(turns[0].commands).toHaveLength(1);
     expect(orchestrator.getGame().getAIFeedback("player_1")[0]?.message).toContain("read-only tool use");
+    await fs.rm(recordDir, { recursive: true, force: true });
   });
 
   it("does not re-queue commands returned by the runtime after the run completes", async () => {

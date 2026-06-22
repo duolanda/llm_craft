@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
-import { AITerminalEvent, GameSnapshot, PlayerId } from "@llmcraft/shared";
+import { AITerminalEvent, PlayerId } from "@llmcraft/shared";
 
 interface AIOutputPanelProps {
-  snapshots: GameSnapshot[];
+  aiOutputs: Record<string, string>;
   events: AITerminalEvent[];
   autoScroll: boolean;
+  canLoadEarlier?: boolean;
+  onLoadEarlier?: () => void;
 }
 
 function formatJSON(value: unknown): string {
@@ -122,15 +124,24 @@ function getPlayerEvents(events: AITerminalEvent[], playerId: PlayerId) {
   return events.filter((event) => event.playerId === playerId);
 }
 
-export function AIOutputPanel({ snapshots, events, autoScroll }: AIOutputPanelProps) {
-  const latest = snapshots[snapshots.length - 1];
-
+export function AIOutputPanel({
+  aiOutputs,
+  events,
+  autoScroll,
+  canLoadEarlier = false,
+  onLoadEarlier,
+}: AIOutputPanelProps) {
   return (
     <div className="ai-terminal">
+      {canLoadEarlier && onLoadEarlier ? (
+        <button type="button" className="ai-terminal-load-earlier" onClick={onLoadEarlier}>
+          加载更早记录
+        </button>
+      ) : null}
       <PlayerTerminal
         headerClassName="red"
         title="AI 1 — 红方指挥核心"
-        replayOutput={latest?.aiOutputs?.player_1}
+        replayOutput={aiOutputs.player_1}
         events={getPlayerEvents(events, "player_1")}
         autoScroll={autoScroll}
       />
@@ -138,7 +149,7 @@ export function AIOutputPanel({ snapshots, events, autoScroll }: AIOutputPanelPr
       <PlayerTerminal
         headerClassName="cyan"
         title="AI 2 — 蓝方指挥核心"
-        replayOutput={latest?.aiOutputs?.player_2}
+        replayOutput={aiOutputs.player_2}
         events={getPlayerEvents(events, "player_2")}
         autoScroll={autoScroll}
       />

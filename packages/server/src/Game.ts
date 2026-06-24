@@ -11,6 +11,7 @@ import {
   GameSnapshot,
   TickDeltaRecord,
   GameState,
+  ActiveProjectile,
   Tile,
   TileType,
   ResultCode,
@@ -20,12 +21,14 @@ import {
   UNIT_STATES,
   RESULT_CODES,
   ECONOMY_RULES,
+  getAttackDamageAgainstUnit,
   getAttackDamageAgainstBuilding,
   getDefaultAttackMovePriority,
   getBuildingCost as getRulesetBuildingCost,
   getBuildingFootprint,
   getBuildingFootprintCells,
   getUnitCost as getRulesetUnitCost,
+  getUnitWeapon,
   getUnitVisionRange,
   isBuildableBuildingType,
   isBuildingType,
@@ -80,6 +83,7 @@ type HarvestLoopIntent = {
 type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
   intent?: UnitIntent | AttackIntent | AttackMoveIntent | HarvestLoopIntent;
   lastAttackTick?: number;
+  nextAttackTick?: number;
 };
 
 export interface AgentReadState {
@@ -115,6 +119,8 @@ export class Game {
   private tickDeltaBuffer: TickDeltaRecord[] = [];
   private tickDeltaChunks: string[] = [];
   private aiOutputs: Record<string, string> = {};
+  private projectiles: ActiveProjectile[] = [];
+  private projectileCounter = 0;
   private winner: PlayerId | null = null;
   private isRunning = false;
   private tickInterval: NodeJS.Timeout | null = null;
@@ -187,6 +193,7 @@ export class Game {
       tiles: this.tileView,
       winner: this.winner,
       logs: this.logs,
+      projectiles: this.projectiles,
     });
   }
 
@@ -978,13 +985,7 @@ export class Game {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    const damage = getAttackDamageAgainstBuilding(attacker.type, target.type);
-    this.buildingManager.takeDamage(target, damage);
-    attacker.state = UNIT_STATES.ATTACKING;
-    attacker.intent = { type: "attack", targetId: target.id, targetX: target.x, targetY: target.y };
-    attacker.lastAttackTick = this.tick;
-
-    return RESULT_CODES.OK;
+    return this.launchProjectile(attacker, target, "building", target.x, target.y);
   }
 
   private executeAttackTarget(
@@ -997,11 +998,78 @@ export class Game {
     }
 
     const targetUnit = target as RuntimeUnit;
-    const result = this.unitManager.attackUnit(attacker, targetUnit);
+    const result = this.attackUnit(attacker, targetUnit);
     if (result === RESULT_CODES.OK) {
       this.processUnitRetaliation(targetUnit, attacker);
     }
     return result;
+  }
+
+  private attackUnit(attacker: RuntimeUnit, target: RuntimeUnit): ResultCode {
+    if (!attacker.exists || !target.exists) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (attacker.playerId === target.playerId) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    const distance = this.getChebyshevDistance(attacker, target);
+    if (distance > attacker.attackRange) {
+      return RESULT_CODES.ERR_NOT_IN_RANGE;
+    }
+
+    return this.launchProjectile(attacker, target, "unit", target.x, target.y);
+  }
+
+  private launchProjectile(
+    attacker: RuntimeUnit,
+    target: Unit | Building,
+    targetKind: "unit" | "building",
+    targetX: number,
+    targetY: number,
+  ): ResultCode {
+    if (!unitCanAttack(attacker.type)) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    if (attacker.nextAttackTick !== undefined && this.tick < attacker.nextAttackTick) {
+      return RESULT_CODES.ERR_BUSY;
+    }
+
+    const weapon = getUnitWeapon(attacker.type);
+    const distance = targetKind === "building"
+      ? this.buildingManager.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
+      : this.getChebyshevDistance(attacker, target);
+    const flightTicks = weapon.projectileType === "instant"
+      ? 1
+      : Math.max(1, Math.ceil(Math.max(1, distance) / Math.max(1, weapon.projectileSpeed)));
+    const projectile: ActiveProjectile = {
+      id: `projectile_${++this.projectileCounter}`,
+      playerId: attacker.playerId,
+      attackerId: attacker.id,
+      attackerType: attacker.type,
+      projectileType: weapon.projectileType,
+      x: attacker.x,
+      y: attacker.y,
+      startX: attacker.x,
+      startY: attacker.y,
+      targetX,
+      targetY,
+      launchedTick: this.tick,
+      impactTick: this.tick + flightTicks,
+      targetId: target.id,
+      targetKind,
+      splashRadius: weapon.splashRadius,
+    };
+    this.projectiles.push(projectile);
+
+    attacker.state = UNIT_STATES.ATTACKING;
+    attacker.intent = { type: "attack", targetId: target.id, targetX, targetY };
+    attacker.lastAttackTick = this.tick;
+    attacker.nextAttackTick = this.tick + weapon.reloadTicks;
+
+    return RESULT_CODES.OK;
   }
 
   private processUnitRetaliation(defender: RuntimeUnit, attacker: RuntimeUnit): void {
@@ -1009,7 +1077,7 @@ export class Game {
       return;
     }
 
-    const result = this.unitManager.attackUnit(defender, attacker);
+    const result = this.attackUnit(defender, attacker);
     if (result === RESULT_CODES.OK) {
       this.unitManager.clearPath(defender);
       defender.lastAttackTick = this.tick;
@@ -1022,6 +1090,7 @@ export class Game {
       !attacker.exists ||
       defender.playerId === attacker.playerId ||
       defender.lastAttackTick === this.tick ||
+      (defender.nextAttackTick !== undefined && this.tick < defender.nextAttackTick) ||
       !unitCanAttack(defender.type) ||
       defender.attackRange <= 0
     ) {
@@ -1041,6 +1110,125 @@ export class Game {
 
   private getChebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
     return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+  }
+
+  private processProjectiles(): void {
+    if (this.projectiles.length === 0) {
+      return;
+    }
+
+    const remaining: ActiveProjectile[] = [];
+    for (const projectile of this.projectiles) {
+      const liveTarget = projectile.targetId ? this.resolveProjectileTarget(projectile) : null;
+      if (liveTarget) {
+        projectile.targetX = liveTarget.x;
+        projectile.targetY = liveTarget.y;
+      }
+
+      if (this.tick >= projectile.impactTick) {
+        this.applyProjectileImpact(projectile);
+        continue;
+      }
+
+      const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
+      const elapsedTicks = Math.max(0, this.tick - projectile.launchedTick);
+      const progress = Math.min(1, elapsedTicks / totalTicks);
+      projectile.x = projectile.startX + (projectile.targetX - projectile.startX) * progress;
+      projectile.y = projectile.startY + (projectile.targetY - projectile.startY) * progress;
+      remaining.push(projectile);
+    }
+    this.projectiles = remaining;
+  }
+
+  private resolveProjectileTarget(projectile: ActiveProjectile): { x: number; y: number } | null {
+    if (!projectile.targetId) {
+      return null;
+    }
+    if (projectile.targetKind === "building") {
+      const building = this.buildingManager.getBuilding(projectile.targetId);
+      return building?.exists ? { x: building.x, y: building.y } : null;
+    }
+    const unit = this.unitManager.getUnit(projectile.targetId);
+    return unit?.exists ? { x: unit.x, y: unit.y } : null;
+  }
+
+  private applyProjectileImpact(projectile: ActiveProjectile): void {
+    const impact = this.resolveProjectileTarget(projectile) ?? { x: projectile.targetX, y: projectile.targetY };
+    const weapon = getUnitWeapon(projectile.attackerType);
+    const radius = weapon.splashRadius ?? 0;
+    const damagedUnits = new Set<string>();
+    const damagedBuildings = new Set<string>();
+
+    if (projectile.targetId && projectile.targetKind === "unit") {
+      const target = this.unitManager.getUnit(projectile.targetId);
+      if (target?.exists && target.playerId !== projectile.playerId) {
+        this.applyProjectileDamageToUnit(projectile, target as RuntimeUnit, 1);
+        damagedUnits.add(target.id);
+      }
+    } else if (projectile.targetId && projectile.targetKind === "building") {
+      const target = this.buildingManager.getBuilding(projectile.targetId);
+      if (target?.exists && target.playerId !== projectile.playerId) {
+        this.applyProjectileDamageToBuilding(projectile, target, 1);
+        damagedBuildings.add(target.id);
+      }
+    }
+
+    if (radius <= 0) {
+      return;
+    }
+
+    for (const unit of this.unitManager.getAllUnits()) {
+      if (unit.playerId === projectile.playerId || damagedUnits.has(unit.id)) {
+        continue;
+      }
+      const distance = this.getChebyshevDistance(unit, impact);
+      const multiplier = this.getSplashDamageMultiplier(distance, weapon.splashFalloff, radius);
+      if (multiplier > 0) {
+        this.applyProjectileDamageToUnit(projectile, unit as RuntimeUnit, multiplier);
+      }
+    }
+
+    for (const building of this.buildingManager.getAllBuildings()) {
+      if (building.playerId === projectile.playerId || damagedBuildings.has(building.id)) {
+        continue;
+      }
+      const distance = this.buildingManager.getDistanceToBuilding(building, impact.x, impact.y);
+      const multiplier = this.getSplashDamageMultiplier(distance, weapon.splashFalloff, radius);
+      if (multiplier > 0) {
+        this.applyProjectileDamageToBuilding(projectile, building, multiplier);
+      }
+    }
+  }
+
+  private getSplashDamageMultiplier(distance: number, falloff: number[] | undefined, radius: number): number {
+    if (distance < 0 || distance > radius) {
+      return 0;
+    }
+    if (!falloff || falloff.length === 0) {
+      return distance === 0 ? 1 : 0.5;
+    }
+    const index = Math.min(falloff.length - 1, Math.max(0, Math.ceil(distance)));
+    return falloff[index] ?? 0;
+  }
+
+  private applyProjectileDamageToUnit(projectile: ActiveProjectile, target: RuntimeUnit, multiplier: number): void {
+    const damage = Math.max(0, Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier));
+    if (damage <= 0) {
+      return;
+    }
+    target.hp -= damage;
+    if (target.hp <= 0) {
+      target.hp = 0;
+      target.exists = false;
+    }
+  }
+
+  private applyProjectileDamageToBuilding(projectile: ActiveProjectile, target: Building, multiplier: number): void {
+    const damage = Math.max(0, Math.round(getAttackDamageAgainstBuilding(projectile.attackerType, target.type) * multiplier));
+    if (damage <= 0) {
+      return;
+    }
+    this.buildingManager.takeDamage(target, damage);
   }
 
   private executeAttackIntent(
@@ -1120,6 +1308,14 @@ export class Game {
               targetId: prioritizedTarget.target.id,
             };
             runtimeUnit.lastAttackTick = this.tick;
+            this.unitManager.clearPath(runtimeUnit);
+            continue;
+          }
+          if (result === RESULT_CODES.ERR_BUSY) {
+            runtimeUnit.intent = {
+              ...attackMoveIntent,
+              targetId: prioritizedTarget.target.id,
+            };
             this.unitManager.clearPath(runtimeUnit);
             continue;
           }
@@ -1398,14 +1594,14 @@ export class Game {
   checkWinCondition(): boolean {
     for (const player of this.players) {
       const buildings = this.buildingManager.getBuildingsByPlayer(player.id);
-      const hasHQ = buildings.some((b) => b.type === BUILDING_TYPES.HQ);
+      const hasAnyBuilding = buildings.length > 0;
 
-      if (!hasHQ) {
+      if (!hasAnyBuilding) {
         // Find the other player as winner
         const winner = this.players.find((p) => p.id !== player.id);
         if (winner) {
           this.winner = winner.id;
-          this.addLog(LOG_TYPES.GAME_END, `Player ${winner.id} wins!`, {
+          this.addLog(LOG_TYPES.GAME_END, `Player ${winner.id} wins! Player ${player.id} has no remaining buildings.`, {
             winner: winner.id,
             loser: player.id,
           });
@@ -1448,6 +1644,9 @@ export class Game {
       for (const unit of this.unitManager.getAllUnits()) {
         this.unitManager.processPathMovement(unit, this.tiles, blockedPositions, repathBudget);
       }
+
+      // Resolve delayed weapon projectiles after movement, before new attacks fire.
+      this.processProjectiles();
 
       // Process worker economy loop: gather on resource tiles, then deliver near HQ
       this.processWorkerEconomy();

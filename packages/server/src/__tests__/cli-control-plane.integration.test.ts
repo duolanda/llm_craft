@@ -33,13 +33,14 @@ describe("CLI Control Plane Integration", () => {
       includeEmptyTiles: false,
     });
     const mapData = mapResult.result as Record<string, unknown>;
-    const rows = String(mapData.asciiMap).split("\n");
     const cells = mapData.cells as Array<Record<string, unknown>>;
     const buildings = mapData.buildings as Array<Record<string, unknown>>;
+    const resources = mapData.resources as Array<Record<string, unknown>>;
 
     expect(MAP_WIDTH).toBe(144);
     expect(MAP_HEIGHT).toBe(96);
-    expect(rows).toHaveLength(MAP_HEIGHT);
+    expect(mapData).not.toHaveProperty("asciiMap");
+    expect(mapData).not.toHaveProperty("fogOfWar");
     expect(buildings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -63,6 +64,11 @@ describe("CLI Control Plane Integration", () => {
     expect(cells).toEqual(
       expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.slice(0, 2).map((position) =>
         expect.objectContaining({ ...position, tile: TILE_TYPES.RESOURCE, resourceRemaining: 5000 })
+      ))
+    );
+    expect(resources).toEqual(
+      expect.arrayContaining(DEFAULT_MAP_LAYOUT.resources.slice(0, 2).map((position) =>
+        expect.objectContaining({ ...position, remaining: 5000 })
       ))
     );
 

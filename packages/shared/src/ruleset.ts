@@ -10,6 +10,7 @@ import type {
   GameRuleset,
   RulesetBuildingDefinition,
   RulesetUnitDefinition,
+  RulesetWeaponDefinition,
   UnitType,
 } from "./constants.js";
 
@@ -111,7 +112,7 @@ export function canBuildingProduce(
 }
 
 export function unitCanAttack(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): boolean {
-  return getUnitStats(unitType, ruleset).attack > 0;
+  return getUnitWeapon(unitType, ruleset).damage > 0;
 }
 
 export function getUnitArmor(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): ArmorType {
@@ -122,10 +123,22 @@ export function getBuildingArmor(buildingType: BuildingType, ruleset: GameRulese
   return getBuildingStats(buildingType, ruleset).armor;
 }
 
+export function getUnitWeapon(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): RulesetWeaponDefinition {
+  const stats = getUnitStats(unitType, ruleset);
+  return stats.weapon ?? {
+    damage: stats.attack,
+    range: stats.attackRange,
+    reloadTicks: 1,
+    projectileType: "instant",
+    projectileSpeed: 99,
+    damageModifiers: stats.damageModifiers,
+  };
+}
+
 export function getAttackDamage(attackerType: UnitType, targetArmor: ArmorType, ruleset: GameRuleset = DEFAULT_RULESET): number {
-  const attackerStats = getUnitStats(attackerType, ruleset);
-  const modifier = attackerStats.damageModifiers?.[targetArmor] ?? 1;
-  return Math.max(0, Math.round(attackerStats.attack * modifier));
+  const weapon = getUnitWeapon(attackerType, ruleset);
+  const modifier = weapon.damageModifiers?.[targetArmor] ?? getUnitStats(attackerType, ruleset).damageModifiers?.[targetArmor] ?? 1;
+  return Math.max(0, Math.round(weapon.damage * modifier));
 }
 
 export function getAttackDamageAgainstUnit(
@@ -154,7 +167,7 @@ export function getDefaultAttackMovePriority(
 ): AttackTargetType[] {
   switch (attackerType) {
     case UNIT_TYPES.RIFLEMAN:
-      return [
+      return getUnitWeapon(attackerType, ruleset).targetPriority ?? [
         UNIT_TYPES.RIFLEMAN,
         UNIT_TYPES.ROCKET_SOLDIER,
         UNIT_TYPES.SOLDIER,
@@ -166,7 +179,7 @@ export function getDefaultAttackMovePriority(
         BUILDING_TYPES.WAR_FACTORY,
       ];
     case UNIT_TYPES.ROCKET_SOLDIER:
-      return [
+      return getUnitWeapon(attackerType, ruleset).targetPriority ?? [
         UNIT_TYPES.LIGHT_TANK,
         BUILDING_TYPES.WAR_FACTORY,
         BUILDING_TYPES.HQ,
@@ -178,19 +191,19 @@ export function getDefaultAttackMovePriority(
         UNIT_TYPES.WORKER,
       ];
     case UNIT_TYPES.LIGHT_TANK:
-      return [
-        BUILDING_TYPES.HQ,
-        BUILDING_TYPES.WAR_FACTORY,
-        BUILDING_TYPES.BARRACKS,
-        BUILDING_TYPES.REFINERY,
+      return getUnitWeapon(attackerType, ruleset).targetPriority ?? [
         UNIT_TYPES.LIGHT_TANK,
         UNIT_TYPES.ROCKET_SOLDIER,
         UNIT_TYPES.RIFLEMAN,
         UNIT_TYPES.SOLDIER,
         UNIT_TYPES.WORKER,
+        BUILDING_TYPES.WAR_FACTORY,
+        BUILDING_TYPES.HQ,
+        BUILDING_TYPES.BARRACKS,
+        BUILDING_TYPES.REFINERY,
       ];
     case UNIT_TYPES.SOLDIER:
-      return [
+      return getUnitWeapon(attackerType, ruleset).targetPriority ?? [
         UNIT_TYPES.RIFLEMAN,
         UNIT_TYPES.ROCKET_SOLDIER,
         UNIT_TYPES.SOLDIER,

@@ -48,6 +48,7 @@ function cloneReplayFrameState(state: GameState): GameState {
     // Sharing these immutable structures avoids duplicating the complete log history and map for every frame.
     logs: state.logs,
     tiles: state.tiles,
+    projectiles: state.projectiles?.map((projectile) => ({ ...projectile })),
   };
 }
 

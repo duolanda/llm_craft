@@ -14,6 +14,7 @@ import {
   getUnitCost,
   getUnitStats,
   getUnitProductionTicks,
+  getUnitWeapon,
   getBuildingVisionRange,
   getUnitVisionRange,
   unitCanAttack,
@@ -27,7 +28,7 @@ describe("default ruleset", () => {
     expect(getUnitStats(UNIT_TYPES.ROCKET_SOLDIER)).toEqual(UNIT_STATS.rocket_soldier);
     expect(getUnitStats(UNIT_TYPES.LIGHT_TANK)).toEqual(UNIT_STATS.light_tank);
     expect(getUnitCost(UNIT_TYPES.WORKER)).toBe(50);
-    expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(60);
+    expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(55);
     expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(70);
     expect(getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)).toBe(110);
     expect(getUnitCost(UNIT_TYPES.LIGHT_TANK)).toBe(240);
@@ -42,8 +43,8 @@ describe("default ruleset", () => {
 
   it("defines vision ranges for units and buildings", () => {
     expect(getUnitVisionRange(UNIT_TYPES.WORKER)).toBe(5);
-    expect(getUnitVisionRange(UNIT_TYPES.RIFLEMAN)).toBe(6);
-    expect(getUnitVisionRange(UNIT_TYPES.ROCKET_SOLDIER)).toBe(6);
+    expect(getUnitVisionRange(UNIT_TYPES.RIFLEMAN)).toBe(7);
+    expect(getUnitVisionRange(UNIT_TYPES.ROCKET_SOLDIER)).toBe(7);
     expect(getUnitVisionRange(UNIT_TYPES.LIGHT_TANK)).toBe(7);
     expect(getBuildingVisionRange(BUILDING_TYPES.HQ)).toBe(8);
     expect(getBuildingVisionRange(BUILDING_TYPES.BARRACKS)).toBe(6);
@@ -51,39 +52,43 @@ describe("default ruleset", () => {
   });
 
   it("applies armor-based damage modifiers", () => {
-    expect(getAttackDamageAgainstUnit(UNIT_TYPES.SOLDIER, UNIT_TYPES.SOLDIER)).toBe(12);
-    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER)).toBe(17);
-    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.LIGHT_TANK)).toBe(6);
-    expect(getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK)).toBe(48);
-    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ)).toBe(24);
-    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS)).toBe(36);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.SOLDIER, UNIT_TYPES.SOLDIER)).toBe(10);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER)).toBe(13);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.LIGHT_TANK)).toBe(2);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK)).toBe(77);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ)).toBe(31);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS)).toBe(38);
   });
 
-  it("keeps the large-map HQ time-to-kill above a reaction window", () => {
+  it("keeps the large-map HQ time-to-kill above a reaction window after reload timing", () => {
     const hqHp = getBuildingStats(BUILDING_TYPES.HQ).hp;
-    const singleTankTicksToKillHQ = Math.ceil(hqHp / getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.HQ));
-    const fourRocketTicksToKillHQ = Math.ceil(hqHp / (getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ) * 4));
+    const singleTankReloadTicksToKillHQ =
+      Math.ceil(hqHp / getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.HQ)) *
+      getUnitWeapon(UNIT_TYPES.LIGHT_TANK).reloadTicks;
+    const fourRocketReloadTicksToKillHQ =
+      Math.ceil(hqHp / (getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ) * 4)) *
+      getUnitWeapon(UNIT_TYPES.ROCKET_SOLDIER).reloadTicks;
 
-    expect(singleTankTicksToKillHQ).toBeGreaterThanOrEqual(36);
-    expect(fourRocketTicksToKillHQ).toBeGreaterThanOrEqual(14);
+    expect(singleTankReloadTicksToKillHQ).toBeGreaterThanOrEqual(180);
+    expect(fourRocketReloadTicksToKillHQ).toBeGreaterThanOrEqual(80);
   });
 
   it("uses role-aware default attack target priorities", () => {
     expect(getDefaultAttackMovePriority(UNIT_TYPES.RIFLEMAN).slice(0, 4)).toEqual([
-      UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.ROCKET_SOLDIER,
+      UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.SOLDIER,
       UNIT_TYPES.WORKER,
     ]);
     expect(getDefaultAttackMovePriority(UNIT_TYPES.ROCKET_SOLDIER).slice(0, 3)).toEqual([
       UNIT_TYPES.LIGHT_TANK,
       BUILDING_TYPES.WAR_FACTORY,
-      BUILDING_TYPES.HQ,
+      BUILDING_TYPES.BARRACKS,
     ]);
     expect(getDefaultAttackMovePriority(UNIT_TYPES.LIGHT_TANK).slice(0, 3)).toEqual([
-      BUILDING_TYPES.HQ,
-      BUILDING_TYPES.WAR_FACTORY,
-      BUILDING_TYPES.BARRACKS,
+      UNIT_TYPES.LIGHT_TANK,
+      UNIT_TYPES.ROCKET_SOLDIER,
+      UNIT_TYPES.RIFLEMAN,
     ]);
   });
 

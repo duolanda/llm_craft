@@ -13,7 +13,7 @@
 - **影响**: 无 3D 的 50,000 tick 压测中，GC 后 heap 从修复前约 `130.2 MiB` 降至约 `13.3 MiB`，完整快照固定为 `2` 个，压缩 delta 约 `0.26 MiB`；仍需用真实双 LLM 长局观察浏览器 working set、服务端 RSS 和录像保存耗时
 
 ### 3. 大地图后的寻路和状态同步需要复测
-- **描述**: 回放快照和 WebSocket 重复推送已完成第一轮收敛，但服务端 A*、agent `asciiMap` 和每 tick 全量当前 state 仍会随地图与单位规模增长
+- **描述**: 回放快照和 WebSocket 重复推送已完成第一轮收敛，但服务端 A* 和每 tick 全量当前 state 仍会随地图与单位规模增长；agent `asciiMap` 已从 `get_map_state` 默认响应中移除
 - **影响**: 大军团单位数上来后，寻路重算、ASCII 地图体积和当前 state 序列化仍可能成为瓶颈，需要用 live match / benchmark / 回放复测确认
 
 ### 4. 3D 表现仍缺正式战斗动画和逻辑占地
@@ -39,7 +39,7 @@
 - **影响**: 无法用预设层面调整模型稳定性/随机性
 
 ### 6. 查询类工具仍然偏碎，后续需要收敛
-- **描述**: 当前只读工具拆成了 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
+- **描述**: 当前只读工具拆成了 `get_map_state / get_my_state / get_my_units / get_army_summary / get_active_plans / get_recent_events`
 - **影响**: 对 agent 来说查询入口偏多，后续需要收敛到 `3` 个（查地图、查自己、recent）或 `2` 个（查所有、recent）工具，并主要通过简单参数完成过滤，而不是继续增加新读工具
 
 ### 7. 高级编排层仍需验证 LLM 实际使用效果
@@ -65,7 +65,7 @@
 - [x] 移除 `AISandbox` 与 `Node vm` 主链路
 - [x] live match 切到 tool-calling agent runtime
 - [x] benchmark 切到同一套 tool-calling runtime
-- [x] 只读工具统一为 `get_map_state / get_my_state / get_my_units / get_active_plans / get_recent_events`
+- [x] 只读工具统一为 `get_map_state / get_my_state / get_my_units / get_army_summary / get_active_plans / get_recent_events`
 - [x] 引入 `orchestrate_plan` 扁平 call-step 计划
 - [x] 回放与 transcript 改为记录 tool calls / plans / commands / stop reason
 - [x] 修复 action tool 命令要等整轮 agent run 结束后才入队，导致长链 tool-calling 期间单位表面“无动作”的时序问题
@@ -73,7 +73,7 @@
 - [x] 为 OpenAI-compatible provider 增加同名同参数 read tool result 折叠，保留 assistant 文本但淘汰旧观察大 JSON
 - [x] 清理 `AIStatePackageBuilder` 与 `AIPromptPayload(full/delta)` 兼容残留
 - [x] 修复单位走到目标后仍保留 `moving` 状态与一次性 `move` intent，导致 agent 误判单位还在移动
-- [x] 将 `get_map_state` 默认响应压缩为 ASCII 小地图 + 实体列表，并把逐格 `cells` 改为显式请求
+- [x] 将 `get_map_state` 默认响应收敛为结构化单位、建筑和资源列表，并把逐格 `cells` 改为显式请求；已移除 ASCII 小地图和迷雾兼容字段
 - [x] 暴露内建 `start_harvest_loop` 工具，避免 agent 用 `orchestrate_plan` 手写采矿往返
 - [x] 增加 `analyze:record` 离线回放分析脚本，用于统计囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机
 - [x] 暴露默认只自动攻击单位的 `attack_move_unit`，让士兵前压时不会无视路上敌军，同时保留攻击 HQ / barracks 必须显式下令的战略约束

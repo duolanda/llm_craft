@@ -4,6 +4,7 @@ import { Billboard, Line, OrbitControls, useGLTF, useTexture } from "@react-thre
 import * as THREE from "three";
 import {
   Building,
+  ActiveProjectile,
   GAME_COLORS,
   GameState,
   PLAYER_COLORS,
@@ -48,10 +49,12 @@ interface InstancedModelPart {
 
 interface CombatShot {
   source: Vec3;
+  current?: Vec3;
   target: Vec3;
   color: string;
   scale: number;
   phase: number;
+  progress?: number;
 }
 
 interface DestructionBurst {
@@ -80,7 +83,15 @@ const PLAYER_1_COLOR = PLAYER_COLORS.player_1;
 const PLAYER_2_COLOR = PLAYER_COLORS.player_2;
 const NEUTRAL_PALETTE: TeamPalette = { primary: "#ffffff", accent: "#ffffff" };
 const UNIT_VISUAL_SCALE = 1.32;
+const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
+  worker: 1.08,
+  soldier: 1.08,
+  rifleman: 1.06,
+  rocket_soldier: 1.06,
+  light_tank: 1.16,
+};
 const STRUCTURE_VISUAL_SCALE = 1.16;
+const UNIT_POSITION_SMOOTHING = 10;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -634,6 +645,10 @@ function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
   return massBattleLod ? MODEL_URLS.soldier_lod : MODEL_URLS.soldier;
 }
 
+function getUnitVisualScale(unit: Unit): number {
+  return UNIT_VISUAL_SCALE * (UNIT_SCALE_BY_TYPE[unit.type] ?? 1);
+}
+
 function UnitBatches({
   units,
   buildings,
@@ -658,7 +673,7 @@ function UnitBatches({
       const baseTransform: ModelTransform = {
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
-        scale: UNIT_VISUAL_SCALE,
+        scale: getUnitVisualScale(unit),
         motionAmplitude: unit.type !== "light_tank" && moving ? 0.035 : 0,
         motionPhase: index * 1.73 + (unit.playerId === "player_1" ? 0 : 0.8),
         recoilAmplitude: firing ? (unit.type === "light_tank" ? 0 : 0.055) : 0,
@@ -711,7 +726,7 @@ function UnitBatches({
               key={`health-${unit.id}`}
               position={toWorldPosition(unit.x, unit.y, dimensions, 0.08)}
               rotation={[0, getBodyHeading(unit), 0]}
-              scale={UNIT_VISUAL_SCALE}
+              scale={getUnitVisualScale(unit)}
             >
               <HealthBar
                 hp={unit.hp}
@@ -752,7 +767,7 @@ function GroundRingBatch({
   const transforms = useMemo<ModelTransform[]>(() => units.map((unit) => ({
     position: toWorldPosition(unit.x, unit.y, dimensions, 0.035),
     rotation: [-Math.PI / 2, 0, 0],
-    scale: unit.type === "light_tank" ? 1.45 : 0.88,
+    scale: unit.type === "light_tank" ? 1.22 : 0.72,
   })), [dimensions, units]);
 
   return <InstancedPart part={part} transforms={transforms} castShadow={false} />;
@@ -786,11 +801,13 @@ function UnitReadabilityLayer({ units, dimensions }: { units: Unit[]; dimensions
 function CombatEffects({
   units,
   buildings,
+  projectiles,
   dimensions,
   tick,
 }: {
   units: Unit[];
   buildings: Building[];
+  projectiles: ActiveProjectile[];
   dimensions: MapDimensions;
   tick: number;
 }) {
@@ -808,6 +825,33 @@ function CombatEffects({
   }), []);
   const shots = useMemo(() => {
     const objects = new Map([...units, ...buildings].map((object) => [object.id, object]));
+    const activeProjectileShots = projectiles
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((projectile, index): CombatShot => {
+        const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
+        const progress = Math.min(1, Math.max(0, (tick - projectile.launchedTick) / totalTicks));
+        const height = projectile.projectileType === "shell" ? 1.16 : projectile.projectileType === "rocket" ? 1.05 : 0.94;
+        const color = projectile.projectileType === "rocket"
+          ? "#ff6a22"
+          : projectile.projectileType === "shell"
+            ? "#ffd36a"
+            : "#fff4b0";
+        const scale = projectile.projectileType === "rocket" ? 0.2 : projectile.projectileType === "shell" ? 0.16 : 0.085;
+        return {
+          source: toWorldPosition(projectile.startX, projectile.startY, dimensions, height),
+          current: toWorldPosition(projectile.x, projectile.y, dimensions, height),
+          target: toWorldPosition(projectile.targetX, projectile.targetY, dimensions, height),
+          color,
+          scale,
+          phase: deterministicNoise(projectile.startX, projectile.startY, tick + index) * 0.9,
+          progress,
+        };
+      })
+      .slice(0, 96);
+    if (activeProjectileShots.length > 0) {
+      return activeProjectileShots;
+    }
+
     return units
       .filter((unit) => unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1 && unit.intent?.targetId)
       .sort((left, right) => left.id.localeCompare(right.id))
@@ -827,7 +871,7 @@ function CombatEffects({
         }];
       })
       .slice(0, 48);
-  }, [buildings, dimensions, tick, units]);
+  }, [buildings, dimensions, projectiles, tick, units]);
 
   useEffect(() => {
     gl.domElement.dataset.combatShots = String(shots.length);
@@ -853,12 +897,16 @@ function CombatEffects({
     }
     const elapsed = clock.getElapsedTime();
     shots.forEach((shot, index) => {
-      const progress = (elapsed * 1.7 + shot.phase) % 1;
-      scratch.position.set(
-        THREE.MathUtils.lerp(shot.source[0], shot.target[0], progress),
-        THREE.MathUtils.lerp(shot.source[1], shot.target[1], progress) + Math.sin(progress * Math.PI) * 0.22,
-        THREE.MathUtils.lerp(shot.source[2], shot.target[2], progress),
-      );
+      const progress = shot.progress ?? ((elapsed * 1.7 + shot.phase) % 1);
+      if (shot.current) {
+        scratch.position.set(shot.current[0], shot.current[1] + Math.sin(progress * Math.PI) * 0.22, shot.current[2]);
+      } else {
+        scratch.position.set(
+          THREE.MathUtils.lerp(shot.source[0], shot.target[0], progress),
+          THREE.MathUtils.lerp(shot.source[1], shot.target[1], progress) + Math.sin(progress * Math.PI) * 0.22,
+          THREE.MathUtils.lerp(shot.source[2], shot.target[2], progress),
+        );
+      }
       scratch.direction.set(
         shot.target[0] - shot.source[0],
         shot.target[1] - shot.source[1],
@@ -1094,6 +1142,67 @@ function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDime
   );
 }
 
+function useInterpolatedUnits(units: Unit[]): Unit[] {
+  const sourceUnits = useRef(units);
+  const visualPositions = useRef(new Map<string, { x: number; y: number; targetX: number; targetY: number }>());
+  const [displayUnits, setDisplayUnits] = useState(units);
+
+  useEffect(() => {
+    sourceUnits.current = units;
+    const liveIds = new Set(units.map((unit) => unit.id));
+    for (const [unitId] of visualPositions.current) {
+      if (!liveIds.has(unitId)) {
+        visualPositions.current.delete(unitId);
+      }
+    }
+
+    for (const unit of units) {
+      const existing = visualPositions.current.get(unit.id);
+      if (!existing) {
+        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y, targetX: unit.x, targetY: unit.y });
+        continue;
+      }
+      const jumpDistance = Math.max(Math.abs(existing.x - unit.x), Math.abs(existing.y - unit.y));
+      if (jumpDistance > 10) {
+        existing.x = unit.x;
+        existing.y = unit.y;
+      }
+      existing.targetX = unit.x;
+      existing.targetY = unit.y;
+    }
+
+    setDisplayUnits(units.map((unit) => {
+      const visual = visualPositions.current.get(unit.id);
+      return visual ? { ...unit, x: visual.x, y: visual.y } : unit;
+    }));
+  }, [units]);
+
+  useFrame((_, delta) => {
+    let changed = false;
+    const blend = 1 - Math.exp(-delta * UNIT_POSITION_SMOOTHING);
+    for (const visual of visualPositions.current.values()) {
+      const nextX = THREE.MathUtils.lerp(visual.x, visual.targetX, blend);
+      const nextY = THREE.MathUtils.lerp(visual.y, visual.targetY, blend);
+      if (Math.abs(nextX - visual.x) > 0.001 || Math.abs(nextY - visual.y) > 0.001) {
+        changed = true;
+      }
+      visual.x = Math.abs(nextX - visual.targetX) < 0.01 ? visual.targetX : nextX;
+      visual.y = Math.abs(nextY - visual.targetY) < 0.01 ? visual.targetY : nextY;
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    setDisplayUnits(sourceUnits.current.map((unit) => {
+      const visual = visualPositions.current.get(unit.id);
+      return visual ? { ...unit, x: visual.x, y: visual.y } : unit;
+    }));
+  });
+
+  return displayUnits;
+}
+
 const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: GameState }) {
   const dimensions = useMemo(() => getMapDimensions(state), [state]);
   const terrainWidth = dimensions.width * CELL_SIZE;
@@ -1124,6 +1233,7 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
       buildings: state.players.flatMap((player) => player.buildings).filter((building) => building.exists),
     };
   }, [state]);
+  const displayUnits = useInterpolatedUnits(units);
   const resourceTransforms = useMemo(
     () => resourceTiles.map((tile) => getResourceTransform(tile, dimensions)),
     [dimensions, resourceTiles],
@@ -1170,12 +1280,18 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
         {buildings.map((building) => (
           <BuildingModel key={building.id} building={building} dimensions={dimensions} />
         ))}
-        <UnitBatches units={units} buildings={buildings} dimensions={dimensions} tick={state.tick} />
-        <UnitReadabilityLayer units={units} dimensions={dimensions} />
-        <CombatEffects units={units} buildings={buildings} dimensions={dimensions} tick={state.tick} />
-        <DestructionEffects units={units} buildings={buildings} dimensions={dimensions} />
+        <UnitBatches units={displayUnits} buildings={buildings} dimensions={dimensions} tick={state.tick} />
+        <UnitReadabilityLayer units={displayUnits} dimensions={dimensions} />
+        <CombatEffects
+          units={displayUnits}
+          buildings={buildings}
+          projectiles={state.projectiles ?? []}
+          dimensions={dimensions}
+          tick={state.tick}
+        />
+        <DestructionEffects units={displayUnits} buildings={buildings} dimensions={dimensions} />
       </Suspense>
-      {SHOW_DEBUG_INTENTS ? <IntentLines units={units} dimensions={dimensions} /> : null}
+      {SHOW_DEBUG_INTENTS ? <IntentLines units={displayUnits} dimensions={dimensions} /> : null}
       <OrbitControls
         makeDefault
         target={initialFocus.target}

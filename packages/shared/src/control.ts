@@ -4,6 +4,7 @@ export const CONTROL_READ_TOOL_NAMES = [
   "get_map_state",
   "get_my_state",
   "get_my_units",
+  "get_army_summary",
   "get_active_plans",
   "get_recent_events",
 ] as const;

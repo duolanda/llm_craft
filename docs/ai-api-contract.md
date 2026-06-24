@@ -376,8 +376,10 @@ interface AgentRunInput {
 - `hq` 可生产 `worker`
 - `barracks` 可生产 `soldier | rifleman | rocket_soldier`
 - `war_factory` 可生产 `light_tank`
-- 当前采用 144x96 三战线大战场尺度：`soldier` 100 HP / 12 attack / range 1 / vision 5 / cost 60；`rifleman` 90 HP / 14 attack / range 3 / vision 6 / cost 70；`rocket_soldier` 80 HP / 24 attack / range 4 / vision 6 / cost 110；`light_tank` 300 HP / 30 attack / range 3 / vision 7 / cost 240
-- 伤害按目标 armor 计算：`rifleman` 对 infantry 1.2x、vehicle 0.4x、structure 0.55x；`rocket_soldier` 对 infantry 0.45x、vehicle 2x、structure 1x；`light_tank` 对 infantry 0.7x、vehicle 1x、structure 1.2x
+- 当前采用 144x96 三战线大战场尺度：`soldier` 115 HP / 10 damage / range 1 / vision 5 / cost 55 / reload 3；`rifleman` 95 HP / 9 damage / range 6 / vision 7 / cost 70 / reload 2；`rocket_soldier` 80 HP / 34 damage / range 6 / vision 7 / cost 110 / reload 8；`light_tank` 420 HP / 42 damage / range 5 / vision 7 / cost 240 / reload 6
+- 伤害按目标 armor 计算：`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x
+- 攻击结算为 weapon/projectile/warhead 模型：命令成功会生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `light_tank` 有 1 格 splash；`ok: true` 不表示目标 HP 已经立即变化。
+- `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。旧 compact-v2 录像可能没有该可选字段。
 - 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
 - `UNIT_STATS` / `BUILDING_STATS` 仍作为兼容导出存在
 
@@ -389,16 +391,13 @@ interface AgentRunInput {
 
 #### `get_map_state`
 
-返回当前己方视野内信息：
+返回全图结构化战场信息：
 
 ```ts
 {
   tick: number;
   width: number;
   height: number;
-  fogOfWar: boolean;
-  visibleTileCount: number;
-  asciiMap: string;
   units: Array<{
     id: string;
     type: UnitType;
@@ -417,6 +416,11 @@ interface AgentRunInput {
     hp: number;
     maxHp: number;
     relation: "self" | "enemy";
+  }>;
+  resources: Array<{
+    x: number;
+    y: number;
+    remaining: number;
   }>;
   cells?: Array<{
     x: number;
@@ -447,25 +451,11 @@ interface AgentRunInput {
 
 说明：
 
-- 当前默认地图为 `144 x 96`，`fogOfWar=false`；默认返回全图压缩信息。前端默认使用 3D 战场表现层，但 AI 工具仍使用底层战术坐标。
-- `visibleTileCount` 为兼容字段；无迷雾时等于地图 tile 总数
-- `asciiMap` 是无坐标轴的全图符号小地图，用于快速读取空间关系
+- 当前默认地图为 `144 x 96`；当前没有战争迷雾，默认返回全图结构化信息。前端默认使用 3D 战场表现层，但 AI 工具仍使用底层战术坐标。
+- `fogOfWar`、`visibleTileCount` 和 `asciiMap` 已移除；默认读取不再消耗上下文返回符号地图
 - 精确坐标默认看 `units` 和 `buildings`；只有需要逐格地形时才传 `includeCells=true`
 - `cells` 返回值按坐标分组，每个 `cell` 表示该位置上的地形与占用物
 - 单位和建筑子项带 `relation` 字段，表示是己方还是敌方
-
-默认符号约定：
-
-```text
-. empty
-# obstacle
-* resource
-? unseen
-H/B/F/D self hq/barracks/war_factory/refinery
-S/I/R/T/W self soldier/rifleman/rocket_soldier/light_tank/worker
-h/b/f/d enemy hq/barracks/war_factory/refinery
-s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
-```
 - 默认不返回 `cells`，以降低上下文体积
 - 传 `includeCells=true` 时只返回全图“有信息量”的格子：资源、障碍、单位、建筑
 - 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整地图格子信息（包括 empty）
@@ -540,14 +530,16 @@ s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
       lightTanks: number;
     };
     recommendedStructures: Array<{
-      buildingType: "barracks" | "war_factory";
+      workerId: string;
+      buildingType: "barracks" | "war_factory" | "refinery";
       cost: number;
       reason: string;
       suggestedSites: Position[];
     }>;
     recommendedProduction: Array<{
-      buildingType: "barracks" | "war_factory";
-      unitType: "rifleman" | "rocket_soldier" | "light_tank";
+      buildingId: string;
+      buildingType: "hq" | "barracks" | "war_factory";
+      unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank";
       reason: string;
     }>;
   };
@@ -556,7 +548,7 @@ s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
 
 `economyStatus` 是派生提示字段，用于减少 agent 每轮重复检查 worker 经济：`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量，`idleWorkers` 表示还应优先安排采矿的 worker 数量，`resourceAssignments` 表示各资源点当前分配到的采矿 worker 数量。省略坐标调用 `start_harvest_loop` 时，系统会倾向选择较近且较少 worker 占用的资源点。
 
-`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有 `barracks` 时优先提示补兵营；已有 `barracks` 且钱够时提示补 `war_factory`；敌方出现 `light_tank` 或 `war_factory` 时提示从兵营补 `rocket_soldier`。
+`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有 `barracks` 时优先提示补兵营；已有 `barracks` 且钱够时提示补 `war_factory`；敌方出现 `light_tank` 或 `war_factory` 时提示从空闲兵营补 `rocket_soldier`。`recommendedStructures` 和 `recommendedProduction` 会尽量携带可直接调用工具的 `workerId` / `buildingId`。
 
 #### `get_my_units`
 
@@ -565,9 +557,46 @@ s/i/r/t/w enemy soldier/rifleman/rocket_soldier/light_tank/worker
 ```ts
 {
   tick: number;
+  groups: Array<{
+    role: "combat" | "worker";
+    intent: string;
+    count: number;
+    unitIds: string[];
+    types: Partial<Record<UnitType, number>>;
+    center?: Position;
+    hasActivePlanCount: number;
+  }>;
   units: Array<Unit & { hasActivePlan: boolean }>;
 }
 ```
+
+`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。
+
+#### `get_army_summary`
+
+返回紧凑战斗态势，不改变游戏状态：
+
+```ts
+{
+  tick: number;
+  myCounts: Record<UnitType, number>;
+  enemyCounts: Record<UnitType, number>;
+  combatUnits: number;
+  readyCombatUnits: number;
+  reloadingCombatUnits: number;
+  recommendedFormation: "line" | "battle_line";
+  recommendations: Array<{
+    action: string;
+    reason: string;
+    formation?: "battle_line";
+  }>;
+}
+```
+
+说明：
+
+- 这是给 agent 的读工具，用于判断是否缺反坦克、缺步兵掩护、是否适合用 `attack_move_group` 组织军团推进
+- `recommendations` 是非强制提示，不会替 agent 自动造兵或自动分兵
 
 #### `get_active_plans`
 
@@ -638,7 +667,7 @@ interface AgentPlanRecord {
 说明：
 
 - 主要用于 worker 移动或 combat unit 精确换位
-- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / war_factory / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
+- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / war_factory / refinery / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
 
 #### `attack_move_unit`
 
@@ -647,18 +676,36 @@ interface AgentPlanRecord {
   unitId: string;
   x: number;
   y: number;
-  priority?: Array<"worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank" | "hq" | "barracks" | "war_factory">;
+  priority?: Array<"worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank" | "hq" | "barracks" | "war_factory" | "refinery">;
 }
 ```
 
 说明：
 
 - 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
-- 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：`rifleman` 默认优先清步兵，`rocket_soldier` 默认优先打 `light_tank` / `war_factory`，`light_tank` 默认优先打 `hq` / `war_factory` / `barracks`
+- 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：`rifleman` 默认优先清火箭/步兵，`rocket_soldier` 默认优先打 `light_tank`，`light_tank` 默认优先打敌方装甲和反装甲支援，其后才拆生产建筑/HQ/精炼厂
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
-- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory 应使用 `attack`
+- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory、拆 refinery 应使用 `attack`
 - 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
+
+#### `attack_move_group`
+
+```ts
+{
+  unitIds: string[];
+  x: number;
+  y: number;
+  formation?: "line" | "column" | "wedge" | "dispersed" | "battle_line";
+}
+```
+
+说明：
+
+- 一次控制 1-100 个己方战斗单位，给每个单位分配不同推进落点
+- `battle_line` 是角色化编队：`light_tank` 前排，`soldier/rifleman` 居中，`rocket_soldier` 后排
+- 编队只影响目的地分配和默认攻击优先级；它不会强制 AI 攒兵，也不会自动替 AI 选择战略路线
+- 大军团推进、正面压制、侧翼小队推进时优先使用本工具，避免逐单位反复调用 `attack_move_unit`
 
 #### `attack`
 
@@ -674,7 +721,7 @@ interface AgentPlanRecord {
 - 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
 - `targetId` 必须来自全图情报中的敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
-- 攻击敌方 HQ、barracks、war_factory 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
+- 攻击敌方 HQ、barracks、war_factory、refinery 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
 - 目标已经消失但曾被读取过时，系统会自动降级为移动到该目标最后记录的位置；调用方不需要也不能传坐标
 - 未知目标 ID 返回 `ok: false` 和 `hint`
 
@@ -692,7 +739,7 @@ interface AgentPlanRecord {
 ```ts
 {
   unitId: string;
-  buildingType: "barracks" | "war_factory";
+  buildingType: "barracks" | "war_factory" | "refinery";
   x: number;
   y: number;
 }
@@ -700,7 +747,7 @@ interface AgentPlanRecord {
 
 说明：
 
-- 当前允许建造 `barracks` 和 `war_factory`
+- 当前允许建造 `barracks`、`war_factory` 和 `refinery`
 - 建筑必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
 - 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
 
@@ -1036,9 +1083,9 @@ Read combined map + player state for the session.
 
 Call an agent tool on behalf of the session's player. Control plane 只暴露可直接落到游戏状态的工具；provider-only 工具（目前为 `spawn_agent`）不通过 HTTP control API 暴露。
 
-Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_active_plans`, `get_recent_events`
+Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_army_summary`, `get_active_plans`, `get_recent_events`
 
-Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
+Action tools: `move_unit`, `attack_move_unit`, `attack_move_group`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
 
 Plan tool: `orchestrate_plan`
 

@@ -27,6 +27,14 @@ describe("Game", () => {
     game = new Game();
   });
 
+  function advanceTicks(count: number): void {
+    game.start();
+    for (let tick = 0; tick < count; tick++) {
+      game.tickUpdate();
+    }
+    game.stop();
+  }
+
   it("initializes each player with one HQ, four workers and expansion credits", () => {
     const state = game.getState();
     const [player1, player2] = state.players;
@@ -65,6 +73,22 @@ describe("Game", () => {
     expect(PathFinder.findPath(20, 48, 123, 48, tiles).length).toBeGreaterThan(0);
     expect(PathFinder.findPath(20, 76, 123, 76, tiles).length).toBeGreaterThan(0);
     expect(PathFinder.findPath(72, 20, 72, 76, tiles).length).toBeGreaterThan(0);
+  });
+
+  it("keeps a player alive after HQ loss while any other building remains", () => {
+    const buildingManager = game.getBuildingManager();
+    const player1Hq = buildingManager
+      .getBuildingsByPlayer("player_1")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const barracks = buildingManager.createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1");
+
+    player1Hq.exists = false;
+    expect(game.checkWinCondition()).toBe(false);
+    expect(game.getWinner()).toBeNull();
+
+    barracks.exists = false;
+    expect(game.checkWinCondition()).toBe(true);
+    expect(game.getWinner()).toBe("player_2");
   });
 
   it("keeps resource tiles outside the HQ delivery ring", () => {
@@ -320,9 +344,9 @@ describe("Game", () => {
     expect(UNIT_STATS.worker.attack).toBe(0);
     expect(worker.attackRange).toBe(0);
     expect(soldier.attackRange).toBe(1);
-    expect(rifleman.attackRange).toBe(3);
-    expect(rocketSoldier.attackRange).toBe(4);
-    expect(lightTank.attackRange).toBe(3);
+    expect(rifleman.attackRange).toBe(6);
+    expect(rocketSoldier.attackRange).toBe(6);
+    expect(lightTank.attackRange).toBe(5);
   });
 
   it("allows soldiers to attack diagonally adjacent targets", () => {
@@ -342,6 +366,9 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+    expect(game.getState().projectiles).toHaveLength(2);
+    expect(target.hp).toBe(target.maxHp);
+    advanceTicks(1);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -350,7 +377,7 @@ describe("Game", () => {
     const buildingManager = game.getBuildingManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = buildingManager.createBuilding(BUILDING_TYPES.BARRACKS, 6, 6, "player_2");
-    const expectedDamage = UNIT_STATS.soldier.attack;
+    const expectedDamage = getAttackDamageAgainstBuilding(UNIT_TYPES.SOLDIER, BUILDING_TYPES.BARRACKS);
 
     game.queueCommand({
       id: "diag_attack_building",
@@ -363,6 +390,8 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+    expect(target.hp).toBe(target.maxHp);
+    advanceTicks(1);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
   });
 
@@ -388,8 +417,9 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
-    expect(tank.hp).toBe(tank.maxHp - 6 - 48);
+    expect(tank.hp).toBe(tank.maxHp - getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.LIGHT_TANK) - getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK));
   });
 
   it("applies heavy damage modifiers to structure targets", () => {
@@ -407,11 +437,36 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
-    expect(barracks.hp).toBe(barracks.maxHp - 36);
+    expect(barracks.hp).toBe(barracks.maxHp - getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS));
   });
 
-  it("keeps attacking every tick after a successful attack command", () => {
+  it("applies tank shell splash damage around the impact point", () => {
+    const unitManager = game.getUnitManager();
+    const tank = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 5, 5, "player_1");
+    const primary = unitManager.createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
+    const nearby = unitManager.createUnit(UNIT_TYPES.SOLDIER, 8, 6, "player_2");
+    const far = unitManager.createUnit(UNIT_TYPES.SOLDIER, 8, 8, "player_2");
+
+    game.queueCommand({
+      id: "tank_splash",
+      type: "attack",
+      unitId: tank.id,
+      targetId: primary.id,
+      playerId: "player_1",
+    });
+
+    game.processCommands();
+    advanceTicks(1);
+
+    const directDamage = getAttackDamageAgainstUnit(UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.SOLDIER);
+    expect(primary.hp).toBe(primary.maxHp - directDamage);
+    expect(nearby.hp).toBe(nearby.maxHp - Math.round(directDamage * 0.5));
+    expect(far.hp).toBe(far.maxHp);
+  });
+
+  it("keeps attacking after reload instead of every tick", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
@@ -425,13 +480,10 @@ describe("Game", () => {
       playerId: "player_1",
     });
 
-    game.start();
-    game.tickUpdate();
+    advanceTicks(2);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
 
-    game.tickUpdate();
-    game.stop();
-
+    advanceTicks(3);
     expect(target.hp).toBe(target.maxHp - expectedDamage * 2);
   });
 
@@ -450,6 +502,7 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
     expect(defender.hp).toBe(defender.maxHp - expectedDamage);
     expect(attacker.hp).toBe(attacker.maxHp - expectedDamage);
@@ -470,6 +523,7 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
     expect(worker.hp).toBe(worker.maxHp - UNIT_STATS.soldier.attack);
     expect(attacker.hp).toBe(attacker.maxHp);
@@ -497,6 +551,7 @@ describe("Game", () => {
       playerId: "player_1",
     });
     game.processCommands();
+    advanceTicks(1);
 
     expect(defender.hp).toBe(defender.maxHp - UNIT_STATS.soldier.attack);
     expect(attacker.hp).toBe(attacker.maxHp);
@@ -509,7 +564,7 @@ describe("Game", () => {
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const enemyWorker = unitManager.createUnit(UNIT_TYPES.WORKER, 4, 5, "player_2");
     const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
-    const expectedDamage = UNIT_STATS.soldier.attack;
+    const expectedDamage = getAttackDamageAgainstBuilding(UNIT_TYPES.SOLDIER, BUILDING_TYPES.HQ);
 
     game.queueCommand({
       id: "sustain_attack_in_range",
@@ -519,12 +574,10 @@ describe("Game", () => {
       playerId: "player_1",
     });
 
-    game.start();
-    game.tickUpdate();
+    advanceTicks(2);
     expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage);
 
-    game.tickUpdate();
-    game.stop();
+    advanceTicks(3);
 
     expect(enemyHq.hp).toBe(enemyHq.maxHp - expectedDamage * 2);
     expect(enemyWorker.hp).toBe(enemyWorker.maxHp);
@@ -546,6 +599,7 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
     expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
@@ -557,7 +611,7 @@ describe("Game", () => {
     const buildingManager = game.getBuildingManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 5, 5, "player_1");
     const enemySoldier = unitManager.createUnit(UNIT_TYPES.SOLDIER, 4, 5, "player_2");
-    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 20, 20, "player_2");
 
     game.queueCommand({
       id: "light_tank_role_priority",
@@ -567,15 +621,16 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
-    expect(enemyHq.hp).toBe(enemyHq.maxHp - getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.HQ));
-    expect(enemySoldier.hp).toBe(enemySoldier.maxHp);
+    expect(enemySoldier.hp).toBe(enemySoldier.maxHp - getAttackDamageAgainstUnit(UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.SOLDIER));
+    expect(enemyHq.hp).toBe(enemyHq.maxHp);
   });
 
   it("uses role-aware default targets for rocket soldiers", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.ROCKET_SOLDIER, 5, 5, "player_1");
-    const enemyRifleman = unitManager.createUnit(UNIT_TYPES.RIFLEMAN, 4, 5, "player_2");
+    const enemyRifleman = unitManager.createUnit(UNIT_TYPES.RIFLEMAN, 3, 5, "player_2");
     const enemyTank = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 6, 5, "player_2");
 
     game.queueCommand({
@@ -586,6 +641,7 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
     expect(enemyTank.hp).toBe(enemyTank.maxHp - getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK));
     expect(enemyRifleman.hp).toBe(enemyRifleman.maxHp);
@@ -597,7 +653,7 @@ describe("Game", () => {
     const attacker = unitManager.createUnit(UNIT_TYPES.RIFLEMAN, 5, 5, "player_1");
     const enemyRifleman = unitManager.createUnit(UNIT_TYPES.RIFLEMAN, 4, 5, "player_2");
     const enemyTank = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 6, 5, "player_2");
-    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 6, 6, "player_2");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 20, 20, "player_2");
 
     game.queueCommand({
       id: "rifleman_role_priority",
@@ -607,6 +663,7 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
     expect(enemyRifleman.hp).toBe(enemyRifleman.maxHp - getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.RIFLEMAN));
     expect(enemyTank.hp).toBe(enemyTank.maxHp);
@@ -670,12 +727,12 @@ describe("Game", () => {
     game.tickUpdate();
     expect(attacker.intent?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);
-    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
+    expect(target.hp).toBe(target.maxHp);
 
     game.tickUpdate();
     expect(attacker.intent?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);
-    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack * 2);
+    expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
 
     game.queueCommand({
       id: "override_attack_move",

@@ -33,7 +33,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "get_map_state",
     description:
-      "Read the currently visible battlefield under basic fog of war. By default returns a compact no-axis ASCII tactical map with ? for unseen tiles plus visible unit/building lists with coordinates. Set includeCells=true only when you need visible terrain cells; set includeEmptyTiles=true only when you explicitly need all visible grid cells including empty cells.",
+      "Read the full battlefield as structured unit, building, and resource lists. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need all grid cells including empty cells.",
     parameters: {
       type: "object",
       properties: {
@@ -50,15 +50,22 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "get_my_state",
-    description: "Read my economy, HQ, buildings, and production capability.",
+    description: "Read my economy, HQ, buildings, production queues, and concrete build/production recommendations.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: (bridge) => bridge.getMyState(),
   },
   {
     name: "get_my_units",
-    description: "Read my controllable units with state and carry status.",
+    description: "Read my controllable units plus role+intent groups, so idle/holding combat forces are visible without manually counting the unit list.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: (bridge) => bridge.getMyUnits(),
+  },
+  {
+    name: "get_army_summary",
+    description:
+      "Read a compact combat summary: own/enemy unit mix, ready vs reloading combat units, and non-binding recommendations for combined-arms production or group formation.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: (bridge) => bridge.getArmySummary(),
   },
   {
     name: "get_active_plans",
@@ -91,7 +98,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_unit",
     description:
-      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking role-appropriate enemy targets encountered before arrival. Defaults are role-aware: riflemen prefer infantry, rocket soldiers prefer vehicles, and light tanks prefer structures. Once the unit reaches the destination, this order ends. If an enemy HQ, barracks, or specific unit id is visible, prefer attack instead.",
+      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking role-appropriate enemy targets encountered before arrival. Defaults are role-aware: riflemen screen infantry, rocket soldiers prefer vehicles, and light tanks prefer enemy armor/support before structures. Once the unit reaches the destination, this order ends. If a specific visible target id matters, prefer attack instead.",
     parameters: {
       type: "object",
       required: ["unitId", "x", "y"],
@@ -112,7 +119,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_group",
     description:
-      "Order 1-100 friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies anywhere inside vision, close to weapon range, fight, and then resume the advance. Use this for army-scale north/center/south fronts instead of issuing one tool call per unit.",
+      "Order 1-100 friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies inside vision, close to weapon range, fight through reload cycles, and then resume the advance. Use battle_line for combined arms: tanks front, riflemen/soldiers screen, rockets behind.",
     parameters: {
       type: "object",
       required: ["unitIds", "x", "y"],
@@ -120,14 +127,19 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
         unitIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
-        formation: { type: "string", enum: ["line", "column", "wedge", "dispersed"], default: "line" },
+        formation: { type: "string", enum: ["line", "column", "wedge", "dispersed", "battle_line"], default: "line" },
       },
       additionalProperties: false,
     },
     execute: (bridge, args) => bridge.attackMoveGroup(
       Array.isArray(args.unitIds) ? args.unitIds.map(String) : [],
       { x: Number(args.x), y: Number(args.y) },
-      args.formation === "column" || args.formation === "wedge" || args.formation === "dispersed" ? args.formation : "line",
+      args.formation === "column" ||
+        args.formation === "wedge" ||
+        args.formation === "dispersed" ||
+        args.formation === "battle_line"
+        ? args.formation
+        : "line",
     ),
   },
   {

@@ -97,6 +97,15 @@ export const ARMOR_TYPES = {
 
 export type ArmorType = typeof ARMOR_TYPES[keyof typeof ARMOR_TYPES];
 
+export const PROJECTILE_TYPES = {
+  INSTANT: "instant",
+  BULLET: "bullet",
+  SHELL: "shell",
+  ROCKET: "rocket",
+} as const;
+
+export type ProjectileType = typeof PROJECTILE_TYPES[keyof typeof PROJECTILE_TYPES];
+
 export const ECONOMY_RULES = {
   WORKER_CARRY_CAPACITY: 100,
   WORKER_GATHER_RATE: 10,
@@ -115,6 +124,20 @@ export interface RulesetUnitDefinition {
   armor: ArmorType;
   productionTicks: number;
   damageModifiers?: Partial<Record<ArmorType, number>>;
+  weapon?: RulesetWeaponDefinition;
+}
+
+export interface RulesetWeaponDefinition {
+  damage: number;
+  range: number;
+  minRange?: number;
+  reloadTicks: number;
+  projectileType: ProjectileType;
+  projectileSpeed: number;
+  splashRadius?: number;
+  splashFalloff?: number[];
+  damageModifiers?: Partial<Record<ArmorType, number>>;
+  targetPriority?: AttackTargetType[];
 }
 
 export interface RulesetBuildingDefinition {
@@ -139,50 +162,121 @@ export const DEFAULT_RULESET = {
   name: "LLMCraft MVP",
   units: {
     [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
-    [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 12, cost: 60, attackRange: 1, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
-    [UNIT_TYPES.RIFLEMAN]: {
-      hp: 90,
+    [UNIT_TYPES.SOLDIER]: {
+      hp: 115,
       speed: 1,
-      attack: 14,
+      attack: 10,
+      cost: 55,
+      attackRange: 1,
+      visionRange: 5,
+      armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 4,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 1,
+        [ARMOR_TYPES.VEHICLE]: 0.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.35,
+      },
+      weapon: {
+        damage: 10,
+        range: 1,
+        reloadTicks: 3,
+        projectileType: PROJECTILE_TYPES.INSTANT,
+        projectileSpeed: 99,
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 1,
+          [ARMOR_TYPES.VEHICLE]: 0.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.35,
+        },
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.HQ],
+      },
+    },
+    [UNIT_TYPES.RIFLEMAN]: {
+      hp: 95,
+      speed: 1,
+      attack: 9,
       cost: 70,
-      attackRange: 3,
-      visionRange: 6,
+      attackRange: 6,
+      visionRange: 7,
       armor: ARMOR_TYPES.INFANTRY,
       productionTicks: 6,
       damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 1.2,
-        [ARMOR_TYPES.VEHICLE]: 0.4,
-        [ARMOR_TYPES.STRUCTURE]: 0.55,
+        [ARMOR_TYPES.INFANTRY]: 1.45,
+        [ARMOR_TYPES.VEHICLE]: 0.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.35,
+      },
+      weapon: {
+        damage: 9,
+        range: 6,
+        reloadTicks: 2,
+        projectileType: PROJECTILE_TYPES.BULLET,
+        projectileSpeed: 9,
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 1.45,
+          [ARMOR_TYPES.VEHICLE]: 0.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.35,
+        },
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.HQ],
       },
     },
     [UNIT_TYPES.ROCKET_SOLDIER]: {
       hp: 80,
       speed: 1,
-      attack: 24,
+      attack: 34,
       cost: 110,
-      attackRange: 4,
-      visionRange: 6,
+      attackRange: 6,
+      visionRange: 7,
       armor: ARMOR_TYPES.INFANTRY,
       productionTicks: 8,
       damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 0.45,
-        [ARMOR_TYPES.VEHICLE]: 2,
-        [ARMOR_TYPES.STRUCTURE]: 1,
+        [ARMOR_TYPES.INFANTRY]: 0.35,
+        [ARMOR_TYPES.VEHICLE]: 2.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.9,
+      },
+      weapon: {
+        damage: 34,
+        range: 6,
+        minRange: 2,
+        reloadTicks: 8,
+        projectileType: PROJECTILE_TYPES.ROCKET,
+        projectileSpeed: 4,
+        splashRadius: 1,
+        splashFalloff: [1, 0.35],
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 0.35,
+          [ARMOR_TYPES.VEHICLE]: 2.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.9,
+        },
+        targetPriority: [UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN],
       },
     },
     [UNIT_TYPES.LIGHT_TANK]: {
-      hp: 300,
+      hp: 420,
       speed: 1,
-      attack: 30,
+      attack: 42,
       cost: 240,
-      attackRange: 3,
+      attackRange: 5,
       visionRange: 7,
       armor: ARMOR_TYPES.VEHICLE,
       productionTicks: 14,
       damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 0.7,
+        [ARMOR_TYPES.INFANTRY]: 0.8,
         [ARMOR_TYPES.VEHICLE]: 1,
-        [ARMOR_TYPES.STRUCTURE]: 1.2,
+        [ARMOR_TYPES.STRUCTURE]: 0.9,
+      },
+      weapon: {
+        damage: 42,
+        range: 5,
+        reloadTicks: 6,
+        projectileType: PROJECTILE_TYPES.SHELL,
+        projectileSpeed: 5,
+        splashRadius: 1,
+        splashFalloff: [1, 0.5],
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 0.8,
+          [ARMOR_TYPES.VEHICLE]: 1,
+          [ARMOR_TYPES.STRUCTURE]: 0.9,
+        },
+        targetPriority: [UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY],
       },
     },
   },

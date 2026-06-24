@@ -1,4 +1,4 @@
-import type { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType } from "./constants.js";
+import type { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType, ProjectileType } from "./constants.js";
 import type { GameLog } from "./logs.js";
 
 export type LLMProviderType = "openai-compatible";
@@ -174,6 +174,8 @@ export interface Unit extends GameObject {
   pathTarget?: { x: number; y: number };
   // 防止同一 tick 重复攻击
   lastAttackTick?: number;
+  // 下一次可开火的 tick，用于武器装填/冷却
+  nextAttackTick?: number;
 }
 
 export interface Building extends GameObject {
@@ -208,12 +210,32 @@ export interface Tile {
   resourceRemaining?: number;
 }
 
+export interface ActiveProjectile {
+  id: string;
+  playerId: PlayerId;
+  attackerId: string;
+  attackerType: UnitType;
+  projectileType: ProjectileType;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  targetX: number;
+  targetY: number;
+  launchedTick: number;
+  impactTick: number;
+  targetId?: string;
+  targetKind?: "unit" | "building";
+  splashRadius?: number;
+}
+
 export interface GameState {
   tick: number;
   players: Player[];
   tiles: Tile[][];
   winner: PlayerId | null;
   logs: GameLog[];
+  projectiles?: ActiveProjectile[];
 }
 
 export interface Command {
@@ -301,16 +323,32 @@ export interface AgentMapStateCell {
   building?: AgentMapStateBuilding;
 }
 
+export interface AgentMapStateResource {
+  x: number;
+  y: number;
+  remaining: number;
+}
+
 export interface AgentMapState {
   tick: number;
   width: number;
   height: number;
-  fogOfWar: boolean;
-  visibleTileCount: number;
-  asciiMap: string;
   units: AgentMapStateUnit[];
   buildings: AgentMapStateBuilding[];
+  resources: AgentMapStateResource[];
   cells?: AgentMapStateCell[];
+}
+
+export type AgentUnitGroupRole = "worker" | "combat";
+
+export interface AgentUnitGroup {
+  role: AgentUnitGroupRole;
+  intent: string;
+  count: number;
+  unitIds: string[];
+  types: Partial<Record<UnitType, number>>;
+  center?: Position;
+  hasActivePlanCount: number;
 }
 
 interface AITerminalEventBase {

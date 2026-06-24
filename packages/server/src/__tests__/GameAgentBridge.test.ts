@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameAgentBridge } from "../agent/GameAgentBridge";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, MAP_HEIGHT, MAP_WIDTH, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
 
 describe("GameAgentBridge", () => {
   const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
@@ -428,12 +428,12 @@ describe("GameAgentBridge", () => {
     expect(result.techStatus.enemy).toMatchObject({ hasWarFactory: true, lightTanks: 1 });
     expect(result.techStatus.recommendedStructures).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ buildingType: "refinery" }),
+        expect.objectContaining({ workerId: expect.any(String), buildingType: "refinery" }),
       ])
     );
     expect(result.techStatus.recommendedProduction).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ buildingType: "barracks", unitType: "rocket_soldier" }),
+        expect.objectContaining({ buildingId: expect.any(String), buildingType: "barracks", unitType: "rocket_soldier" }),
       ])
     );
     game.stop();
@@ -566,22 +566,27 @@ describe("GameAgentBridge", () => {
     const result = bridge.getMapState();
     const mapState = result.result as {
       tick: number;
-      fogOfWar: boolean;
-      visibleTileCount: number;
-      asciiMap: string;
       units: Array<Record<string, unknown>>;
       buildings: Array<Record<string, unknown>>;
+      resources: Array<Record<string, unknown>>;
       cells?: Array<Record<string, unknown>>;
     };
 
     expect(mapState.tick).toBe(0);
-    expect(mapState.fogOfWar).toBe(false);
-    expect(mapState.visibleTileCount).toBe(MAP_WIDTH * MAP_HEIGHT);
-    expect(mapState.asciiMap.split("\n")).toHaveLength(MAP_HEIGHT);
-    expect(mapState.asciiMap).toContain("H");
-    expect(mapState.asciiMap).not.toContain("?");
+    expect(mapState).not.toHaveProperty("fogOfWar");
+    expect(mapState).not.toHaveProperty("visibleTileCount");
+    expect(mapState).not.toHaveProperty("asciiMap");
     expect(mapState).not.toHaveProperty("legend");
     expect(mapState.cells).toBeUndefined();
+    expect(mapState.resources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          x: DEFAULT_MAP_LAYOUT.resources[0].x,
+          y: DEFAULT_MAP_LAYOUT.resources[0].y,
+          remaining: 5000,
+        }),
+      ])
+    );
     expect(mapState.units).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -610,6 +615,46 @@ describe("GameAgentBridge", () => {
     expect(mapState.units[0]).not.toHaveProperty("playerId");
     expect(mapState.units[0]).not.toHaveProperty("carryingCredits");
     expect(mapState.units[0]).not.toHaveProperty("attackRange");
+  });
+
+  it("groups controllable units by role and intent in get_my_units", () => {
+    const game = new Game();
+    game.start();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const tank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 30, 48, "player_1");
+    const rocket = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 31, 49, "player_1");
+
+    bridge.holdUnit(tank.id);
+    bridge.holdUnit(rocket.id);
+    game.processCommands();
+
+    const result = bridge.getMyUnits().result as {
+      groups: Array<Record<string, unknown>>;
+      units: Array<Record<string, unknown>>;
+    };
+
+    expect(result.groups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "combat",
+          intent: "hold",
+          count: 2,
+          unitIds: expect.arrayContaining([tank.id, rocket.id]),
+          types: expect.objectContaining({
+            [UNIT_TYPES.LIGHT_TANK]: 1,
+            [UNIT_TYPES.ROCKET_SOLDIER]: 1,
+          }),
+          center: { x: 31, y: 49 },
+        }),
+        expect.objectContaining({
+          role: "worker",
+          intent: "none",
+          count: 4,
+        }),
+      ])
+    );
+    expect(result.units.find((unit) => unit.id === tank.id)).toMatchObject({ intent: { type: "hold" } });
+    game.stop();
   });
 
   it("reveals enemy units and buildings across the full battlefield", () => {
@@ -659,13 +704,13 @@ describe("GameAgentBridge", () => {
         type: "attack_move",
         unitId: soldier.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["rifleman", "rocket_soldier", "soldier", "worker", "light_tank", "hq", "war_factory", "barracks", "refinery"],
+        targetPriority: ["rocket_soldier", "rifleman", "soldier", "worker", "light_tank", "barracks", "refinery", "hq"],
       }),
       expect.objectContaining({
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["hq", "war_factory", "barracks", "refinery", "light_tank", "rocket_soldier", "rifleman", "soldier", "worker"],
+        targetPriority: ["light_tank", "rocket_soldier", "rifleman", "soldier", "war_factory", "barracks", "hq", "refinery"],
       }),
     ]);
     game.stop();
@@ -685,6 +730,47 @@ describe("GameAgentBridge", () => {
     expect(payload.assignments).toHaveLength(100);
     expect(new Set(payload.assignments.map((assignment) => `${assignment.position.x},${assignment.position.y}`)).size).toBe(100);
     expect(bridge.takeIssuedCommands()).toHaveLength(100);
+  });
+
+  it("summarizes army readiness and recommends battle_line for tank groups", () => {
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 11, 10, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 12, 10, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 13, 10, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 20, 10, "player_2");
+
+    const summary = bridge.getArmySummary().result as {
+      myCounts: Record<string, number>;
+      enemyCounts: Record<string, number>;
+      recommendedFormation: string;
+      recommendations: Array<{ action: string; formation?: string }>;
+    };
+
+    expect(summary.myCounts.light_tank).toBe(4);
+    expect(summary.enemyCounts.rocket_soldier).toBe(1);
+    expect(summary.recommendedFormation).toBe("battle_line");
+    expect(summary.recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "attack_move_group", formation: "battle_line" }),
+    ]));
+  });
+
+  it("assigns battle_line formation with tanks ahead of rockets", () => {
+    const game = new Game();
+    const bridge = new GameAgentBridge(game, "player_1");
+    const tank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
+    const rifleman = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10, 11, "player_1");
+    const rocket = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 10, 12, "player_1");
+
+    const result = bridge.attackMoveGroup([rocket.id, tank.id, rifleman.id], { x: 60, y: 48 }, "battle_line").result as {
+      assignments: Array<{ unitId: string; position: { x: number; y: number } }>;
+    };
+    const byUnit = new Map(result.assignments.map((assignment) => [assignment.unitId, assignment.position]));
+
+    expect(byUnit.get(tank.id)?.x).toBe(60);
+    expect(byUnit.get(rifleman.id)?.x).toBe(56);
+    expect(byUnit.get(rocket.id)?.x).toBe(52);
   });
 
   it("queues high-level attack as movement until the target is in range", () => {

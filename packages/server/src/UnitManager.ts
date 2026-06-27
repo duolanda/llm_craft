@@ -15,12 +15,38 @@ import {
 } from "@llmcraft/shared";
 import { PathFinder } from "./PathFinder";
 
+const ARRIVAL_EPSILON = 0.001;
+const SEPARATION_ITERATIONS = 2;
+
+const UNIT_COLLISION_RADIUS: Record<UnitType, number> = {
+  worker: 0.3,
+  soldier: 0.32,
+  rifleman: 0.32,
+  rocket_soldier: 0.32,
+  light_tank: 0.56,
+};
+
 function getDistance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
 }
 
 function getChebyshevDistance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1));
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getPathCell(x: number, y: number): { x: number; y: number } {
+  return {
+    x: clamp(Math.round(x), 0, MAP_WIDTH - 1),
+    y: clamp(Math.round(y), 0, MAP_HEIGHT - 1),
+  };
+}
+
+function getCollisionRadius(unit: Unit): number {
+  return UNIT_COLLISION_RADIUS[unit.type] ?? 0.32;
 }
 
 export class UnitManager {
@@ -67,10 +93,12 @@ export class UnitManager {
    */
   hasUnitAt(x: number, y: number, excludeUnitId?: string): boolean {
     for (const unit of this.units.values()) {
-      if (unit.exists && unit.x === x && unit.y === y) {
-        if (excludeUnitId && unit.id === excludeUnitId) {
-          continue;
-        }
+      if (!unit.exists || (excludeUnitId && unit.id === excludeUnitId)) {
+        continue;
+      }
+
+      const unitCell = getPathCell(unit.x, unit.y);
+      if (unitCell.x === x && unitCell.y === y) {
         return true;
       }
     }
@@ -105,8 +133,8 @@ export class UnitManager {
       return RESULT_CODES.ERR_EXCEEDS_SPEED;
     }
 
-    // Check collision: cannot move to a position occupied by another unit
-    if (this.hasUnitAt(targetX, targetY, unit.id)) {
+    // Check collision: units have physical radius, not only a grid-center occupancy point.
+    if (this.hasUnitCollisionAt(unit, targetX, targetY)) {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
@@ -207,6 +235,7 @@ export class UnitManager {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
 
+    const startCell = getPathCell(unit.x, unit.y);
     const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
     const resolvedTarget = this.resolveMoveTarget(unit, targetX, targetY, tiles, occupiedPositions);
     if (!resolvedTarget) {
@@ -214,8 +243,8 @@ export class UnitManager {
     }
 
     const path = PathFinder.findPath(
-      unit.x,
-      unit.y,
+      startCell.x,
+      startCell.y,
       resolvedTarget.x,
       resolvedTarget.y,
       tiles,
@@ -225,7 +254,7 @@ export class UnitManager {
     // 保存路径和目标
     if (path.length === 0) {
       unit.path = undefined;
-      const alreadyAtResolvedTarget = unit.x === resolvedTarget.x && unit.y === resolvedTarget.y;
+      const alreadyAtResolvedTarget = getChebyshevDistance(unit.x, unit.y, resolvedTarget.x, resolvedTarget.y) <= 0.35;
       unit.pathTarget =
         keepResolvedTargetWhenAlreadyThere && alreadyAtResolvedTarget
           ? { x: resolvedTarget.x, y: resolvedTarget.y }
@@ -258,26 +287,39 @@ export class UnitManager {
       return RESULT_CODES.OK;
     }
 
-    const maxSpeed = getUnitStats(unit.type).speed;
-    let stepsTaken = 0;
+    let remainingDistance = getUnitStats(unit.type).speed;
 
-    while (stepsTaken < maxSpeed && unit.path.length > 0) {
+    while (remainingDistance > ARRIVAL_EPSILON && unit.path.length > 0) {
       const nextStep = unit.path[0];
+      const distanceToStep = getDistance(unit.x, unit.y, nextStep.x, nextStep.y);
+
+      if (distanceToStep <= ARRIVAL_EPSILON) {
+        unit.x = nextStep.x;
+        unit.y = nextStep.y;
+        unit.path.shift();
+        continue;
+      }
+
+      const travelDistance = Math.min(remainingDistance, distanceToStep);
+      const ratio = travelDistance / distanceToStep;
+      const nextX = unit.x + (nextStep.x - unit.x) * ratio;
+      const nextY = unit.y + (nextStep.y - unit.y) * ratio;
 
       // 检查这一步是否仍然可行（可能被其他单位占据了）
       if (
-        this.hasUnitAt(nextStep.x, nextStep.y, unit.id) ||
-        blockedPositions?.has(`${nextStep.x},${nextStep.y}`)
+        this.isPositionBlockedForUnit(unit, nextX, nextY, tiles, blockedPositions) ||
+        this.hasUnitCollisionAt(unit, nextX, nextY)
       ) {
         if (repathBudget && repathBudget.remaining <= 0) {
           return RESULT_CODES.ERR_BUSY;
         }
         if (repathBudget) repathBudget.remaining -= 1;
         // 路径被阻挡，需要重新寻路
+        const startCell = getPathCell(unit.x, unit.y);
         const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);
         const newPath = PathFinder.findPath(
-          unit.x,
-          unit.y,
+          startCell.x,
+          startCell.y,
           unit.pathTarget!.x,
           unit.pathTarget!.y,
           tiles,
@@ -296,11 +338,16 @@ export class UnitManager {
       }
 
       // 执行移动
-      unit.x = nextStep.x;
-      unit.y = nextStep.y;
+      unit.x = Math.abs(nextX - nextStep.x) <= ARRIVAL_EPSILON ? nextStep.x : nextX;
+      unit.y = Math.abs(nextY - nextStep.y) <= ARRIVAL_EPSILON ? nextStep.y : nextY;
       unit.state = UNIT_STATES.MOVING;
-      unit.path.shift();
-      stepsTaken++;
+      remainingDistance -= travelDistance;
+
+      if (getDistance(unit.x, unit.y, nextStep.x, nextStep.y) <= ARRIVAL_EPSILON) {
+        unit.x = nextStep.x;
+        unit.y = nextStep.y;
+        unit.path.shift();
+      }
     }
 
     // 路径走完
@@ -314,6 +361,40 @@ export class UnitManager {
     }
 
     return RESULT_CODES.OK;
+  }
+
+  resolveUnitSeparation(tiles: TileType[][], blockedPositions?: Set<string>): void {
+    for (let iteration = 0; iteration < SEPARATION_ITERATIONS; iteration++) {
+      const units = this.getAllUnits();
+      for (let i = 0; i < units.length; i++) {
+        for (let j = i + 1; j < units.length; j++) {
+          const left = units[i];
+          const right = units[j];
+          const minDistance = getCollisionRadius(left) + getCollisionRadius(right);
+          const dx = right.x - left.x;
+          const dy = right.y - left.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          if (distance >= minDistance || minDistance <= 0) {
+            continue;
+          }
+
+          const overlap = minDistance - distance;
+          const direction =
+            distance > ARRIVAL_EPSILON
+              ? { x: dx / distance, y: dy / distance }
+              : this.getDeterministicSeparationDirection(left.id, right.id);
+          const correction = overlap / 2;
+          const leftX = left.x - direction.x * correction;
+          const leftY = left.y - direction.y * correction;
+          const rightX = right.x + direction.x * correction;
+          const rightY = right.y + direction.y * correction;
+
+          this.tryApplySeparation(left, leftX, leftY, tiles, blockedPositions);
+          this.tryApplySeparation(right, rightX, rightY, tiles, blockedPositions);
+        }
+      }
+    }
   }
 
   /**
@@ -334,7 +415,8 @@ export class UnitManager {
         continue;
       }
 
-      positions.add(`${unit.x},${unit.y}`);
+      const unitCell = getPathCell(unit.x, unit.y);
+      positions.add(`${unitCell.x},${unitCell.y}`);
       if (unit.pathTarget) {
         positions.add(`${unit.pathTarget.x},${unit.pathTarget.y}`);
       }
@@ -352,6 +434,7 @@ export class UnitManager {
     tiles: TileType[][],
     occupiedPositions: Set<string>
   ): { x: number; y: number } | null {
+    const startCell = getPathCell(unit.x, unit.y);
     const candidates: Array<{ x: number; y: number; radius: number; pathLength: number; unitDistance: number }> = [];
 
     for (let radius = 0; radius <= MAP_WIDTH + MAP_HEIGHT; radius++) {
@@ -369,8 +452,8 @@ export class UnitManager {
             continue;
           }
 
-          const path = PathFinder.findPath(unit.x, unit.y, x, y, tiles, occupiedPositions);
-          if (path.length === 0 && (unit.x !== x || unit.y !== y)) {
+          const path = PathFinder.findPath(startCell.x, startCell.y, x, y, tiles, occupiedPositions);
+          if (path.length === 0 && (startCell.x !== x || startCell.y !== y)) {
             continue;
           }
 
@@ -398,5 +481,73 @@ export class UnitManager {
     }
 
     return null;
+  }
+
+  private hasUnitCollisionAt(unit: Unit, targetX: number, targetY: number): boolean {
+    const unitRadius = getCollisionRadius(unit);
+    for (const other of this.units.values()) {
+      if (!other.exists || other.id === unit.id) {
+        continue;
+      }
+
+      const minDistance = unitRadius + getCollisionRadius(other);
+      if (getDistance(targetX, targetY, other.x, other.y) < minDistance) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private isPositionBlockedForUnit(
+    unit: Unit,
+    x: number,
+    y: number,
+    tiles: TileType[][],
+    blockedPositions?: Set<string>,
+  ): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return true;
+    }
+
+    const cell = getPathCell(x, y);
+    if (tiles[cell.y][cell.x] === TILE_TYPES.OBSTACLE) {
+      return true;
+    }
+
+    if (blockedPositions?.has(`${cell.x},${cell.y}`)) {
+      return true;
+    }
+
+    return this.hasUnitCollisionAt(unit, x, y);
+  }
+
+  private tryApplySeparation(unit: Unit, x: number, y: number, tiles: TileType[][], blockedPositions?: Set<string>): void {
+    const nextX = clamp(x, 0, MAP_WIDTH - 1);
+    const nextY = clamp(y, 0, MAP_HEIGHT - 1);
+    if (this.isTerrainBlocked(nextX, nextY, tiles, blockedPositions)) {
+      return;
+    }
+    unit.x = nextX;
+    unit.y = nextY;
+  }
+
+  private isTerrainBlocked(x: number, y: number, tiles: TileType[][], blockedPositions?: Set<string>): boolean {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+      return true;
+    }
+
+    const cell = getPathCell(x, y);
+    return tiles[cell.y][cell.x] === TILE_TYPES.OBSTACLE || Boolean(blockedPositions?.has(`${cell.x},${cell.y}`));
+  }
+
+  private getDeterministicSeparationDirection(leftId: string, rightId: string): { x: number; y: number } {
+    const seed = `${leftId}:${rightId}`;
+    let hash = 0;
+    for (let index = 0; index < seed.length; index++) {
+      hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+    }
+    const angle = (hash % 360) * (Math.PI / 180);
+    return { x: Math.cos(angle), y: Math.sin(angle) };
   }
 }

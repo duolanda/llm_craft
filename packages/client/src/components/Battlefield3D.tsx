@@ -8,6 +8,7 @@ import {
   GAME_COLORS,
   GameState,
   PLAYER_COLORS,
+  TICK_INTERVAL_MS,
   Tile,
   Unit,
 } from "@llmcraft/shared";
@@ -91,7 +92,8 @@ const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
   light_tank: 1.16,
 };
 const STRUCTURE_VISUAL_SCALE = 1.16;
-const UNIT_POSITION_SMOOTHING = 10;
+const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
+const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -1144,31 +1146,46 @@ function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDime
 
 function useInterpolatedUnits(units: Unit[]): Unit[] {
   const sourceUnits = useRef(units);
-  const visualPositions = useRef(new Map<string, { x: number; y: number; targetX: number; targetY: number }>());
+  const visualPositions = useRef(new Map<string, { x: number; y: number }>());
+  const transitions = useRef(new Map<string, { fromX: number; fromY: number; toX: number; toY: number; startedAtMs: number }>());
   const [displayUnits, setDisplayUnits] = useState(units);
 
   useEffect(() => {
+    const now = performance.now();
     sourceUnits.current = units;
     const liveIds = new Set(units.map((unit) => unit.id));
     for (const [unitId] of visualPositions.current) {
       if (!liveIds.has(unitId)) {
         visualPositions.current.delete(unitId);
+        transitions.current.delete(unitId);
       }
     }
 
     for (const unit of units) {
       const existing = visualPositions.current.get(unit.id);
       if (!existing) {
-        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y, targetX: unit.x, targetY: unit.y });
+        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y });
+        transitions.current.set(unit.id, {
+          fromX: unit.x,
+          fromY: unit.y,
+          toX: unit.x,
+          toY: unit.y,
+          startedAtMs: now,
+        });
         continue;
       }
       const jumpDistance = Math.max(Math.abs(existing.x - unit.x), Math.abs(existing.y - unit.y));
-      if (jumpDistance > 10) {
+      if (jumpDistance > UNIT_INTERPOLATION_SNAP_DISTANCE) {
         existing.x = unit.x;
         existing.y = unit.y;
       }
-      existing.targetX = unit.x;
-      existing.targetY = unit.y;
+      transitions.current.set(unit.id, {
+        fromX: existing.x,
+        fromY: existing.y,
+        toX: unit.x,
+        toY: unit.y,
+        startedAtMs: now,
+      });
     }
 
     setDisplayUnits(units.map((unit) => {
@@ -1177,17 +1194,28 @@ function useInterpolatedUnits(units: Unit[]): Unit[] {
     }));
   }, [units]);
 
-  useFrame((_, delta) => {
+  useFrame(() => {
+    const now = performance.now();
     let changed = false;
-    const blend = 1 - Math.exp(-delta * UNIT_POSITION_SMOOTHING);
-    for (const visual of visualPositions.current.values()) {
-      const nextX = THREE.MathUtils.lerp(visual.x, visual.targetX, blend);
-      const nextY = THREE.MathUtils.lerp(visual.y, visual.targetY, blend);
+    for (const [unitId, transition] of transitions.current) {
+      const visual = visualPositions.current.get(unitId);
+      if (!visual) {
+        transitions.current.delete(unitId);
+        continue;
+      }
+
+      const progress = Math.min(1, Math.max(0, (now - transition.startedAtMs) / UNIT_INTERPOLATION_DURATION_MS));
+      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, progress);
+      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, progress);
       if (Math.abs(nextX - visual.x) > 0.001 || Math.abs(nextY - visual.y) > 0.001) {
         changed = true;
       }
-      visual.x = Math.abs(nextX - visual.targetX) < 0.01 ? visual.targetX : nextX;
-      visual.y = Math.abs(nextY - visual.targetY) < 0.01 ? visual.targetY : nextY;
+      visual.x = progress >= 1 ? transition.toX : nextX;
+      visual.y = progress >= 1 ? transition.toY : nextY;
+
+      if (progress >= 1) {
+        transitions.current.delete(unitId);
+      }
     }
 
     if (!changed) {

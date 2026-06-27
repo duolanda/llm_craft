@@ -1439,7 +1439,15 @@ export class GameAgentBridge {
       if (tile.type !== "empty") {
         return { ok: false, hint: "The building footprint overlaps terrain or resources." };
       }
-      if (state.players.some((player) => player.units.some((unit) => unit.exists && unit.x === cell.x && unit.y === cell.y))) {
+      if (
+        state.players.some((player) =>
+          player.units.some((unit) =>
+            unit.exists &&
+            Math.round(unit.x) === cell.x &&
+            Math.round(unit.y) === cell.y
+          )
+        )
+      ) {
         return { ok: false, hint: "The building footprint is occupied by a unit right now." };
       }
       if (state.players.some((player) => player.buildings.some((building) =>

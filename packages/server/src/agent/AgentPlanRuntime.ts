@@ -357,7 +357,11 @@ export class AgentPlanRuntime {
           return false;
         }
         const args = this.resolveUnitArgs(step.args, unit.id);
-        return Number.isInteger(args.x) && Number.isInteger(args.y) && unit.x === Number(args.x) && unit.y === Number(args.y);
+        return (
+          Number.isInteger(args.x) &&
+          Number.isInteger(args.y) &&
+          Math.max(Math.abs(unit.x - Number(args.x)), Math.abs(unit.y - Number(args.y))) <= 0.35
+        );
       }
       case "enemy_in_range":
         return Boolean(unit && this.isAnyEnemyInRange(unit, snapshot));

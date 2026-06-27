@@ -230,24 +230,6 @@ export class GameOrchestrator {
         return;
       }
 
-      if (latestState.winner) {
-        return;
-      }
-
-      if (result.stopReason === "stall_detected") {
-        this.game.addLog(
-          LOG_TYPES.AI_GENERATION_ERROR,
-          "Agent run stopped after repeated read-only tool use with no actionable progress.",
-          undefined,
-          {
-            level: LOG_LEVELS.WARNING,
-            owner: playerId,
-            feedbackTarget: playerId as AIFeedbackTarget,
-            displayTarget: LOG_DISPLAY_TARGETS.BACKEND,
-          }
-        );
-      }
-
       const assistantPreview = result.assistantMessages.at(-1) ?? `tool-calls=${result.toolCalls.length}`;
       this.game.setAIOutput(playerId, assistantPreview);
 
@@ -267,6 +249,24 @@ export class GameOrchestrator {
         baseURL: this.getProvider(playerId).getBaseURL(),
         createdAt,
       });
+
+      if (latestState.winner) {
+        return;
+      }
+
+      if (result.stopReason === "stall_detected") {
+        this.game.addLog(
+          LOG_TYPES.AI_GENERATION_ERROR,
+          "Agent run stopped after repeated read-only tool use with no actionable progress.",
+          undefined,
+          {
+            level: LOG_LEVELS.WARNING,
+            owner: playerId,
+            feedbackTarget: playerId as AIFeedbackTarget,
+            displayTarget: LOG_DISPLAY_TARGETS.BACKEND,
+          }
+        );
+      }
 
     } catch (error) {
       this.maybeLogAIRuntimePerformance(

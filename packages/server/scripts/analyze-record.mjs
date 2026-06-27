@@ -28,6 +28,8 @@ const debugPath = options.debugFile ? resolveInputPath(options.debugFile) : null
 const debugText = debugPath ? readFileSync(debugPath, "utf8") : null;
 const players = (record.finalState?.players ?? record.initialState?.players ?? []).map((player) => player.id);
 const analysis = buildReplayAnalysis(record, players, options.skill);
+const aiTurns = record.aiTurns ?? [];
+const metadataByPlayer = new Map((record.metadata?.players ?? []).map((player) => [player.playerId, player]));
 
 const createCounter = () => Object.create(null);
 const bump = (counter, key, amount = 1) => {
@@ -68,7 +70,7 @@ for (const player of record.initialState?.players ?? []) {
   }
 }
 
-for (const turn of record.aiTurns ?? []) {
+for (const turn of aiTurns) {
   const entry = metrics[turn.playerId];
   if (!entry) {
     continue;
@@ -179,13 +181,29 @@ for (const playerId of players) {
 
   console.log(`${playerId}:`);
   console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}, workers=${entry.workerCount}, soldiers=${entry.soldierCount}, barracks=${entry.barracksCount}, hqAlive=${entry.hqAlive}`);
-  console.log(`  agent: modelRequests=${entry.modelRequests}, toolCalls=${entry.toolCalls}`);
-  console.log(`  tools: ${formatCounter(entry.toolNames)}`);
+  if (isAgentMetricsUnavailable(playerId)) {
+    console.log("  agent: unavailable (record has no aiTurns; model/tool metrics were not persisted)");
+    console.log("  tools: unavailable");
+  } else {
+    console.log(`  agent: modelRequests=${entry.modelRequests}, toolCalls=${entry.toolCalls}`);
+    console.log(`  tools: ${formatCounter(entry.toolNames)}`);
+  }
   console.log(`  commands: ${formatCounter(entry.commands)}`);
   console.log(`  results: ${formatCounter(entry.commandResults)}`);
   console.log(`  firstEnemyHqDamageTick: ${entry.firstEnemyHqDamageTick ?? "never"}`);
   console.log(`  flags: ${flags.length > 0 ? flags.join(", ") : "none"}`);
   console.log("");
+}
+
+function isAgentMetricsUnavailable(playerId) {
+  if (aiTurns.length > 0 || debugText) {
+    return false;
+  }
+  const metadata = metadataByPlayer.get(playerId);
+  const model = String(metadata?.model ?? "");
+  const baseURL = String(metadata?.baseURL ?? "");
+  const hasModelBackedPlayer = Boolean(model || baseURL) && !/cpu|benchmark/i.test(`${model} ${baseURL}`);
+  return hasModelBackedPlayer;
 }
 
 if (options.timeline) {

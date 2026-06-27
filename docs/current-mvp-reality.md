@@ -1,6 +1,6 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-06-23
+日期: 2026-06-27
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
@@ -108,6 +108,8 @@
 
 服务端提供 `pnpm --filter @llmcraft/server analyze:record <record.json> [--debug <llm-debug.log>]`，用于离线统计回放里的囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机；传入 debug log 时还会补充工具调用分布和粗略 token 体量。
 
+当旧 record 缺少 `aiTurns` 但 metadata 显示双方是模型玩家时，`analyze-record` 会明确标记 `agent: unavailable (record has no aiTurns...)`，不再把缺失日志误读成模型请求数为 `0` 或 CPU 对局。新对局中，agent run 只要已经返回结果，会先写入 AI turn journal，再处理胜负后的 early return，避免最后一轮打出胜负时丢失模型/tool 调用记录。
+
 Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` 局 LLM vs CPU 对局；默认并发为 `1`，前端限制为 `1-10`。主画面会自动观战一局活跃 benchmark round，并在该 round 结束后切到剩余活跃 round 中编号最小的一局；前端状态条会显示当前画面对应的 round 和活跃 round 列表。最终结果按 round 编号排序，进度消息按实际完成顺序更新。
 
 ## 5. 当前 MVP 规则
@@ -119,6 +121,7 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - `barracks` 生产 `soldier`、`rifleman`、`rocket_soldier`
 - `war_factory` 生产 `light_tank`
 - 当前 OpenRA-lite 武器模型：攻击不再是命令执行即扣血，而是开火生成 projectile；projectile 按飞行时间抵达后由 warhead 结算伤害。单位有 reload：`soldier` 3 ticks、`rifleman` 2 ticks、`rocket_soldier` 8 ticks、`light_tank` 6 ticks。
+- 当前移动/碰撞模型：地图、建筑、资源和寻路仍使用格子坐标；单位权威坐标允许为连续数值。A* 仍以最近格作为路径节点，但移动沿路径按速度推进，并在 tick 后做单位半径分离；轻坦半径大于步兵，避免多个坦克视觉上叠在同一点。到达、采矿和 plan `arrived` 判断使用近似位置/最近格，不再依赖 `x === tile.x`。
 - 当前单位数值：`soldier` 115 HP / 10 damage / range 1 / cost 55；`rifleman` 95 HP / 9 damage / range 6 / cost 70；`rocket_soldier` 80 HP / 34 damage / range 6 / cost 110；`light_tank` 420 HP / 42 damage / range 5 / cost 240。
 - 当前 armor / 伤害倍率：单位 armor 为 `infantry` 或 `vehicle`，建筑 armor 为 `structure`。`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x。伤害结算四舍五入为整数。
 - `rocket_soldier` 和 `light_tank` 的 projectile 有 1 格 splash，默认 falloff 分别为 35% / 50%。这让单位扎堆会吃亏，坦克前排、步兵掩护、火箭后排的阵型更有实际收益。
@@ -132,7 +135,7 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - Phase 9 增强资源分配：省略坐标调用 `start_harvest_loop` 时会倾向选择较近且较少 worker 占用的资源点；`get_my_state.economyStatus` 会暴露 worker / activeHarvester / idleWorker 数量、携带中的 credits、资源点分配和经济建议。
 - Phase 10 增强移动目标预约：寻路会把其他单位的当前格和已预约 `pathTarget` 都视为占用；多个单位同 tick 移动或 attack-move 到同一目标时，后续单位会自动解析到附近可达格，降低大地图集群推进时的同格拥堵。
 - Phase 19 重做单位战斗交互：引入 weapon/projectile/reload/splash，`GameState.projectiles` 向前端同步实时弹丸；客户端优先渲染 active projectiles，旧录像没有该字段时仍可回放。新增 `get_army_summary` 和 `attack_move_group` 的 `battle_line` 编队，给 AI 表达步坦协同的工具，但不强制 AI 攒兵或按脚本行动。
-- Phase 20 收敛 AI 读工具和表现层：`get_map_state` 移除 `fogOfWar`、`visibleTileCount`、`asciiMap`，默认只返回结构化单位/建筑/资源；`get_my_state` 的推荐项携带可直接调用工具的 `workerId` / `buildingId`；`get_my_units` 增加 `groups` 聚合。客户端对单位位置做表现层插值，并缩小单位视觉占位以降低大军团重叠感。
+- Phase 20 收敛 AI 读工具和表现层：`get_map_state` 移除 `fogOfWar`、`visibleTileCount`、`asciiMap`，默认只返回结构化单位/建筑/资源；`get_my_state` 的推荐项携带可直接调用工具的 `workerId` / `buildingId`；`get_my_units` 增加 `groups` 聚合。客户端对单位位置按服务器 tick 周期做时间插值；服务端单位坐标改为连续坐标 + 半径分离，降低大军团推进时的顿挫和坦克叠放感。
 - Phase 13 启用 3D 战场表现层：前端主战术视口从 2D Canvas 网格切换为 React Three Fiber / Three.js；HQ、兵营、工厂、工人、步兵、火箭兵、轻坦、资源和障碍加载 `packages/client/public/assets/models/battlefield/*.glb`。这些 GLB 由本机 Blender 后台脚本生成，运行时通过 `team_primary` / `team_accent` 材质名替换红蓝队色。底层仍保留离散战术坐标供 AI、寻路、攻击范围、回放和控制面使用，但前端默认不显示格线或坐标轴。
 - Phase 14 将首版几何占位资产替换为可复现的生产资产管线：步兵以 Quaternius CC0 `Animated Men` 人体网格为基础追加原创军装、护甲、武器和工程装备，轻坦基于 Quaternius CC0 `Animated Tanks` 重制材质和附加装甲；HQ 扩大为约 `7.2 x 6.5` 世界单位的指挥中心，并重制兵营和战车工厂。Blender 导出模型嵌入程序生成的 Albedo / Normal / Roughness 贴图，地面和道路也使用重复 PBR 纹理。
 - Phase 14 同时加入军团 LOD 和实例运动：单位总数达到 `100` 时自动切换为单网格、单材质的 mass-battle GLB；高细节版本仍用于小规模/近景。单位、矿石和岩石均通过 `InstancedMesh` 合批，移动步兵以 30 Hz 更新实例矩阵形成错相步态起伏。开发地址 `/?showcase=mass-battle` 可在没有服务端对局状态时独立生成 `80 vs 80` 压力场景，`&units=<每方数量>` 可用于资产审查。

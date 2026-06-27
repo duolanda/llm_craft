@@ -876,6 +876,18 @@ describe("Game", () => {
     expect(unit2.pathTarget).not.toEqual(target);
   });
 
+  it("separates overlapping tanks with continuous unit positions", () => {
+    const unitManager = game.getUnitManager();
+    const tank1 = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 60, 40, "player_1");
+    const tank2 = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 60, 40, "player_1");
+
+    advanceTicks(1);
+
+    const distance = Math.hypot(tank1.x - tank2.x, tank1.y - tank2.y);
+    expect(distance).toBeGreaterThan(1);
+    expect(Number.isInteger(tank1.x) && Number.isInteger(tank1.y) && Number.isInteger(tank2.x) && Number.isInteger(tank2.y)).toBe(false);
+  });
+
   it("reserves path targets for grouped attack-move orders near blocked HQ targets", () => {
     const unitManager = game.getUnitManager();
     const enemyHq = game.getState().players[1].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;

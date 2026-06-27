@@ -1112,6 +1112,17 @@ export class Game {
     return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
   }
 
+  private getNearestCell(position: { x: number; y: number }): { x: number; y: number } {
+    return {
+      x: Math.max(0, Math.min(MAP_WIDTH - 1, Math.round(position.x))),
+      y: Math.max(0, Math.min(MAP_HEIGHT - 1, Math.round(position.y))),
+    };
+  }
+
+  private isNearPosition(position: { x: number; y: number }, target: { x: number; y: number }, tolerance = 0.35): boolean {
+    return Math.max(Math.abs(position.x - target.x), Math.abs(position.y - target.y)) <= tolerance;
+  }
+
   private processProjectiles(): void {
     if (this.projectiles.length === 0) {
       return;
@@ -1286,7 +1297,7 @@ export class Game {
         ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
         : null;
 
-      if (!moveTarget || (runtimeUnit.x === moveTarget.x && runtimeUnit.y === moveTarget.y)) {
+      if (!moveTarget || this.isNearPosition(runtimeUnit, moveTarget)) {
         this.unitManager.clearPath(runtimeUnit);
         runtimeUnit.intent = { type: "hold" };
         runtimeUnit.state = UNIT_STATES.IDLE;
@@ -1449,7 +1460,7 @@ export class Game {
         continue;
       }
 
-      const onResourceTile = runtimeUnit.x === resourceTarget.x && runtimeUnit.y === resourceTarget.y;
+      const onResourceTile = this.isNearPosition(runtimeUnit, resourceTarget);
       const pathingToResource =
         runtimeUnit.pathTarget?.x === resourceTarget.x &&
         runtimeUnit.pathTarget?.y === resourceTarget.y;
@@ -1644,6 +1655,7 @@ export class Game {
       for (const unit of this.unitManager.getAllUnits()) {
         this.unitManager.processPathMovement(unit, this.tiles, blockedPositions, repathBudget);
       }
+      this.unitManager.resolveUnitSeparation(this.tiles, blockedPositions);
 
       // Resolve delayed weapon projectiles after movement, before new attacks fire.
       this.processProjectiles();
@@ -1683,6 +1695,7 @@ export class Game {
           }
         }
       }
+      this.unitManager.resolveUnitSeparation(this.tiles, this.buildingManager.getOccupiedPositions());
 
       // Check win condition
       this.checkWinCondition();
@@ -1857,7 +1870,8 @@ export class Game {
         }
 
         const preserveHarvestLoop = unit.intent?.type === "harvest_loop" ? unit.intent : null;
-        const onResourceTile = this.tiles[unit.y]?.[unit.x] === TILE_TYPES.RESOURCE;
+        const unitCell = this.getNearestCell(unit);
+        const onResourceTile = this.tiles[unitCell.y]?.[unitCell.x] === TILE_TYPES.RESOURCE;
         const deliveryBuilding = deliveryBuildings
           .filter((building) => this.isWithinDeliveryRange(unit, building))
           .sort((left, right) =>
@@ -1867,7 +1881,7 @@ export class Game {
         let economyActionTaken = false;
 
         if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
-          const resourceKey = `${unit.x},${unit.y}`;
+          const resourceKey = `${unitCell.x},${unitCell.y}`;
           const depositRemaining = this.resourceRemaining.get(resourceKey) ?? 0;
           const gatheredCredits = Math.min(
             ECONOMY_RULES.WORKER_GATHER_RATE,
@@ -1879,24 +1893,24 @@ export class Game {
             unit.carryingCredits += gatheredCredits;
             const nextDepositRemaining = depositRemaining - gatheredCredits;
             this.resourceRemaining.set(resourceKey, nextDepositRemaining);
-            const currentTile = this.tileView[unit.y]?.[unit.x];
+            const currentTile = this.tileView[unitCell.y]?.[unitCell.x];
             const nextTile: Tile | undefined = currentTile
               ? nextDepositRemaining <= 0
                 ? { x: currentTile.x, y: currentTile.y, type: TILE_TYPES.EMPTY }
                 : { ...currentTile, resourceRemaining: nextDepositRemaining }
               : undefined;
             if (nextDepositRemaining <= 0) {
-              this.tiles[unit.y][unit.x] = TILE_TYPES.EMPTY;
+              this.tiles[unitCell.y][unitCell.x] = TILE_TYPES.EMPTY;
             }
             if (nextTile) {
-              const nextRow = [...this.tileView[unit.y]];
-              nextRow[unit.x] = nextTile;
+              const nextRow = [...this.tileView[unitCell.y]];
+              nextRow[unitCell.x] = nextTile;
               const nextTileView = [...this.tileView];
-              nextTileView[unit.y] = nextRow;
+              nextTileView[unitCell.y] = nextRow;
               this.tileView = nextTileView;
             }
             unit.state = UNIT_STATES.GATHERING;
-            unit.intent = preserveHarvestLoop ?? { type: "gather", targetX: unit.x, targetY: unit.y };
+            unit.intent = preserveHarvestLoop ?? { type: "gather", targetX: unitCell.x, targetY: unitCell.y };
             this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
               unitId: unit.id,
               amount: gatheredCredits,

@@ -466,20 +466,22 @@ describe("GameAgentBridge", () => {
       idleWorkers: 2,
       carryingCredits: 0,
     });
-    expect(result.economyStatus.resourceAssignments).toEqual(
+    const assignedResources = result.economyStatus.resourceAssignments.filter(
+      (assignment) => assignment.assignedHarvesters === 1,
+    );
+    expect(assignedResources).toHaveLength(2);
+    expect(assignedResources).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          x: DEFAULT_MAP_LAYOUT.resources[0].x,
-          y: DEFAULT_MAP_LAYOUT.resources[0].y,
-          assignedHarvesters: 1,
-        }),
-        expect.objectContaining({
-          x: DEFAULT_MAP_LAYOUT.resources[1].x,
-          y: DEFAULT_MAP_LAYOUT.resources[1].y,
-          assignedHarvesters: 1,
-        }),
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), assignedHarvesters: 1 }),
       ])
     );
+    for (const assignment of assignedResources) {
+      expect(DEFAULT_MAP_LAYOUT.resources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ x: assignment.x, y: assignment.y }),
+        ]),
+      );
+    }
     expect(result.economyStatus.recommendations).toEqual(
       expect.arrayContaining([expect.objectContaining({ action: "start_harvest_loop" })])
     );

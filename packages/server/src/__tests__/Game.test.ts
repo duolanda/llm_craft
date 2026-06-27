@@ -107,6 +107,39 @@ describe("Game", () => {
     }
   });
 
+  it("keeps default battlefield free of obstacle rocks", () => {
+    const tiles = MapGenerator.generate();
+    expect(tiles.flat().filter((tile) => tile === TILE_TYPES.OBSTACLE)).toHaveLength(0);
+  });
+
+  it("keeps mineral fields out of the central attack corridor", () => {
+    const state = game.getState();
+    for (let y = DEFAULT_MAP_LAYOUT.centerY - 10; y <= DEFAULT_MAP_LAYOUT.centerY + 10; y++) {
+      for (let x = DEFAULT_MAP_LAYOUT.centerX - 18; x <= DEFAULT_MAP_LAYOUT.centerX + 18; x++) {
+        expect(state.tiles[y][x].type).not.toBe(TILE_TYPES.RESOURCE);
+      }
+    }
+  });
+
+  it("keeps home mineral fields out of the HQ and production-building pocket", () => {
+    for (const position of DEFAULT_MAP_LAYOUT.resources) {
+      if (position.x <= 40) {
+        const distanceFromHq = Math.max(
+          Math.abs(position.x - DEFAULT_MAP_LAYOUT.player1Hq.x),
+          Math.abs(position.y - DEFAULT_MAP_LAYOUT.player1Hq.y),
+        );
+        expect(distanceFromHq).toBeGreaterThanOrEqual(17);
+      }
+      if (position.x >= MAP_WIDTH - 41) {
+        const distanceFromHq = Math.max(
+          Math.abs(position.x - DEFAULT_MAP_LAYOUT.player2Hq.x),
+          Math.abs(position.y - DEFAULT_MAP_LAYOUT.player2Hq.y),
+        );
+        expect(distanceFromHq).toBeGreaterThanOrEqual(17);
+      }
+    }
+  });
+
   it("allows HQ to spawn workers and deducts credits", () => {
     const state = game.getState();
     const player1 = state.players[0];

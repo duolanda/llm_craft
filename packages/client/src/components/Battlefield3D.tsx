@@ -37,9 +37,11 @@ interface ModelTransform {
   rotation: Vec3;
   scale: number;
   motionAmplitude?: number;
+  motionFrequency?: number;
   motionPhase?: number;
   recoilAmplitude?: number;
   swayAmplitude?: number;
+  swayFrequency?: number;
 }
 
 interface InstancedModelPart {
@@ -94,6 +96,7 @@ const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
 const STRUCTURE_VISUAL_SCALE = 1.16;
 const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
 const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
+const UNIT_INTERPOLATION_DEADZONE = 0.075;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -402,13 +405,15 @@ function InstancedPart({
     transforms.forEach((transform, index) => {
       const motion = transform.motionAmplitude ?? 0;
       const phase = transform.motionPhase ?? 0;
+      const motionFrequency = transform.motionFrequency ?? 5.2;
+      const swayFrequency = transform.swayFrequency ?? 4.6;
       const recoilPulse = Math.pow(Math.max(0, Math.sin(elapsed * 11 + phase)), 10)
         * (transform.recoilAmplitude ?? 0);
-      const sway = Math.sin(elapsed * 7.5 + phase) * (transform.swayAmplitude ?? 0);
+      const sway = Math.sin(elapsed * swayFrequency + phase) * (transform.swayAmplitude ?? 0);
       const heading = transform.rotation[1];
       scratch.position.set(
         transform.position[0] - Math.sin(heading) * recoilPulse,
-        transform.position[1] + Math.abs(Math.sin(elapsed * 7.5 + phase)) * motion,
+        transform.position[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
         transform.position[2] - Math.cos(heading) * recoilPulse,
       );
       scratch.rotation.set(transform.rotation[0], heading, transform.rotation[2] + sway);
@@ -423,7 +428,7 @@ function InstancedPart({
   };
 
   useLayoutEffect(() => {
-    updateMatrices(0);
+    updateMatrices(performance.now() / 1000);
   }, [part.localMatrix, transforms]);
 
   useFrame(({ clock }) => {
@@ -526,25 +531,35 @@ function HealthBar({
   );
 }
 
-function getResourceTransform(tile: Tile, dimensions: MapDimensions): ModelTransform {
-  const scale = 0.78 + deterministicNoise(tile.x, tile.y, 2) * 0.34;
-  return {
-    position: toWorldPosition(tile.x, tile.y, dimensions, 0.02),
-    rotation: [0, ((tile.x * 13 + tile.y * 7) % 360) * (Math.PI / 180), 0],
-    scale,
-  };
+function getResourceClusterTransforms(tile: Tile, dimensions: MapDimensions): ModelTransform[] {
+  const basePosition = toWorldPosition(tile.x, tile.y, dimensions, 0.02);
+  const count = 10;
+  return Array.from({ length: count }, (_, index) => {
+    const angle = deterministicNoise(tile.x, tile.y, 20 + index) * Math.PI * 2;
+    const radius = index === 0 ? 0 : CELL_SIZE * (0.22 + deterministicNoise(tile.x, tile.y, 30 + index) * 0.74);
+    const scale = (index === 0 ? 1.65 : 0.86) + deterministicNoise(tile.x, tile.y, 40 + index) * 0.54;
+    return {
+      position: [
+        basePosition[0] + Math.cos(angle) * radius,
+        basePosition[1],
+        basePosition[2] + Math.sin(angle) * radius,
+      ],
+      rotation: [0, ((tile.x * 13 + tile.y * 7 + index * 43) % 360) * (Math.PI / 180), 0],
+      scale,
+    };
+  });
 }
 
 function getRockTransform(tile: Tile, dimensions: MapDimensions): ModelTransform | null {
   const density = deterministicNoise(tile.x, tile.y, 3);
-  if (density < 0.3) {
+  if (density < 0.52) {
     return null;
   }
 
   const basePosition = toWorldPosition(tile.x, tile.y, dimensions, 0);
-  const jitterX = (deterministicNoise(tile.x, tile.y, 4) - 0.5) * CELL_SIZE * 0.62;
-  const jitterZ = (deterministicNoise(tile.x, tile.y, 5) - 0.5) * CELL_SIZE * 0.62;
-  const scale = 0.58 + deterministicNoise(tile.x, tile.y, 6) * 0.82;
+  const jitterX = (deterministicNoise(tile.x, tile.y, 4) - 0.5) * CELL_SIZE * 0.44;
+  const jitterZ = (deterministicNoise(tile.x, tile.y, 5) - 0.5) * CELL_SIZE * 0.44;
+  const scale = 0.34 + deterministicNoise(tile.x, tile.y, 6) * 0.46;
 
   return {
     position: [basePosition[0] + jitterX, 0, basePosition[2] + jitterZ],
@@ -651,6 +666,45 @@ function getUnitVisualScale(unit: Unit): number {
   return UNIT_VISUAL_SCALE * (UNIT_SCALE_BY_TYPE[unit.type] ?? 1);
 }
 
+function getUnitMotionProfile(unit: Unit, moving: boolean, firing: boolean): Pick<ModelTransform, "motionAmplitude" | "motionFrequency" | "swayAmplitude" | "swayFrequency" | "recoilAmplitude"> {
+  if (unit.type === "light_tank") {
+    return {
+      motionAmplitude: 0,
+      swayAmplitude: 0,
+      recoilAmplitude: firing ? 0 : 0,
+    };
+  }
+
+  if (unit.type === "worker") {
+    const working = unit.intent?.type === "harvest_loop" || unit.intent?.type === "gather" || unit.intent?.type === "deposit" || unit.state === "gathering";
+    if (working && !moving) {
+      return {
+        motionAmplitude: 0,
+        motionFrequency: 1.2,
+        swayAmplitude: 0.003,
+        swayFrequency: 1.15,
+        recoilAmplitude: 0,
+      };
+    }
+
+    return {
+      motionAmplitude: moving ? 0.006 : 0,
+      motionFrequency: 2.2,
+      swayAmplitude: moving ? 0.003 : 0,
+      swayFrequency: 1.9,
+      recoilAmplitude: 0,
+    };
+  }
+
+  return {
+    motionAmplitude: moving ? 0.01 : 0,
+    motionFrequency: 3.2,
+    swayAmplitude: moving ? 0.004 : 0,
+    swayFrequency: 2.8,
+    recoilAmplitude: firing ? 0.04 : 0,
+  };
+}
+
 function UnitBatches({
   units,
   buildings,
@@ -672,14 +726,17 @@ function UnitBatches({
     for (const [index, unit] of units.entries()) {
       const moving = unit.state === "moving" || unit.intent?.type === "move" || unit.intent?.type === "attack_move";
       const firing = unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1;
+      const motionProfile = getUnitMotionProfile(unit, moving, firing);
       const baseTransform: ModelTransform = {
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
         scale: getUnitVisualScale(unit),
-        motionAmplitude: unit.type !== "light_tank" && moving ? 0.035 : 0,
+        motionAmplitude: motionProfile.motionAmplitude,
+        motionFrequency: motionProfile.motionFrequency,
         motionPhase: index * 1.73 + (unit.playerId === "player_1" ? 0 : 0.8),
-        recoilAmplitude: firing ? (unit.type === "light_tank" ? 0 : 0.055) : 0,
-        swayAmplitude: unit.type !== "light_tank" && moving ? 0.025 : 0,
+        recoilAmplitude: motionProfile.recoilAmplitude,
+        swayAmplitude: motionProfile.swayAmplitude,
+        swayFrequency: motionProfile.swayFrequency,
       };
 
       const addToBatch = (url: string, transform: ModelTransform) => {
@@ -1179,6 +1236,9 @@ function useInterpolatedUnits(units: Unit[]): Unit[] {
         existing.x = unit.x;
         existing.y = unit.y;
       }
+      if (jumpDistance < UNIT_INTERPOLATION_DEADZONE && unit.state !== "moving") {
+        continue;
+      }
       transitions.current.set(unit.id, {
         fromX: existing.x,
         fromY: existing.y,
@@ -1205,8 +1265,9 @@ function useInterpolatedUnits(units: Unit[]): Unit[] {
       }
 
       const progress = Math.min(1, Math.max(0, (now - transition.startedAtMs) / UNIT_INTERPOLATION_DURATION_MS));
-      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, progress);
-      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, progress);
+      const easedProgress = progress * progress * (3 - 2 * progress);
+      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, easedProgress);
+      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, easedProgress);
       if (Math.abs(nextX - visual.x) > 0.001 || Math.abs(nextY - visual.y) > 0.001) {
         changed = true;
       }
@@ -1263,7 +1324,7 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
   }, [state]);
   const displayUnits = useInterpolatedUnits(units);
   const resourceTransforms = useMemo(
-    () => resourceTiles.map((tile) => getResourceTransform(tile, dimensions)),
+    () => resourceTiles.flatMap((tile) => getResourceClusterTransforms(tile, dimensions)),
     [dimensions, resourceTiles],
   );
   const rockTransforms = useMemo(

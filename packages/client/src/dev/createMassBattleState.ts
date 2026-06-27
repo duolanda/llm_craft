@@ -9,6 +9,7 @@ import {
   PLAYER_IDS,
   Player,
   TILE_TYPES,
+  UNIT_STATES,
   UNIT_STATS,
   UNIT_TYPES,
   Unit,
@@ -118,18 +119,6 @@ function createShowcasePlayer(
 
 function createShowcaseSource(unitCount: number): GameState {
   const resourcePositions = new Set(DEFAULT_MAP_LAYOUT.resources.map((position) => `${position.x},${position.y}`));
-  const obstaclePositions = new Set<string>();
-  for (const ridgeY of [34, 62]) {
-    for (let y = ridgeY - 4; y <= ridgeY + 4; y++) {
-      for (let x = 5; x < MAP_WIDTH - 5; x++) {
-        const nearCrossing = [36, 72, 108].some((gapX) => Math.abs(x - gapX) <= 6);
-        const noise = Math.abs(Math.sin(x * 12.9898 + y * 78.233)) % 1;
-        if (!nearCrossing && noise > 0.48) {
-          obstaclePositions.add(`${x},${y}`);
-        }
-      }
-    }
-  }
 
   return {
     tick: 999,
@@ -141,11 +130,7 @@ function createShowcaseSource(unitCount: number): GameState {
       Array.from({ length: MAP_WIDTH }, (_, x) => ({
         x,
         y,
-        type: resourcePositions.has(`${x},${y}`)
-          ? TILE_TYPES.RESOURCE
-          : obstaclePositions.has(`${x},${y}`)
-            ? TILE_TYPES.OBSTACLE
-            : TILE_TYPES.EMPTY,
+        type: resourcePositions.has(`${x},${y}`) ? TILE_TYPES.RESOURCE : TILE_TYPES.EMPTY,
         ...(resourcePositions.has(`${x},${y}`) ? { resourceRemaining: ECONOMY_RULES.RESOURCE_DEPOSIT_CAPACITY } : {}),
       })),
     ),
@@ -169,5 +154,124 @@ export function createMassBattleState(
         (_, index) => createFormationUnit(player.id, index),
       ),
     })),
+  };
+}
+
+function createAnimationLabUnit(
+  playerId: typeof PLAYER_IDS.PLAYER_1 | typeof PLAYER_IDS.PLAYER_2,
+  id: string,
+  type: UnitType,
+  x: number,
+  y: number,
+  options: Partial<Pick<Unit, "state" | "intent" | "lastAttackTick" | "carryingCredits">> = {},
+): Unit {
+  const stats = UNIT_STATS[type];
+  return {
+    id,
+    type,
+    x,
+    y,
+    hp: stats.hp,
+    maxHp: stats.hp,
+    state: options.state ?? UNIT_STATES.IDLE,
+    my: playerId === PLAYER_IDS.PLAYER_1,
+    playerId,
+    exists: true,
+    attackRange: stats.attackRange,
+    carryingCredits: options.carryingCredits ?? 0,
+    carryCapacity: type === UNIT_TYPES.WORKER ? ECONOMY_RULES.WORKER_CARRY_CAPACITY : 0,
+    intent: options.intent,
+    lastAttackTick: options.lastAttackTick,
+  };
+}
+
+function createAnimationLabPlayer(
+  playerId: typeof PLAYER_IDS.PLAYER_1 | typeof PLAYER_IDS.PLAYER_2,
+  tick: number,
+): Player {
+  const playerOne = playerId === PLAYER_IDS.PLAYER_1;
+  const direction = playerOne ? 1 : -1;
+  const baseX = playerOne ? 58 : 86;
+  const targetX = baseX + direction * 10;
+  const walkPhase = (tick % 24) / 24;
+  const patrolX = baseX + direction * (7 + Math.sin(walkPhase * Math.PI * 2) * 4);
+  const enemyId = playerOne ? PLAYER_IDS.PLAYER_2 : PLAYER_IDS.PLAYER_1;
+  const buildingLayout = playerOne
+    ? [
+        { type: BUILDING_TYPES.HQ, x: 46, y: 48 },
+        { type: BUILDING_TYPES.REFINERY, x: 50, y: 35 },
+        { type: BUILDING_TYPES.BARRACKS, x: 50, y: 61 },
+      ]
+    : [
+        { type: BUILDING_TYPES.HQ, x: 98, y: 48 },
+        { type: BUILDING_TYPES.REFINERY, x: 94, y: 35 },
+        { type: BUILDING_TYPES.BARRACKS, x: 94, y: 61 },
+      ];
+
+  return {
+    id: playerId,
+    resources: { credits: 8000 },
+    units: [
+      createAnimationLabUnit(playerId, `${playerId}_lab_worker_gather`, UNIT_TYPES.WORKER, baseX, 35, {
+        state: UNIT_STATES.GATHERING,
+        intent: { type: "harvest_loop", targetX: baseX + direction * 3, targetY: 35 },
+      }),
+      createAnimationLabUnit(playerId, `${playerId}_lab_worker_deposit`, UNIT_TYPES.WORKER, baseX - direction * 4, 39, {
+        state: UNIT_STATES.GATHERING,
+        carryingCredits: 80,
+        intent: { type: "deposit", targetX: playerOne ? 14 : 129, targetY: 48 },
+      }),
+      createAnimationLabUnit(playerId, `${playerId}_lab_worker_walk`, UNIT_TYPES.WORKER, patrolX, 44, {
+        state: UNIT_STATES.MOVING,
+        intent: { type: "move", targetX, targetY: 44 },
+      }),
+      createAnimationLabUnit(playerId, `${playerId}_lab_rifle_walk`, UNIT_TYPES.RIFLEMAN, patrolX, 53, {
+        state: UNIT_STATES.MOVING,
+        intent: { type: "attack_move", targetX, targetY: 53 },
+      }),
+      createAnimationLabUnit(playerId, `${playerId}_lab_rocket_fire`, UNIT_TYPES.ROCKET_SOLDIER, baseX + direction * 8, 58, {
+        state: UNIT_STATES.ATTACKING,
+        intent: { type: "attack", targetId: `${enemyId}_lab_tank`, targetX: baseX + direction * 34, targetY: 58 },
+        lastAttackTick: tick,
+      }),
+      createAnimationLabUnit(playerId, `${playerId}_lab_tank`, UNIT_TYPES.LIGHT_TANK, baseX + direction * 9, playerOne ? 46 : 50, {
+        state: UNIT_STATES.MOVING,
+        intent: { type: "attack_move", targetX, targetY: playerOne ? 46 : 50 },
+      }),
+    ],
+    buildings: buildingLayout.map((building, index) => {
+      const stats = BUILDING_STATS[building.type];
+      return {
+        id: `${playerId}_lab_building_${index}`,
+        ...building,
+        hp: stats.hp,
+        maxHp: stats.hp,
+        my: playerOne,
+        playerId,
+        exists: true,
+        productionQueue: [],
+      };
+    }),
+  };
+}
+
+export function createAnimationLabState(tick: number): GameState {
+  const resourcePositions = new Set(DEFAULT_MAP_LAYOUT.resources.map((position) => `${position.x},${position.y}`));
+  return {
+    tick,
+    players: [
+      createAnimationLabPlayer(PLAYER_IDS.PLAYER_1, tick),
+      createAnimationLabPlayer(PLAYER_IDS.PLAYER_2, tick),
+    ],
+    tiles: Array.from({ length: MAP_HEIGHT }, (_, y) =>
+      Array.from({ length: MAP_WIDTH }, (_, x) => ({
+        x,
+        y,
+        type: resourcePositions.has(`${x},${y}`) ? TILE_TYPES.RESOURCE : TILE_TYPES.EMPTY,
+        ...(resourcePositions.has(`${x},${y}`) ? { resourceRemaining: ECONOMY_RULES.RESOURCE_DEPOSIT_CAPACITY } : {}),
+      })),
+    ),
+    winner: null,
+    logs: [],
   };
 }

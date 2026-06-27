@@ -23,7 +23,7 @@ import { BenchmarkResult } from "./components/BenchmarkResult";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
-import { createMassBattleState } from "./dev/createMassBattleState";
+import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
 type AppMode = "live" | "replay";
 
@@ -38,8 +38,10 @@ const SERVER_HOST = window.location.hostname || "localhost";
 const WS_URL = `ws://${SERVER_HOST}:3001`;
 const API_BASE_URL = `http://${SERVER_HOST}:3001`;
 const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
-const MASS_BATTLE_SHOWCASE = import.meta.env.DEV
-  && new URLSearchParams(window.location.search).get("showcase") === "mass-battle";
+const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
+const MASS_BATTLE_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "mass-battle";
+const ANIMATION_LAB_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "animation-lab";
+const LOCAL_SHOWCASE = MASS_BATTLE_SHOWCASE || ANIMATION_LAB_SHOWCASE;
 const requestedShowcaseUnits = Number(new URLSearchParams(window.location.search).get("units"));
 const MASS_BATTLE_UNIT_COUNT = Number.isFinite(requestedShowcaseUnits) && requestedShowcaseUnits > 0
   ? Math.min(100, Math.floor(requestedShowcaseUnits))
@@ -95,7 +97,7 @@ function App() {
     send,
     clearServerMessage,
     clearBenchmarkResult,
-  } = useWebSocket(WS_URL, !MASS_BATTLE_SHOWCASE);
+  } = useWebSocket(WS_URL, !LOCAL_SHOWCASE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [winnerOverlayDismissed, setWinnerOverlayDismissed] = useState(false);
   const [mode, setMode] = useState<AppMode>("live");
@@ -127,7 +129,21 @@ function App() {
     concurrency: number;
   } | null>(null);
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
+  const [showcaseTick, setShowcaseTick] = useState(0);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!LOCAL_SHOWCASE) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setShowcaseTick((current) => current + 1);
+    }, 500);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     if (mode !== "live" || benchmarkRunning || benchmarkResult) {
@@ -258,7 +274,7 @@ function App() {
   };
 
   useEffect(() => {
-    if (MASS_BATTLE_SHOWCASE) {
+    if (LOCAL_SHOWCASE) {
       return;
     }
     void fetchRecordEntries();
@@ -460,10 +476,16 @@ function App() {
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
   const sourceDisplayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
   const displayState = useMemo(
-    () => MASS_BATTLE_SHOWCASE
-      ? createMassBattleState(sourceDisplayState, MASS_BATTLE_UNIT_COUNT)
-      : sourceDisplayState,
-    [sourceDisplayState],
+    () => {
+      if (ANIMATION_LAB_SHOWCASE) {
+        return createAnimationLabState(showcaseTick);
+      }
+      if (MASS_BATTLE_SHOWCASE) {
+        return createMassBattleState(sourceDisplayState, MASS_BATTLE_UNIT_COUNT);
+      }
+      return sourceDisplayState;
+    },
+    [sourceDisplayState, showcaseTick],
   );
   const displayAIOutputs = mode === "replay" ? replayFrame?.aiOutputs ?? {} : aiOutputs;
   const displayAITerminalEvents = mode === "replay" ? replayFrame?.terminalEvents ?? [] : aiTerminalEvents;
@@ -493,7 +515,7 @@ function App() {
     ? formatRoundList(benchmarkProgress.activeRounds.map((round) => round.round))
     : null;
 
-  if (MASS_BATTLE_SHOWCASE) {
+  if (LOCAL_SHOWCASE) {
     return (
       <main className="battlefield-showcase">
         <Battlefield3D state={displayState} />

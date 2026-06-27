@@ -381,6 +381,7 @@ interface AgentRunInput {
 - 攻击结算为 weapon/projectile/warhead 模型：命令成功会生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `light_tank` 有 1 格 splash；`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。旧 compact-v2 录像可能没有该可选字段。
 - 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
+- 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
 - `UNIT_STATS` / `BUILDING_STATS` 仍作为兼容导出存在
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、生产关系、成本和攻击能力判断；工具 schema 已接受新增 unit/building 类型。

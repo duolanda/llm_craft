@@ -104,7 +104,8 @@
 - [x] 将客户端单位插值改为按服务器 tick 周期的时间插值，替代指数追目标造成的顿挫/追逐感
 - [x] 修复 agent run 产生胜负时 AI turn 可能在 early return 前未写入的问题，并让 `analyze-record` 对缺失 `aiTurns` 的旧模型对局明确显示日志不可用
 - [x] 调整 3D 资源、默认地图和动画调试：资源矿脉改为更大的多晶簇；默认地图暂不放置 obstacle 岩石；资源点移出 HQ / 生产建筑夹缝和中央主攻路线；新增 `/?showcase=animation-lab` 本地动画调试入口，并降低 worker 工作、交付和士兵移动的高频抖动
-- [x] 建立 Animation Lab projectile preview 架构：正式战场 projectile 保持当前稳定表现；`/?showcase=animation-lab` 保持单一调试场景，在原有动作样例基础上追加三组固定面对面靶场，左下角 tab 只切换同一批元素的 implemented / preview 表现，便于观察 bullet / rocket / shell 的飞行、枪口闪和受击 recoil；dev-only 导航下移并精简入口，Mass Battle 默认 200v200，LOD 切换移动到 Mass Battle 页面左下角面板
+- [x] 建立 Animation Lab projectile preview 架构：`/?showcase=animation-lab` 保持单一调试场景，在原有动作样例基础上追加三组固定面对面靶场，左下角 tab 只切换同一批元素的 implemented / preview 表现，便于观察 bullet / rocket / shell 的飞行、枪口闪和受击 recoil；dev-only 导航下移并精简入口，Mass Battle 默认 200v200，LOD 切换移动到 Mass Battle 页面左下角面板
+- [x] 将 Animation Lab preview 验证后的弹药表现接入正式战场：正式 `CombatEffects` 现在基于 `ActiveProjectile` 的 launched/impact tick 做本地连续插值，渲染飞行体、曳光/烟尾和枪口闪，并删除旧的命中大圈 / impact mesh
 
 ---
 

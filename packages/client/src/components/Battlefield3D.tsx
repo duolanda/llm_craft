@@ -57,13 +57,16 @@ interface InstancedModelPart {
 }
 
 interface CombatShot {
+  projectileType: ActiveProjectile["projectileType"];
   source: Vec3;
   current?: Vec3;
   target: Vec3;
   color: string;
+  trailColor: string;
   scale: number;
   phase: number;
   progress?: number;
+  totalTicks?: number;
 }
 
 interface VisualProjectile {
@@ -1012,6 +1015,46 @@ function UnitReadabilityLayer({ units, dimensions }: { units: Unit[]; dimensions
   );
 }
 
+function getProjectileVisualType(unitType: Unit["type"]): ActiveProjectile["projectileType"] {
+  if (unitType === "rocket_soldier") {
+    return "rocket";
+  }
+  if (unitType === "light_tank") {
+    return "shell";
+  }
+  return "bullet";
+}
+
+function getProjectileVisualColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "rocket") {
+    return "#ff8a2a";
+  }
+  if (projectileType === "shell") {
+    return "#ffd36a";
+  }
+  return "#fff1a8";
+}
+
+function getProjectileTrailColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "rocket") {
+    return "#b7b5a7";
+  }
+  if (projectileType === "shell") {
+    return "#f5d48a";
+  }
+  return "#ffe27a";
+}
+
+function getProjectileVisualScale(projectileType: ActiveProjectile["projectileType"]): number {
+  if (projectileType === "rocket") {
+    return 0.19;
+  }
+  if (projectileType === "shell") {
+    return 0.15;
+  }
+  return 0.075;
+}
+
 function CombatEffects({
   units,
   buildings,
@@ -1027,11 +1070,13 @@ function CombatEffects({
 }) {
   const { gl } = useThree();
   const projectileRef = useRef<THREE.InstancedMesh>(null);
+  const trailRef = useRef<THREE.InstancedMesh>(null);
   const muzzleRef = useRef<THREE.InstancedMesh>(null);
-  const impactRef = useRef<THREE.InstancedMesh>(null);
+  const tickFrameRef = useRef({ tick, observedAtMs: performance.now() });
   const scratch = useMemo(() => ({
     matrix: new THREE.Matrix4(),
     position: new THREE.Vector3(),
+    trailPosition: new THREE.Vector3(),
     scale: new THREE.Vector3(),
     quaternion: new THREE.Quaternion(),
     direction: new THREE.Vector3(),
@@ -1045,20 +1090,17 @@ function CombatEffects({
         const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
         const progress = Math.min(1, Math.max(0, (tick - projectile.launchedTick) / totalTicks));
         const height = projectile.projectileType === "shell" ? 1.16 : projectile.projectileType === "rocket" ? 1.05 : 0.94;
-        const color = projectile.projectileType === "rocket"
-          ? "#ff6a22"
-          : projectile.projectileType === "shell"
-            ? "#ffd36a"
-            : "#fff4b0";
-        const scale = projectile.projectileType === "rocket" ? 0.2 : projectile.projectileType === "shell" ? 0.16 : 0.085;
         return {
+          projectileType: projectile.projectileType,
           source: toWorldPosition(projectile.startX, projectile.startY, dimensions, height),
           current: toWorldPosition(projectile.x, projectile.y, dimensions, height),
           target: toWorldPosition(projectile.targetX, projectile.targetY, dimensions, height),
-          color,
-          scale,
+          color: getProjectileVisualColor(projectile.projectileType),
+          trailColor: getProjectileTrailColor(projectile.projectileType),
+          scale: getProjectileVisualScale(projectile.projectileType),
           phase: deterministicNoise(projectile.startX, projectile.startY, tick + index) * 0.9,
           progress,
+          totalTicks,
         };
       })
       .slice(0, 96);
@@ -1076,11 +1118,14 @@ function CombatEffects({
         }
         const sourceHeight = unit.type === "light_tank" ? 1.02 : 0.96;
         const targetHeight = "productionQueue" in target ? 1.4 : target.type === "light_tank" ? 0.76 : 0.82;
+        const projectileType = getProjectileVisualType(unit.type);
         return [{
+          projectileType,
           source: toWorldPosition(unit.x, unit.y, dimensions, sourceHeight),
           target: toWorldPosition(target.x, target.y, dimensions, targetHeight),
-          color: unit.type === "rocket_soldier" ? "#ff6a22" : unit.type === "light_tank" ? "#ffd36a" : "#fff4b0",
-          scale: unit.type === "rocket_soldier" ? 0.2 : unit.type === "light_tank" ? 0.16 : 0.085,
+          color: getProjectileVisualColor(projectileType),
+          trailColor: getProjectileTrailColor(projectileType),
+          scale: getProjectileVisualScale(projectileType),
           phase: deterministicNoise(unit.x, unit.y, tick + index) * 0.9,
         }];
       })
@@ -1091,62 +1136,92 @@ function CombatEffects({
     gl.domElement.dataset.combatShots = String(shots.length);
   }, [gl, shots.length]);
 
+  useEffect(() => {
+    tickFrameRef.current = { tick, observedAtMs: performance.now() };
+  }, [tick]);
+
   useLayoutEffect(() => {
     const projectile = projectileRef.current;
-    if (!projectile) {
+    const trail = trailRef.current;
+    if (!projectile || !trail) {
       return;
     }
-    shots.forEach((shot, index) => projectile.setColorAt(index, new THREE.Color(shot.color)));
+    shots.forEach((shot, index) => {
+      projectile.setColorAt(index, new THREE.Color(shot.color));
+      trail.setColorAt(index, new THREE.Color(shot.trailColor));
+    });
     if (projectile.instanceColor) {
       projectile.instanceColor.needsUpdate = true;
+    }
+    if (trail.instanceColor) {
+      trail.instanceColor.needsUpdate = true;
     }
   }, [shots]);
 
   useFrame(({ clock }) => {
     const projectile = projectileRef.current;
+    const trail = trailRef.current;
     const muzzle = muzzleRef.current;
-    const impact = impactRef.current;
-    if (!projectile || !muzzle || !impact) {
+    if (!projectile || !trail || !muzzle) {
       return;
     }
     const elapsed = clock.getElapsedTime();
+    const tickFrame = tickFrameRef.current;
+    const tickFraction = tickFrame.tick === tick
+      ? Math.min(0.98, Math.max(0, (performance.now() - tickFrame.observedAtMs) / TICK_INTERVAL_MS))
+      : 0;
+    const hiddenScale = new THREE.Vector3(0.001, 0.001, 0.001);
     shots.forEach((shot, index) => {
-      const progress = shot.progress ?? ((elapsed * 1.7 + shot.phase) % 1);
-      if (shot.current) {
-        scratch.position.set(shot.current[0], shot.current[1] + Math.sin(progress * Math.PI) * 0.22, shot.current[2]);
-      } else {
-        scratch.position.set(
-          THREE.MathUtils.lerp(shot.source[0], shot.target[0], progress),
-          THREE.MathUtils.lerp(shot.source[1], shot.target[1], progress) + Math.sin(progress * Math.PI) * 0.22,
-          THREE.MathUtils.lerp(shot.source[2], shot.target[2], progress),
-        );
-      }
+      const progress = shot.progress !== undefined
+        ? Math.min(1, shot.progress + tickFraction / Math.max(1, shot.totalTicks ?? 1))
+        : ((elapsed * 1.7 + shot.phase) % 1);
       scratch.direction.set(
         shot.target[0] - shot.source[0],
         shot.target[1] - shot.source[1],
         shot.target[2] - shot.source[2],
       ).normalize();
       scratch.quaternion.setFromUnitVectors(scratch.up, scratch.direction);
-      scratch.scale.set(shot.scale * 0.48, shot.scale * 5.5, shot.scale * 0.48);
+
+      const arc = shot.projectileType === "shell"
+        ? Math.sin(progress * Math.PI) * 0.58
+        : shot.projectileType === "rocket"
+          ? Math.sin(progress * Math.PI) * 0.18
+          : 0.02;
+      scratch.position.set(
+        THREE.MathUtils.lerp(shot.source[0], shot.target[0], progress),
+        THREE.MathUtils.lerp(shot.source[1], shot.target[1], progress) + arc,
+        THREE.MathUtils.lerp(shot.source[2], shot.target[2], progress),
+      );
+
+      const projectileLength = shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
+      scratch.scale.set(shot.scale * 0.5, shot.scale * projectileLength, shot.scale * 0.5);
       scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
       projectile.setMatrixAt(index, scratch.matrix);
 
-      const muzzlePulse = Math.max(0.001, 1 - progress * 9) * shot.scale * 7;
+      const trailLength = shot.projectileType === "rocket" ? shot.scale * 8.5 : shot.scale * 5.4;
+      scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
+      scratch.scale.set(
+        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+        trailLength,
+        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+      );
+      scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
+      trail.setMatrixAt(index, scratch.matrix);
+
+      const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "rocket" ? 5.2 : 4.6);
       scratch.quaternion.identity();
       scratch.position.set(...shot.source);
-      scratch.scale.setScalar(muzzlePulse);
+      if (progress < 0.09) {
+        scratch.scale.setScalar(muzzleScale);
+      } else {
+        scratch.scale.copy(hiddenScale);
+      }
       scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
       muzzle.setMatrixAt(index, scratch.matrix);
-
-      const impactPulse = Math.max(0.001, (progress - 0.82) * (1 - progress) * 28) * shot.scale * 9;
-      scratch.position.set(...shot.target);
-      scratch.scale.setScalar(impactPulse);
-      scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
-      impact.setMatrixAt(index, scratch.matrix);
     });
     projectile.instanceMatrix.needsUpdate = true;
+    trail.instanceMatrix.needsUpdate = true;
     muzzle.instanceMatrix.needsUpdate = true;
-    impact.instanceMatrix.needsUpdate = true;
   });
 
   if (shots.length === 0) {
@@ -1159,13 +1234,13 @@ function CombatEffects({
         <boxGeometry args={[1, 1, 1]} />
         <meshBasicMaterial color="#ffd36a" toneMapped={false} />
       </instancedMesh>
+      <instancedMesh ref={trailRef} args={[undefined, undefined, shots.length]} frustumCulled={false}>
+        <cylinderGeometry args={[1, 0.28, 1, 8, 1, true]} />
+        <meshBasicMaterial color="#f4c66b" transparent opacity={0.28} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
       <instancedMesh ref={muzzleRef} args={[undefined, undefined, shots.length]} frustumCulled={false}>
         <sphereGeometry args={[1, 7, 5]} />
-        <meshBasicMaterial color="#ffb238" transparent opacity={0.88} blending={THREE.AdditiveBlending} toneMapped={false} />
-      </instancedMesh>
-      <instancedMesh ref={impactRef} args={[undefined, undefined, shots.length]} frustumCulled={false}>
-        <icosahedronGeometry args={[1, 1]} />
-        <meshBasicMaterial color="#ff6a22" transparent opacity={0.76} blending={THREE.AdditiveBlending} toneMapped={false} />
+        <meshBasicMaterial color="#ffc04f" transparent opacity={0.82} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
       </instancedMesh>
     </>
   );

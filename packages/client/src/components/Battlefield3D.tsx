@@ -15,6 +15,7 @@ import {
 
 interface Battlefield3DProps {
   state: GameState | null;
+  projectileFxMode?: ProjectileFxMode;
 }
 
 interface MapDimensions {
@@ -40,6 +41,11 @@ interface ModelTransform {
   motionFrequency?: number;
   motionPhase?: number;
   recoilAmplitude?: number;
+  timedRecoilAmplitude?: number;
+  timedRecoilAtMs?: number;
+  timedRecoilCycleMs?: number;
+  timedRecoilPhaseMs?: number;
+  timedRecoilWidthMs?: number;
   swayAmplitude?: number;
   swayFrequency?: number;
 }
@@ -60,6 +66,37 @@ interface CombatShot {
   progress?: number;
 }
 
+interface VisualProjectile {
+  id: string;
+  projectileType: ActiveProjectile["projectileType"];
+  source: Vec3;
+  target: Vec3;
+  color: string;
+  trailColor: string;
+  scale: number;
+  phase: number;
+  bornAtMs: number;
+  durationMs: number;
+}
+
+interface PreviewFxShotSpec {
+  id: string;
+  projectileType: ActiveProjectile["projectileType"];
+  sourceId: string;
+  targetId: string;
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+  sourceElevation: number;
+  targetElevation: number;
+  color: string;
+  trailColor: string;
+  scale: number;
+  phase: number;
+  durationMs: number;
+}
+
 interface DestructionBurst {
   id: string;
   position: Vec3;
@@ -68,6 +105,8 @@ interface DestructionBurst {
 }
 
 type Vec3 = [number, number, number];
+
+type ProjectileFxMode = "game" | "preview";
 
 declare global {
   interface Window {
@@ -93,6 +132,62 @@ const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
   rocket_soldier: 1.06,
   light_tank: 1.16,
 };
+const PREVIEW_FX_SOURCE_X = 63;
+const PREVIEW_FX_TARGET_X = 81;
+const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
+  {
+    id: "preview-bullet",
+    projectileType: "bullet",
+    sourceId: "player_1_lab_fx_source_rifle",
+    targetId: "player_2_lab_fx_target_rifle",
+    sourceX: PREVIEW_FX_SOURCE_X + 0.62,
+    sourceY: 39,
+    targetX: PREVIEW_FX_TARGET_X - 0.35,
+    targetY: 39,
+    sourceElevation: 1.02,
+    targetElevation: 0.88,
+    color: "#fff1a8",
+    trailColor: "#ffe27a",
+    scale: 0.075,
+    phase: 0,
+    durationMs: 680,
+  },
+  {
+    id: "preview-rocket",
+    projectileType: "rocket",
+    sourceId: "player_1_lab_fx_source_rocket",
+    targetId: "player_2_lab_fx_target_rocket_tank",
+    sourceX: PREVIEW_FX_SOURCE_X + 0.68,
+    sourceY: 47,
+    targetX: PREVIEW_FX_TARGET_X - 0.52,
+    targetY: 47,
+    sourceElevation: 1.08,
+    targetElevation: 0.92,
+    color: "#ff8a2a",
+    trailColor: "#b7b5a7",
+    scale: 0.19,
+    phase: 1.7,
+    durationMs: 1450,
+  },
+  {
+    id: "preview-shell",
+    projectileType: "shell",
+    sourceId: "player_1_lab_fx_source_tank",
+    targetId: "player_2_lab_fx_target_tank",
+    sourceX: PREVIEW_FX_SOURCE_X + 0.92,
+    sourceY: 53,
+    targetX: PREVIEW_FX_TARGET_X - 0.72,
+    targetY: 53,
+    sourceElevation: 1.18,
+    targetElevation: 0.94,
+    color: "#ffd36a",
+    trailColor: "#f5d48a",
+    scale: 0.15,
+    phase: 3.2,
+    durationMs: 1250,
+  },
+];
+const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const STRUCTURE_VISUAL_SCALE = 1.16;
 const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
 const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
@@ -277,6 +372,21 @@ function RenderDiagnostics() {
   return null;
 }
 
+function ProjectileFxModeMarker({ mode }: { mode: ProjectileFxMode }) {
+  const { gl } = useThree();
+
+  useEffect(() => {
+    if (mode === "preview") {
+      gl.domElement.dataset.projectileFxMode = "preview";
+      return;
+    }
+
+    delete gl.domElement.dataset.projectileFxMode;
+  }, [gl, mode]);
+
+  return null;
+}
+
 function deterministicNoise(x: number, y: number, salt: number): number {
   const value = Math.sin(x * 12.9898 + y * 78.233 + salt * 37.719) * 43758.5453;
   return value - Math.floor(value);
@@ -392,6 +502,7 @@ function InstancedPart({
     () => transforms.some((transform) =>
       (transform.motionAmplitude ?? 0) > 0
       || (transform.recoilAmplitude ?? 0) > 0
+      || (transform.timedRecoilAmplitude ?? 0) > 0
       || (transform.swayAmplitude ?? 0) > 0),
     [transforms],
   );
@@ -409,12 +520,25 @@ function InstancedPart({
       const swayFrequency = transform.swayFrequency ?? 4.6;
       const recoilPulse = Math.pow(Math.max(0, Math.sin(elapsed * 11 + phase)), 10)
         * (transform.recoilAmplitude ?? 0);
+      const cycleMs = transform.timedRecoilCycleMs ?? 0;
+      const timedRecoilAtMs = transform.timedRecoilAtMs ?? 0;
+      const timedRecoilWidthMs = transform.timedRecoilWidthMs ?? 160;
+      const timedLocalMs = cycleMs > 0
+        ? ((elapsed * 1000 + (transform.timedRecoilPhaseMs ?? 0)) % cycleMs + cycleMs) % cycleMs
+        : -1;
+      const timedRecoilProgress = timedLocalMs >= timedRecoilAtMs && timedLocalMs <= timedRecoilAtMs + timedRecoilWidthMs
+        ? (timedLocalMs - timedRecoilAtMs) / Math.max(1, timedRecoilWidthMs)
+        : -1;
+      const timedRecoilPulse = timedRecoilProgress >= 0
+        ? Math.sin(timedRecoilProgress * Math.PI) * (transform.timedRecoilAmplitude ?? 0)
+        : 0;
+      const totalRecoilPulse = recoilPulse + timedRecoilPulse;
       const sway = Math.sin(elapsed * swayFrequency + phase) * (transform.swayAmplitude ?? 0);
       const heading = transform.rotation[1];
       scratch.position.set(
-        transform.position[0] - Math.sin(heading) * recoilPulse,
+        transform.position[0] - Math.sin(heading) * totalRecoilPulse,
         transform.position[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
-        transform.position[2] - Math.cos(heading) * recoilPulse,
+        transform.position[2] - Math.cos(heading) * totalRecoilPulse,
       );
       scratch.rotation.set(transform.rotation[0], heading, transform.rotation[2] + sway);
       scratch.quaternion.setFromEuler(scratch.rotation);
@@ -705,6 +829,35 @@ function getUnitMotionProfile(unit: Unit, moving: boolean, firing: boolean): Pic
   };
 }
 
+function getPreviewFxTimedRecoil(unitId: string): Pick<
+  ModelTransform,
+  "timedRecoilAmplitude" | "timedRecoilAtMs" | "timedRecoilCycleMs" | "timedRecoilPhaseMs" | "timedRecoilWidthMs"
+> {
+  const sourceShot = PREVIEW_FX_SHOT_SPECS.find((shot) => shot.sourceId === unitId);
+  if (sourceShot) {
+    return {
+      timedRecoilAmplitude: sourceShot.projectileType === "shell" ? 0.11 : 0.052,
+      timedRecoilAtMs: 0,
+      timedRecoilCycleMs: sourceShot.durationMs + PREVIEW_FX_CYCLE_GAP_MS,
+      timedRecoilPhaseMs: sourceShot.phase * 1000,
+      timedRecoilWidthMs: sourceShot.projectileType === "shell" ? 190 : 120,
+    };
+  }
+
+  const targetShot = PREVIEW_FX_SHOT_SPECS.find((shot) => shot.targetId === unitId);
+  if (targetShot) {
+    return {
+      timedRecoilAmplitude: targetShot.projectileType === "bullet" ? 0.035 : 0.075,
+      timedRecoilAtMs: targetShot.durationMs,
+      timedRecoilCycleMs: targetShot.durationMs + PREVIEW_FX_CYCLE_GAP_MS,
+      timedRecoilPhaseMs: targetShot.phase * 1000,
+      timedRecoilWidthMs: targetShot.projectileType === "bullet" ? 105 : 150,
+    };
+  }
+
+  return {};
+}
+
 function UnitBatches({
   units,
   buildings,
@@ -727,6 +880,7 @@ function UnitBatches({
       const moving = unit.state === "moving" || unit.intent?.type === "move" || unit.intent?.type === "attack_move";
       const firing = unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1;
       const motionProfile = getUnitMotionProfile(unit, moving, firing);
+      const previewFxTimedRecoil = getPreviewFxTimedRecoil(unit.id);
       const baseTransform: ModelTransform = {
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
@@ -735,6 +889,7 @@ function UnitBatches({
         motionFrequency: motionProfile.motionFrequency,
         motionPhase: index * 1.73 + (unit.playerId === "player_1" ? 0 : 0.8),
         recoilAmplitude: motionProfile.recoilAmplitude,
+        ...previewFxTimedRecoil,
         swayAmplitude: motionProfile.swayAmplitude,
         swayFrequency: motionProfile.swayFrequency,
       };
@@ -1016,6 +1171,134 @@ function CombatEffects({
   );
 }
 
+function ProjectilePreviewEffects({ dimensions }: { dimensions: MapDimensions }) {
+  const projectileRef = useRef<THREE.InstancedMesh>(null);
+  const trailRef = useRef<THREE.InstancedMesh>(null);
+  const muzzleRef = useRef<THREE.InstancedMesh>(null);
+  const scratch = useMemo(() => ({
+    matrix: new THREE.Matrix4(),
+    position: new THREE.Vector3(),
+    trailPosition: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    direction: new THREE.Vector3(),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+  const previews = useMemo<VisualProjectile[]>(() =>
+    PREVIEW_FX_SHOT_SPECS.map((shot) => ({
+      id: shot.id,
+      projectileType: shot.projectileType,
+      source: toWorldPosition(shot.sourceX, shot.sourceY, dimensions, shot.sourceElevation),
+      target: toWorldPosition(shot.targetX, shot.targetY, dimensions, shot.targetElevation),
+      color: shot.color,
+      trailColor: shot.trailColor,
+      scale: shot.scale,
+      phase: shot.phase,
+      bornAtMs: 0,
+      durationMs: shot.durationMs,
+    })),
+  [dimensions]);
+
+  useLayoutEffect(() => {
+    const projectile = projectileRef.current;
+    const trail = trailRef.current;
+    if (!projectile || !trail) {
+      return;
+    }
+    previews.forEach((preview, index) => {
+      projectile.setColorAt(index, new THREE.Color(preview.color));
+      trail.setColorAt(index, new THREE.Color(preview.trailColor));
+    });
+    projectile.instanceColor!.needsUpdate = true;
+    trail.instanceColor!.needsUpdate = true;
+  }, [previews]);
+
+  useFrame(({ clock }) => {
+    const projectile = projectileRef.current;
+    const trail = trailRef.current;
+    const muzzle = muzzleRef.current;
+    if (!projectile || !trail || !muzzle) {
+      return;
+    }
+
+    const nowMs = clock.elapsedTime * 1000;
+    const hiddenScale = new THREE.Vector3(0.001, 0.001, 0.001);
+    previews.forEach((preview, index) => {
+      const cycleMs = preview.durationMs + PREVIEW_FX_CYCLE_GAP_MS;
+      const localMs = (nowMs + preview.phase * 1000) % cycleMs;
+      const flying = localMs <= preview.durationMs;
+      const progress = Math.min(1, Math.max(0, localMs / preview.durationMs));
+
+      scratch.direction.set(
+        preview.target[0] - preview.source[0],
+        preview.target[1] - preview.source[1],
+        preview.target[2] - preview.source[2],
+      ).normalize();
+      scratch.quaternion.setFromUnitVectors(scratch.up, scratch.direction);
+
+      if (flying) {
+        const arc = preview.projectileType === "shell"
+          ? Math.sin(progress * Math.PI) * 0.58
+          : preview.projectileType === "rocket"
+            ? Math.sin(progress * Math.PI) * 0.18
+            : 0.02;
+        scratch.position.set(
+          THREE.MathUtils.lerp(preview.source[0], preview.target[0], progress),
+          THREE.MathUtils.lerp(preview.source[1], preview.target[1], progress) + arc,
+          THREE.MathUtils.lerp(preview.source[2], preview.target[2], progress),
+        );
+        const projectileLength = preview.projectileType === "bullet" ? 6.2 : preview.projectileType === "rocket" ? 3.2 : 2.8;
+        scratch.scale.set(preview.scale * 0.5, preview.scale * projectileLength, preview.scale * 0.5);
+        scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+        projectile.setMatrixAt(index, scratch.matrix);
+
+        const trailLength = preview.projectileType === "rocket" ? preview.scale * 8.5 : preview.scale * 5.4;
+        scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
+        scratch.scale.set(
+          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+          trailLength,
+          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+        );
+        scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
+        trail.setMatrixAt(index, scratch.matrix);
+
+        const muzzleScale = Math.max(0.001, 1 - progress * 18) * preview.scale * (preview.projectileType === "rocket" ? 5.2 : 4.6);
+        scratch.quaternion.identity();
+        scratch.scale.setScalar(muzzleScale);
+        scratch.position.set(...preview.source);
+        scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+        muzzle.setMatrixAt(index, scratch.matrix);
+      } else {
+        scratch.matrix.compose(scratch.position, scratch.quaternion, hiddenScale);
+        projectile.setMatrixAt(index, scratch.matrix);
+        trail.setMatrixAt(index, scratch.matrix);
+        muzzle.setMatrixAt(index, scratch.matrix);
+      }
+    });
+
+    projectile.instanceMatrix.needsUpdate = true;
+    trail.instanceMatrix.needsUpdate = true;
+    muzzle.instanceMatrix.needsUpdate = true;
+  });
+
+  return (
+    <>
+      <instancedMesh ref={projectileRef} args={[undefined, undefined, previews.length]} frustumCulled={false}>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshBasicMaterial color="#ffd36a" toneMapped={false} />
+      </instancedMesh>
+      <instancedMesh ref={trailRef} args={[undefined, undefined, previews.length]} frustumCulled={false}>
+        <cylinderGeometry args={[1, 0.28, 1, 8, 1, true]} />
+        <meshBasicMaterial color="#f4c66b" transparent opacity={0.28} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+      <instancedMesh ref={muzzleRef} args={[undefined, undefined, previews.length]} frustumCulled={false}>
+        <sphereGeometry args={[1, 8, 6]} />
+        <meshBasicMaterial color="#ffc04f" transparent opacity={0.82} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+    </>
+  );
+}
+
 function DestructionEffects({
   units,
   buildings,
@@ -1292,7 +1575,13 @@ function useInterpolatedUnits(units: Unit[]): Unit[] {
   return displayUnits;
 }
 
-const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: GameState }) {
+const BattlefieldScene = memo(function BattlefieldScene({
+  state,
+  projectileFxMode = "game",
+}: {
+  state: GameState;
+  projectileFxMode?: ProjectileFxMode;
+}) {
   const dimensions = useMemo(() => getMapDimensions(state), [state]);
   const terrainWidth = dimensions.width * CELL_SIZE;
   const terrainHeight = dimensions.height * CELL_SIZE;
@@ -1338,6 +1627,7 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
     <>
       <ResponsiveCamera initialFocus={initialFocus} />
       <RenderDiagnostics />
+      <ProjectileFxModeMarker mode={projectileFxMode} />
       <color attach="background" args={["#82989a"]} />
       <fog attach="fog" args={["#82989a", 86, 205]} />
       <hemisphereLight color="#dce6e3" groundColor="#253127" intensity={0.82} />
@@ -1371,13 +1661,16 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
         ))}
         <UnitBatches units={displayUnits} buildings={buildings} dimensions={dimensions} tick={state.tick} />
         <UnitReadabilityLayer units={displayUnits} dimensions={dimensions} />
-        <CombatEffects
-          units={displayUnits}
-          buildings={buildings}
-          projectiles={state.projectiles ?? []}
-          dimensions={dimensions}
-          tick={state.tick}
-        />
+        {projectileFxMode === "game" ? (
+          <CombatEffects
+            units={displayUnits}
+            buildings={buildings}
+            projectiles={state.projectiles ?? []}
+            dimensions={dimensions}
+            tick={state.tick}
+          />
+        ) : null}
+        {projectileFxMode === "preview" ? <ProjectilePreviewEffects dimensions={dimensions} /> : null}
         <DestructionEffects units={displayUnits} buildings={buildings} dimensions={dimensions} />
       </Suspense>
       {SHOW_DEBUG_INTENTS ? <IntentLines units={displayUnits} dimensions={dimensions} /> : null}
@@ -1396,7 +1689,7 @@ const BattlefieldScene = memo(function BattlefieldScene({ state }: { state: Game
   );
 });
 
-export function Battlefield3D({ state }: Battlefield3DProps) {
+export function Battlefield3D({ state, projectileFxMode = "game" }: Battlefield3DProps) {
   const dimensions = state ? getMapDimensions(state) : { width: 96, height: 64 };
   const cameraFocus = state
     ? getInitialCameraFocus(state, dimensions)
@@ -1423,7 +1716,7 @@ export function Battlefield3D({ state }: Battlefield3DProps) {
           gl.toneMappingExposure = 1.08;
         }}
       >
-        <BattlefieldScene state={state} />
+        <BattlefieldScene state={state} projectileFxMode={projectileFxMode} />
       </Canvas>
     </div>
   );

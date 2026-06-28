@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   CPUStrategyType,
   CreateLLMPresetRequest,
@@ -26,6 +26,7 @@ import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
 type AppMode = "live" | "replay";
+type AnimationLabMode = "implemented" | "preview";
 
 interface ReplayRecordListEntry {
   fileName: string;
@@ -41,15 +42,104 @@ const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
 const MASS_BATTLE_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "mass-battle";
 const ANIMATION_LAB_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "animation-lab";
+const ANIMATION_LAB_MODE: AnimationLabMode = new URLSearchParams(window.location.search).get("lab") === "preview"
+  ? "preview"
+  : "implemented";
 const LOCAL_SHOWCASE = MASS_BATTLE_SHOWCASE || ANIMATION_LAB_SHOWCASE;
 const requestedShowcaseUnits = Number(new URLSearchParams(window.location.search).get("units"));
 const MASS_BATTLE_UNIT_COUNT = Number.isFinite(requestedShowcaseUnits) && requestedShowcaseUnits > 0
-  ? Math.min(100, Math.floor(requestedShowcaseUnits))
-  : 60;
+  ? Math.min(240, Math.floor(requestedShowcaseUnits))
+  : 200;
 
 interface LivePresetSelection {
   player1PresetId: string;
   player2PresetId: string;
+}
+
+function DevQuickNav() {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+
+  const links = [
+    { label: "Live", href: "/" },
+    { label: "Mass Battle", href: "/?showcase=mass-battle&units=200" },
+    { label: "Animation Lab", href: "/?showcase=animation-lab" },
+    { label: "FX Preview", href: "/?showcase=animation-lab&lab=preview" },
+    { label: "Diagnostics", href: "/diagnostics.html" },
+    { label: "Transcript", href: "/transcript.html" },
+  ];
+
+  return (
+    <details className="dev-quick-nav">
+      <summary>DEV</summary>
+      <nav aria-label="Developer quick navigation">
+        {links.map((link) => (
+          <a key={link.href} href={link.href}>
+            {link.label}
+          </a>
+        ))}
+      </nav>
+    </details>
+  );
+}
+
+function ShowcasePanel({
+  kicker,
+  title,
+  children,
+}: {
+  kicker: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <aside className="showcase-panel">
+      <span className="showcase-panel-kicker">{kicker}</span>
+      <div className="showcase-panel-title">{title}</div>
+      <div className="showcase-panel-tabs">
+        {children}
+      </div>
+    </aside>
+  );
+}
+
+function AnimationLabPanel({ mode }: { mode: AnimationLabMode }) {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+
+  return (
+    <ShowcasePanel kicker="Animation Lab" title={mode === "preview" ? "FX Preview" : "Implemented States"}>
+      <a className={mode === "implemented" ? "active" : ""} href="/?showcase=animation-lab">
+        Implemented
+      </a>
+      <a className={mode === "preview" ? "active" : ""} href="/?showcase=animation-lab&lab=preview">
+        Preview
+      </a>
+    </ShowcasePanel>
+  );
+}
+
+function MassBattlePanel({ unitCount }: { unitCount: number }) {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+
+  const lodEnabled = new URLSearchParams(window.location.search).get("lod") === "mass";
+  const highDetailHref = `/?showcase=mass-battle&units=${unitCount}`;
+  const lodHref = `/?showcase=mass-battle&units=${unitCount}&lod=mass`;
+
+  return (
+    <ShowcasePanel kicker="Mass Battle" title={`${unitCount} vs ${unitCount}`}>
+      <a className={!lodEnabled ? "active" : ""} href={highDetailHref}>
+        High Detail
+      </a>
+      <a className={lodEnabled ? "active" : ""} href={lodHref}>
+        Mass LOD
+      </a>
+    </ShowcasePanel>
+  );
 }
 
 function readStoredLivePresetSelection(): LivePresetSelection {
@@ -478,7 +568,7 @@ function App() {
   const displayState = useMemo(
     () => {
       if (ANIMATION_LAB_SHOWCASE) {
-        return createAnimationLabState(showcaseTick);
+        return createAnimationLabState(showcaseTick, ANIMATION_LAB_MODE);
       }
       if (MASS_BATTLE_SHOWCASE) {
         return createMassBattleState(sourceDisplayState, MASS_BATTLE_UNIT_COUNT);
@@ -518,7 +608,13 @@ function App() {
   if (LOCAL_SHOWCASE) {
     return (
       <main className="battlefield-showcase">
-        <Battlefield3D state={displayState} />
+        <DevQuickNav />
+        {ANIMATION_LAB_SHOWCASE ? <AnimationLabPanel mode={ANIMATION_LAB_MODE} /> : null}
+        {MASS_BATTLE_SHOWCASE ? <MassBattlePanel unitCount={MASS_BATTLE_UNIT_COUNT} /> : null}
+        <Battlefield3D
+          state={displayState}
+          projectileFxMode={ANIMATION_LAB_SHOWCASE && ANIMATION_LAB_MODE === "preview" ? "preview" : "game"}
+        />
       </main>
     );
   }
@@ -526,6 +622,7 @@ function App() {
   return (
     <>
       <div className="noise-overlay" />
+      <DevQuickNav />
       <div className="app-shell">
         <header className="app-header">
           <div className="brand">

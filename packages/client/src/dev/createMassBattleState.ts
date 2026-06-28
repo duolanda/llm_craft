@@ -1,4 +1,5 @@
 import {
+  ActiveProjectile,
   BUILDING_STATS,
   BUILDING_TYPES,
   DEFAULT_MAP_LAYOUT,
@@ -8,6 +9,7 @@ import {
   MAP_WIDTH,
   PLAYER_IDS,
   Player,
+  PROJECTILE_TYPES,
   TILE_TYPES,
   UNIT_STATES,
   UNIT_STATS,
@@ -26,6 +28,66 @@ const FORMATION_TYPES: UnitType[] = [
   UNIT_TYPES.ROCKET_SOLDIER,
   UNIT_TYPES.LIGHT_TANK,
 ];
+
+const ANIMATION_LAB_FX_PAIRS = [
+  {
+    sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_rifle`,
+    targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_rifle`,
+    sourceType: UNIT_TYPES.RIFLEMAN,
+    targetType: UNIT_TYPES.RIFLEMAN,
+    y: 39,
+  },
+  {
+    sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_rocket`,
+    targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_rocket_tank`,
+    sourceType: UNIT_TYPES.ROCKET_SOLDIER,
+    targetType: UNIT_TYPES.LIGHT_TANK,
+    y: 47,
+  },
+  {
+    sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_tank`,
+    targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_tank`,
+    sourceType: UNIT_TYPES.LIGHT_TANK,
+    targetType: UNIT_TYPES.LIGHT_TANK,
+    y: 53,
+  },
+] as const;
+
+const ANIMATION_LAB_FX_SOURCE_X = 63;
+const ANIMATION_LAB_FX_TARGET_X = 81;
+
+const ANIMATION_LAB_FX_PROJECTILES = [
+  {
+    id: "lab_bullet",
+    projectileType: PROJECTILE_TYPES.BULLET,
+    periodTicks: 4,
+    flightTicks: 2,
+    sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.62,
+    targetX: ANIMATION_LAB_FX_TARGET_X - 0.35,
+    y: ANIMATION_LAB_FX_PAIRS[0].y,
+    offsetTicks: 0,
+  },
+  {
+    id: "lab_rocket",
+    projectileType: PROJECTILE_TYPES.ROCKET,
+    periodTicks: 9,
+    flightTicks: 5,
+    sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.68,
+    targetX: ANIMATION_LAB_FX_TARGET_X - 0.52,
+    y: ANIMATION_LAB_FX_PAIRS[1].y,
+    offsetTicks: 2,
+  },
+  {
+    id: "lab_shell",
+    projectileType: PROJECTILE_TYPES.SHELL,
+    periodTicks: 10,
+    flightTicks: 6,
+    sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.92,
+    targetX: ANIMATION_LAB_FX_TARGET_X - 0.72,
+    y: ANIMATION_LAB_FX_PAIRS[2].y,
+    offsetTicks: 5,
+  },
+] as const;
 
 function createFormationUnit(
   playerId: typeof PLAYER_IDS.PLAYER_1 | typeof PLAYER_IDS.PLAYER_2,
@@ -238,6 +300,7 @@ function createAnimationLabPlayer(
         state: UNIT_STATES.MOVING,
         intent: { type: "attack_move", targetX, targetY: playerOne ? 46 : 50 },
       }),
+      ...createAnimationLabFxRangeUnits(playerId),
     ],
     buildings: buildingLayout.map((building, index) => {
       const stats = BUILDING_STATS[building.type];
@@ -255,8 +318,91 @@ function createAnimationLabPlayer(
   };
 }
 
-export function createAnimationLabState(tick: number): GameState {
+function createAnimationLabFxRangeUnits(
+  playerId: typeof PLAYER_IDS.PLAYER_1 | typeof PLAYER_IDS.PLAYER_2,
+): Unit[] {
+  const playerOne = playerId === PLAYER_IDS.PLAYER_1;
+  return playerOne
+    ? ANIMATION_LAB_FX_PAIRS.map((pair) =>
+        createAnimationLabUnit(playerId, pair.sourceId, pair.sourceType, ANIMATION_LAB_FX_SOURCE_X, pair.y, {
+          state: UNIT_STATES.ATTACKING,
+          intent: {
+            type: "attack",
+            targetId: pair.targetId,
+            targetX: ANIMATION_LAB_FX_TARGET_X,
+            targetY: pair.y,
+          },
+        }))
+    : ANIMATION_LAB_FX_PAIRS.map((pair) =>
+        createAnimationLabUnit(playerId, pair.targetId, pair.targetType, ANIMATION_LAB_FX_TARGET_X, pair.y, {
+          state: UNIT_STATES.IDLE,
+          intent: {
+            type: "attack",
+            targetId: pair.sourceId,
+            targetX: ANIMATION_LAB_FX_SOURCE_X,
+            targetY: pair.y,
+          },
+        }));
+}
+
+function createAnimationLabProjectile(
+  id: string,
+  projectileType: ActiveProjectile["projectileType"],
+  tick: number,
+  periodTicks: number,
+  flightTicks: number,
+  startX: number,
+  startY: number,
+  targetX: number,
+  targetY: number,
+  offsetTicks = 0,
+): ActiveProjectile | null {
+  const localTick = tick + offsetTicks;
+  const ageTicks = ((localTick % periodTicks) + periodTicks) % periodTicks;
+  if (ageTicks >= flightTicks) {
+    return null;
+  }
+
+  const launchedTick = tick - ageTicks;
+  const progress = ageTicks / Math.max(1, flightTicks);
+  return {
+    id: `${id}_${launchedTick}`,
+    playerId: PLAYER_IDS.PLAYER_1,
+    attackerId: `${PLAYER_IDS.PLAYER_1}_lab_projectile_source`,
+    attackerType: projectileType === PROJECTILE_TYPES.ROCKET ? UNIT_TYPES.ROCKET_SOLDIER : UNIT_TYPES.LIGHT_TANK,
+    projectileType,
+    x: startX + (targetX - startX) * progress,
+    y: startY + (targetY - startY) * progress,
+    startX,
+    startY,
+    targetX,
+    targetY,
+    launchedTick,
+    impactTick: launchedTick + flightTicks,
+    splashRadius: projectileType === PROJECTILE_TYPES.BULLET ? undefined : 1,
+  };
+}
+
+export function createAnimationLabState(tick: number, mode: "implemented" | "preview" = "implemented"): GameState {
   const resourcePositions = new Set(DEFAULT_MAP_LAYOUT.resources.map((position) => `${position.x},${position.y}`));
+  const labProjectiles = mode === "implemented"
+    ? ANIMATION_LAB_FX_PROJECTILES
+        .map((projectile) =>
+          createAnimationLabProjectile(
+            projectile.id,
+            projectile.projectileType,
+            tick,
+            projectile.periodTicks,
+            projectile.flightTicks,
+            projectile.sourceX,
+            projectile.y,
+            projectile.targetX,
+            projectile.y,
+            projectile.offsetTicks,
+          ))
+        .filter((projectile): projectile is ActiveProjectile => projectile !== null)
+    : [];
+
   return {
     tick,
     players: [
@@ -273,5 +419,6 @@ export function createAnimationLabState(tick: number): GameState {
     ),
     winner: null,
     logs: [],
+    projectiles: labProjectiles,
   };
 }

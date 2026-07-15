@@ -74,6 +74,7 @@ export const RESULT_TYPES = {
   ATTACK_MOVE_SUCCESS: "attack_move_success",
 
   // 建造相关
+  BUILDING_CONSTRUCTION_STARTED: "building_construction_started",
   BUILDING_CONSTRUCTED: "building_constructed",
   BUILD_INVALID_POSITION: "build_invalid_position",
   BUILD_INSUFFICIENT_CREDITS: "build_insufficient_credits",
@@ -127,6 +128,14 @@ export interface CommandResultExtraDataMap {
     hint: string;
   };
   [RESULT_TYPES.ATTACK_MOVE_SUCCESS]: Record<string, never>;
+  [RESULT_TYPES.BUILDING_CONSTRUCTION_STARTED]: {
+    buildingId: string;
+    buildingType: string;
+    x: number;
+    y: number;
+    workerId: string;
+    constructionTicks: number;
+  };
   [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
     buildingId: string;
     buildingType: string;
@@ -233,6 +242,7 @@ export const LOG_TYPES = {
   // 单位系统
   UNIT_SPAWNED: "unit_spawned",
   SPAWN_FAILED: "spawn_failed",
+  BUILDING_COMPLETED: "building_completed",
 
   // 命令执行结果（统一）
   COMMAND_RESULT: "command_result",
@@ -271,6 +281,11 @@ export interface GameLogDataMap {
   };
   [LOG_TYPES.UNIT_SPAWNED]: { unitType: string };
   [LOG_TYPES.SPAWN_FAILED]: { unitType: string };
+  [LOG_TYPES.BUILDING_COMPLETED]: {
+    buildingId: string;
+    buildingType: string;
+    workerId: string;
+  };
   [LOG_TYPES.COMMAND_RESULT]: CommandResultData;
   [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
   [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;
@@ -311,6 +326,7 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.CREDITS_DELIVERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.UNIT_SPAWNED]: {},
   [LOG_TYPES.SPAWN_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.BUILDING_COMPLETED]: {},
   [LOG_TYPES.COMMAND_RESULT]: {},
   [LOG_TYPES.AI_GENERATION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.AI_EXECUTION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },

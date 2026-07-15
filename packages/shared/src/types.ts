@@ -154,6 +154,12 @@ export type UnitIntent =
       targetY?: number;
       targetId?: string;
       targetPriority?: AttackTargetType[];
+    }
+  | {
+      type: "build";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
     };
 
 export interface Unit extends GameObject {
@@ -176,6 +182,8 @@ export interface Unit extends GameObject {
   lastAttackTick?: number;
   // 下一次可开火的 tick，用于武器装填/冷却
   nextAttackTick?: number;
+  // 当前正在施工的建筑 ID；施工时 worker 被占用
+  constructingBuildingId?: string;
 }
 
 export interface Building extends GameObject {
@@ -187,6 +195,11 @@ export interface Building extends GameObject {
   productionQueue: UnitType[];
   productionProgress?: {
     unitType: UnitType;
+    remainingTicks: number;
+    totalTicks: number;
+  };
+  constructionProgress?: {
+    workerId: string;
     remainingTicks: number;
     totalTicks: number;
   };
@@ -312,6 +325,7 @@ export interface AgentMapStateBuilding {
   hp: number;
   maxHp: number;
   relation: "self" | "enemy";
+  constructionProgress?: Building["constructionProgress"];
 }
 
 export interface AgentMapStateCell {
@@ -499,6 +513,7 @@ export interface TickDeltaRecord {
       carryingCredits?: number;
       carryCapacity?: number;
       intent?: UnitIntent | null;
+      constructingBuildingId?: string | null;
     }>;
     buildings: Array<{
       id: string;
@@ -510,6 +525,7 @@ export interface TickDeltaRecord {
       maxHp?: number;
       productionQueue?: UnitType[];
       productionProgress?: Building["productionProgress"] | null;
+      constructionProgress?: Building["constructionProgress"] | null;
     }>;
   }>;
   newLogs: GameLog[];

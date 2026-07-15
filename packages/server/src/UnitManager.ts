@@ -283,7 +283,7 @@ export class UnitManager {
     blockedPositions?: Set<string>,
     repathBudget?: { remaining: number },
   ): ResultCode {
-    if (!unit.exists || !unit.path || unit.path.length === 0) {
+    if (!unit.exists || unit.state === UNIT_STATES.BUILDING || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
     }
 
@@ -523,6 +523,9 @@ export class UnitManager {
   }
 
   private tryApplySeparation(unit: Unit, x: number, y: number, tiles: TileType[][], blockedPositions?: Set<string>): void {
+    if (unit.state === UNIT_STATES.BUILDING) {
+      return;
+    }
     const nextX = clamp(x, 0, MAP_WIDTH - 1);
     const nextY = clamp(y, 0, MAP_HEIGHT - 1);
     if (this.isTerrainBlocked(nextX, nextY, tiles, blockedPositions)) {

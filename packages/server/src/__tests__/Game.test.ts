@@ -15,6 +15,8 @@ import {
   DEFAULT_MAP_LAYOUT,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
+  getBuildingConstructionTicks,
+  getBuildingFootprint,
   getUnitProductionTicks,
   LOG_TYPES,
 } from "@llmcraft/shared";
@@ -33,6 +35,17 @@ describe("Game", () => {
       game.tickUpdate();
     }
     game.stop();
+  }
+
+  function moveWorkerAdjacentToBuildSite(workerId: string, buildingType: typeof BUILDING_TYPES[keyof typeof BUILDING_TYPES], site = player1BuildSite): void {
+    const worker = game.getUnitManager().getUnit(workerId)!;
+    const footprint = getBuildingFootprint(buildingType);
+    worker.x = site.x - Math.floor(footprint.width / 2) - 1;
+    worker.y = site.y;
+  }
+
+  function completeConstruction(buildingType: typeof BUILDING_TYPES[keyof typeof BUILDING_TYPES]): void {
+    advanceTicks(getBuildingConstructionTicks(buildingType));
   }
 
   it("initializes each player with one HQ, four workers and expansion credits", () => {
@@ -178,11 +191,12 @@ describe("Game", () => {
     expect(game.getState().players[0].resources.credits).toBe(800);
   });
 
-  it("allows a worker to build a barracks on a valid tile", () => {
+  it("allows a nearby worker to start constructing a barracks on a valid tile", () => {
     const worker = game
       .getState()
       .players[0]
       .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
 
     game.queueCommand({
       id: "build_barracks",
@@ -196,9 +210,111 @@ describe("Game", () => {
     game.processCommands();
 
     const state = game.getState();
-    expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS)).toHaveLength(1);
+    const barracks = state.players[0].buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS)!;
+    expect(barracks.constructionProgress).toMatchObject({
+      workerId: worker.id,
+      remainingTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
+      totalTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
+    });
+    expect(state.players[0].units.find((unit) => unit.id === worker.id)?.state).toBe("building");
     expect(state.players[0].resources.credits).toBe(680);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.type).toBe(RESULT_TYPES.BUILDING_CONSTRUCTION_STARTED);
+  });
+
+  it("completes construction after the building time and frees the worker", () => {
+    const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
+
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    completeConstruction(BUILDING_TYPES.BARRACKS);
+
+    const state = game.getState();
+    const barracks = state.players[0].buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS)!;
+    const freedWorker = state.players[0].units.find((unit) => unit.id === worker.id)!;
+    expect(barracks.constructionProgress).toBeUndefined();
+    expect(freedWorker.state).toBe("idle");
+    expect(freedWorker.constructingBuildingId).toBeUndefined();
+  });
+
+  it("keeps a construction worker busy until the building completes", () => {
+    const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    game.queueCommand({
+      id: "move_busy_worker",
+      type: "move",
+      unitId: worker.id,
+      position: { x: worker.x + 1, y: worker.y },
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_BUSY);
+    expect(game.getState().players[0].units.find((unit) => unit.id === worker.id)?.state).toBe("building");
+  });
+
+  it("does not allow production from buildings still under construction", () => {
+    const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    const barracks = game.getState().players[0].buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS)!;
+
+    game.queueCommand({
+      id: "spawn_from_unfinished_barracks",
+      type: "spawn",
+      buildingId: barracks.id,
+      unitType: UNIT_TYPES.RIFLEMAN,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_BUSY);
+    expect(game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.RIFLEMAN)).toHaveLength(0);
+  });
+
+  it("rejects construction when the worker is not adjacent to the building footprint", () => {
+    const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+
+    game.queueCommand({
+      id: "build_barracks_far_worker",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const result = game.getCommandResults().at(-1)?.data as CommandResultData;
+    expect(result.result_code).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect((result.result_data as any).type).toBe("build_worker_too_far");
+    expect(game.getState().players[0].resources.credits).toBe(800);
   });
 
   it("rejects building on an occupied tile", () => {
@@ -267,6 +383,7 @@ describe("Game", () => {
       .getState()
       .players[0]
       .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
 
     game.queueCommand({
       id: "build_barracks",
@@ -277,6 +394,7 @@ describe("Game", () => {
       playerId: "player_1",
     });
     game.processCommands();
+    completeConstruction(BUILDING_TYPES.BARRACKS);
 
     const barracks = game
       .getState()
@@ -300,11 +418,12 @@ describe("Game", () => {
     expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
   });
 
-  it("allows workers to build a war factory", () => {
+  it("requires a completed barracks before workers can build a war factory", () => {
     const worker = game
       .getState()
       .players[0]
       .units.find((u) => u.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.WAR_FACTORY);
 
     game.queueCommand({
       id: "build_war_factory",
@@ -317,13 +436,47 @@ describe("Game", () => {
     game.processCommands();
 
     const state = game.getState();
-    expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY)).toHaveLength(1);
-    expect(state.players[0].resources.credits).toBe(580);
+    expect(state.players[0].buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY)).toHaveLength(0);
+    expect(state.players[0].resources.credits).toBe(800);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
+  });
+
+  it("allows workers to build a war factory after barracks is complete", () => {
+    const [worker1, worker2] = game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.WORKER);
+    moveWorkerAdjacentToBuildSite(worker1.id, BUILDING_TYPES.BARRACKS);
+    game.queueCommand({
+      id: "build_barracks",
+      type: "build",
+      unitId: worker1.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    completeConstruction(BUILDING_TYPES.BARRACKS);
+
+    const factorySite = { x: player1BuildSite.x + 8, y: player1BuildSite.y };
+    moveWorkerAdjacentToBuildSite(worker2.id, BUILDING_TYPES.WAR_FACTORY, factorySite);
+    game.queueCommand({
+      id: "build_war_factory",
+      type: "build",
+      unitId: worker2.id,
+      buildingType: BUILDING_TYPES.WAR_FACTORY,
+      position: factorySite,
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    const state = game.getState();
+    const factory = state.players[0].buildings.find((b) => b.type === BUILDING_TYPES.WAR_FACTORY)!;
+    expect(factory.constructionProgress).toBeTruthy();
+    expect(state.players[0].resources.credits).toBe(460);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
   });
 
   it("allows workers to build a refinery for forward resource delivery", () => {
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.REFINERY);
     game.queueCommand({
       id: "build_refinery",
       type: "build",
@@ -335,7 +488,8 @@ describe("Game", () => {
     game.processCommands();
 
     const state = game.getState();
-    expect(state.players[0].buildings.filter((building) => building.type === BUILDING_TYPES.REFINERY)).toHaveLength(1);
+    const refinery = state.players[0].buildings.find((building) => building.type === BUILDING_TYPES.REFINERY)!;
+    expect(refinery.constructionProgress).toBeTruthy();
     expect(state.players[0].resources.credits).toBe(500);
   });
 

@@ -74,6 +74,7 @@ export const UNIT_STATES = {
   MOVING: "moving",
   ATTACKING: "attacking",
   GATHERING: "gathering",
+  BUILDING: "building",
 } as const;
 
 export type UnitState = typeof UNIT_STATES[keyof typeof UNIT_STATES];
@@ -140,6 +141,7 @@ export interface RulesetWeaponDefinition {
 export interface RulesetBuildingDefinition {
   hp: number;
   cost: number;
+  constructionTicks: number;
   visionRange: number;
   armor: ArmorType;
   produces: UnitType[];
@@ -278,17 +280,18 @@ export const DEFAULT_RULESET = {
     },
   },
   buildings: {
-    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER], footprint: { width: 7, height: 7 } },
+    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, constructionTicks: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER], footprint: { width: 7, height: 7 } },
     [BUILDING_TYPES.BARRACKS]: {
       hp: 420,
       cost: 120,
+      constructionTicks: 12,
       visionRange: 6,
       armor: ARMOR_TYPES.STRUCTURE,
       produces: [UNIT_TYPES.SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
       footprint: { width: 5, height: 5 },
     },
-    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK], footprint: { width: 7, height: 5 } },
-    [BUILDING_TYPES.REFINERY]: { hp: 560, cost: 300, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [], footprint: { width: 5, height: 5 } },
+    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, constructionTicks: 18, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK], footprint: { width: 7, height: 5 } },
+    [BUILDING_TYPES.REFINERY]: { hp: 560, cost: 300, constructionTicks: 16, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [], footprint: { width: 5, height: 5 } },
   },
   economy: ECONOMY_RULES,
 } satisfies GameRuleset;
@@ -300,6 +303,7 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
   [BUILDING_TYPES.HQ]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].constructionTicks,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].armor,
     footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].footprint,
@@ -307,6 +311,7 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
   [BUILDING_TYPES.BARRACKS]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].constructionTicks,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].armor,
     footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].footprint,
@@ -314,6 +319,7 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
   [BUILDING_TYPES.WAR_FACTORY]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].constructionTicks,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].armor,
     footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].footprint,
@@ -321,6 +327,7 @@ export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition
   [BUILDING_TYPES.REFINERY]: {
     hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].hp,
     cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].constructionTicks,
     visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].visionRange,
     armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].armor,
     footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].footprint,

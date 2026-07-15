@@ -1,10 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameAgentBridge } from "../agent/GameAgentBridge";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint } from "@llmcraft/shared";
 
 describe("GameAgentBridge", () => {
   const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
+
+  function moveWorkerAdjacentToBuildSite(game: Game, workerId: string, buildingType: typeof BUILDING_TYPES[keyof typeof BUILDING_TYPES], site = player1BuildSite): void {
+    const worker = game.getUnitManager().getUnit(workerId)!;
+    const footprint = getBuildingFootprint(buildingType);
+    worker.x = site.x - Math.floor(footprint.width / 2) - 1;
+    worker.y = site.y;
+  }
+
+  function advanceTicks(game: Game, count: number): void {
+    for (let tick = 0; tick < count; tick++) {
+      game.tickUpdate();
+    }
+  }
 
   it("queues action commands into the game immediately", () => {
     const game = new Game();
@@ -186,6 +199,7 @@ describe("GameAgentBridge", () => {
       expect.objectContaining({ type: "harvest_loop", unitId: worker2.id }),
     ]);
 
+    moveWorkerAdjacentToBuildSite(game, worker1.id, BUILDING_TYPES.BARRACKS);
     const buildCommands = bridge.advancePlans();
     expect(buildCommands).toEqual([
       expect.objectContaining({
@@ -199,6 +213,7 @@ describe("GameAgentBridge", () => {
       game.queueCommand(command);
     }
     game.tickUpdate();
+    advanceTicks(game, getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS) - 1);
 
     expect(bridge.advancePlans()).toEqual([
       expect.objectContaining({
@@ -214,13 +229,16 @@ describe("GameAgentBridge", () => {
     game.start();
     const bridge = new GameAgentBridge(game, "player_1");
     const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
+    const factorySite = { x: player1BuildSite.x + 8, y: player1BuildSite.y };
+    moveWorkerAdjacentToBuildSite(game, worker1.id, BUILDING_TYPES.WAR_FACTORY, factorySite);
 
     const result = bridge.orchestratePlan({
       unitIds: [worker1.id, worker2.id],
       steps: [
         {
           call: "build_structure",
-          args: { unitId: worker1.id, buildingType: "war_factory", x: player1BuildSite.x, y: player1BuildSite.y },
+          args: { unitId: worker1.id, buildingType: "war_factory", x: factorySite.x, y: factorySite.y },
           scope: "global",
           when: { condition: "credits_at_least", amount: 220 },
           until: { condition: "building_exists", buildingType: "war_factory" },
@@ -244,13 +262,14 @@ describe("GameAgentBridge", () => {
         type: "build",
         unitId: worker1.id,
         buildingType: "war_factory",
-        position: player1BuildSite,
+        position: factorySite,
       }),
     ]);
     for (const command of buildCommands) {
       game.queueCommand(command);
     }
     game.tickUpdate();
+    advanceTicks(game, getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY) - 1);
 
     const runtimeWorker2 = game.getUnitManager().getUnit(worker2.id)!;
     runtimeWorker2.x = DEFAULT_MAP_LAYOUT.player1Hq.x + 1;

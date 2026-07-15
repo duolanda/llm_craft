@@ -8,6 +8,7 @@ import {
   AgentPlanRecord,
   AttackTargetType,
   BUILDING_TYPES,
+  Building,
   BuildingType,
   Command,
   OrchestratePlanInput,
@@ -22,6 +23,7 @@ import {
   canBuildingProduce,
   getDefaultAttackMovePriority,
   getBuildingCost,
+  getBuildingConstructionTicks,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
   getProducerBuildingType,
@@ -79,6 +81,8 @@ type CachedEnemyTarget = {
 type AttackOrderResolution =
   | { ok: true; command: Command; mode: "attack" | "move_to_target" | "move_to_last_seen"; completedAfterCommand: boolean }
   | { ok: false; error: string; hint: string };
+
+const isBuildingComplete = (building: Building): boolean => building.exists && !building.constructionProgress;
 
 export class GameAgentBridge {
   private issuedCommands: Command[] = [];
@@ -216,6 +220,7 @@ export class GameAgentBridge {
           hp: building.hp,
           maxHp: building.maxHp,
           relation,
+          constructionProgress: building.constructionProgress,
         } satisfies AgentMapStateBuilding;
         buildings.push(mapBuilding);
         if (includeCells) {
@@ -321,11 +326,24 @@ export class GameAgentBridge {
           if (!isBuildableBuildingType(context.args.buildingType) || context.snapshot.myCredits < getBuildingCost(context.args.buildingType)) {
             return null;
           }
+          const worker = context.snapshot.myUnits.find((unit) => unit.id === unitId && unit.exists && unit.type === UNIT_TYPES.WORKER);
+          const position = { x: Number(context.args.x), y: Number(context.args.y) };
+          if (
+            !worker ||
+            worker.constructingBuildingId ||
+            (context.args.buildingType === BUILDING_TYPES.WAR_FACTORY &&
+              !context.snapshot.myBuildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))) ||
+            !Number.isInteger(position.x) ||
+            !Number.isInteger(position.y) ||
+            !this.isWorkerAdjacentToBuildFootprint(worker, context.args.buildingType, position)
+          ) {
+            return null;
+          }
           return unitId && isBuildableBuildingType(context.args.buildingType) && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
             ? this.createCommand("build", {
                 unitId,
                 buildingType: context.args.buildingType,
-                position: { x: Number(context.args.x), y: Number(context.args.y) },
+                position,
               })
             : null;
         },
@@ -380,7 +398,7 @@ export class GameAgentBridge {
     }
     const placeholderType = this.resolveBuildingPlaceholder(requested);
     const type = placeholderType ?? (isBuildingType(context.args.buildingType) ? context.args.buildingType : fallbackType);
-    return context.snapshot.myBuildings.find((building) => building.type === type && building.exists)?.id ?? null;
+    return context.snapshot.myBuildings.find((building) => building.type === type && isBuildingComplete(building))?.id ?? null;
   }
 
   private resolveBuildingPlaceholder(value: unknown): BuildingType | null {
@@ -413,12 +431,14 @@ export class GameAgentBridge {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const enemies = state.players.filter((player) => player.id !== this.playerId);
     const myBuildings = me.buildings.filter((building) => building.exists);
+    const completedMyBuildings = myBuildings.filter(isBuildingComplete);
     const myUnits = me.units.filter((unit) => unit.exists);
     const enemyBuildings = enemies.flatMap((player) => player.buildings.filter((building) => building.exists));
     const enemyUnits = enemies.flatMap((player) => player.units.filter((unit) => unit.exists));
-    const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ) ?? null;
+    const hq = completedMyBuildings.find((building) => building.type === BUILDING_TYPES.HQ) ?? null;
     const countUnits = (unitType: UnitType) => myUnits.filter((unit) => unit.type === unitType).length;
-    const countBuildings = (buildingType: BuildingType) => myBuildings.filter((building) => building.type === buildingType).length;
+    const countBuildings = (buildingType: BuildingType) => completedMyBuildings.filter((building) => building.type === buildingType).length;
+    const countStartedBuildings = (buildingType: BuildingType) => myBuildings.filter((building) => building.type === buildingType).length;
     const hasBarracks = countBuildings(BUILDING_TYPES.BARRACKS) > 0;
     const hasWarFactory = countBuildings(BUILDING_TYPES.WAR_FACTORY) > 0;
     const hasRefinery = countBuildings(BUILDING_TYPES.REFINERY) > 0;
@@ -428,7 +448,7 @@ export class GameAgentBridge {
       ? UNIT_TYPES.ROCKET_SOLDIER
       : UNIT_TYPES.RIFLEMAN;
     const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
-    const builderWorker = workers.find((unit) => unit.state === "idle") ?? workers[0] ?? null;
+    const builderWorker = workers.find((unit) => unit.state === "idle" && !unit.constructingBuildingId) ?? workers.find((unit) => !unit.constructingBuildingId) ?? null;
     const activeHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
     const idleWorkers = workers.filter((unit) => unit.state === "idle" && unit.intent?.type !== "harvest_loop");
     const resourceAssignments = state.tiles
@@ -474,27 +494,30 @@ export class GameAgentBridge {
       });
     }
     const recommendedStructures: Array<Record<string, unknown>> = [];
-    if (!hasBarracks && builderWorker) {
+    if (countStartedBuildings(BUILDING_TYPES.BARRACKS) === 0 && builderWorker) {
       recommendedStructures.push({
         workerId: builderWorker.id,
         buildingType: BUILDING_TYPES.BARRACKS,
         cost: getBuildingCost(BUILDING_TYPES.BARRACKS),
+        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
         reason: "Unlock infantry production before floating credits.",
         suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.BARRACKS),
       });
-    } else if (!hasRefinery && me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY) && builderWorker) {
+    } else if (countStartedBuildings(BUILDING_TYPES.REFINERY) === 0 && me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY) && builderWorker) {
       recommendedStructures.push({
         workerId: builderWorker.id,
         buildingType: BUILDING_TYPES.REFINERY,
         cost: getBuildingCost(BUILDING_TYPES.REFINERY),
+        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.REFINERY),
         reason: "Expand toward a flank deposit so additional workers can sustain multiple production buildings.",
         suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.REFINERY),
       });
-    } else if (!hasWarFactory && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY) && builderWorker) {
+    } else if (hasBarracks && countStartedBuildings(BUILDING_TYPES.WAR_FACTORY) === 0 && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY) && builderWorker) {
       recommendedStructures.push({
         workerId: builderWorker.id,
         buildingType: BUILDING_TYPES.WAR_FACTORY,
         cost: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
         reason: "Tech to light_tank once barracks exists and credits can pay for the factory.",
         suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.WAR_FACTORY),
       });
@@ -503,6 +526,7 @@ export class GameAgentBridge {
         workerId: builderWorker.id,
         buildingType: BUILDING_TYPES.BARRACKS,
         cost: getBuildingCost(BUILDING_TYPES.BARRACKS),
+        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
         reason: "Credits are floating; add a second barracks so infantry production can spend income faster.",
         suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.BARRACKS),
       });
@@ -511,12 +535,13 @@ export class GameAgentBridge {
         workerId: builderWorker.id,
         buildingType: BUILDING_TYPES.WAR_FACTORY,
         cost: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
         reason: "Credits are floating; add a second war_factory so tank production can spend income faster.",
         suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.WAR_FACTORY),
       });
     }
     const recommendedProduction: Array<Record<string, unknown>> = [];
-    for (const building of myBuildings) {
+    for (const building of completedMyBuildings) {
       if (building.productionQueue.length > 0) {
         continue;
       }
@@ -554,7 +579,7 @@ export class GameAgentBridge {
         productionQueues: myBuildings
           .map((building) => ({ buildingId: building.id, queue: building.productionQueue, progress: building.productionProgress ?? null })),
         canBuildBarracks: me.resources.credits >= getBuildingCost(BUILDING_TYPES.BARRACKS),
-        canBuildWarFactory: me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
+        canBuildWarFactory: hasBarracks && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
         canBuildRefinery: me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY),
         canSpawnWorker: me.resources.credits >= getUnitCost(UNIT_TYPES.WORKER),
         canSpawnSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.SOLDIER),
@@ -580,6 +605,11 @@ export class GameAgentBridge {
           [BUILDING_TYPES.BARRACKS]: getBuildingCost(BUILDING_TYPES.BARRACKS),
           [BUILDING_TYPES.WAR_FACTORY]: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
           [BUILDING_TYPES.REFINERY]: getBuildingCost(BUILDING_TYPES.REFINERY),
+        },
+        buildingConstructionTicks: {
+          [BUILDING_TYPES.BARRACKS]: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
+          [BUILDING_TYPES.WAR_FACTORY]: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
+          [BUILDING_TYPES.REFINERY]: getBuildingConstructionTicks(BUILDING_TYPES.REFINERY),
         },
         techStatus: {
           own: {
@@ -863,6 +893,17 @@ export class GameAgentBridge {
       };
     }
 
+    if (building.constructionProgress) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "building_under_construction",
+          hint: `${building.type} is still under construction and cannot produce units yet.`,
+        }),
+      };
+    }
+
     if (!isUnitType(unitType)) {
       return {
         effect: "action",
@@ -929,7 +970,29 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_building",
-          hint: "Buildable structures are barracks and war_factory. HQ cannot be built.",
+          hint: "Buildable structures are barracks, war_factory, and refinery. HQ cannot be built.",
+        }),
+      };
+    }
+
+    if (worker.constructingBuildingId) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "worker_busy",
+          hint: "This worker is already constructing a building and cannot start another order yet.",
+        }),
+      };
+    }
+
+    if (buildingType === BUILDING_TYPES.WAR_FACTORY && !me.buildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "missing_prerequisite",
+          hint: "Build and complete a barracks before starting a war_factory.",
         }),
       };
     }
@@ -941,7 +1004,7 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "insufficient_credits",
-          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`, state),
+          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`, state, buildingType),
         }),
       };
     }
@@ -953,7 +1016,18 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_build_position",
-          hint: this.buildPlacementHint(validation.hint, state),
+          hint: this.buildPlacementHint(validation.hint, state, buildingType),
+        }),
+      };
+    }
+
+    if (!this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "worker_too_far",
+          hint: this.buildPlacementHint("Move the worker to a tile adjacent to the full building footprint before building.", state, buildingType),
         }),
       };
     }
@@ -1355,7 +1429,7 @@ export class GameAgentBridge {
       tick: state.tick,
       myCredits: me.resources.credits,
       myUnits: me.units.filter((unit) => unit.exists),
-      myBuildings: me.buildings.filter((building) => building.exists),
+      myBuildings: me.buildings.filter(isBuildingComplete),
       visibleUnits: state.players.flatMap((player) =>
         player.units
           .filter((unit) => unit.exists)
@@ -1411,8 +1485,8 @@ export class GameAgentBridge {
       .slice(0, limit);
   }
 
-  private buildPlacementHint(baseHint: string, state = this.getReadState()): string {
-    const suggestions = this.getSuggestedBuildSites(state)
+  private buildPlacementHint(baseHint: string, state = this.getReadState(), buildingType: BuildingType = BUILDING_TYPES.WAR_FACTORY): string {
+    const suggestions = this.getSuggestedBuildSites(state, buildingType)
       .map((site) => `(${site.x}, ${site.y})`)
       .join(", ");
     if (!suggestions) {
@@ -1462,6 +1536,12 @@ export class GameAgentBridge {
     }
 
     return { ok: true };
+  }
+
+  private isWorkerAdjacentToBuildFootprint(worker: { x: number; y: number }, buildingType: BuildingType, position: Position): boolean {
+    return getBuildingFootprintCells(buildingType, position.x, position.y).some((cell) =>
+      Math.max(Math.abs(worker.x - cell.x), Math.abs(worker.y - cell.y)) <= 1
+    );
   }
 
   private validatePlanInput(input: OrchestratePlanInput): { ok: true; value: OrchestratePlanInput } | { ok: false; hint: string } {

@@ -1,6 +1,6 @@
 # LLMCraft 当前 MVP 现状说明
 
-日期: 2026-06-27
+日期: 2026-07-02
 
 这份文档只描述当前代码真实行为，不描述理想设计。
 
@@ -115,11 +115,15 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 ## 5. 当前 MVP 规则
 
 - 当前规则已集中在 shared 默认 ruleset（`DEFAULT_RULESET`）中；`UNIT_STATS` / `BUILDING_STATS` 仍保留为兼容导出，但服务端核心创建、成本、生产关系和攻击能力判断开始通过 ruleset helper 读取。
-- 建筑包含 `hq`、`barracks`、`war_factory`
+- 建筑包含 `hq`、`barracks`、`war_factory`、`refinery`
 - 单位包含 `worker`、`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
 - `hq` 生产 `worker`
 - `barracks` 生产 `soldier`、`rifleman`、`rocket_soldier`
 - `war_factory` 生产 `light_tank`
+- `worker` 可建造 `barracks`、`war_factory`、`refinery`；`war_factory` 需要己方已有一个已完成 `barracks`
+- 建造不是瞬间完成：开始施工时扣除 credits 并创建占地建筑，施工中建筑可被攻击、会阻挡寻路，但不能生产、不能作为科技前置，也不会满足 plan 的 `building_exists`
+- 建造要求 worker 位于目标建筑完整 footprint 的相邻 1 格内；施工期间该 worker 进入 `building` 状态并被占用，不能移动、采矿或接收其他命令
+- 默认施工时间：`barracks` 12 ticks、`war_factory` 18 ticks、`refinery` 16 ticks
 - 当前 OpenRA-lite 武器模型：攻击不再是命令执行即扣血，而是开火生成 projectile；projectile 按飞行时间抵达后由 warhead 结算伤害。单位有 reload：`soldier` 3 ticks、`rifleman` 2 ticks、`rocket_soldier` 8 ticks、`light_tank` 6 ticks。
 - 当前移动/碰撞模型：地图、建筑、资源和寻路仍使用格子坐标；单位权威坐标允许为连续数值。A* 仍以最近格作为路径节点，但移动沿路径按速度推进，并在 tick 后做单位半径分离；轻坦半径大于步兵，避免多个坦克视觉上叠在同一点。到达、采矿和 plan `arrived` 判断使用近似位置/最近格，不再依赖 `x === tile.x`。
 - 当前单位数值：`soldier` 115 HP / 10 damage / range 1 / cost 55；`rifleman` 95 HP / 9 damage / range 6 / cost 70；`rocket_soldier` 80 HP / 34 damage / range 6 / cost 110；`light_tank` 420 HP / 42 damage / range 5 / cost 240。
@@ -150,8 +154,8 @@ Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` �
 - 胜负条件是摧毁敌方所有建筑；HQ 被摧毁但仍有 barracks / war_factory / refinery 时不会立刻失败
 - 当前地图 `144 x 96`
 - 当前没有战争迷雾读取层：`get_map_state`、`get_my_state.techStatus.enemy` 和 active plan 的 enemy 条件使用全图真实状态，且不再返回 ASCII 小地图。单位自动索敌仍受各自 `visionRange` 限制；等侦察兵、雷达和 last-seen 系统完整后再重新评估迷雾。
-- `worker` 自动采矿，回最近 HQ 或 refinery 交付；资源点有有限储量
-- `barracks` 和 `war_factory` 不能紧贴己方 `HQ`
+- `worker` 自动采矿，回最近已完成 HQ 或 refinery 交付；资源点有有限储量
+- `barracks`、`war_factory` 和 `refinery` 不能紧贴己方 `HQ`
 - idle/hold 的有攻击力单位被敌方单位攻击时，会在射程内自动还击攻击者
 
 ## 6. CLI 控制面
@@ -192,8 +196,8 @@ Control session 只是访问令牌；同一 player 的多个 session 共享 matc
 ### 选择器命令
 
 - `units [--type w|s] [--idle] [--planned|--unplanned] [--near x,y] [--limit n]`
-- `buildings [--type hq|barracks|war_factory] [--ready] [--near x,y] [--limit n]`
-- `enemies [--type w|s|rifleman|rocket_soldier|light_tank|hq|barracks|war_factory] [--near x,y] [--limit n]`
+- `buildings [--type hq|barracks|war_factory|refinery] [--ready] [--near x,y] [--limit n]`
+- `enemies [--type w|s|rifleman|rocket_soldier|light_tank|hq|barracks|war_factory|refinery] [--near x,y] [--limit n]`
 - `resources [--near x,y] [--limit n]`
 
 ### 动作命令
@@ -202,7 +206,7 @@ Control session 只是访问令牌；同一 player 的多个 session 共享 matc
 - `attack --unit <id> --target <id>`
 - `attack-move --unit <id> --to x,y [--priority soldier,rifleman,rocket_soldier,light_tank,worker,hq,barracks,war_factory,refinery]`
 - `gather --unit <id> [--resource x,y]`
-- `build barracks|war_factory --unit <id> --at x,y`
+- `build barracks|war_factory|refinery --unit <id> --at x,y`
 - `train worker|soldier|rifleman|rocket_soldier|light_tank --building <id>`
 - `hold --unit <id>`
 

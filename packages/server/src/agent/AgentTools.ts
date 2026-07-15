@@ -28,6 +28,10 @@ const OPENING_BARRACKS_SITE = {
   x: DEFAULT_MAP_LAYOUT.player1Hq.x + 12,
   y: DEFAULT_MAP_LAYOUT.player1Hq.y,
 };
+const OPENING_BARRACKS_WORKER_SITE = {
+  x: OPENING_BARRACKS_SITE.x - 3,
+  y: OPENING_BARRACKS_SITE.y,
+};
 
 const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
@@ -173,7 +177,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "build_structure",
-    description: "Queue a build command for one worker. Barracks, war factories, and refineries use multi-tile footprints that must remain clear and leave one empty ring around HQ. Refineries accept worker resource deliveries near their footprint.",
+    description: "Start construction with one worker. The worker must already be adjacent to the full building footprint and is occupied until construction completes. War factories require a completed barracks first. Barracks, war factories, and refineries use multi-tile footprints that must remain clear and leave one empty ring around HQ. Refineries are buildable mining drop-off structures.",
     parameters: {
       type: "object",
       required: ["unitId", "buildingType", "x", "y"],
@@ -293,21 +297,28 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Supported call tools in plans: move_unit, attack_move_unit, attack, spawn_unit, build_structure, start_harvest_loop, hold_unit.",
       "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for production/building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
-      "- In global production args, buildingId can be \"$hq\", \"$barracks\", or \"$war_factory\" to resolve the current friendly building at execution time.",
+      "- In global production args, buildingId can be \"$hq\", \"$barracks\", \"$war_factory\", or \"$refinery\" to resolve the current friendly building at execution time.",
       "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
-      "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; they do not emit unaffordable commands just to retry.",
+      "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; build_structure also waits until the worker is adjacent to the requested footprint.",
       "- Multiple active plans share the same tick budget. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining budget cannot cover them.",
       "- Use get_active_plans to inspect currentStep, waitingReason, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train riflemen:",
+      "Opening example: assign two workers to mining, move a builder beside the barracks footprint, build barracks, then train riflemen:",
       JSON.stringify({
         unitIds: ["worker_1", "worker_2"],
         loop: 1,
         steps: [
           { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
+          {
+            call: "move_unit",
+            args: { unitId: "worker_1", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y },
+            scope: "global",
+            until: { condition: "near_position", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y, distance: 1 },
+            retry: true,
+          },
           {
             call: "build_structure",
             args: { unitId: "worker_1", buildingType: "barracks", x: OPENING_BARRACKS_SITE.x, y: OPENING_BARRACKS_SITE.y },

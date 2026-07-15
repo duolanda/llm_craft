@@ -25,6 +25,7 @@ import {
   getAttackDamageAgainstBuilding,
   getDefaultAttackMovePriority,
   getBuildingCost as getRulesetBuildingCost,
+  getBuildingConstructionTicks,
   getBuildingFootprint,
   getBuildingFootprintCells,
   getUnitCost as getRulesetUnitCost,
@@ -267,6 +268,31 @@ export class Game {
   }
 
   private processCommand(command: Command): void {
+    if (command.unitId && command.type !== "build") {
+      const unit = this.unitManager.getUnit(command.unitId);
+      if (unit && unit.playerId === command.playerId && this.isWorkerConstructing(unit)) {
+        this.addLog(
+          LOG_TYPES.COMMAND_RESULT,
+          `${command.type} command failed: worker is constructing`,
+          {
+            command,
+            result_code: RESULT_CODES.ERR_BUSY,
+            type: RESULT_TYPES.INVALID_UNIT,
+            result_data: {
+              unitId: command.unitId,
+              hint: "This worker is constructing a building and cannot accept other orders until construction finishes.",
+            },
+          },
+          {
+            owner: command.playerId,
+            feedbackTarget: command.playerId,
+            level: LOG_LEVELS.WARNING,
+          }
+        );
+        return;
+      }
+    }
+
     switch (command.type) {
       case "move": {
         if (command.unitId && command.position) {
@@ -763,7 +789,29 @@ export class Game {
             const player = this.players.find((p) => p.id === command.playerId);
             if (player) {
               const unitCost = this.getUnitCost(command.unitType);
-              if (!this.buildingManager.canProduce(building, command.unitType)) {
+              if (building.constructionProgress) {
+                const result = RESULT_CODES.ERR_BUSY;
+                this.addLog(
+                  LOG_TYPES.COMMAND_RESULT,
+                  `Spawn command failed: ${building.type} is still under construction`,
+                  {
+                    command,
+                    result_code: result,
+                    type: RESULT_TYPES.SPAWN_INVALID_BUILDING,
+                    result_data: {
+                      buildingId: building.id,
+                      buildingType: building.type,
+                      unitType: command.unitType,
+                      hint: `${building.type} is still under construction and cannot produce units yet.`,
+                    },
+                  },
+                  {
+                    owner: command.playerId,
+                    feedbackTarget: command.playerId,
+                    level: LOG_LEVELS.WARNING,
+                  }
+                );
+              } else if (!this.buildingManager.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
@@ -863,6 +911,28 @@ export class Game {
             break;
           }
 
+          if (this.isWorkerConstructing(unit)) {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              "Build command failed: worker is already constructing",
+              {
+                command,
+                result_code: RESULT_CODES.ERR_BUSY,
+                type: RESULT_TYPES.INVALID_UNIT,
+                result_data: {
+                  unitId: command.unitId,
+                  hint: "This worker is already constructing a building and cannot start another order yet.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+            break;
+          }
+
           if (!isBuildableBuildingType(command.buildingType)) {
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
@@ -872,7 +942,28 @@ export class Game {
                 result_code: RESULT_CODES.ERR_INVALID_BUILDING,
                 type: RESULT_TYPES.BUILD_INVALID_BUILDING,
                 result_data: {
-                  hint: "Buildable structures are barracks and war_factory. HQ cannot be built.",
+                  hint: "Buildable structures are barracks, war_factory, and refinery. HQ cannot be built.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+            break;
+          }
+
+          if (!this.canStartBuildingType(command.playerId, command.buildingType)) {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              "Build command failed: missing technology prerequisite",
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_BUILDING,
+                type: RESULT_TYPES.BUILD_INVALID_BUILDING,
+                result_data: {
+                  hint: "Build a completed barracks before starting a war_factory.",
                 },
               },
               {
@@ -936,22 +1027,60 @@ export class Game {
             break;
           }
 
+          if (!this.isWorkerAdjacentToBuildFootprint(unit, command.buildingType, command.position.x, command.position.y)) {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              "Build command failed: worker too far from build site",
+              {
+                command,
+                result_code: RESULT_CODES.ERR_NOT_IN_RANGE,
+                type: RESULT_TYPES.BUILD_INVALID_POSITION,
+                result_data: {
+                  x: command.position.x,
+                  y: command.position.y,
+                  hint: "Move the worker to a tile adjacent to the full building footprint before building.",
+                  type: "build_worker_too_far",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              }
+            );
+            break;
+          }
+
           player.resources.credits -= buildingCost;
+          const constructionTicks = getBuildingConstructionTicks(command.buildingType);
           const newBuilding = this.buildingManager.createBuilding(
             command.buildingType,
             command.position.x,
             command.position.y,
-            command.playerId
+            command.playerId,
+            {
+              constructionProgress: {
+                workerId: unit.id,
+                remainingTicks: constructionTicks,
+                totalTicks: constructionTicks,
+              },
+            }
           );
-          this.addLog(LOG_TYPES.COMMAND_RESULT, `${command.buildingType} constructed for ${command.playerId}`, {
+          this.unitManager.clearPath(unit);
+          unit.state = UNIT_STATES.BUILDING;
+          unit.intent = { type: "build", targetX: newBuilding.x, targetY: newBuilding.y, targetId: newBuilding.id };
+          unit.constructingBuildingId = newBuilding.id;
+          this.addLog(LOG_TYPES.COMMAND_RESULT, `${command.buildingType} construction started for ${command.playerId}`, {
             command,
             result_code: RESULT_CODES.OK,
-            type: RESULT_TYPES.BUILDING_CONSTRUCTED,
+            type: RESULT_TYPES.BUILDING_CONSTRUCTION_STARTED,
             result_data: {
               buildingId: newBuilding.id,
               buildingType: newBuilding.type,
               x: newBuilding.x,
               y: newBuilding.y,
+              workerId: unit.id,
+              constructionTicks,
             },
           }, {
             owner: command.playerId,
@@ -969,6 +1098,29 @@ export class Game {
 
   private getBuildingCost(buildingType: string): number {
     return isBuildingType(buildingType) ? getRulesetBuildingCost(buildingType) : 0;
+  }
+
+  private isWorkerConstructing(unit: Unit): boolean {
+    return unit.type === UNIT_TYPES.WORKER && Boolean(unit.constructingBuildingId);
+  }
+
+  private isBuildingComplete(building: Building): boolean {
+    return building.exists && !building.constructionProgress;
+  }
+
+  private canStartBuildingType(playerId: PlayerId, buildingType: BuildingType): boolean {
+    if (buildingType !== BUILDING_TYPES.WAR_FACTORY) {
+      return true;
+    }
+    return this.buildingManager
+      .getBuildingsByPlayer(playerId)
+      .some((building) => building.type === BUILDING_TYPES.BARRACKS && this.isBuildingComplete(building));
+  }
+
+  private isWorkerAdjacentToBuildFootprint(unit: Unit, buildingType: BuildingType, x: number, y: number): boolean {
+    return getBuildingFootprintCells(buildingType, x, y).some((cell) =>
+      Math.max(Math.abs(unit.x - cell.x), Math.abs(unit.y - cell.y)) <= 1
+    );
   }
 
   private attackBuilding(attacker: RuntimeUnit, target: Building): ResultCode {
@@ -1239,7 +1391,25 @@ export class Game {
     if (damage <= 0) {
       return;
     }
-    this.buildingManager.takeDamage(target, damage);
+    const destroyed = this.buildingManager.takeDamage(target, damage);
+    if (destroyed) {
+      this.releaseConstructionWorker(target);
+    }
+  }
+
+  private releaseConstructionWorker(building: Building): void {
+    const workerId = building.constructionProgress?.workerId;
+    building.constructionProgress = undefined;
+    if (!workerId) {
+      return;
+    }
+    const worker = this.unitManager.getUnit(workerId);
+    if (!worker || !worker.exists || worker.constructingBuildingId !== building.id) {
+      return;
+    }
+    worker.constructingBuildingId = undefined;
+    worker.state = UNIT_STATES.IDLE;
+    worker.intent = undefined;
   }
 
   private executeAttackIntent(
@@ -1670,6 +1840,9 @@ export class Game {
       // Sustain attack intents every tick so units keep attacking in range.
       this.processAttackIntents();
 
+      // Advance building construction before production queues tick.
+      this.processBuildingConstruction();
+
       // Process building production queues
       const completedUnits = this.buildingManager.processProductionQueues();
       for (const [playerId, completions] of completedUnits) {
@@ -1801,6 +1974,7 @@ export class Game {
         ...building,
         productionQueue: [...building.productionQueue],
         productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
+        constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),
     }));
     const snapshot: GameSnapshot = {
@@ -1854,6 +2028,43 @@ export class Game {
     });
   }
 
+  private processBuildingConstruction(): void {
+    for (const building of this.buildingManager.getAllBuildings()) {
+      const construction = building.constructionProgress;
+      if (!construction) {
+        continue;
+      }
+
+      const worker = this.unitManager.getUnit(construction.workerId);
+      if (!worker || !worker.exists || worker.constructingBuildingId !== building.id) {
+        building.exists = false;
+        continue;
+      }
+
+      this.unitManager.clearPath(worker);
+      worker.state = UNIT_STATES.BUILDING;
+      worker.intent = { type: "build", targetX: building.x, targetY: building.y, targetId: building.id };
+
+      construction.remainingTicks -= 1;
+      if (construction.remainingTicks > 0) {
+        continue;
+      }
+
+      building.constructionProgress = undefined;
+      worker.constructingBuildingId = undefined;
+      worker.state = UNIT_STATES.IDLE;
+      worker.intent = undefined;
+      this.addLog(LOG_TYPES.BUILDING_COMPLETED, `${building.type} completed for ${building.playerId}`, {
+        buildingId: building.id,
+        buildingType: building.type,
+        workerId: worker.id,
+      }, {
+        owner: building.playerId,
+        feedbackTarget: building.playerId,
+      });
+    }
+  }
+
   private processWorkerEconomy(): void {
     for (const player of this.players) {
       const deliveryBuildings = this.buildingManager
@@ -1865,7 +2076,7 @@ export class Game {
       }
 
       for (const unit of this.unitManager.getUnitsByPlayer(player.id)) {
-        if (unit.type !== UNIT_TYPES.WORKER || !unit.exists) {
+        if (unit.type !== UNIT_TYPES.WORKER || !unit.exists || this.isWorkerConstructing(unit)) {
           continue;
         }
 
@@ -2049,7 +2260,7 @@ export class Game {
   }
 
   private isResourceDeliveryBuilding(building: Building): boolean {
-    return building.exists && (building.type === BUILDING_TYPES.HQ || building.type === BUILDING_TYPES.REFINERY);
+    return this.isBuildingComplete(building) && (building.type === BUILDING_TYPES.HQ || building.type === BUILDING_TYPES.REFINERY);
   }
 
   private getDeliveryRange(building: Building): number {

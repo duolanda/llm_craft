@@ -85,6 +85,9 @@ describe("CLI Control Plane Integration", () => {
     expect(buildControlResponse(harvestResult).ok).toBe(true);
 
     const buildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
+    const builder = game.getUnitManager().getUnit(String(workers[1].id))!;
+    builder.x = buildSite.x - 3;
+    builder.y = buildSite.y;
     const buildResult = executeControlTool(session.bridge, "build_structure", {
       unitId: workers[1].id,
       buildingType: BUILDING_TYPES.BARRACKS,

@@ -37,11 +37,13 @@ function cloneReplayFrameState(state: GameState): GameState {
         ...unit,
         intent: unit.intent ? { ...unit.intent } : undefined,
         pathTarget: unit.pathTarget ? { ...unit.pathTarget } : undefined,
+        constructingBuildingId: unit.constructingBuildingId,
       })),
       buildings: player.buildings.map((building) => ({
         ...building,
         productionQueue: [...building.productionQueue],
         productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
+        constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),
     })),
     // Replay application replaces log arrays instead of mutating them, and tiles are immutable in compact-v2.
@@ -87,6 +89,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
       intent: change.intent ?? undefined,
+      constructingBuildingId: change.constructingBuildingId ?? undefined,
     };
     player.units.push(createdUnit);
     return;
@@ -105,6 +108,9 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
+    constructingBuildingId: "constructingBuildingId" in change
+      ? change.constructingBuildingId ?? undefined
+      : current.constructingBuildingId,
   };
 }
 
@@ -131,6 +137,7 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       exists: true,
       productionQueue: change.productionQueue ?? [],
       productionProgress: change.productionProgress ?? undefined,
+      constructionProgress: change.constructionProgress ?? undefined,
     };
     player.buildings.push(createdBuilding);
     return;
@@ -146,6 +153,7 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
     maxHp: change.maxHp ?? current.maxHp,
     productionQueue: change.productionQueue ?? current.productionQueue,
     productionProgress: change.productionProgress === null ? undefined : change.productionProgress ?? current.productionProgress,
+    constructionProgress: change.constructionProgress === null ? undefined : change.constructionProgress ?? current.constructionProgress,
   };
 }
 

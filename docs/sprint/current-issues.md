@@ -60,6 +60,7 @@
 
 ## 已完成 ✅
 
+- [x] 收紧建造规则：`war_factory` 需要已完成 `barracks`，worker 必须贴近建筑 footprint 才能施工，建造改为多 tick 施工并占用 worker；`refinery` 明确作为可建矿场/交付点
 - [x] 暂时移除缺少侦察兵、雷达和 last-seen 配套的战争迷雾读取层，恢复双方全图情报，同时保留单位局部自动索敌范围
 - [x] 重建 HQ、兵营、战车工厂和精炼厂的功能轮廓，解决四类建筑都像通用工业盒体的问题
 - [x] 移除 `AISandbox` 与 `Node vm` 主链路

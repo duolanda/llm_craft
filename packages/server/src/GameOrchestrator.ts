@@ -708,6 +708,7 @@ export class GameOrchestrator {
           carryingCredits: unit.carryingCredits,
           carryCapacity: unit.carryCapacity,
           intent: unit.intent ?? null,
+          constructingBuildingId: unit.constructingBuildingId ?? null,
         });
         continue;
       }
@@ -718,6 +719,7 @@ export class GameOrchestrator {
       const updated =
         previousUnit.state !== unit.state ||
         carryingChanged ||
+        previousUnit.constructingBuildingId !== unit.constructingBuildingId ||
         JSON.stringify(previousUnit.intent ?? null) !== JSON.stringify(unit.intent ?? null);
 
       if (moved || damaged || updated) {
@@ -734,6 +736,7 @@ export class GameOrchestrator {
           carryingCredits: unit.carryingCredits,
           carryCapacity: unit.carryCapacity,
           intent: unit.intent ?? null,
+          constructingBuildingId: unit.constructingBuildingId ?? null,
         });
       }
     }
@@ -769,6 +772,7 @@ export class GameOrchestrator {
           maxHp: building.maxHp,
           productionQueue: building.productionQueue,
           productionProgress: building.productionProgress ?? null,
+          constructionProgress: building.constructionProgress ?? null,
         });
         continue;
       }
@@ -776,7 +780,8 @@ export class GameOrchestrator {
       const damaged = previousBuilding.hp !== building.hp;
       const updated =
         JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue) ||
-        JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress);
+        JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress) ||
+        JSON.stringify(previousBuilding.constructionProgress) !== JSON.stringify(building.constructionProgress);
 
       if (damaged || updated) {
         changes.push({
@@ -789,6 +794,7 @@ export class GameOrchestrator {
           maxHp: building.maxHp,
           productionQueue: building.productionQueue,
           productionProgress: building.productionProgress ?? null,
+          constructionProgress: building.constructionProgress ?? null,
         });
       }
     }

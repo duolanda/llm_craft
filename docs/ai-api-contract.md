@@ -492,6 +492,7 @@ interface AgentRunInput {
   productionQueues: Array<{ buildingId: string; queue: UnitType[] }>;
   canBuildBarracks: boolean;
   canBuildWarFactory: boolean;
+  canBuildRefinery: boolean;
   canSpawnWorker: boolean;
   canSpawnSoldier: boolean;
   canSpawnRifleman: boolean;
@@ -516,6 +517,7 @@ interface AgentRunInput {
   };
   unitCosts: Record<UnitType, number>;
   buildingCosts: Partial<Record<BuildingType, number>>;
+  buildingConstructionTicks: Partial<Record<BuildingType, number>>;
   techStatus: {
     own: {
       workers: number;
@@ -534,6 +536,7 @@ interface AgentRunInput {
       workerId: string;
       buildingType: "barracks" | "war_factory" | "refinery";
       cost: number;
+      constructionTicks: number;
       reason: string;
       suggestedSites: Position[];
     }>;
@@ -549,7 +552,7 @@ interface AgentRunInput {
 
 `economyStatus` 是派生提示字段，用于减少 agent 每轮重复检查 worker 经济：`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量，`idleWorkers` 表示还应优先安排采矿的 worker 数量，`resourceAssignments` 表示各资源点当前分配到的采矿 worker 数量。省略坐标调用 `start_harvest_loop` 时，系统会倾向选择较近且较少 worker 占用的资源点。
 
-`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有 `barracks` 时优先提示补兵营；已有 `barracks` 且钱够时提示补 `war_factory`；敌方出现 `light_tank` 或 `war_factory` 时提示从空闲兵营补 `rocket_soldier`。`recommendedStructures` 和 `recommendedProduction` 会尽量携带可直接调用工具的 `workerId` / `buildingId`。
+`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有已完成 `barracks` 时优先提示补兵营；已有已完成 `barracks` 且钱够时提示补 `war_factory`；敌方出现 `light_tank` 或 `war_factory` 时提示从空闲兵营补 `rocket_soldier`。`recommendedStructures` 和 `recommendedProduction` 会尽量携带可直接调用工具的 `workerId` / `buildingId`。施工中的建筑会出现在 `buildings` 中并带 `constructionProgress`，但不会计入 `techStatus.own`、不会满足 `building_exists`，也不能生产。
 
 #### `get_my_units`
 
@@ -749,6 +752,12 @@ interface AgentPlanRecord {
 说明：
 
 - 当前允许建造 `barracks`、`war_factory` 和 `refinery`
+- `war_factory` 需要己方已有一个已完成的 `barracks`
+- worker 必须先移动到目标建筑完整 footprint 的相邻 1 格内，才能开始施工
+- 建造成功会立即扣 credits 并创建施工中的建筑；施工中建筑占地、可被攻击，但不能生产，也不满足科技前置
+- 施工会占用该 worker，施工完成前不能移动、采矿或接收其他命令
+- 默认施工时间：`barracks` 12 ticks，`war_factory` 18 ticks，`refinery` 16 ticks
+- `refinery` 是矿场/精炼厂，可建在前线矿附近，worker 采矿后会向最近的 HQ 或已完成 refinery 交付
 - 建筑必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
 - 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
 
@@ -871,7 +880,7 @@ type PlanStepCondition =
 - `enemy_building_exists` / `enemy_unit_count_at_least` 用于表达反制触发，例如看到敌方 `war_factory` 或 `light_tank` 后补 `rocket_soldier`
 - `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
 - `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"`、`"$barracks"` 或 `"$war_factory"`，在执行时解析为当前友方建筑
-- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；即时动作工具仍会返回 `insufficient_credits`
+- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；`build_structure` 仍要求 worker 已经在 footprint 相邻 1 格内，因此常见计划应先用 `move_unit` 把 builder 移到工地旁；即时动作工具仍会返回 `insufficient_credits`
 - 多个 active plan 在同一 tick 推进时共享同一份预算；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
@@ -883,6 +892,13 @@ type PlanStepCondition =
   "loop": 1,
   "steps": [
     { "call": "start_harvest_loop", "args": { "unitId": "$unitId" }, "scope": "per_unit" },
+    {
+      "call": "move_unit",
+      "args": { "unitId": "unit_1", "x": 1, "y": 10 },
+      "scope": "global",
+      "until": { "condition": "near_position", "x": 1, "y": 10, "distance": 1 },
+      "retry": true
+    },
     {
       "call": "build_structure",
       "args": { "unitId": "unit_1", "buildingType": "barracks", "x": 4, "y": 10 },
@@ -903,13 +919,20 @@ type PlanStepCondition =
 }
 ```
 
-示例：已有稳定经济后，补 `war_factory` 并生产 1 台 `light_tank`。
+示例：已有稳定经济和已完成 `barracks` 后，补 `war_factory` 并生产 1 台 `light_tank`。
 
 ```json
 {
   "unitIds": ["unit_1"],
   "loop": 1,
   "steps": [
+    {
+      "call": "move_unit",
+      "args": { "unitId": "unit_1", "x": 0, "y": 12 },
+      "scope": "global",
+      "until": { "condition": "near_position", "x": 0, "y": 12, "distance": 1 },
+      "retry": true
+    },
     {
       "call": "build_structure",
       "args": { "unitId": "unit_1", "buildingType": "war_factory", "x": 4, "y": 12 },

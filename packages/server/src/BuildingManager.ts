@@ -23,7 +23,8 @@ export class BuildingManager {
     type: BuildingType,
     x: number,
     y: number,
-    playerId: PlayerId
+    playerId: PlayerId,
+    options?: { constructionProgress?: Building["constructionProgress"] }
   ): Building {
     const stats = getBuildingStats(type);
     const building: Building = {
@@ -37,6 +38,7 @@ export class BuildingManager {
       playerId,
       exists: true,
       productionQueue: [],
+      constructionProgress: options?.constructionProgress,
     };
     this.buildings.set(building.id, building);
     return building;
@@ -78,7 +80,7 @@ export class BuildingManager {
   }
 
   spawnUnit(building: Building, unitType: UnitType): boolean {
-    if (!building.exists) {
+    if (!building.exists || building.constructionProgress) {
       return false;
     }
 
@@ -87,7 +89,7 @@ export class BuildingManager {
   }
 
   canProduce(building: Building, unitType: UnitType): boolean {
-    return canBuildingProduce(building.type, unitType);
+    return building.exists && !building.constructionProgress && canBuildingProduce(building.type, unitType);
   }
 
   getDistanceToBuilding(building: Building, x: number, y: number): number {
@@ -114,7 +116,7 @@ export class BuildingManager {
     const completedUnits = new Map<PlayerId, ProductionCompletion[]>();
 
     for (const building of this.buildings.values()) {
-      if (building.exists && building.productionQueue.length > 0) {
+      if (building.exists && !building.constructionProgress && building.productionQueue.length > 0) {
         const queuedType = building.productionQueue[0];
         if (!queuedType) {
           continue;

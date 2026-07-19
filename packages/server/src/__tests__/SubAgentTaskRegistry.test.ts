@@ -22,6 +22,7 @@ describe("SubAgentTaskRegistry", () => {
       taskId: expect.any(String),
       status: "running",
       description: "test task",
+      controllerId: expect.stringMatching(/^subagent:subtask_\d+$/),
     });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -127,5 +128,19 @@ describe("SubAgentTaskRegistry", () => {
     registry.abortAll();
     expect(registry.drainNotifications("player_1")).toHaveLength(0);
     expect(registry.drainNotifications("player_2")).toHaveLength(0);
+  });
+
+  it("rejects overlapping leases and enforces per-player concurrency", () => {
+    const registry = new SubAgentTaskRegistry(2);
+    const runner = vi.fn(async () => await new Promise<string>(() => {}));
+
+    expect(registry.spawn(createInput({ assignedUnits: ["unit_1"] }), "player_1", runner).ok).toBe(true);
+    expect(registry.spawn(createInput({ assignedUnits: ["unit_1"] }), "player_1", runner)).toEqual(
+      expect.objectContaining({ ok: false, error: "resource_already_leased" }),
+    );
+    expect(registry.spawn(createInput({ assignedUnits: ["unit_2"] }), "player_1", runner).ok).toBe(true);
+    expect(registry.spawn(createInput({ assignedUnits: ["unit_3"] }), "player_1", runner)).toEqual(
+      expect.objectContaining({ ok: false, error: "subagent_concurrency_limit" }),
+    );
   });
 });

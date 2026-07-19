@@ -77,7 +77,7 @@ function printHelp(): void {
     "Usage: llmcraft [global-flags] <command> [subcommand] [flags]",
     "",
     "Global flags:",
-    "  --base-url <url>   Server base URL (env: LLMCRAFT_SERVER, default: http://localhost:3001)",
+    "  --base-url <url>   Server base URL (env: LLMCRAFT_SERVER, default: http://localhost:3101)",
     "  --session <id>     Control session ID (env: LLMCRAFT_SESSION)",
     "  --player <id>      Player ID: player_1 or player_2 (env: LLMCRAFT_PLAYER)",
     "  --json             Force JSON output (default)",
@@ -87,6 +87,14 @@ function printHelp(): void {
     "Commands:",
     "  session use        Create or bind a control session",
     "  session show       Display current session info",
+    "  matches list       List registered live/control/benchmark matches",
+    "  matches observe    Select the match shown by Web UI (--game <matchId>)",
+    "  matches stop       Quiesce, stop, and save one match without affecting others",
+    "  record save        Save a Trace v3 record (--game <matchId>)",
+    "  storage inspect    Preview retention decisions without deleting files",
+    "  storage cleanup    Preview cleanup; add --apply to delete reported artifacts",
+    "  storage journals   Inspect active, crashed, and legacy journal owners",
+    "  storage recover    Preview orphan recovery; add --apply to quarantine them",
     "  state              Read full game state (map + player)",
     "  map                Show ASCII battlefield map",
     "  me                 Show my economy, HQ, and production",
@@ -115,6 +123,7 @@ function printHelp(): void {
     "Orchestrate flags:",
     "  --dry-run          Validate only, do not submit",
     "  --max-actions <n>  Limit number of actions executed",
+    "  --request-id <id>  Stable idempotency key for a batched action submission",
     "",
     "Action flags:",
     "  --unit <id>        Unit ID",
@@ -124,6 +133,7 @@ function printHelp(): void {
     "  --at <x,y>         Build location",
     "  --building <id>    Building ID",
     "  --priority <list>  Target priority (soldier,rifleman,rocket_soldier,light_tank,worker,hq,barracks,war_factory)",
+    "  --request-id <id>  Stable idempotency key when stdin expands to multiple actions",
     "",
     "Selector flags (units, buildings, enemies, resources):",
     "  --type <t>         Filter by type (worker, soldier, rifleman, rocket_soldier, light_tank, hq, barracks, war_factory)",
@@ -146,8 +156,13 @@ function printHelp(): void {
     "Examples:",
     "  llmcraft play --vs random",
     "  llmcraft play --mode pvp",
-    "  llmcraft session use --player player_1 --base-url http://localhost:3001",
+    "  llmcraft session use --player player_1 --base-url http://localhost:3101",
     "  llmcraft session show",
+    "  llmcraft matches list",
+    "  llmcraft matches observe --game match_xxx",
+    "  llmcraft record save --game match_xxx",
+    "  llmcraft storage cleanup",
+    "  llmcraft storage cleanup --apply",
     "  llmcraft state --compact",
     "  llmcraft units --type worker --idle",
     "  llmcraft enemies --type hq",
@@ -357,6 +372,69 @@ async function main(): Promise<void> {
       return;
     }
     exit(ExitCode.ArgError, `Unknown session subcommand: ${parsed.subcommand || "(none)"}`);
+  }
+
+  if (parsed.command === "matches") {
+    const client = new ControlClient(globalBaseUrl);
+    try {
+      if (parsed.subcommand === "list") {
+        printJson(await client.listMatches());
+        return;
+      }
+      const matchId = parsed.flags.get("game") || parsed.flags.get("game-id");
+      if (!matchId) exit(ExitCode.ArgError, `${parsed.subcommand} requires --game <matchId>`);
+      if (parsed.subcommand === "observe") {
+        printJson(await client.observeMatch(matchId));
+        return;
+      }
+      if (parsed.subcommand === "stop") {
+        printJson(await client.stopMatch(matchId));
+        return;
+      }
+      exit(ExitCode.ArgError, `Unknown matches subcommand: ${parsed.subcommand || "(none)"}`);
+    } catch (error) {
+      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (parsed.command === "record") {
+    if (parsed.subcommand !== "save") {
+      exit(ExitCode.ArgError, `Unknown record subcommand: ${parsed.subcommand || "(none)"}`);
+    }
+    const savedSession = loadSession();
+    const matchId = parsed.flags.get("game") || parsed.flags.get("game-id") || savedSession?.gameId;
+    if (!matchId) exit(ExitCode.ArgError, "record save requires --game <matchId> or a saved session");
+    try {
+      printJson(await new ControlClient(globalBaseUrl).saveMatchRecord(matchId));
+      return;
+    } catch (error) {
+      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (parsed.command === "storage") {
+    const client = new ControlClient(globalBaseUrl);
+    try {
+      if (parsed.subcommand === "inspect") {
+        printJson(await client.inspectStorageRetention());
+        return;
+      }
+      if (parsed.subcommand === "cleanup") {
+        printJson(await client.cleanupStorage(parsed.flags.has("apply")));
+        return;
+      }
+      if (parsed.subcommand === "journals") {
+        printJson(await client.inspectJournals());
+        return;
+      }
+      if (parsed.subcommand === "recover") {
+        printJson(await client.recoverJournals(parsed.flags.has("apply")));
+        return;
+      }
+      exit(ExitCode.ArgError, `Unknown storage subcommand: ${parsed.subcommand || "(none)"}`);
+    } catch (error) {
+      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
+    }
   }
 
   // Play command: start a game vs CPU

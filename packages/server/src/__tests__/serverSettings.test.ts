@@ -340,6 +340,7 @@ describe("server settings", () => {
       getSnapshots: () => [],
     }));
     const createOrchestrator = vi.fn((config) => ({
+      getMatchId: () => "match_started",
       start,
       stop,
       saveRecord,
@@ -375,7 +376,7 @@ describe("server settings", () => {
       debug: undefined,
     });
     expect(start).toHaveBeenCalledTimes(1);
-    expect(state.orchestrator).not.toBeNull();
+    expect(state.matchRegistry.getObservedMatchId()).toBe("match_started");
   });
 
   it("keeps the previous orchestrator if starting the next one fails", async () => {
@@ -396,6 +397,7 @@ describe("server settings", () => {
     });
 
     const previousOrchestrator = {
+      getMatchId: () => "match_previous",
       start: vi.fn<[], Promise<void>>(async () => undefined),
       stop: vi.fn<[], void>(() => undefined),
       saveRecord: vi.fn<[], Promise<string>>(async () => "logs/records/old.json"),
@@ -405,6 +407,7 @@ describe("server settings", () => {
       })),
     };
     const failedOrchestrator = {
+      getMatchId: () => "match_failed",
       start: vi.fn<[], Promise<void>>(async () => {
         throw new Error("start failed");
       }),
@@ -416,7 +419,7 @@ describe("server settings", () => {
       })),
     };
     const state = createServerState(presetStore, vi.fn(() => failedOrchestrator as any));
-    state.orchestrator = previousOrchestrator;
+    state.matchRegistry.register(previousOrchestrator as any, { kind: "live", observe: true });
     const ws = { send: vi.fn() };
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -433,7 +436,7 @@ describe("server settings", () => {
     expect(failedOrchestrator.start).toHaveBeenCalledTimes(1);
     expect(failedOrchestrator.stop).toHaveBeenCalledTimes(1);
     expect(previousOrchestrator.stop).not.toHaveBeenCalled();
-    expect(state.orchestrator).toBe(previousOrchestrator);
+    expect(state.matchRegistry.getObserved()?.handle).toBe(previousOrchestrator);
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("处理客户端消息失败"));
   });
 
@@ -626,6 +629,7 @@ describe("server settings", () => {
     });
 
     const previousOrchestrator = {
+      getMatchId: () => "match_live",
       start: vi.fn(async () => undefined),
       stop: vi.fn(() => undefined),
       saveRecord: vi.fn(async () => "logs/records/live.json"),
@@ -645,7 +649,7 @@ describe("server settings", () => {
     };
     const createBenchmarkOrchestrator = vi.fn(() => benchmarkOrchestrator as any);
     const state = createServerState(presetStore, undefined, createBenchmarkOrchestrator);
-    state.orchestrator = previousOrchestrator as any;
+    state.matchRegistry.register(previousOrchestrator as any, { kind: "live", observe: true });
 
     await handleClientMessage({
       data: JSON.stringify({
@@ -661,7 +665,7 @@ describe("server settings", () => {
       state,
     });
 
-    expect(previousOrchestrator.stop).toHaveBeenCalledTimes(1);
+    expect(previousOrchestrator.stop).not.toHaveBeenCalled();
     expect(createBenchmarkOrchestrator).toHaveBeenCalledWith(
       {
         presetId: preset.id,
@@ -680,7 +684,7 @@ describe("server settings", () => {
       expect.any(Object)
     );
     expect(benchmarkOrchestrator.start).toHaveBeenCalledTimes(1);
-    expect(state.orchestrator).toBe(benchmarkOrchestrator);
+    expect(state.activeBenchmark).toBe(benchmarkOrchestrator);
   });
 
   it("builds live state payloads without hitting preset storage or duplicating snapshots", async () => {
@@ -706,7 +710,7 @@ describe("server settings", () => {
       }))
     );
     state.liveEnabled = true;
-    state.orchestrator = state.createOrchestrator({
+    const observedOrchestrator = state.createOrchestrator({
       player1: {
         providerType: "openai-compatible",
         apiKey: "token-one",
@@ -720,13 +724,26 @@ describe("server settings", () => {
         model: "model-two",
       },
     }) as any;
+    state.matchRegistry.register({
+      ...observedOrchestrator,
+      getMatchId: () => "match_payload",
+    }, { kind: "live", observe: true });
 
     const payload = buildStateMessagePayload(state);
 
     expect(listSpy).not.toHaveBeenCalled();
     expect(payload.liveEnabled).toBe(true);
+    expect(payload.matchStatus).toBeNull();
     expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
     expect(payload.snapshots).toHaveLength(1);
     expect(payload.snapshots[0]?.tick).toBe(24);
+    expect(payload.frame).toEqual(expect.objectContaining({
+      kind: "keyframe",
+      metadata: expect.objectContaining({
+        frameVersion: 1,
+        frameSequence: 1,
+        simulationTick: 24,
+      }),
+    }));
   });
 });

@@ -1,6 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
+import { analyzeGameRecord, detectRecordFormat, projectRecordToGameRecord } from "@llmcraft/trace";
 
 const args = process.argv.slice(2);
 const options = parseArgs(args);
@@ -8,7 +10,7 @@ const file = options.file;
 
 if (!file) {
   console.error([
-    "Usage: pnpm --filter @llmcraft/server analyze:record <record.json> [options]",
+    "Usage: pnpm --filter @llmcraft/server analyze:record <record.json[.gz]> [options]",
     "",
     "Options:",
     "  --debug <llm-debug.log>      Merge rough model/tool metrics from an LLM debug log",
@@ -16,6 +18,10 @@ if (!file) {
     "  --snapshots <ticks>          Print battlefield snapshots, e.g. --snapshots 54,59,62,82",
     "  --focus <player_id>          Limit timeline/snapshot detail to one player",
     "  --skill <command_type>       Analyze a one-shot command or ability timing",
+    "  --format human|json|csv      Select machine-readable or human output",
+    "  --json / --csv               Short aliases for --format",
+    "  --compare <record|directory> Compare metric means against a baseline",
+    "  Directories are analyzed as deterministic filename-sorted batches.",
   ].join("\n"));
   process.exit(1);
 }
@@ -23,13 +29,53 @@ if (!file) {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../../..");
 const filePath = resolveInputPath(file);
-const record = JSON.parse(readFileSync(filePath, "utf8"));
+if (statSync(filePath).isDirectory() || options.format !== "human" || options.compareFile) {
+  printBatchAnalysis(filePath, options);
+  process.exit(0);
+}
+const sourceRecord = JSON.parse(readRecordText(filePath));
+const sourceFormat = detectRecordFormat(sourceRecord);
+const record = projectRecordToGameRecord(sourceRecord);
 const debugPath = options.debugFile ? resolveInputPath(options.debugFile) : null;
 const debugText = debugPath ? readFileSync(debugPath, "utf8") : null;
 const players = (record.finalState?.players ?? record.initialState?.players ?? []).map((player) => player.id);
-const analysis = buildReplayAnalysis(record, players, options.skill);
 const aiTurns = record.aiTurns ?? [];
 const metadataByPlayer = new Map((record.metadata?.players ?? []).map((player) => [player.playerId, player]));
+const sourceCapabilities = sourceFormat === "trace-v3" ? sourceRecord.manifest?.capabilities ?? {} : {};
+const commandFacts = buildCommandFacts(sourceRecord, record, sourceFormat);
+const analysis = buildReplayAnalysis(record, players, options.skill, commandFacts);
+const registryReport = analyzeGameRecord(record);
+
+function readRecordText(recordPath) {
+  const bytes = readFileSync(recordPath);
+  const content = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
+  return content.toString("utf8");
+}
+
+function buildCommandFacts(source, projected, format) {
+  if (format === "trace-v3" && source.manifest?.capabilities?.domainEvents !== "absent") {
+    return (source.domainEvents ?? [])
+      .filter((event) => event.type === "command_result")
+      .map((event) => ({
+        tick: event.tick,
+        eventSequence: event.eventSequence,
+        commandId: event.commandId,
+        data: {
+          command: event.payload?.command,
+          type: event.payload?.resultType,
+          result_code: event.payload?.resultCode,
+          result_data: event.payload?.resultData,
+          success: event.payload?.success,
+        },
+      }));
+  }
+  return projected.commandResults ?? [];
+}
+
+if (sourceFormat === "trace-v3") {
+  console.log(`Source: trace-v3 (${Object.entries(sourceCapabilities).map(([key, value]) => `${key}=${value}`).join(", ")})`);
+  console.log(`Facts: DomainEvent command_result=${commandFacts.length}; compatibility GameLog is not used for command metrics`);
+}
 
 const createCounter = () => Object.create(null);
 const bump = (counter, key, amount = 1) => {
@@ -51,9 +97,8 @@ const metrics = Object.fromEntries(
       commandResults: createCounter(),
       finalCredits: 0,
       maxCredits: 0,
-      workerCount: 0,
-      soldierCount: 0,
-      barracksCount: 0,
+      unitCounts: createCounter(),
+      buildingCounts: createCounter(),
       hqAlive: false,
       firstEnemyHqDamageTick: null,
     },
@@ -89,7 +134,7 @@ for (const turn of aiTurns) {
   }
 }
 
-for (const log of record.commandResults ?? []) {
+for (const log of commandFacts) {
   const data = log.data;
   const playerId = data?.command?.playerId;
   if (!metrics[playerId]) {
@@ -147,14 +192,18 @@ for (const player of record.finalState?.players ?? []) {
   }
   entry.finalCredits = player.resources?.credits ?? 0;
   entry.maxCredits = Math.max(entry.maxCredits, entry.finalCredits);
-  entry.workerCount = (player.units ?? []).filter((unit) => unit.exists && unit.type === "worker").length;
-  entry.soldierCount = (player.units ?? []).filter((unit) => unit.exists && unit.type === "soldier").length;
-  entry.barracksCount = (player.buildings ?? []).filter((building) => building.exists && building.type === "barracks").length;
+  for (const unit of player.units ?? []) {
+    if (unit.exists) bump(entry.unitCounts, unit.type);
+  }
+  for (const building of player.buildings ?? []) {
+    if (building.exists) bump(entry.buildingCounts, building.type);
+  }
   entry.hqAlive = (player.buildings ?? []).some((building) => building.exists && building.type === "hq");
 }
 
-const durationTicks = record.finalState?.tick ?? 0;
-const durationSeconds = durationTicks * 0.5;
+const durationTicks = registryReport.match.durationTicks;
+const tickIntervalMs = registryReport.match.tickIntervalMs;
+const durationSeconds = registryReport.match.durationSeconds;
 
 console.log(`Record: ${basename(filePath)}`);
 console.log(`Status: ${record.metadata?.status ?? "unknown"}; winner: ${record.metadata?.winner ?? "none"}; duration: ${durationTicks} ticks (${durationSeconds.toFixed(1)}s)`);
@@ -165,25 +214,22 @@ console.log("");
 
 for (const playerId of players) {
   const entry = metrics[playerId];
-  const flags = [];
-  if (entry.maxCredits >= 2000 || entry.finalCredits >= 1000) {
-    flags.push("floating_credits");
-  }
-  if (entry.workerCount > 8 || (entry.commands["spawn:worker"] ?? 0) > 12) {
-    flags.push("worker_overproduction_possible");
-  }
-  if (entry.maxCredits >= 1000 && entry.barracksCount < 2) {
-    flags.push("production_bottleneck_possible");
-  }
-  if ((entry.commandResults.attack_no_target_in_range ?? 0) + (entry.commandResults.attack_out_of_range ?? 0) > (entry.commandResults.attack_success ?? 0)) {
-    flags.push("combat_execution_noisy");
-  }
+  const flags = registryReport.findings
+    .filter((finding) => finding.scopeId === playerId)
+    .map((finding) => `${finding.detectorId}@v${finding.detectorVersion}`);
 
   console.log(`${playerId}:`);
-  console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}, workers=${entry.workerCount}, soldiers=${entry.soldierCount}, barracks=${entry.barracksCount}, hqAlive=${entry.hqAlive}`);
+  console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}`);
+  console.log(`  units: ${formatCounter(entry.unitCounts)}`);
+  console.log(`  buildings: ${formatCounter(entry.buildingCounts)}; hqAlive=${entry.hqAlive}`);
   if (isAgentMetricsUnavailable(playerId)) {
-    console.log("  agent: unavailable (record has no aiTurns; model/tool metrics were not persisted)");
-    console.log("  tools: unavailable");
+    if (sourceCapabilities.agentTurns === "complete") {
+      console.log("  agent: no turns recorded before this trace cut");
+      console.log("  tools: none");
+    } else {
+      console.log("  agent: unavailable (record has no aiTurns; model/tool metrics were not persisted)");
+      console.log("  tools: unavailable");
+    }
   } else {
     console.log(`  agent: modelRequests=${entry.modelRequests}, toolCalls=${entry.toolCalls}`);
     console.log(`  tools: ${formatCounter(entry.toolNames)}`);
@@ -215,7 +261,7 @@ if (options.snapshotTicks.length > 0) {
 }
 
 if (options.skill) {
-  printSkillAnalysis(record, analysis, options.skill, options.focusPlayer);
+  printSkillAnalysis(commandFacts, analysis, options.skill, options.focusPlayer);
 }
 
 function parseArgs(rawArgs) {
@@ -226,6 +272,8 @@ function parseArgs(rawArgs) {
     snapshotTicks: [],
     focusPlayer: null,
     skill: null,
+    format: "human",
+    compareFile: null,
   };
 
   for (let i = 0; i < rawArgs.length; i++) {
@@ -244,12 +292,107 @@ function parseArgs(rawArgs) {
       parsed.focusPlayer = rawArgs[++i] ?? null;
     } else if (arg === "--skill") {
       parsed.skill = rawArgs[++i] ?? null;
+    } else if (arg === "--format") {
+      const format = rawArgs[++i] ?? "human";
+      if (!["human", "json", "csv"].includes(format)) throw new Error(`Unsupported format: ${format}`);
+      parsed.format = format;
+    } else if (arg === "--json") {
+      parsed.format = "json";
+    } else if (arg === "--csv") {
+      parsed.format = "csv";
+    } else if (arg === "--compare") {
+      parsed.compareFile = rawArgs[++i] ?? null;
     } else if (!arg.startsWith("--") && parsed.file === null) {
       parsed.file = arg;
     }
   }
 
   return parsed;
+}
+
+function printBatchAnalysis(inputPath, batchOptions) {
+  const reports = analyzePath(inputPath);
+  const baselineReports = batchOptions.compareFile
+    ? analyzePath(resolveInputPath(batchOptions.compareFile))
+    : [];
+  const comparison = baselineReports.length > 0
+    ? compareReportSets(reports, baselineReports)
+    : null;
+  if (batchOptions.format === "json") {
+    console.log(JSON.stringify({ reports, comparison }, null, 2));
+    return;
+  }
+  if (batchOptions.format === "csv") {
+    console.log("file,status,winner,ruleset,scope,metric,metric_version,value,source_paths");
+    for (const entry of reports) {
+      for (const metric of entry.report.metrics) {
+        console.log([
+          csv(entry.file),
+          csv(entry.report.match.status),
+          csv(entry.report.match.winner ?? ""),
+          csv(entry.report.match.rulesetId),
+          csv(metric.scopeId),
+          csv(metric.metricId),
+          metric.metricVersion,
+          metric.value,
+          csv(metric.sourcePaths.join("|")),
+        ].join(","));
+      }
+    }
+    return;
+  }
+  for (const entry of reports) {
+    console.log(`${entry.file}: status=${entry.report.match.status} winner=${entry.report.match.winner ?? "none"} duration=${entry.report.match.durationSeconds.toFixed(1)}s`);
+    for (const finding of entry.report.findings) {
+      console.log(`  [${finding.severity}] ${finding.scopeId}:${finding.detectorId} ${finding.value} (threshold ${finding.threshold})`);
+    }
+  }
+  if (comparison) {
+    console.log("\nBaseline comparison (candidate mean - baseline mean):");
+    for (const metric of comparison.metrics) console.log(`  ${metric.key}: ${metric.delta >= 0 ? "+" : ""}${metric.delta.toFixed(3)}`);
+  }
+}
+
+function analyzePath(inputPath) {
+  const files = statSync(inputPath).isDirectory()
+    ? readdirSync(inputPath)
+        .filter((name) => name.endsWith(".json") || name.endsWith(".json.gz"))
+        .sort()
+        .map((name) => resolve(inputPath, name))
+    : [inputPath];
+  return files.map((recordPath) => {
+    const source = JSON.parse(readRecordText(recordPath));
+    return { file: basename(recordPath), report: analyzeGameRecord(projectRecordToGameRecord(source)) };
+  });
+}
+
+function compareReportSets(candidate, baseline) {
+  const means = (entries) => {
+    const buckets = new Map();
+    for (const entry of entries) {
+      for (const metric of entry.report.metrics) {
+        const key = `${metric.scopeId}:${metric.metricId}`;
+        const bucket = buckets.get(key) ?? [];
+        bucket.push(metric.value);
+        buckets.set(key, bucket);
+      }
+    }
+    return new Map([...buckets].map(([key, values]) => [key, values.reduce((sum, value) => sum + value, 0) / values.length]));
+  };
+  const candidateMeans = means(candidate);
+  const baselineMeans = means(baseline);
+  return {
+    candidateCount: candidate.length,
+    baselineCount: baseline.length,
+    metrics: [...candidateMeans.entries()]
+      .filter(([key]) => baselineMeans.has(key))
+      .map(([key, value]) => ({ key, candidateMean: value, baselineMean: baselineMeans.get(key), delta: value - baselineMeans.get(key) })),
+  };
+}
+
+function csv(value) {
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 function parseTickList(value) {
@@ -280,7 +423,7 @@ function resolveInputPath(input) {
   return resolve(repoRoot, input);
 }
 
-function buildReplayAnalysis(gameRecord, playerIds, skillCommand) {
+function buildReplayAnalysis(gameRecord, playerIds, skillCommand, nativeCommandFacts) {
   const world = cloneState(gameRecord.initialState);
   const snapshots = new Map([[world.tick, cloneState(world)]]);
   const timeline = [];
@@ -316,7 +459,7 @@ function buildReplayAnalysis(gameRecord, playerIds, skillCommand) {
     snapshots.set(world.tick, cloneState(world));
   }
 
-  for (const log of gameRecord.commandResults ?? []) {
+  for (const log of nativeCommandFacts) {
     const data = log.data;
     const command = data?.command;
     if (!command?.playerId || !command.type) {
@@ -511,13 +654,13 @@ function printPlayerSnapshot(world, player) {
   }
 }
 
-function printSkillAnalysis(gameRecord, analysisData, skill, focusPlayer) {
+function printSkillAnalysis(commandFactsForSkill, analysisData, skill, focusPlayer) {
   console.log(`Skill analysis: ${skill}`);
   const deathTicks = getHqDeathTicks(analysisData.timeline);
   const pressureTicks = getPressureTicks(analysisData.timeline);
   let printed = false;
 
-  for (const log of gameRecord.commandResults ?? []) {
+  for (const log of commandFactsForSkill) {
     const data = log.data;
     const command = data?.command;
     if (command?.type !== skill) {

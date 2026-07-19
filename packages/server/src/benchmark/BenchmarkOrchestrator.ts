@@ -14,6 +14,12 @@ import type WebSocket from "ws";
 import { GameOrchestrator, GameOrchestratorConfig } from "../GameOrchestrator";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import type { MatchRegistry } from "../MatchRegistry";
+import type { JournalLifecycleService } from "../JournalLifecycle";
+import { percentile, wilsonInterval } from "../experiment/ExperimentRunner";
+import { createPairedTrials, ExperimentRunner, type ExperimentManifestV1 } from "../experiment/ExperimentRunner";
+import { createDefaultMatchDefinition } from "../MatchDefinition";
 
 type SendOnlyWebSocket = Pick<WebSocket, "send">;
 
@@ -43,6 +49,8 @@ export interface BenchmarkConfig {
   decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
+  experimentId?: string;
+  seed?: number;
 }
 
 export class BenchmarkOrchestrator {
@@ -53,11 +61,14 @@ export class BenchmarkOrchestrator {
   private currentRun: Promise<void> | null = null;
   private stopRequested = false;
   private ws: SendOnlyWebSocket | null;
+  private readonly benchmarkId = `benchmark_${randomUUID()}`;
 
   constructor(
     private readonly config: BenchmarkConfig,
     ws: SendOnlyWebSocket | null,
-    private readonly createGameOrchestrator: BenchmarkGameFactory = (matchConfig) => new GameOrchestrator(matchConfig)
+    private readonly createGameOrchestrator: BenchmarkGameFactory = (matchConfig) => new GameOrchestrator(matchConfig),
+    private readonly matchRegistry?: MatchRegistry,
+    private readonly journalLifecycle?: JournalLifecycleService,
   ) {
     this.ws = ws;
   }
@@ -118,25 +129,49 @@ export class BenchmarkOrchestrator {
   }
 
   private async run(): Promise<void> {
-    let nextRoundIndex = 0;
-    const concurrency = Math.min(this.config.rounds, this.config.concurrency ?? 1);
-    const workers = Array.from({ length: concurrency }, async () => {
-      while (!this.stopRequested) {
-        const index = nextRoundIndex++;
-        if (index >= this.config.rounds) {
-          return;
-        }
-        await this.runRound(index);
-      }
-    });
-
-    await Promise.all(workers);
+    const pairCount = Math.ceil(this.config.rounds / 2);
+    const trials = createPairedTrials({
+      seeds: Array.from({ length: pairCount }, (_, index) => (this.config.seed ?? 0) + index),
+      repeats: 1,
+      variables: { presetId: this.config.presetId, cpuStrategy: this.config.cpuStrategy },
+    }).slice(0, this.config.rounds);
+    const manifest: ExperimentManifestV1 = {
+      manifestVersion: 1,
+      experimentId: this.config.experimentId ?? this.benchmarkId,
+      createdAt: new Date().toISOString(),
+      baseline: `builtin-test:${this.config.cpuStrategy}`,
+      fixed: { decisionIntervalTicks: this.config.decisionIntervalTicks ?? 5 },
+      concurrency: Math.min(this.config.rounds, this.config.concurrency ?? 1),
+      trials,
+    };
+    const resultPath = this.config.experimentId
+      ? path.join(BENCHMARK_RECORDS_DIR, `${this.config.experimentId}.experiment.json`)
+      : undefined;
+    await new ExperimentRunner(
+      manifest,
+      async (trial) => {
+        const index = trials.findIndex((candidate) => candidate.trialId === trial.trialId);
+        const result = await this.runRound(index, trial.seed, trial.side);
+        if (!result) return { status: "failed", error: "stopped" };
+        return {
+          status: "completed",
+          winner: result.winner === "llm" ? "candidate" : result.winner === "cpu" ? "baseline" : "draw",
+          durationTicks: result.durationTicks,
+          payload: result,
+        };
+      },
+      resultPath,
+      () => this.stopRequested,
+      (file) => {
+        const recovered = file.results.flatMap((result) => isBenchmarkRoundResult(result.payload) ? [result.payload] : []);
+        this.rounds.splice(0, this.rounds.length, ...recovered.sort((left, right) => left.round - right.round));
+      },
+    ).run();
 
     this.send(this.buildCompleteMessage());
   }
 
-  private async runRound(index: number): Promise<void> {
-    const llmSide = index % 2 === 0 ? "player_1" : "player_2";
+  private async runRound(index: number, seed: number, llmSide: "player_1" | "player_2"): Promise<ServerBenchmarkRoundResult | null> {
     const cpuSide = llmSide === "player_1" ? "player_2" : "player_1";
     const cpuConfig: BuiltinCPURuntimeConfig = {
       providerType: "builtin-cpu",
@@ -147,17 +182,26 @@ export class BenchmarkOrchestrator {
       player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
       debug: this.config.debug,
       runtime: {
+        matchDefinition: { ...createDefaultMatchDefinition(), seed },
         aiIntervalTicksByPlayer: {
           [llmSide]: 5,
           [cpuSide]: this.config.decisionIntervalTicks ?? 5,
         },
         recordDir: BENCHMARK_RECORDS_DIR,
         transcriptDir: BENCHMARK_LLM_DEBUG_DIR,
+        journalLifecycle: this.journalLifecycle,
       },
     };
 
     const roundNumber = index + 1;
     const orchestrator = this.createGameOrchestrator(matchConfig);
+    this.matchRegistry?.register(orchestrator, {
+      kind: "benchmark",
+      parentId: this.benchmarkId,
+      label: `Benchmark round ${roundNumber}`,
+      observe: this.viewedRound === null,
+      terminalPolicy: this.config.recordReplay ? "save" : "discard",
+    });
     this.activeRounds.set(roundNumber, { orchestrator, llmSide });
     if (this.viewedRound === null) {
       this.setViewedRound(roundNumber);
@@ -169,19 +213,23 @@ export class BenchmarkOrchestrator {
       await this.waitForRoundEnd(orchestrator);
 
       if (this.stopRequested) {
-        return;
+        return null;
       }
 
       const game = orchestrator.getGame();
       const winner = game.getWinner();
       const durationTicks = game.getState().tick;
+      if (typeof orchestrator.quiesce === "function") await orchestrator.quiesce();
+      else orchestrator.stop();
       let recordPath: string | undefined;
       if (this.config.recordReplay) {
         recordPath = await orchestrator.saveRecord();
+      } else if (typeof orchestrator.discardJournal === "function") {
+        await orchestrator.discardJournal();
       }
 
       const transcriptPath = orchestrator.getTranscriptFilePath() ?? undefined;
-      this.rounds.push({
+      const roundResult: ServerBenchmarkRoundResult = {
         round: roundNumber,
         llmSide,
         winner:
@@ -193,8 +241,10 @@ export class BenchmarkOrchestrator {
         durationTicks,
         recordPath,
         transcriptPath,
-      });
+      };
+      this.rounds.push(roundResult);
       completed = true;
+      return roundResult;
     } finally {
       this.activeRounds.delete(roundNumber);
       if (this.viewedRound === roundNumber) {
@@ -204,6 +254,7 @@ export class BenchmarkOrchestrator {
         this.sendProgress();
       }
     }
+    return null;
   }
 
   private sendProgress(): void {
@@ -225,6 +276,9 @@ export class BenchmarkOrchestrator {
     this.currentOrchestrator = roundNumber === null
       ? null
       : this.activeRounds.get(roundNumber)?.orchestrator ?? null;
+    if (this.currentOrchestrator && this.matchRegistry?.get(this.currentOrchestrator.getMatchId())) {
+      this.matchRegistry.observe(this.currentOrchestrator.getMatchId());
+    }
   }
 
   private getNextActiveRoundNumber(): number | null {
@@ -263,6 +317,11 @@ export class BenchmarkOrchestrator {
     const averageDurationTicks = this.rounds.length === 0
       ? 0
       : Math.round(this.rounds.reduce((sum, round) => sum + round.durationTicks, 0) / this.rounds.length);
+    const durations = this.rounds.map((round) => round.durationTicks);
+    const p1Rounds = this.rounds.filter((round) => round.llmSide === "player_1");
+    const p2Rounds = this.rounds.filter((round) => round.llmSide === "player_2");
+    const p1WinRate = p1Rounds.length === 0 ? 0 : p1Rounds.filter((round) => round.winner === "llm").length / p1Rounds.length;
+    const p2WinRate = p2Rounds.length === 0 ? 0 : p2Rounds.filter((round) => round.winner === "llm").length / p2Rounds.length;
 
     return {
       type: "benchmark_complete",
@@ -275,6 +334,10 @@ export class BenchmarkOrchestrator {
       draws,
       llmWinRate: this.rounds.length === 0 ? 0 : Number(((llmWins / this.rounds.length) * 100).toFixed(1)),
       averageDurationTicks,
+      medianDurationTicks: percentile(durations, 0.5),
+      p90DurationTicks: percentile(durations, 0.9),
+      llmWinRateConfidence95: wilsonInterval(llmWins, this.rounds.length),
+      positionBias: p1Rounds.length === 0 || p2Rounds.length === 0 ? 0 : p1WinRate - p2WinRate,
       stopped: this.stopRequested && this.rounds.length < this.config.rounds,
       rounds: [...this.rounds].sort((a, b) => a.round - b.round),
     };
@@ -283,4 +346,13 @@ export class BenchmarkOrchestrator {
   private send(message: ServerBenchmarkProgressMessage | ServerBenchmarkCompleteMessage): void {
     this.ws?.send(JSON.stringify(message));
   }
+}
+
+function isBenchmarkRoundResult(value: unknown): value is ServerBenchmarkRoundResult {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Partial<ServerBenchmarkRoundResult>;
+  return Number.isSafeInteger(result.round)
+    && (result.llmSide === "player_1" || result.llmSide === "player_2")
+    && (result.winner === "llm" || result.winner === "cpu" || result.winner === "draw")
+    && typeof result.durationTicks === "number";
 }

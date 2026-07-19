@@ -1,6 +1,6 @@
-import OpenAI from "openai";
 import {
   AgentRunInput,
+  AgentModelRequestRecord,
   AgentToolCallRecord,
 } from "@llmcraft/shared";
 import {
@@ -17,15 +17,19 @@ import {
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 import { runSubAgentTask } from "./agent/SubAgentRunner";
+import type { ModelTransport } from "./model/ModelTransport";
+import { OpenAICompatibleModelTransport } from "./model/OpenAICompatibleModelTransport";
+import { AgentMemoryPolicy } from "./agent/AgentMemoryPolicy";
+import { createHash } from "node:crypto";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
 const CONNECTION_TEST_MAX_TOKENS = 8;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
-const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const PROVIDER_SYNC_WARNING_MS = 100;
 const PROVIDER_LARGE_PAYLOAD_WARNING_BYTES = 250_000;
+const MODEL_REQUEST_MAX_ATTEMPTS = 3;
 const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_map_state",
   "get_my_state",
@@ -39,26 +43,27 @@ interface PreparedTurn {
   assistantMessage: any;
   assistantText: string;
   finishReason: string;
+  modelRequestRecord: AgentModelRequestRecord;
 }
 
-export class OpenAICompatibleProvider implements LLMProvider {
-  private client: OpenAI;
-  private model: string;
-  private baseURL?: string;
-  private reasoningEffort?: OpenAIProviderConfig["reasoningEffort"];
-  private extraRequestParams?: Record<string, unknown> | null;
+export interface OpenAIAgentSessionOptions {
+  systemPrompt?: string;
+  memoryPolicy?: AgentMemoryPolicy;
+}
+
+export class OpenAIAgentSession implements LLMProvider {
   private history: any[] = [];
   private preparedTurn: PreparedTurn | null = null;
+  private readonly systemPrompt: string;
+  private readonly memoryPolicy: AgentMemoryPolicy;
 
-  constructor(config: OpenAIProviderConfig) {
-    this.client = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL,
-    });
-    this.model = config.model || "gpt-4o-mini";
-    this.baseURL = config.baseURL;
-    this.reasoningEffort = config.reasoningEffort ?? null;
-    this.extraRequestParams = config.extraRequestParams ?? null;
+  constructor(
+    config: OpenAIProviderConfig,
+    private readonly transport: ModelTransport = new OpenAICompatibleModelTransport(config),
+    options: OpenAIAgentSessionOptions = {},
+  ) {
+    this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
+    this.memoryPolicy = options.memoryPolicy ?? new AgentMemoryPolicy();
   }
 
   async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
@@ -67,48 +72,49 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
 
     const messages: any[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: this.systemPrompt },
       ...this.history,
       { role: "user", content: JSON.stringify(input, null, 2) },
     ];
     const persistentHistory = messages.slice(1);
+    const modelRequestRecords: AgentModelRequestRecord[] = [];
     this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), null);
 
     try {
-      const response = await this.createAgentCompletion(messages, options);
-      const choice = response.choices[0];
-      const assistantMessage = choice?.message;
+      const response = await this.createAgentCompletion(messages, options, modelRequestRecords, "warmup");
+      const assistantMessage = response.message;
       if (!assistantMessage) {
-        this.history = persistentHistory;
+        const memory = this.commitHistory(persistentHistory);
         this.preparedTurn = null;
         return {
           assistantMessages: [],
           stopReason: "empty_response",
           hasPendingToolCalls: false,
-          metrics: { modelRequests: 1 },
+          metrics: { modelRequests: 1, modelRequestRecords, memory },
         };
       }
 
       messages.push(assistantMessage);
       persistentHistory.push(assistantMessage);
-      this.history = persistentHistory;
+      const memory = this.commitHistory(persistentHistory);
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
       if (assistantText) {
         options.onAssistantMessage?.(assistantText);
       }
-      const finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+      const finishReason = response.finishReason;
       this.preparedTurn = {
         input,
         assistantMessage,
         assistantText,
         finishReason,
+        modelRequestRecord: modelRequestRecords[0]!,
       };
 
       return {
         assistantMessages: assistantText ? [assistantText] : [],
         stopReason: finishReason,
         hasPendingToolCalls: (assistantMessage.tool_calls ?? []).length > 0,
-        metrics: { modelRequests: 1 },
+        metrics: { modelRequests: 1, modelRequestRecords, memory },
       };
     } catch (error) {
       if (this.isAbortError(error, options.signal)) {
@@ -119,25 +125,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 
   async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
-    const response = await this.client.chat.completions.create(
-      {
-        model: this.model,
-        messages: [
-          {
-            role: "user",
-            content: "Reply with exactly: OK",
-          },
-        ],
-        temperature: 0,
-        max_tokens: CONNECTION_TEST_MAX_TOKENS,
-        ...this.buildOptionalRequestParams(),
-      } as any,
-      { signal },
-    );
-    const text = response.choices
-      .map((choice) => typeof choice.message?.content === "string" ? choice.message.content : "")
-      .join("\n")
-      .trim();
+    const response = await this.transport.complete({
+      messages: [{ role: "user", content: "Reply with exactly: OK" }],
+      temperature: 0,
+      maxTokens: CONNECTION_TEST_MAX_TOKENS,
+      signal,
+    });
+    const text = typeof response.message?.content === "string"
+      ? response.message.content.trim()
+      : "";
 
     return {
       responseText: text,
@@ -155,19 +151,22 @@ export class OpenAICompatibleProvider implements LLMProvider {
       },
     });
     const messages: any[] = preparedTurn
-      ? [{ role: "system", content: SYSTEM_PROMPT }, ...this.history]
+      ? [{ role: "system", content: this.systemPrompt }, ...this.history]
       : [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: this.systemPrompt },
           ...this.history,
           { role: "user", content: inputContent },
         ];
     const persistentHistory = messages.slice(1);
     const assistantMessages: string[] = preparedTurn?.assistantText ? [preparedTurn.assistantText] : [];
     const toolCalls: AgentToolCallRecord[] = [];
-    let modelRequests = 0;
+    const modelRequestRecords: AgentModelRequestRecord[] = preparedTurn
+      ? [preparedTurn.modelRequestRecord]
+      : [];
     let consecutiveReadOnlyToolCalls = 0;
     let stopReason = "model_stopped";
     let lastRuntimeAlertSignature: string | null = null;
+    let latestObservationTick = input.tick;
     let pendingAssistantMessage = preparedTurn?.assistantMessage ?? null;
     let pendingFinishReason = preparedTurn?.finishReason ?? null;
 
@@ -207,11 +206,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
         let response;
         try {
           const completionStartedAt = Date.now();
-          response = await this.createAgentCompletion(messages, options);
+          response = await this.createAgentCompletion(messages, options, modelRequestRecords, "turn");
           this.maybeEmitProviderWarning(options, "create_completion", Date.now() - completionStartedAt, {
             details: {
               messages: messages.length,
-              modelRequests: modelRequests + 1,
+              modelRequests: modelRequestRecords.length,
             },
           });
         } catch (error) {
@@ -221,15 +220,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
           }
           throw error;
         }
-        modelRequests++;
-
-        const choice = response.choices[0];
-        assistantMessage = choice?.message;
+        assistantMessage = response.message;
         if (!assistantMessage) {
           stopReason = "empty_response";
           break;
         }
-        finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+        finishReason = response.finishReason;
 
         messages.push(assistantMessage);
         persistentHistory.push(assistantMessage);
@@ -252,7 +248,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
 
       let shouldStopForStall = false;
-      for (const toolCall of requestedToolCalls) {
+      for (let toolCallIndex = 0; toolCallIndex < requestedToolCalls.length; toolCallIndex++) {
+        const toolCall = requestedToolCalls[toolCallIndex];
+        const toolStartedAtMs = Date.now();
+        const toolStartedAt = new Date(toolStartedAtMs).toISOString();
         const parseArgsStartedAt = Date.now();
         const args = this.parseToolArgs(toolCall.function.arguments);
         this.maybeEmitProviderWarning(options, "parse_tool_args", Date.now() - parseArgsStartedAt, {
@@ -274,6 +273,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
             });
             const parentContext: SubAgentParentContext = {
               playerId: input.playerId,
+              controllerId: options.traceContext?.controllerId,
+              turnId: options.traceContext?.turnId,
               input,
               messages: [...messages],
               runtimeState,
@@ -296,7 +297,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
         } else {
           try {
             const executeToolStartedAt = Date.now();
-            execution = await options.executeTool(toolCall.function.name, args);
+            execution = await options.executeTool(toolCall.function.name, args, {
+              toolCallId: toolCall.id,
+              controllerId: options.traceContext?.controllerId,
+              parentControllerId: options.traceContext?.parentControllerId,
+              turnId: options.traceContext?.turnId,
+              source: "macro_tool",
+            });
             this.maybeEmitProviderWarning(options, "execute_tool", Date.now() - executeToolStartedAt, {
               details: {
                 toolName: toolCall.function.name,
@@ -324,6 +331,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
         } else {
           consecutiveReadOnlyToolCalls = 0;
         }
+        const resultTick = this.extractResultTick(execution.result);
+        const observationTick = latestObservationTick;
+        if (execution.effect === "read" && resultTick !== undefined) {
+          latestObservationTick = resultTick;
+        }
+        const toolCompletedAtMs = Date.now();
+        const resultBytes = Buffer.byteLength(JSON.stringify(execution.result) ?? "null", "utf8");
         const toolCallRecord = {
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
@@ -332,6 +346,16 @@ export class OpenAICompatibleProvider implements LLMProvider {
           isError: execution.result instanceof Object && "ok" in (execution.result as Record<string, unknown>)
             ? (execution.result as Record<string, unknown>).ok === false
             : false,
+          turnId: options.traceContext?.turnId,
+          controllerId: options.traceContext?.controllerId,
+          modelRequestIndex: modelRequestRecords.length,
+          startedAt: toolStartedAt,
+          completedAt: new Date(toolCompletedAtMs).toISOString(),
+          durationMs: toolCompletedAtMs - toolStartedAtMs,
+          observationTick,
+          resultTick,
+          resultBytes,
+          commandIds: this.extractCommandIds(execution.result),
         };
         toolCalls.push(toolCallRecord);
         const toolCallbackStartedAt = Date.now();
@@ -363,6 +387,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
         if (consecutiveReadOnlyToolCalls > MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS) {
           stopReason = "stall_detected";
           shouldStopForStall = true;
+          for (const skippedToolCall of requestedToolCalls.slice(toolCallIndex + 1)) {
+            const skippedToolMessage = {
+              role: "tool",
+              tool_call_id: skippedToolCall.id,
+              content: JSON.stringify({
+                ok: false,
+                error: "stall_detected",
+                hint: "This tool call was not executed because the read-only tool loop exceeded its safety limit.",
+              }),
+              name: skippedToolCall.function.name,
+            };
+            messages.push(skippedToolMessage);
+            persistentHistory.push(skippedToolMessage);
+          }
           break;
         }
       }
@@ -372,16 +410,18 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
     }
 
-    this.history = persistentHistory;
+    const memory = this.commitHistory(persistentHistory);
     return {
       assistantMessages,
       toolCalls,
       plans: [],
       stopReason,
       metrics: {
-        modelRequests,
+        modelRequests: modelRequestRecords.length,
         toolCalls: toolCalls.length,
         stallDetected: stopReason === "stall_detected",
+        modelRequestRecords,
+        memory,
       },
     };
   }
@@ -389,35 +429,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
   async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
     return await runSubAgentTask({
       ...input,
+      systemPrompt: this.systemPrompt,
       createCompletion: async (request, signal) =>
-        await this.client.chat.completions.create(
-          {
-            model: this.model,
-            messages: request.messages,
-            tools: request.tools.map((tool) => ({
-              type: "function",
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              },
-            })),
-            tool_choice: "auto",
-            temperature: request.temperature,
-            max_tokens: request.maxTokens,
-            ...this.buildOptionalRequestParams(),
-          } as any,
-          { signal },
-        ),
+        await this.transport.complete({
+          messages: request.messages,
+          tools: request.tools,
+          toolChoice: "auto",
+          temperature: request.temperature,
+          maxTokens: request.maxTokens,
+          signal,
+        }),
     });
   }
 
   getModel(): string {
-    return this.model;
+    return this.transport.getDescriptor().model;
   }
 
   getBaseURL(): string | undefined {
-    return this.baseURL;
+    return this.transport.getDescriptor().baseURL;
   }
 
   private parseToolArgs(raw: string): unknown {
@@ -428,43 +458,111 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
   }
 
-  private buildOptionalRequestParams(): Record<string, unknown> {
-    const params: Record<string, unknown> = {};
-    if (this.reasoningEffort) {
-      params.reasoning_effort = this.reasoningEffort;
-    }
-
-    if (this.extraRequestParams) {
-      for (const [key, value] of Object.entries(this.extraRequestParams)) {
-        if (!FORBIDDEN_EXTRA_REQUEST_PARAMS.has(key)) {
-          params[key] = value;
-        }
-      }
-    }
-
-    return params;
+  private extractResultTick(result: unknown): number | undefined {
+    if (!result || typeof result !== "object") return undefined;
+    const tick = (result as { tick?: unknown }).tick;
+    return typeof tick === "number" && Number.isFinite(tick) ? tick : undefined;
   }
 
-  private async createAgentCompletion(messages: any[], options: RunAgentOptions) {
-    return await this.client.chat.completions.create(
-      {
-        model: this.model,
-        messages,
-        tools: options.tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          },
-        })),
-        tool_choice: "auto",
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        ...this.buildOptionalRequestParams(),
-      } as any,
-      { signal: options.signal },
-    );
+  private extractCommandIds(result: unknown): string[] {
+    if (!result || typeof result !== "object") return [];
+    const record = result as Record<string, unknown>;
+    const ids = new Set<string>();
+    if (typeof record.commandId === "string") ids.add(record.commandId);
+    if (Array.isArray(record.commandIds)) {
+      for (const id of record.commandIds) if (typeof id === "string") ids.add(id);
+    }
+    if (Array.isArray(record.results)) {
+      for (const nested of record.results) {
+        for (const id of this.extractCommandIds(nested)) ids.add(id);
+      }
+    }
+    return [...ids];
+  }
+
+  private commitHistory(history: readonly unknown[]) {
+    const result = this.memoryPolicy.compact(history);
+    this.history = result.history;
+    return result.record;
+  }
+
+  private async createAgentCompletion(
+    messages: any[],
+    options: RunAgentOptions,
+    records: AgentModelRequestRecord[],
+    phase: AgentModelRequestRecord["phase"],
+  ) {
+    const messagesSnapshot = structuredClone(messages) as unknown[];
+    const messagesHash = createHash("sha256").update(JSON.stringify(messagesSnapshot)).digest("hex");
+    const firstRequestIndex = records.length + 1;
+    for (let attempt = 1; attempt <= MODEL_REQUEST_MAX_ATTEMPTS; attempt++) {
+      const startedAtMs = Date.now();
+      try {
+        const result = await this.transport.complete({
+          messages,
+          tools: options.tools,
+          toolChoice: "auto",
+          temperature: DEFAULT_TEMPERATURE,
+          maxTokens: DEFAULT_MAX_TOKENS,
+          signal: options.signal,
+        });
+        const record: AgentModelRequestRecord = {
+          requestIndex: records.length + 1,
+          phase,
+          requestId: result.requestId,
+          model: result.responseModel ?? this.transport.getDescriptor().model,
+          finishReason: result.finishReason,
+          latencyMs: result.timing?.latencyMs ?? Date.now() - startedAtMs,
+          messageCount: messages.length,
+          toolCount: options.tools.length,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          totalTokens: result.usage.totalTokens,
+          reasoningTokens: result.usage.reasoningTokens,
+          cachedInputTokens: result.usage.cachedInputTokens,
+          status: "success",
+          attempt,
+          ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
+          messagesVersion: 1,
+          messagesHash,
+          messages: messagesSnapshot,
+        };
+        records.push(record);
+        options.onModelRequest?.(record);
+        return result;
+      } catch (error) {
+        const record: AgentModelRequestRecord = {
+          requestIndex: records.length + 1,
+          phase,
+          model: this.transport.getDescriptor().model,
+          finishReason: "request_error",
+          latencyMs: Date.now() - startedAtMs,
+          messageCount: messages.length,
+          toolCount: options.tools.length,
+          status: "error",
+          attempt,
+          ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
+          error: error instanceof Error ? error.message : String(error),
+          messagesVersion: 1,
+          messagesHash,
+          messages: messagesSnapshot,
+        };
+        records.push(record);
+        options.onModelRequest?.(record);
+        if (this.isAbortError(error, options.signal) || attempt === MODEL_REQUEST_MAX_ATTEMPTS || !this.isRetryableModelError(error)) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
+    throw new Error("Model request retry loop exhausted unexpectedly.");
+  }
+
+  private isRetryableModelError(error: unknown): boolean {
+    const status = typeof error === "object" && error && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+    return status === undefined || status === 408 || status === 409 || status === 429 || status >= 500;
   }
 
   private maybeEmitProviderWarning(
@@ -657,7 +755,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       hasPendingToolCalls: false,
       metrics: {
         modelRequests: 0,
+        modelRequestRecords: [],
       },
     };
   }
 }
+
+/** @deprecated Prefer OpenAIAgentSession; retained for external imports during migration. */
+export class OpenAICompatibleProvider extends OpenAIAgentSession {}

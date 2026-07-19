@@ -62,7 +62,12 @@ export function BenchmarkResult({ progress, result }: BenchmarkResultProps) {
           </div>
           <div className="settings-list-item">
             <span>LLM 胜率</span>
-            <strong>{result.llmWinRate}%</strong>
+            <strong>
+              {result.llmWinRate}%
+              {result.llmWinRateConfidence95
+                ? ` (95% CI ${(result.llmWinRateConfidence95.low * 100).toFixed(1)}-${(result.llmWinRateConfidence95.high * 100).toFixed(1)}%)`
+                : ""}
+            </strong>
           </div>
           <div className="settings-list-item">
             <span>平均时长</span>
@@ -77,6 +82,14 @@ export function BenchmarkResult({ progress, result }: BenchmarkResultProps) {
             <strong>
               {result.cpuWins} / {result.draws}
             </strong>
+          </div>
+          <div className="settings-list-item">
+            <span>中位 / P90 时长</span>
+            <strong>{result.medianDurationTicks ?? 0} / {result.p90DurationTicks ?? 0} ticks</strong>
+          </div>
+          <div className="settings-list-item">
+            <span>方位偏差</span>
+            <strong>{result.positionBias === undefined ? "n/a" : `${(result.positionBias * 100).toFixed(1)} pp`}</strong>
           </div>
         </div>
       </div>

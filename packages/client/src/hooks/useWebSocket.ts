@@ -9,6 +9,7 @@ import {
   ServerBenchmarkProgressMessage,
   isServerMessage,
 } from "@llmcraft/shared";
+import { SimulationFrameBuffer } from "@llmcraft/trace";
 
 const MAX_LIVE_TERMINAL_EVENTS = 500;
 
@@ -21,6 +22,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
+  const [matchStatus, setMatchStatus] = useState<"preparing" | "running" | "stopped" | "finished" | null>(null);
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
   const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
@@ -28,6 +30,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [prepareMessage, setPrepareMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const terminalSessionIdRef = useRef<string | null>(null);
+  const frameBufferRef = useRef(new SimulationFrameBuffer());
 
   const send = useCallback((message: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -68,9 +71,17 @@ export function useWebSocket(url: string, enabled = true) {
         switch (parsed.type) {
           case "state":
             setServerMessage(null);
-            setState(parsed.state);
-            setAIOutputs(parsed.aiOutputs);
+            if (parsed.frame) {
+              const projected = frameBufferRef.current.ingest(parsed.frame);
+              if (projected) setState(projected);
+              setAIOutputs(parsed.frame.aiOutputs);
+            } else {
+              frameBufferRef.current.clear();
+              setState(parsed.state);
+              setAIOutputs(parsed.aiOutputs);
+            }
             setLiveEnabled(parsed.liveEnabled);
+            setMatchStatus(parsed.matchStatus);
             break;
 
           case "ai_terminal_events":
@@ -160,6 +171,7 @@ export function useWebSocket(url: string, enabled = true) {
 
   return {
     state,
+    frameBuffer: frameBufferRef.current,
     aiOutputs,
     aiTerminalEvents: terminalHistoryEvents.concat(aiTerminalEvents),
     terminalHistoryHasMore,
@@ -167,6 +179,7 @@ export function useWebSocket(url: string, enabled = true) {
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    matchStatus,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,

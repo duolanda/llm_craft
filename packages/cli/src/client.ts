@@ -1,6 +1,7 @@
-import type { ControlResponse } from "@llmcraft/shared";
+import type { ControlBatchAction, ControlResponse } from "@llmcraft/shared";
+import { randomUUID } from "node:crypto";
 
-export const DEFAULT_SERVER = process.env.LLMCRAFT_SERVER || "http://localhost:3001";
+export const DEFAULT_SERVER = process.env.LLMCRAFT_SERVER || "http://localhost:3101";
 
 type RawControlBody = Partial<ControlResponse> & {
   error?: string | { code?: string; message?: string; hint?: string };
@@ -57,6 +58,89 @@ export class ControlClient {
     );
     return parseControlResponse(res, "action_result");
   }
+
+  async callActionBatch(
+    sessionId: string,
+    actions: ControlBatchAction[],
+    clientRequestId = `cli_${randomUUID()}`,
+  ): Promise<ControlResponse> {
+    const res = await fetch(
+      `${this.baseUrl}/api/control/sessions/${sessionId}/actions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientRequestId, actions }),
+      },
+    );
+    return parseControlResponse(res, "batch_result");
+  }
+
+  async listMatches(): Promise<unknown> {
+    return requestJson(fetch(`${this.baseUrl}/api/control/matches`));
+  }
+
+  async observeMatch(matchId: string): Promise<unknown> {
+    return requestJson(fetch(
+      `${this.baseUrl}/api/control/matches/${encodeURIComponent(matchId)}/observe`,
+      { method: "POST" },
+    ));
+  }
+
+  async stopMatch(matchId: string): Promise<unknown> {
+    return requestJson(fetch(
+      `${this.baseUrl}/api/control/matches/${encodeURIComponent(matchId)}/stop`,
+      { method: "POST" },
+    ));
+  }
+
+  async saveMatchRecord(matchId: string): Promise<unknown> {
+    return requestJson(fetch(
+      `${this.baseUrl}/api/control/matches/${encodeURIComponent(matchId)}/save-record`,
+      { method: "POST" },
+    ));
+  }
+
+  async inspectStorageRetention(): Promise<unknown> {
+    return requestJson(fetch(`${this.baseUrl}/api/control/storage/retention`));
+  }
+
+  async cleanupStorage(apply = false): Promise<unknown> {
+    return requestJson(fetch(`${this.baseUrl}/api/control/storage/cleanup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply }),
+    }));
+  }
+
+  async inspectJournals(): Promise<unknown> {
+    return requestJson(fetch(`${this.baseUrl}/api/control/storage/journals`));
+  }
+
+  async recoverJournals(apply = false): Promise<unknown> {
+    return requestJson(fetch(`${this.baseUrl}/api/control/storage/recover-journals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply }),
+    }));
+  }
+}
+
+async function requestJson(request: Promise<Response>): Promise<unknown> {
+  const response = await request;
+  const text = await response.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) as unknown : {};
+  } catch {
+    body = { error: text || response.statusText };
+  }
+  if (!response.ok) {
+    const error = typeof body === "object" && body !== null && "error" in body
+      ? (body as { error?: unknown }).error
+      : undefined;
+    throw new Error(typeof error === "string" ? error : `HTTP ${response.status}`);
+  }
+  return body;
 }
 
 async function parseControlResponse(

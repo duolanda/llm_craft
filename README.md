@@ -18,6 +18,7 @@ LLMCraft 是一个供 LLM 游玩的即时战略游戏。双方 agent 通过工�
 - **Agent Runtime**: OpenAI-compatible tool calling
 - **CLI**: shell 可调用的 action control plane
 - **AI**: OpenAI API 兼容接口
+- **Record/Trace**: `@llmcraft/trace` 统一校验、迁移与 Replay 投影
 - **包管理**: pnpm workspace
 
 ## 快速开始
@@ -56,8 +57,8 @@ OPENAI_MODEL=gpt-4o-mini
 # 可选: 自定义 API 地址 (兼容 OpenAI API 格式的服务)
 # OPENAI_BASE_URL=https://api.yourservice.com/v1
 
-# 服务器端口 (默认: 3001)
-PORT=3001
+# 服务器端口 (默认: 3101)
+PORT=3101
 ```
 
 支持任意兼容 OpenAI API 格式的服务（Azure、本地模型、第三方代理等）。
@@ -72,10 +73,10 @@ PORT=3001
 ### 运行
 
 ```bash
-# 同时启动 shared watch + 前后端
+# 同时启动 shared/trace watch + 前后端
 pnpm dev
 
-# 访问 http://localhost:3000
+# 访问 http://localhost:3100
 # 点击"开始"按钮观看 AI 对战
 ```
 
@@ -85,10 +86,13 @@ pnpm dev
 # 终端 1 - shared 包增量构建
 pnpm dev:shared
 
-# 终端 2 - 后端
+# 终端 2 - trace 包增量构建
+pnpm dev:trace
+
+# 终端 3 - 后端
 pnpm dev:server
 
-# 终端 3 - 前端
+# 终端 4 - 前端
 pnpm dev:client
 ```
 
@@ -162,7 +166,7 @@ llmcraft session use --player player_2
 如果你是人类主持人，想让任意两个外部 coding agent 对战，可以按这个流程操作：
 
 1. 你先运行 `pnpm dev:server` 和 `llmcraft play --mode pvp`。
-2. 给第一个 agent 说明：先读 `docs/cli-agent-guide.md`，作为 `player_1` 运行 `llmcraft session use --player player_1 --base-url http://localhost:3001`，之后每条命令都显式带自己的 `--session <id>`。
+2. 给第一个 agent 说明：先读 `docs/cli-agent-guide.md`，作为 `player_1` 运行 `llmcraft session use --player player_1 --base-url http://localhost:3101`，之后每条命令都显式带自己的 `--session <id>`。
 3. 给第二个 agent 同样说明，但使用 `player_2`。
 4. 两边都创建 control session 后，对局会自动开始 tick。
 
@@ -182,14 +186,14 @@ llmcraft units --idle --type worker --session cs_player2 | llmcraft gather --ses
 
 ```bash
 export LLMCRAFT_SESSION=cs_player1
-export LLMCRAFT_SERVER=http://localhost:3001
+export LLMCRAFT_SERVER=http://localhost:3101
 ```
 
 Windows PowerShell：
 
 ```powershell
 $env:LLMCRAFT_SESSION = "cs_player1"
-$env:LLMCRAFT_SERVER = "http://localhost:3001"
+$env:LLMCRAFT_SERVER = "http://localhost:3101"
 ```
 
 PowerShell 中坐标参数要加引号，例如 `--at '5,10'`、`--to '18,10'`，避免逗号被 shell 拆成多个参数。
@@ -210,6 +214,23 @@ llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
 CLI 本身不会强制等待或插入 `sleep`；外部 agent 或 benchmark harness 拥有调度循环，下一轮何时读取由调用方决定。
 
 `state --compact` 会返回 `winner`，可用于快速判断对局是否结束；需要完整经济、HQ 和生产信息时使用不带 `--compact` 的 `state`。
+
+服务端可以同时保留多个 live、control 和 benchmark 对局。可按稳定 `matchId` 管理和保存：
+
+```bash
+llmcraft matches list
+llmcraft matches observe --game match_abc123
+llmcraft record save --game match_abc123
+llmcraft matches stop --game match_abc123
+```
+
+`matches observe` 只切换 Web UI 当前展示的对局，不会停止其他对局，也不会改变既有 CLI session 绑定的 `gameId`。`matches stop` 会等待 controller 安静、停止并保存这一局；`record save` 省略 `--game` 时会使用本地已保存 session 对应的 match。
+
+浏览器顶部的“对局”按钮提供同一个 MatchRegistry 的只读观察选择器；它只切换主战场投影，不负责创建 CPU 对局或改变其他 match 的生命周期。
+
+选择器/配对管道展开出的多动作会通过单个 HTTP batch 和单个 `CommandEnvelope` 提交，在同一 tick 全部应用或整批回滚。自动化重试可传 `--request-id <id>`；相同 ID+动作不会重复执行，同一 ID 改变动作会拒绝。
+
+日志与录像治理默认先预览：`llmcraft storage journals` / `storage recover` 检查异常 journal，`storage inspect` / `storage cleanup` 查看逐 artifact retention 决策；只有追加 `--apply` 才执行恢复或正式文件清理。版本化 pins 和 keep marker 不会被删除。
 
 对局结束后，除 `state` / `map` / `me` / `events` / `plans` 这类读取命令外，selector、transformer、action、plan 和 orchestrate 命令会直接返回 `game_over` 与赢家，避免 agent 继续执行无意义管道。
 
@@ -263,8 +284,8 @@ pnpm --filter @llmcraft/client build
 
 启动前后端后，除了主页面外，还有两个独立调试页面：
 
-- `http://localhost:3000/diagnostics.html`：对局诊断页。直接从服务端记录列表选择 `match-*.json`，查看 HQ 压力时间线、防守响应延迟、受压后工具调用、失效单位、出生点陷阱等结构化指标。
-- `http://localhost:3000/transcript.html`：模型日志查看页。用于查看 `packages/server/logs/llm-debug/*.log`，拆解每次 LLM 请求看到的上下文、响应、工具调用和执行结果。
+- `http://localhost:3100/diagnostics.html`：对局诊断页。直接从服务端记录列表选择 `match-*.json`，查看 HQ 压力时间线、防守响应延迟、受压后工具调用、失效单位、出生点陷阱等结构化指标。
+- `http://localhost:3100/transcript.html`：模型日志查看页。用于查看 `packages/server/logs/llm-debug/*.log`，拆解每次 LLM 请求看到的上下文、响应、工具调用和执行结果。
 
 这两个页面目前是调试入口，没有放进主界面导航；需要直接访问 URL。
 
@@ -277,27 +298,28 @@ pnpm --filter @llmcraft/client build
 
 当前有两种不同的文件输出，职责不同：
 
-- `logs/records/*.json`：对局记录文件，用于回放和结构化分析
+- `logs/records/*.trace.json.gz`：当前压缩 Trace v3 对局记录；读取链路仍兼容历史 `*.json`
 - `packages/server/logs/llm-debug/*.log`：单局 LLM debug transcript，用于人工排查 prompt / response / 执行结果
 
 benchmark 另有两类独立输出：
 
-- `packages/server/logs/benchmark-records/*.json`：benchmark 每个已完成 round 的回放
+- `packages/server/logs/benchmark-records/*.trace.json.gz`：benchmark 每个已完成 round 的压缩回放
 - `packages/server/logs/benchmark-llm-debug/*.log`：benchmark 每个已完成 round 的 LLM transcript
 
 ### `save_record` 会保存什么
 
-- 点击前端“保存记录”，或对局结束后前端自动触发 `save_record`
-- 服务端会把当前整局写成一份 JSON 到 `logs/records/`
-- 这份 JSON 包含 `initialState / finalState / tickDeltas / commandResults / aiTurns`
+- 点击前端“保存记录”、对局结束后前端自动触发 `save_record`，或运行 `llmcraft record save [--game <matchId>]`
+- 服务端会通过统一 `MatchRecorder` 把指定对局的一致 cut 流式写成 gzip Trace v3；live、CLI/control-plane 与 benchmark 不使用不同 record builder
+- Trace v3 的 manifest、command submissions、DomainEvents、state hashes 和 AI/terminal 流是事实层；兼容回放所需的 `initialState / finalState / tickDeltas / commandResults / aiTurns` 位于显式派生的 replay projection
 
 ### Benchmark 会保存什么
 
-- benchmark 会先停止当前 live 对局，再串行执行多个 round
+- benchmark round 会注册为独立 match；启动 benchmark 不会自动停止已有 live/control match
 - `recordReplay = true` 时，每个已完成 round 会自动写出 1 份回放到 `packages/server/logs/benchmark-records/`
+- `recordReplay = false` 时，round 会在 controller quiesce 后丢弃临时 journal，不会被后台生命周期任务偷偷保存
 - `debug.recordLLMTranscript = true` 时，每个已完成 round 会额外写出 1 份 transcript 到 `packages/server/logs/benchmark-llm-debug/`
 - benchmark 的 `decisionIntervalTicks` 只影响 CPU 一侧；LLM 一侧保持默认 5 tick 调度
-- 同一已结束对局如果被重复保存，服务端会复用已有文件路径，不再额外生成重复回放
+- 同一 cut 如果被重复保存，服务端会复用已有文件路径；同一时刻并发保存也会合并为一次写入
 - benchmark 文件当前按时间戳命名；在串行执行模型下通常不会冲突，但命名不是强唯一
 
 ### `LLM Debug` 会保存什么
@@ -358,7 +380,7 @@ benchmark 另有两类独立输出：
 
 1. 双方各有一个 HQ、2 个 Worker、200 credits
 2. 每 500ms 执行一个游戏 tick
-3. AI 每 5 ticks 思考一次，通过工具调用或 CLI 控制面产生命令
+3. 双 LLM 默认每 5 ticks 获得一次配对宏观决策机会；通过工具调用或 CLI 控制面产生命令
 4. 命令加入队列，在后续 tick 执行
 5. Worker 可以建造 Barracks，Barracks 建好后才能生产 Soldier
 6. Barracks 不能紧贴己方 HQ 建造，至少要留出 1 格缓冲
@@ -399,7 +421,7 @@ llmcraft/
 - 当前有效的 AI 接口契约见 [docs/ai-api-contract.md](./docs/ai-api-contract.md)
 - CLI agent 操作手册见 [docs/cli-agent-guide.md](./docs/cli-agent-guide.md)
 - 当前真实 MVP 行为见 [docs/current-mvp-reality.md](./docs/current-mvp-reality.md)
-- 当前保存的对局记录格式为 `initialState / finalState / tickDeltas / commandResults / aiTurns`
+- 当前保存格式为 `.trace.json.gz`：Trace facts 是权威层，`initialState / finalState / tickDeltas / commandResults / aiTurns` 是版本化 replay projection
 - 当前前端已支持读取保存记录并做逐 tick 回放
 - `docs/plans/` 和较早的设计稿包含历史方案，不一定代表当前实现
 

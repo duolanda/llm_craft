@@ -1,6 +1,5 @@
 import {
   PlayerId,
-  Unit,
   UnitType,
   TileType,
   ECONOMY_RULES,
@@ -14,6 +13,7 @@ import {
   MAP_HEIGHT,
 } from "@llmcraft/shared";
 import { PathFinder } from "./PathFinder";
+import type { WorldUnit as Unit } from "./WorldUnit";
 
 const ARRIVAL_EPSILON = 0.001;
 const SEPARATION_ITERATIONS = 2;
@@ -53,6 +53,21 @@ export class UnitManager {
   private units: Map<string, Unit> = new Map();
   private idCounter = 0;
 
+  createCheckpoint(): { units: Unit[]; idCounter: number } {
+    return {
+      units: structuredClone(Array.from(this.units.values())),
+      idCounter: this.idCounter,
+    };
+  }
+
+  restoreCheckpoint(checkpoint: { units: Unit[]; idCounter: number }): void {
+    this.units = new Map(
+      structuredClone(checkpoint.units).map((unit) => [unit.id, unit]),
+    );
+    this.idCounter = checkpoint.idCounter;
+  }
+
+  /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): Unit {
     const stats = getUnitStats(type);
     const unit: Unit = {
@@ -63,7 +78,6 @@ export class UnitManager {
       hp: stats.hp,
       maxHp: stats.hp,
       state: UNIT_STATES.IDLE,
-      my: true,
       playerId,
       exists: true,
       attackRange: stats.attackRange,
@@ -86,6 +100,10 @@ export class UnitManager {
 
   getAllUnits(): Unit[] {
     return Array.from(this.units.values()).filter((u) => u.exists);
+  }
+
+  iterateStoredUnits(): IterableIterator<Unit> {
+    return this.units.values();
   }
 
   /**
@@ -151,7 +169,7 @@ export class UnitManager {
     unit.y = targetY;
     unit.state = UNIT_STATES.MOVING;
     // Record move intent for visualization
-    unit.intent = { type: 'move', targetX, targetY };
+    unit.order = { type: 'move', targetX, targetY };
 
     return RESULT_CODES.OK;
   }
@@ -175,7 +193,7 @@ export class UnitManager {
     target.hp -= damage;
     attacker.state = UNIT_STATES.ATTACKING;
     // Record attack intent for visualization
-    attacker.intent = { type: 'attack', targetId: target.id, targetX: target.x, targetY: target.y };
+    attacker.order = { type: 'attack', targetId: target.id, targetX: target.x, targetY: target.y };
 
     if (target.hp <= 0) {
       target.hp = 0;
@@ -192,10 +210,11 @@ export class UnitManager {
 
     unit.state = UNIT_STATES.IDLE;
     // Record hold intent for visualization
-    unit.intent = { type: 'hold' };
+    unit.order = { type: 'hold' };
     return RESULT_CODES.OK;
   }
 
+  /** @internal Authoritative runtime destruction goes through EntityRegistry/WorldState. */
   removeUnit(id: string): boolean {
     const unit = this.units.get(id);
     if (unit) {
@@ -260,15 +279,15 @@ export class UnitManager {
           ? { x: resolvedTarget.x, y: resolvedTarget.y }
           : undefined;
       unit.state = UNIT_STATES.IDLE;
-      if (unit.intent?.type === "move") {
-        unit.intent = undefined;
+      if (unit.order?.type === "move") {
+        unit.order = undefined;
       }
       return RESULT_CODES.OK;
     }
 
     unit.path = path;
     unit.pathTarget = { x: resolvedTarget.x, y: resolvedTarget.y };
-    unit.intent = { type: "move", targetX: resolvedTarget.x, targetY: resolvedTarget.y };
+    unit.order = { type: "move", targetX: resolvedTarget.x, targetY: resolvedTarget.y };
 
     return RESULT_CODES.OK;
   }
@@ -355,8 +374,8 @@ export class UnitManager {
       unit.path = undefined;
       unit.pathTarget = undefined;
       unit.state = UNIT_STATES.IDLE;
-      if (unit.intent?.type === "move") {
-        unit.intent = undefined;
+      if (unit.order?.type === "move") {
+        unit.order = undefined;
       }
     }
 

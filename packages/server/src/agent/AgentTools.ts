@@ -306,22 +306,21 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, move a builder beside the barracks footprint, build barracks, then train riflemen:",
+      "Opening example: first assign three other starting workers to mining with direct start_harvest_loop calls; reserve one builder, move it to the workerPosition paired with a recommended barracks site, build, then train the first six riflemen:",
       JSON.stringify({
-        unitIds: ["worker_1", "worker_2"],
+        unitIds: ["worker_builder"],
         loop: 1,
         steps: [
-          { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
           {
             call: "move_unit",
-            args: { unitId: "worker_1", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y },
+            args: { unitId: "worker_builder", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y },
             scope: "global",
             until: { condition: "near_position", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y, distance: 1 },
             retry: true,
           },
           {
             call: "build_structure",
-            args: { unitId: "worker_1", buildingType: "barracks", x: OPENING_BARRACKS_SITE.x, y: OPENING_BARRACKS_SITE.y },
+            args: { unitId: "worker_builder", buildingType: "barracks", x: OPENING_BARRACKS_SITE.x, y: OPENING_BARRACKS_SITE.y },
             scope: "global",
             when: { condition: "credits_at_least", amount: 120 },
             until: { condition: "building_exists", buildingType: "barracks" },
@@ -332,7 +331,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             args: { buildingId: "$barracks", unitType: "rifleman" },
             scope: "global",
             when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "rifleman", count: 4 },
+            until: { condition: "unit_count_at_least", unitType: "rifleman", count: 6 },
             retry: true,
           },
         ],
@@ -345,8 +344,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
           {
             call: "attack_move_unit",
             args: { unitId: "$unitId", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y },
-            until: { condition: "near_position", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y, distance: 2 },
-            maxTicks: 80,
+            until: { condition: "hq_in_range" },
+            maxTicks: 180,
           },
           {
             call: "attack",
@@ -489,6 +488,10 @@ export function getControlAgentToolNames(): string[] {
 
 export function getControlReadToolNames(): string[] {
   return getControlAgentToolNames().filter((name) => readToolNames.has(name));
+}
+
+export function getControlActionToolNames(): string[] {
+  return getControlAgentToolNames().filter((name) => !readToolNames.has(name) && name !== "orchestrate_plan");
 }
 
 export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {

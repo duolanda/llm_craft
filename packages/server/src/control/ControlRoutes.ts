@@ -1,11 +1,16 @@
 import http from "node:http";
 import {
+  ControlActionBatchRequest,
   ControlToolCallRequest,
   CreateControlSessionRequest,
   PLAYER_IDS,
 } from "@llmcraft/shared";
 import type { ServerState } from "../index";
-import { buildControlResponse, executeControlTool } from "../ControlHandler";
+import {
+  buildControlResponse,
+  executeControlActionBatch,
+  executeControlTool,
+} from "../ControlHandler";
 import { getControlAgentToolNames, getControlReadToolNames } from "../agent/AgentTools";
 import { ControlPlaneMatch } from "./ControlPlaneMatch";
 
@@ -17,34 +22,21 @@ interface ControlRouteHelpers {
   readJsonBody<T>(req: http.IncomingMessage): Promise<T>;
 }
 
-function releaseFinishedOrchestrator(state: ServerState): boolean {
-  const currentOrchestrator = state.orchestrator;
-  if (!currentOrchestrator) {
-    return false;
+function getControlMatch(state: ServerState, matchId?: string): ControlPlaneMatch | null {
+  const entry = matchId
+    ? state.matchRegistry.get(matchId)
+    : state.matchRegistry.getObserved();
+  if (entry?.kind === "control" && entry.handle instanceof ControlPlaneMatch) {
+    return entry.handle;
   }
-
-  const winner = currentOrchestrator.getGame().getState()?.winner;
-  if (!winner) {
-    return false;
+  if (matchId) return null;
+  for (const summary of state.matchRegistry.list()) {
+    const candidate = state.matchRegistry.get(summary.matchId);
+    if (candidate?.kind === "control" && candidate.handle instanceof ControlPlaneMatch) {
+      return candidate.handle;
+    }
   }
-
-  currentOrchestrator.stop();
-  state.orchestrator = null;
-  state.pendingMatch = null;
-  state.controlSessions.clear();
-  return true;
-}
-
-function releaseFinishedControlMatch(state: ServerState): boolean {
-  const currentMatch = state.controlMatch;
-  if (!currentMatch || !currentMatch.isFinished()) {
-    return false;
-  }
-
-  currentMatch.stop();
-  state.controlMatch = null;
-  state.controlSessions.clear();
-  return true;
+  return null;
 }
 
 export async function handleControlHttpRequest(
@@ -56,16 +48,81 @@ export async function handleControlHttpRequest(
 ): Promise<boolean> {
   const { sendJson, readJsonBody } = helpers;
 
-  if (req.method === "POST" && url.pathname === "/api/control/start-game") {
-    if (state.orchestrator && !releaseFinishedOrchestrator(state)) {
-      sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
-      return true;
-    }
-    if (state.controlMatch && !releaseFinishedControlMatch(state)) {
-      sendJson(res, 409, { error: "已有活跃对局。请先结束当前对局。" });
-      return true;
-    }
+  if (req.method === "GET" && url.pathname === "/api/control/storage/retention") {
+    sendJson(res, 200, await state.artifactRetention.inspect());
+    return true;
+  }
 
+  if (req.method === "GET" && url.pathname === "/api/control/storage/journals") {
+    sendJson(res, 200, await state.journalLifecycle.recoverOrphans({ dryRun: true }));
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/control/storage/recover-journals") {
+    let body: { apply?: boolean } = {};
+    try {
+      body = await readJsonBody<{ apply?: boolean }>(req);
+    } catch {
+      // Empty body is a dry-run request.
+    }
+    if (body.apply !== undefined && typeof body.apply !== "boolean") {
+      sendJson(res, 400, { error: "apply 必须是 boolean。" });
+      return true;
+    }
+    sendJson(res, 200, await state.journalLifecycle.recoverOrphans({ dryRun: body.apply !== true }));
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/control/storage/cleanup") {
+    let body: { apply?: boolean } = {};
+    try {
+      body = await readJsonBody<{ apply?: boolean }>(req);
+    } catch {
+      // Empty body is a dry-run request.
+    }
+    if (body.apply !== undefined && typeof body.apply !== "boolean") {
+      sendJson(res, 400, { error: "apply 必须是 boolean。" });
+      return true;
+    }
+    sendJson(res, 200, await state.artifactRetention.inspect({ apply: body.apply === true }));
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/control/matches") {
+    sendJson(res, 200, {
+      matches: state.matchRegistry.list(),
+      observedMatchId: state.matchRegistry.getObservedMatchId(),
+    });
+    return true;
+  }
+
+  const matchRoute = url.pathname.match(/^\/api\/control\/matches\/([^/]+)\/(observe|save-record|stop)$/);
+  if (req.method === "POST" && matchRoute) {
+    const matchId = decodeURIComponent(matchRoute[1]!);
+    const action = matchRoute[2]!;
+    const entry = state.matchRegistry.get(matchId);
+    if (!entry) {
+      sendJson(res, 404, { error: "指定对局不存在。" });
+      return true;
+    }
+    if (action === "observe") {
+      state.matchRegistry.observe(matchId);
+      sendJson(res, 200, { ok: true, matchId });
+      return true;
+    }
+    if (action === "save-record") {
+      const filePath = await state.matchRegistry.save(matchId);
+      sendJson(res, 200, { ok: true, matchId, filePath });
+      return true;
+    }
+    const finalization = await state.matchRegistry.stopAndSave(matchId);
+    sendJson(res, finalization.ok ? 200 : 500, finalization.ok
+      ? { ok: true, matchId, filePath: finalization.filePath }
+      : { ok: false, matchId, error: finalization.error });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/control/start-game") {
     let cpu: string | undefined;
     try {
       const body = await readJsonBody<{ cpu?: string }>(req);
@@ -88,13 +145,17 @@ export async function handleControlHttpRequest(
       return true;
     }
 
-    const controlMatch = new ControlPlaneMatch({ cpuStrategy: cpu });
-    state.controlMatch = controlMatch;
+    const controlMatch = new ControlPlaneMatch({
+      cpuStrategy: cpu,
+      journalLifecycle: state.journalLifecycle,
+    });
+    state.matchRegistry.register(controlMatch, { kind: "control", observe: true });
     sendJson(res, 201, {
       ok: true,
       tick: 0,
       kind: "state",
       data: {
+        matchId: controlMatch.getMatchId(),
         status: "waiting_for_players",
         ...(cpu ? { cpu, cpuPlayer: "player_2" } : {}),
       },
@@ -115,19 +176,20 @@ export async function handleControlHttpRequest(
       return true;
     }
 
-    if (!state.controlMatch) {
+    const controlMatch = getControlMatch(state, body.gameId);
+    if (!controlMatch) {
       sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
       return true;
     }
 
-    const game = state.controlMatch.getGame();
+    const game = controlMatch.getGame();
     const session = state.controlSessions.create(
-      state.controlMatch.getBridge(body.playerId),
-      body.gameId || "default",
+      controlMatch.getBridge(body.playerId),
+      controlMatch.getMatchId(),
       body.playerId,
     );
     const serverTick = game.getState()?.tick ?? 0;
-    state.controlMatch.join(body.playerId);
+    controlMatch.join(body.playerId);
 
     sendJson(res, 201, {
       ok: true,
@@ -165,11 +227,11 @@ export async function handleControlHttpRequest(
   }
 
   state.controlSessions.touch(sessionId);
-  if (!state.controlMatch) {
-    sendJson(res, 503, { error: "没有活跃对局。请先 POST /api/control/start-game。" });
+  const controlMatch = getControlMatch(state, session.gameId);
+  if (!controlMatch) {
+    sendJson(res, 410, { error: "控制会话所属对局已不存在。" });
     return true;
   }
-  const controlMatch = state.controlMatch;
   const game = controlMatch.getGame();
 
   if (req.method === "GET" && subPath === "/state") {
@@ -185,6 +247,82 @@ export async function handleControlHttpRequest(
       ...(lobby ? { status: lobby.status, ready: lobby.ready } : {}),
     };
     sendJson(res, 200, response);
+    return true;
+  }
+
+  if (req.method === "POST" && subPath === "/save-record") {
+    const filePath = await state.matchRegistry.save(session.gameId);
+    sendJson(res, 200, {
+      ok: true,
+      tick: game.getState().tick,
+      kind: "state",
+      data: { matchId: session.gameId, filePath },
+    });
+    return true;
+  }
+
+  if (req.method === "POST" && subPath === "/actions") {
+    const lobby = controlMatch.getLobbyStatus();
+    if (lobby?.status === "waiting_for_players") {
+      sendJson(res, 409, {
+        ok: false,
+        tick: game.getState().tick,
+        kind: "batch_result",
+        data: { status: lobby.status, ready: lobby.ready },
+        error: {
+          code: "game_not_started",
+          message: "Game has not started. Wait until both players have created control sessions.",
+        },
+      });
+      return true;
+    }
+    let body: ControlActionBatchRequest;
+    try {
+      body = await readJsonBody<ControlActionBatchRequest>(req);
+    } catch {
+      sendJson(res, 400, { error: "请求体 JSON 格式错误。" });
+      return true;
+    }
+    if (
+      typeof body.clientRequestId !== "string"
+      || !body.clientRequestId.trim()
+      || !Array.isArray(body.actions)
+      || body.actions.length === 0
+      || body.actions.length > 100
+      || body.actions.some((action) => (
+        !action
+        || typeof action.tool !== "string"
+        || !action.tool.trim()
+        || (action.args !== undefined && (typeof action.args !== "object" || action.args === null || Array.isArray(action.args)))
+      ))
+    ) {
+      sendJson(res, 400, {
+        ok: false,
+        tick: game.getState().tick,
+        kind: "batch_result",
+        data: {},
+        error: {
+          code: "invalid_action_batch",
+          message: "clientRequestId and 1-100 well-formed actions are required.",
+        },
+      });
+      return true;
+    }
+    try {
+      const response = executeControlActionBatch(session.controller, body, game.getState().tick);
+      sendJson(res, 200, response);
+    } catch (error) {
+      sendJson(res, 409, {
+        ok: false,
+        tick: game.getState().tick,
+        kind: "batch_result",
+        data: { clientRequestId: body.clientRequestId },
+        error: {
+          code: "batch_submission_rejected",
+          message: error instanceof Error ? error.message : "Batch submission failed.",
+        },
+      });
+    }
     return true;
   }
 
@@ -227,7 +365,7 @@ export async function handleControlHttpRequest(
     try {
       const body = await readJsonBody<ControlToolCallRequest>(req);
       const args = body.args ?? {};
-      const result = executeControlTool(session.bridge, toolName, args);
+      const result = executeControlTool(session.controller, toolName, args);
       const response = buildControlResponse(result);
       sendJson(res, 200, response);
     } catch (error) {

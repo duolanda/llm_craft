@@ -14,7 +14,12 @@ import {
 } from "@llmcraft/shared";
 import { Game } from "../Game";
 import { GameAgentBridge } from "../agent/GameAgentBridge";
-import { ControlSessionManager, executeControlTool, buildControlResponse } from "../ControlHandler";
+import {
+  ControlSessionManager,
+  executeControlActionBatch,
+  executeControlTool,
+  buildControlResponse,
+} from "../ControlHandler";
 import { ControlPlaneMatch } from "../control/ControlPlaneMatch";
 
 describe("CLI Control Plane Integration", () => {
@@ -96,9 +101,9 @@ describe("CLI Control Plane Integration", () => {
     });
     expect(buildControlResponse(buildResult).ok).toBe(true);
 
-    game.tickUpdate();
+    match.advanceOneTick();
     match.advancePlans();
-    game.tickUpdate();
+    match.advanceOneTick();
     match.stop();
 
     const updatedPlayer = game.getState().players[0];
@@ -216,6 +221,78 @@ describe("CLI Control Plane Integration", () => {
     expect(actionResponse.warnings).toBeUndefined();
   });
 
+  it("submits a successful CLI action batch as one idempotent command envelope", async () => {
+    const match = new ControlPlaneMatch();
+    match.join("player_1");
+    match.join("player_2");
+    const bridge = match.getBridge("player_1");
+    const workers = match.getGame().getState().players[0]!.units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
+    const request = {
+      clientRequestId: "cli_atomic_success",
+      actions: workers.slice(0, 2).map((worker) => ({
+        tool: "hold_unit",
+        args: { unitId: worker.id },
+      })),
+    };
+
+    const first = executeControlActionBatch(bridge, request, 0);
+    expect(first).toMatchObject({ ok: true, kind: "batch_result", data: { duplicate: false } });
+
+    const submissions = [];
+    for await (const submission of match.getMatchRuntime().getJournal().readCommandSubmissions()) {
+      submissions.push(submission);
+    }
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0]).toMatchObject({
+      envelope: { clientRequestId: "cli_atomic_success", commands: [{ type: "hold" }, { type: "hold" }] },
+      result: { accepted: true, duplicate: false },
+    });
+    match.advanceOneTick();
+    const duplicate = executeControlActionBatch(bridge, request, 1);
+    expect(duplicate).toMatchObject({ ok: true, kind: "batch_result", data: { duplicate: true } });
+    expect(() => executeControlActionBatch(bridge, {
+      clientRequestId: request.clientRequestId,
+      actions: [{ tool: "hold_unit", args: { unitId: workers[0]!.id } }],
+    }, 1)).toThrow(/different action batch/);
+    expect(match.getGame().getState().players[0]!.units.filter((unit) => (
+      workers.slice(0, 2).some((worker) => worker.id === unit.id) && unit.intent?.type === "hold"
+    ))).toHaveLength(2);
+    match.stop();
+  });
+
+  it("does not submit or mutate controller state when one CLI batch action is invalid", async () => {
+    const match = new ControlPlaneMatch();
+    match.join("player_1");
+    match.join("player_2");
+    const bridge = match.getBridge("player_1");
+    const worker = match.getGame().getState().players[0]!.units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    bridge.orchestratePlan({
+      unitIds: [worker.id],
+      loop: -1,
+      steps: [{ call: "start_harvest_loop", args: { unitId: "$unitId" } }],
+    });
+    expect(bridge.getActivePlans()).toHaveLength(1);
+
+    const response = executeControlActionBatch(bridge, {
+      clientRequestId: "cli_atomic_rejected",
+      actions: [
+        { tool: "hold_unit", args: { unitId: worker.id } },
+        { tool: "hold_unit", args: { unitId: "missing_unit" } },
+      ],
+    }, 0);
+    expect(response).toMatchObject({ ok: false, kind: "batch_result" });
+
+    const submissions = [];
+    for await (const submission of match.getMatchRuntime().getJournal().readCommandSubmissions()) {
+      submissions.push(submission);
+    }
+    expect(submissions).toHaveLength(0);
+    expect(bridge.getActivePlans()).toHaveLength(1);
+    match.advanceOneTick();
+    expect(match.getGame().getState().players[0]!.units.find((unit) => unit.id === worker.id)?.intent?.type).not.toBe("hold");
+    match.stop();
+  });
+
   it("returns error for unknown tool", () => {
     const game = new Game();
     game.start();
@@ -316,7 +393,7 @@ describe("CLI Control Plane Integration", () => {
     expect(result.result).toMatchObject({ ok: true });
 
     match.advancePlans();
-    game.tickUpdate();
+    match.advanceOneTick();
     match.stop();
 
     const updatedWorker = game.getState().players[0].units.find((unit) => unit.id === worker.id)!;

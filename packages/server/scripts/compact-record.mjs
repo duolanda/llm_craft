@@ -1,5 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { gunzip } from "node:zlib";
+import { promisify } from "node:util";
+import { detectRecordFormat, projectRecordToGameRecord } from "@llmcraft/trace";
+
+const gunzipAsync = promisify(gunzip);
 
 function diffUnits(previousUnits, currentUnits) {
   const previousMap = new Map(previousUnits.map((unit) => [unit.id, unit]));
@@ -176,30 +181,36 @@ async function main() {
   }
 
   const absoluteInputPath = path.resolve(inputPath);
-  const raw = await fs.readFile(absoluteInputPath, "utf8");
+  const bytes = await fs.readFile(absoluteInputPath);
+  const raw = (bytes[0] === 0x1f && bytes[1] === 0x8b ? await gunzipAsync(bytes) : bytes).toString("utf8");
   const record = JSON.parse(raw);
+  const format = detectRecordFormat(record);
 
-  if (record.metadata?.recordFormat === "compact-v2") {
+  if (format === "compact-v2") {
     console.log("Record is already compact-v2.");
     return;
   }
 
-  const snapshots = record.snapshots || [];
-  const compactRecord = {
-    metadata: {
-      ...record.metadata,
-      recordFormat: "compact-v2",
-      systemPrompt: record.metadata?.systemPrompt || "",
-    },
-    initialState: snapshots[0]?.state || record.finalState,
-    finalState: record.finalState,
-    tickDeltas: buildTickDeltas(snapshots),
-    commandResults: record.commandResults || [],
-    aiTurns: buildSavedAITurns(record.aiTurns || []),
-  };
+  const compactRecord = format === "trace-v3"
+    ? projectRecordToGameRecord(record)
+    : (() => {
+        const snapshots = record.snapshots || [];
+        return {
+          metadata: {
+            ...record.metadata,
+            recordFormat: "compact-v2",
+            systemPrompt: record.metadata?.systemPrompt || "",
+          },
+          initialState: snapshots[0]?.state || record.finalState,
+          finalState: record.finalState,
+          tickDeltas: buildTickDeltas(snapshots),
+          commandResults: record.commandResults || [],
+          aiTurns: buildSavedAITurns(record.aiTurns || []),
+        };
+      })();
 
-  const parsedPath = path.parse(absoluteInputPath);
-  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}.compact${parsedPath.ext}`);
+  const parsedPath = path.parse(absoluteInputPath.replace(/\.gz$/, ""));
+  const outputPath = path.join(parsedPath.dir, `${parsedPath.name}.compact.json`);
   await fs.writeFile(outputPath, JSON.stringify(compactRecord, null, 2), "utf8");
 
   const [beforeStat, afterStat] = await Promise.all([
@@ -216,5 +227,3 @@ main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
-
-

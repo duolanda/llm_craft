@@ -1,5 +1,5 @@
 import type { PlayerId } from "./constants.js";
-import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchWarmupOptions } from "./types.js";
+import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchWarmupOptions, StateProjectionFrameV1 } from "./types.js";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -80,9 +80,11 @@ export type ClientMessageType = ClientMessage["type"];
 export interface ServerStateMessage {
   type: "state";
   state: GameState | null;
+  frame?: StateProjectionFrameV1;
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  matchStatus: "preparing" | "running" | "stopped" | "finished" | null;
 }
 
 export interface ServerAITerminalEventsMessage {
@@ -150,6 +152,10 @@ export interface ServerBenchmarkCompleteMessage {
   draws: number;
   llmWinRate: number;
   averageDurationTicks: number;
+  medianDurationTicks?: number;
+  p90DurationTicks?: number;
+  llmWinRateConfidence95?: { low: number; high: number };
+  positionBias?: number;
   stopped: boolean;
   rounds: ServerBenchmarkRoundResult[];
 }

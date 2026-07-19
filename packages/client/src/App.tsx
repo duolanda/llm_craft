@@ -1,4 +1,4 @@
-import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CPUStrategyType,
   CreateLLMPresetRequest,
@@ -7,10 +7,12 @@ import {
   LLMPresetSummary,
   MatchDebugOptions,
   MatchPrepareState,
+  MatchRegistrySummary,
   PlayerId,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
+import { projectRecordToGameRecord, SimulationFrameBuffer } from "@llmcraft/trace";
 import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
@@ -20,8 +22,11 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
+import { MatchPanel } from "./components/MatchPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
+import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
+import { readLocalRecordText } from "./lib/readRecordFile";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
@@ -33,13 +38,17 @@ interface ReplayRecordListEntry {
   fullPath: string;
   size: number;
   modifiedAt: string;
+  encoding?: "identity" | "gzip";
 }
 
 const SERVER_HOST = window.location.hostname || "localhost";
-const WS_URL = `ws://${SERVER_HOST}:3001`;
-const API_BASE_URL = `http://${SERVER_HOST}:3001`;
+const WS_URL = `ws://${SERVER_HOST}:3101`;
+const API_BASE_URL = `http://${SERVER_HOST}:3101`;
 const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
+const REQUESTED_REPLAY_FILE = new URLSearchParams(window.location.search).get("replay");
+const requestedReplayTick = new URLSearchParams(window.location.search).get("tick");
+const REQUESTED_REPLAY_TICK = requestedReplayTick === null ? null : Number(requestedReplayTick);
 const MASS_BATTLE_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "mass-battle";
 const ANIMATION_LAB_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "animation-lab";
 const ANIMATION_LAB_MODE: AnimationLabMode = new URLSearchParams(window.location.search).get("lab") === "preview"
@@ -67,7 +76,7 @@ function DevQuickNav() {
     { label: "Animation Lab", href: "/?showcase=animation-lab" },
     { label: "FX Preview", href: "/?showcase=animation-lab&lab=preview" },
     { label: "Diagnostics", href: "/diagnostics.html" },
-    { label: "Transcript", href: "/transcript.html" },
+    { label: "Match Explorer", href: "/transcript.html" },
   ];
 
   return (
@@ -170,6 +179,7 @@ function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
 function App() {
   const {
     state,
+    frameBuffer,
     aiOutputs,
     aiTerminalEvents,
     terminalHistoryHasMore,
@@ -177,6 +187,7 @@ function App() {
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    matchStatus,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
@@ -200,6 +211,8 @@ function App() {
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
+  const replayFrameBuffer = useMemo(() => new SimulationFrameBuffer(4), []);
+  const replayQueryLoaded = useRef(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [presetsLoaded, setPresetsLoaded] = useState(false);
@@ -211,6 +224,12 @@ function App() {
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [matchesOpen, setMatchesOpen] = useState(false);
+  const [registeredMatches, setRegisteredMatches] = useState<MatchRegistrySummary[]>([]);
+  const [observedMatchId, setObservedMatchId] = useState<string | null>(null);
+  const [matchesLoading, setMatchesLoading] = useState(false);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+  const [switchingMatchId, setSwitchingMatchId] = useState<string | null>(null);
   const [benchmarkOpen, setBenchmarkOpen] = useState(false);
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkRunSummary, setBenchmarkRunSummary] = useState<{
@@ -221,6 +240,25 @@ function App() {
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const [showcaseTick, setShowcaseTick] = useState(0);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
+
+  const refreshRegisteredMatches = useCallback(async (showLoading = true) => {
+    if (showLoading) {
+      setMatchesLoading(true);
+      setMatchesError(null);
+    }
+    try {
+      const payload = await listRegisteredMatches(API_BASE_URL);
+      setRegisteredMatches(payload.matches);
+      setObservedMatchId(payload.observedMatchId);
+      setMatchesError(null);
+    } catch (error) {
+      setMatchesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (showLoading) {
+        setMatchesLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!LOCAL_SHOWCASE) {
@@ -234,6 +272,15 @@ function App() {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    if (LOCAL_SHOWCASE || mode !== "live" || !matchesOpen) return;
+    void refreshRegisteredMatches();
+    const interval = window.setInterval(() => {
+      void refreshRegisteredMatches(false);
+    }, 1_000);
+    return () => window.clearInterval(interval);
+  }, [matchesOpen, mode, refreshRegisteredMatches]);
 
   useEffect(() => {
     if (mode !== "live" || benchmarkRunning || benchmarkResult) {
@@ -251,6 +298,17 @@ function App() {
       lastAutoSavedWinnerRef.current = null;
     }
   }, [benchmarkResult, benchmarkRunning, mode, send, state?.winner]);
+
+  useEffect(() => {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult || matchStatus === null) {
+      return;
+    }
+    setIsPlaying(matchStatus === "running");
+    if (matchStatus === "running") {
+      setStartPending(false);
+      setHasLiveMatchStarted(true);
+    }
+  }, [benchmarkResult, benchmarkRunning, matchStatus, mode]);
 
   useEffect(() => {
     if (mode !== "live" || benchmarkRunning || benchmarkResult || !state?.winner || winnerOverlayDismissed) {
@@ -323,12 +381,12 @@ function App() {
         }
         return current + 1;
       });
-    }, Math.max(50, 500 / replaySpeed));
+    }, Math.max(50, (activeReplayRecord?.metadata.tickIntervalMs ?? 500) / replaySpeed));
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [mode, replayFrames.length, replayPlaying, replaySpeed]);
+  }, [activeReplayRecord?.metadata.tickIntervalMs, mode, replayFrames.length, replayPlaying, replaySpeed]);
 
   const fetchRecordEntries = async () => {
     setRecordsLoading(true);
@@ -339,9 +397,7 @@ function App() {
       }
       const payload = await response.json() as { records: ReplayRecordListEntry[] };
       setRecordEntries(payload.records);
-      if (!selectedRecordFile && payload.records.length > 0) {
-        setSelectedRecordFile(payload.records[0].fileName);
-      }
+      setSelectedRecordFile((current) => current || payload.records[0]?.fileName || "");
     } catch (error) {
       setReplayError(`获取服务端记录列表失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -407,6 +463,24 @@ function App() {
     setMode("replay");
   };
 
+  useEffect(() => {
+    if (!REQUESTED_REPLAY_FILE || replayQueryLoaded.current || LOCAL_SHOWCASE) return;
+    replayQueryLoaded.current = true;
+    setSelectedRecordFile(REQUESTED_REPLAY_FILE);
+    void fetch(`${API_BASE_URL}/api/replay/records/${encodeURIComponent(REQUESTED_REPLAY_FILE)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const record = projectRecordToGameRecord(await response.json() as unknown);
+        const frames = buildReplayFrames(record);
+        loadReplayRecord(record, REQUESTED_REPLAY_FILE);
+        if (REQUESTED_REPLAY_TICK !== null && Number.isFinite(REQUESTED_REPLAY_TICK)) {
+          const index = frames.findIndex((frame) => frame.tick >= REQUESTED_REPLAY_TICK);
+          setReplayFrameIndex(index >= 0 ? index : Math.max(0, frames.length - 1));
+        }
+      })
+      .catch((error) => setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`));
+  }, []);
+
   const handleLoadSelectedRecord = async () => {
     if (!selectedRecordFile) {
       return;
@@ -417,7 +491,7 @@ function App() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const record = await response.json() as GameRecord;
+      const record = projectRecordToGameRecord(await response.json() as unknown);
       loadReplayRecord(record, selectedRecordFile);
     } catch (error) {
       setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -431,8 +505,8 @@ function App() {
     }
 
     try {
-      const text = await file.text();
-      const record = JSON.parse(text) as GameRecord;
+      const text = await readLocalRecordText(file);
+      const record = projectRecordToGameRecord(JSON.parse(text) as unknown);
       loadReplayRecord(record, file.name);
       event.target.value = "";
     } catch (error) {
@@ -512,6 +586,23 @@ function App() {
     send({ type: "save_record" });
   };
 
+  const handleObserveMatch = async (match: MatchRegistrySummary) => {
+    setSwitchingMatchId(match.matchId);
+    setMatchesError(null);
+    try {
+      await observeRegisteredMatch(API_BASE_URL, match.matchId);
+      setObservedMatchId(match.matchId);
+      setStartPending(false);
+      setIsPlaying(match.status === "running");
+      setWinnerOverlayDismissed(match.status !== "finished");
+      await refreshRegisteredMatches();
+    } catch (error) {
+      setMatchesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingMatchId(null);
+    }
+  };
+
   const handleStartBenchmark = (input: {
     presetId: string;
     cpuStrategy: CPUStrategyType;
@@ -564,6 +655,31 @@ function App() {
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
+  const replayTickIntervalMs = activeReplayRecord?.metadata.tickIntervalMs ?? 500;
+  const displayTickIntervalMs = mode === "replay"
+    ? replayTickIntervalMs
+    : frameBuffer.getLatestFrame()?.metadata.tickIntervalMs ?? 500;
+  useEffect(() => {
+    replayFrameBuffer.clear();
+    const start = Math.max(0, replayFrameIndex - 1);
+    for (let index = start; index <= replayFrameIndex; index++) {
+      const frame = replayFrames[index];
+      if (!frame) continue;
+      replayFrameBuffer.ingest({
+        kind: "keyframe",
+        metadata: {
+          frameVersion: 1,
+          frameSequence: index + 1,
+          simulationTick: frame.tick,
+          simulationTimeMs: frame.tick * replayTickIntervalMs,
+          tickIntervalMs: replayTickIntervalMs,
+          serverTimeMs: 0,
+        },
+        state: frame.state,
+        aiOutputs: frame.aiOutputs,
+      });
+    }
+  }, [replayFrameBuffer, replayFrameIndex, replayFrames, replayTickIntervalMs]);
   const sourceDisplayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
   const displayState = useMemo(
     () => {
@@ -714,6 +830,14 @@ function App() {
                 <button
                   type="button"
                   className="hud-btn hud-btn-ghost"
+                  onClick={() => setMatchesOpen(true)}
+                  disabled={!connected}
+                >
+                  对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
+                </button>
+                <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
                   onClick={() => setSettingsOpen(true)}
                   disabled={benchmarkRunning}
                 >
@@ -823,7 +947,7 @@ function App() {
               </div>
 
               <label className="file-pick">
-                <input type="file" accept=".json,application/json" onChange={handleLocalFileChange} />
+                <input type="file" accept=".json,.gz,application/json,application/gzip" onChange={handleLocalFileChange} />
                 导入本地 JSON
               </label>
             </div>
@@ -837,7 +961,7 @@ function App() {
                   Tick: {replayFrame?.tick ?? 0} / {activeReplayRecord?.finalState.tick ?? 0}
                 </span>
                 <span className="replay-meta-chip">
-                  时间: {formatTickTime(replayFrame?.tick ?? 0)}
+                  时间: {formatTickTime(replayFrame?.tick ?? 0, replayTickIntervalMs)}
                 </span>
                 {activeReplayRecord?.metadata.winner && (
                   <span className="replay-meta-chip">
@@ -910,7 +1034,7 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战场数据</span>
               </div>
-              <StatsPanel state={displayState} />
+              <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
             </div>
 
             <div className="hud-panel" style={{ marginTop: 12 }}>
@@ -935,7 +1059,11 @@ function App() {
                 <span className="data-line dl-br" />
               </div>
               <div className="viewport">
-                <Battlefield3D state={displayState} />
+                <Battlefield3D
+                  state={displayState}
+                  frameBuffer={mode === "replay" ? replayFrameBuffer : frameBuffer}
+                  simulationTimeMs={mode === "replay" ? (replayFrame?.tick ?? 0) * replayTickIntervalMs : undefined}
+                />
               </div>
             </div>
 
@@ -966,6 +1094,22 @@ function App() {
             </div>
           </div>
         </div>
+
+        <SettingsOverlay
+          open={mode === "live" && matchesOpen}
+          title="对局观察"
+          onClose={() => setMatchesOpen(false)}
+        >
+          <MatchPanel
+            matches={registeredMatches}
+            observedMatchId={observedMatchId}
+            loading={matchesLoading}
+            error={matchesError}
+            switchingMatchId={switchingMatchId}
+            onRefresh={() => void refreshRegisteredMatches()}
+            onObserve={(match) => void handleObserveMatch(match)}
+          />
+        </SettingsOverlay>
 
         <SettingsOverlay
           open={mode === "live" && settingsOpen}

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { BenchmarkOrchestrator } from "../benchmark/BenchmarkOrchestrator";
+import { MatchRegistry } from "../MatchRegistry";
 
 function createFakeRound(params: {
   winner: string | null;
@@ -28,6 +29,7 @@ function createFakeRound(params: {
   };
 
   return {
+    getMatchId: () => `match_round_${params.tick}`,
     start: vi.fn(async () => undefined),
     stop: vi.fn(() => undefined),
     saveRecord: vi.fn(async () => params.recordPath ?? `logs/records/round-${params.tick}.json`),
@@ -190,5 +192,39 @@ describe("BenchmarkOrchestrator", () => {
     expect(maxActiveStarts).toBe(2);
     expect(complete).toMatchObject({ completedRounds: 4 });
     expect(complete.rounds.map((round: { round: number }) => round.round)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("registers benchmark rounds as independently queryable matches", async () => {
+    const registry = new MatchRegistry();
+    const round = createFakeRound({ winner: "player_1", tick: 90 });
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "test-model",
+        },
+        cpuStrategy: "random",
+        rounds: 1,
+        recordReplay: false,
+      },
+      null,
+      () => round as any,
+      registry,
+    );
+
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(registry.list()).toEqual([
+      expect.objectContaining({
+        matchId: "match_round_90",
+        kind: "benchmark",
+        label: "Benchmark round 1",
+        observed: true,
+      }),
+    ]);
   });
 });

@@ -9,8 +9,8 @@
 - **影响**: 直接破坏实时观战和操控反馈；后续地图和机制继续扩展时，AI hot path 必须避免完整 client/replay state clone
 
 ### 2. 长局 OOM 的无界历史与重复状态广播已修复，待实战复测
-- **描述**: 已确认问题早于 3D 渲染：`Game.snapshots`、AI terminal 和保存用 AI turns 无界增长，同时每连接 `100ms` 深拷贝并发送重复状态。现已改为只保留初始/最新完整快照、在线生成并 gzip 分块 compact-v2 delta、按 tick 变化发送 state；AI turn 与 terminal event 完整追加到磁盘 journal，实时缓存仅保留窗口，历史可分页读取，保存录像流式原子落盘，全程不截断字段或丢弃持久数据
-- **影响**: 无 3D 的 50,000 tick 压测中，GC 后 heap 从修复前约 `130.2 MiB` 降至约 `13.3 MiB`，完整快照固定为 `2` 个，压缩 delta 约 `0.26 MiB`；仍需用真实双 LLM 长局观察浏览器 working set、服务端 RSS 和录像保存耗时
+- **描述**: `Game.snapshots`、AI terminal、AI turns 和 replay delta 的无界内存历史已收口：完整快照只保留初始/最新，delta/facts 逐 tick追加到 MatchJournal 后释放 Game 兼容缓存，终局流式压缩为 `.trace.json.gz`；在线窗口有上限，慢 WebSocket 达到 `1 MB` backlog 后采用 latest-projection-wins，不再持续追加过期全量帧
+- **影响**: 自动验收中 1001 tick 的 Game delta 缓存保持为 `0`，正式 Trace 仍完整包含 1001 个 replay delta；此前无 3D 的 50,000 tick 压测也已确认 heap 大幅下降。仍需真实双 LLM 长局观察浏览器 working set、服务端 RSS 和压缩保存耗时
 
 ### 3. 大地图后的寻路和状态同步需要复测
 - **描述**: 回放快照和 WebSocket 重复推送已完成第一轮收敛，但服务端 A* 和每 tick 全量当前 state 仍会随地图与单位规模增长；agent `asciiMap` 已从 `get_map_state` 默认响应中移除
@@ -43,8 +43,8 @@
 - **影响**: 对 agent 来说查询入口偏多，后续需要收敛到 `3` 个（查地图、查自己、recent）或 `2` 个（查所有、recent）工具，并主要通过简单参数完成过滤，而不是继续增加新读工具
 
 ### 7. 高级编排层仍需验证 LLM 实际使用效果
-- **描述**: `orchestrate_plan` 已支持基于现有动作工具的 call steps，但还缺少 benchmark/transcript 数据验证模型是否会稳定使用
-- **影响**: 表达力已比旧 DSL 更贴近工具调用心智模型，但是否能显著减少微操和提高胜率仍需实测
+- **描述**: 两局真实双 LLM Trace 已确认模型会主动使用 `orchestrate_plan`；已修复 global unit step 无法命中 `near_position`、带 retry 的移动重复发路径，以及建造建议缺少 `workerPosition` 的问题。现在需要用修复后的真实对局验证计划能否稳定完成“builder 移动 -> 兵营 -> 第一波进攻”
+- **影响**: 表达力与已知执行阻塞都已处理，剩余风险是不同模型是否会稳定采纳结构化建议，以及第一波进攻节奏在镜像实战中的方差
 
 ### 8. Benchmark 面板还没消费新 runtime 细节
 - **描述**: 服务端内部已有 tool calls / plans / stopReason 等 runtime 细节，但 benchmark 结果面板还未充分展示
@@ -54,12 +54,59 @@
 - **描述**: 当前对局日志/回放等文件名里的时间戳使用 UTC 时间，与本地开发和排查时常用的北京时间不一致
 - **影响**: 按文件名定位具体对局时需要额外换算时区，容易和控制台、本地观察时间产生偏差；后续可评估改为北京时间或在文件名中显式标注时区
 
-### 10. CLI/control-plane 对局不会保存 record 文件
-- **描述**: CLI PVP / CLI vs CPU 走 `ControlPlaneMatch`，目前没有接入 `GameOrchestrator.saveRecord()` 的落盘路径，也没有 control API 暴露保存回放入口
-- **影响**: CLI agent 对打可在内存中推进并通过 `state/events` 观察，但结束后不会留下 `logs/records/*.json`，不利于复盘、离线分析和 benchmark 横向比较；后续应抽出通用 record builder，或为 control-plane 增加 `saveRecord()` / `POST /api/control/save-record`
+### 10. 战略表达仍缺少开放且持久的意图层
+- **描述**: 首轮观赏性实验中的固定阶段、`7+3/10` 分兵阈值、自动 `mainForce / raidForce` 和预选侧翼目标会把运行时局势摘要越界为隐藏脚本策略，现已撤销。当前 Mission 能执行多步命令，但模型还没有独立于聊天历史、可版本化并可关联多个 Mission 的自由战略意图
+- **影响**: 不应继续扩充 rush/raid/multi-front 等策略枚举；下一步需要让系统只提供中性事实，由 LLM 自由声明目标、理由、约束和复审条件，并在 Trace 中记录意图变化
 
 ## 已完成 ✅
 
+- [x] 完成 Phase 4 首轮观赏性实战诊断：首局基线在 tick 64–196 对非法兵营位置重试 133 次，随后因未闭合 multi-tool history 持续 provider 400；修复后连续三局浏览器镜像赛均完整自然终局，provider 400 为 0。第二局生产从旧基线的 tick 61–80 集中排 20+ rifleman，收敛为按生产完成逐单补充，并出现 refinery、war_factory、rocket_soldier、light_tank 混合路线。实验中加入的固定 `operationPlan` 虽曾被模型用于终局拆分，但因过度干预战略已撤销，不作为当前能力
+- [x] 修复 plan → SimulationCore → command result 的因果链：`Command.provenance` 不再在 normalize 时丢失；确定性 `build_invalid_position` 等失败会终止对应 Mission，而不是被 `retry` 永久重发
+- [x] 修复 provider 在多工具调用中途触发 read-only stall 时留下缺失 tool response 的非法历史；未执行的剩余 tool call 现在写入显式 `stall_detected` 结果，下一轮请求仍满足 OpenAI 消息序列约束
+- [x] 计划内 `spawn_unit` 增加生产队列空闲门槛，避免 `until=unit_count_at_least` 等待成品期间每 tick 继续预排同质单位
+- [x] 基于两局真实双 LLM Trace 完成首轮策略诊断：快节奏一方在 tick 49 完成兵营、持续生产步枪兵并于 tick 227 开始攻击 HQ；慢节奏一方因首个 global builder plan 卡死在 tick 46。由此将策略契约调整为“3 采矿 + 1 builder、约 6 个步枪兵立即施压 HQ、战车工厂放到第一波之后或敌方装甲反制时”，同时明确 HQ 是首要目标、摧毁后仍需清理其余生产建筑
+- [x] 完成优化后的第三局真实浏览器镜像复赛：双方都正确采用 3 采矿 + 1 builder、读取 `workerPosition` 并完成兵营与第一波 6 人进攻；红方在 tick 838 开始反攻 HQ、tick 879 摧毁 HQ、tick 957 清完其余建筑获胜。Trace 暴露的下一层策略问题是蓝方首波受挫后把新步兵/坦克逐个送进约 10 个火箭兵集群，因此 attackWindow 改按 12 格内最大局部集群判断，未满 6 人时给出 assemblyPoint 和 regroup 提示；敌方 3+ 火箭兵且步兵掩护不足时停止推荐 light_tank
+- [x] 完成最终策略反馈的第四局真实浏览器镜像复赛：双方兵营分别在 tick 49/51 完成；`attack_move_group` 返回 2 个立即下发、4 个跨 tick scheduled 后，模型明确识别 scheduled 并未再逐个覆盖。蓝方形成 2 兵营 + 1 战车工厂的混合产能，tick 625 首次攻击敌方 HQ、tick 712 摧毁并在 tick 713 清完建筑获胜；整局只有 3 次 `command_invalid`，明显低于首场旧实现的 487 次与第二场的 12 次
+- [x] 为 `attack_move_group` 的跨 tick 调度补强工具反馈：动作结果解释 `queuedNow / scheduled`，`get_my_units` 暴露 `pendingGroupMoves` 与单位级 `hasPendingGroupMove`；模型不再把路径预算导致的短暂 idle 误判为编队漏下命令
+- [x] 修复 MissionRuntime global unit step 不解析具体单位的问题；`near_position / arrived / hq_in_range` 现在可推进显式 unitId 的 global 步骤，retry 移动在已有同类持续命令时不再每 tick 重发
+- [x] 将 `get_my_state.techStatus.recommendedStructures[].suggestedSites` 和建造失败反馈升级为建筑中心与 `workerPosition` 成对建议；模型可直接先移动 worker 再建造，不再需要猜测多格 footprint 的相邻站位
+- [x] 完成真实入口验收：Web UI 使用 deepseek-v4-flash 镜像分别自然打到 tick 483（红方胜）和 tick 329（蓝方胜）终局；CLI PVP 通过两个显式 control session 从建局、经济、施工、生产、进攻打到 tick 780 终局，并分别由统一 MatchRecorder 保存 Trace v3
+- [x] 删除 LLM 对局的 paired outer-turn barrier；每个 controller 现在按自己的 simulation-tick interval 和 in-flight guard 独立调度，短 turn 不再因对手长 tool loop 而整局失去后续决策机会；浏览器实机复测到 tick 133 时双方已分别进入 Request #2，蓝方继续到 Request #4，保存 Trace 含 6 个 turn
+- [x] 将 `attack_move_group` 超出单 actor 公平寻路份额的成员保留为显式 pending group commands，并由 plan advancement 跨 tick 下发；大编队不再以单个超额 envelope 整批回滚
+- [x] 修复终局 quiesce 先使 run session 失效、导致已 abort 的真实 agent turn 未写入 Trace 的问题；AI turn 现在先持久化，再屏蔽旧 session 的 UI/runtime 副作用
+- [x] 修复刷新 Web UI 后本地 `isPlaying` 与服务端真实 match 状态脱节的问题；state projection 增加 `matchStatus`，运行中重连会恢复“暂停模拟”状态
+- [x] 修复持续攻击在 Bridge 与 SimulationCore 两层重复推进的问题：模拟层持有攻击/冷却意图，Bridge 不再每 tick 重发并触发 `ERR_BUSY` 原子回滚；移动中的追击也不再反复替换路径
+- [x] 让 MissionRuntime 按 MatchDefinition 路径预算为双方保留公平计划份额；4 worker 采矿等批量计划会跨 tick 显式推进，不再以超额 envelope 整批回滚
+- [x] 修复 CLI `plan economy/tech/attack-hq` 的旧地图假设：建筑计划使用服务端推荐点或 HQ/footprint 相对位置并先移动 builder；HQ 进攻使用 `hq_in_range` 和大地图超时，实测双方 economy plan 均能自动完成兵营施工
+- [x] 提取通用 `MatchRecorder`，让 live 与 CLI/control-plane 通过相同的一致 cut 和 Trace v3 finalizer 保存；新增按 match/session 保存的 control API 与 `llmcraft record save`
+- [x] 引入 `MatchRegistry` 统一 live/control/benchmark round 的稳定 `matchId`；多个 match 可并存、查询、停止和保存，WebSocket 只投影显式选择的 observed match，不再以单一 orchestrator/controlMatch 充当全局对局
+- [x] 在主 Web UI 增加“对局观察”选择器，列出 MatchRegistry 中的 live/control/benchmark match 并只切换 observed projection；窄屏无横向溢出，关闭面板后 3D Canvas 保持挂载
+- [x] 将 Gateway 接纳/拒绝/回滚、结构化 command result 与 SimulationCore outcome 统一为 DomainEvent v1；MatchRuntime 负责关联 ID，MatchJournal 负责单调 eventSequence 和 NDJSON 流式追加，实时窗口上限 `500`
+- [x] 定义 `MatchTraceRecordV3`、显式 capability 和运行时 validator；活跃 journal 已保存 manifest、完整 command submission 与逐提交 tick 的 state hash v2
+- [x] 区分模拟 rollback 与提交后的 journal 故障；两者都 fail-stop，但只有前者产生 `simulation_tick_failed`，后者保留 `committed: true` 证据
+- [x] 将活跃 journal 的一致 cut 流式原子 finalize 为正式 Trace v3，并建立独立 `@llmcraft/trace` validator/migrator/projector；`saveRecord()`、Replay、本地 JSON、Diagnostics 和 Analyzer 已接入
+- [x] 为 journal 补进程 owner、终局 quiesce+seal 清理、启动时失活 owner/legacy 孤儿恢复，以及 record/transcript/orphan 的年龄/数量/容量策略；CLI/HTTP 默认 dry-run，显式 apply 才清理正式产物，固定样本由版本化 pins 或 keep marker 保护
+- [x] 为每个真正进入 Game 的命令强制产生且只产生一个结构化结果；旧的静默丢弃分支改为 `command_invalid`，commandId 在整局内不允许被不同 envelope 重用
+- [x] 引入 shared CommandEnvelope v1 与 MatchRuntime 专属 CommandGateway；LLM live、计划推进和 CLI/control-plane 真实动作路径已统一经过整批授权校验、clientRequestId 幂等、applyAtTick 边界和确定性排序
+- [x] 将 CLI selection/pairing 与 orchestrate action batch 从逐条 HTTP/tool 提交改为单请求、单 CommandEnvelope；controller 预校验失败恢复内部计划/攻击状态，Game 按 envelope checkpoint，任一命令失败或路径预算不足时整批回滚并产生结构化证据
+- [x] 为正式 envelope 增加每 actor/apply tick累计 `100` 条的 Gateway 接纳预算和公平共享的全局 `4` 条路径执行预算；双方先等额保底、空余额按 tick 轮换借出，多 envelope 不能绕过，超额分别结构化拒绝或整批回滚
+- [x] 升级到 MatchDefinition v2，将命令/路径预算写入版本化 rules；旧 v1 Trace 固定使用历史默认语义，Gateway、Game 与 manifest 不再读取彼此独立常量
+- [x] 将 replay delta 逐 tick流式写入 journal 并释放 Game 兼容缓存；正式 Trace 采用 64 KiB chunk 的 `.trace.json.gz` 原子文件，旧 JSON、新 gzip、Replay、Analyzer 和 compact 工具统一兼容
+- [x] 让正式 commandResults、Analyzer 和 Transcript Viewer 原生消费 DomainEvent/AI turn facts；慢 WebSocket 在 1 MB backlog 时采用 latest-projection-wins；Live/CLI/LLM-vs-CPU Benchmark 已通过同一参数化契约测试
+- [x] 将 control-plane 集成测试从直接 `Game.tickUpdate()` 迁到 `MatchRuntime.advanceOneTick()`，确保无墙钟测试也经过同一 Gateway/runtime 边界
+- [x] 让 MatchDefinition.seed 实际初始化 WorldState 专属的可序列化 `mulberry32-v1` RNG；随机流状态已纳入 tick checkpoint 与确定性 hash，为后续随机规则禁止 `Math.random()` 建立边界
+- [x] 将正式实体创建/销毁收口到 EntityRegistry / WorldState；创建前先校验 player 所有权，UnitManager/BuildingManager 的对应方法降为内部存储 hook
+- [x] 将移动、弹丸结算、资源经济、持续采矿、攻击/追击/反击、施工、生产和胜负判定从 Game 内联代码提取为只操作 WorldState 的独立 simulation systems；SimulationCore 直接组合这些系统并返回结构化 outcome，Game 只保留旧命令与日志 adapter
+- [x] 将权威单位持续命令从共享投影字段 `intent` 拆成 WorldUnit.order；Player/GameState 读取时才生成兼容 intent，并深复制可变嵌套字段，Agent/client 不再拿到权威实体引用
+- [x] 为 WorldState 增加 revision，并将 GameAgentBridge 观察缓存从 tick-only 改为 revision-aware；同 tick processCommands、计划推进和 target action 不再读取陈旧的实体投影
+- [x] 增加 WorldState EntityRegistry：统一跨 Unit/Building 的 ID 解析、存活语义与每 tick 不变量检查，并把 attack/projectile 的泛型目标查找迁到该入口；保持组合式数据结构，不引入深继承对象树
+- [x] 从共享 Unit/Building 权威类型、服务端创建、客户端回放和开发展示状态中删除恒真/恒假的 `my` 字段；self/enemy 关系只在观察投影中由 playerId 派生
+- [x] 引入首版 WorldState 聚合权威模拟状态：UnitManager/BuildingManager 成为实体集合唯一来源，Player 的 units/buildings 只在读取时投影；资源余量与 tile/tileView 更新收口到同一边界
+- [x] 将 SimulationCore step 改为原子事务：任一规则阶段异常都会恢复 tick、实体、经济、资源、命令队列、弹丸、日志和胜负状态，并 fail-stop 外部 clock，不再保存可继续推进的半成品世界
+- [x] 提取首版同步 SimulationCore.step，并让 MatchRuntime 的 live/control-plane tick 直接经过该 core；固定规则阶段顺序已有独立表征测试，性能计时和墙钟留在 runtime 边界，Game.tickUpdate 仅作为兼容入口
+- [x] 引入首版不可变 MatchDefinition，并让 Game 初始化与 MatchRuntime tick 间隔实际消费该定义；现阶段主动拒绝非默认 ruleset/scenario/地图几何，待 Phase 3 将 agent prompt 改为由 MatchDefinition 生成后再开放可变场景
+- [x] 完成 MatchRuntime 第一阶段迁移：把 500ms 模拟 timer 从 `Game` 移到 runtime，live 与 control-plane 通过同一 ClockDriver 推进；Game 保留同步 tickUpdate，规则结束时 runtime 会同步停止外部 clock
+- [x] 修复 strategic smoke 中内置 CPU 直接远程建造、经济命令覆盖 builder 移动、施工中建筑被当作完成产能和生产持续花光科技建筑预算的问题；双边 rush 基线现可在 360 tick 内完成 barracks / refinery / war_factory、生产 40+ 战斗单位并下达多战线推进命令
 - [x] 收紧建造规则：`war_factory` 需要已完成 `barracks`，worker 必须贴近建筑 footprint 才能施工，建造改为多 tick 施工并占用 worker；`refinery` 明确作为可建矿场/交付点
 - [x] 暂时移除缺少侦察兵、雷达和 last-seen 配套的战争迷雾读取层，恢复双方全图情报，同时保留单位局部自动索敌范围
 - [x] 重建 HQ、兵营、战车工厂和精炼厂的功能轮廓，解决四类建筑都像通用工业盒体的问题
@@ -110,4 +157,4 @@
 
 ---
 
-*最后更新: 2026-06-27*
+*最后更新: 2026-07-17*

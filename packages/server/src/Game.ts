@@ -1,6 +1,5 @@
 import {
   Unit,
-  UnitIntent,
   AttackTargetType,
   Building,
   BuildingType,
@@ -13,7 +12,6 @@ import {
   GameState,
   ActiveProjectile,
   Tile,
-  TileType,
   ResultCode,
   TILE_TYPES,
   UNIT_TYPES,
@@ -21,24 +19,16 @@ import {
   UNIT_STATES,
   RESULT_CODES,
   ECONOMY_RULES,
-  getAttackDamageAgainstUnit,
-  getAttackDamageAgainstBuilding,
-  getDefaultAttackMovePriority,
   getBuildingCost as getRulesetBuildingCost,
   getBuildingConstructionTicks,
   getBuildingFootprint,
   getBuildingFootprintCells,
   getUnitCost as getRulesetUnitCost,
-  getUnitWeapon,
-  getUnitVisionRange,
   isBuildableBuildingType,
   isBuildingType,
   isUnitType,
-  unitCanAttack,
-  TICK_INTERVAL_MS,
   MAP_WIDTH,
   MAP_HEIGHT,
-  DEFAULT_MAP_LAYOUT,
   LOG_TYPES,
   LogType,
   defaultLogMeta,
@@ -49,205 +39,177 @@ import {
   AIFeedbackTarget,
   LogDisplayTarget,
   GameLogDataMap,
-  RESULT_TYPES
+  RESULT_TYPES,
+  ResultType,
 } from "@llmcraft/shared";
 import { buildTickDelta } from "./GameHistory";
-import { performance } from "node:perf_hooks";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { MapGenerator } from "./MapGenerator";
 import { UnitManager } from "./UnitManager";
 import { BuildingManager } from "./BuildingManager";
+import { createDefaultMatchDefinition, type MatchDefinition, validateMatchDefinition } from "./MatchDefinition";
+import { SimulationCore, type SimulationEvent, type SimulationStepResult } from "./SimulationCore";
+import { WorldState } from "./WorldState";
+import {
+  isWorkerConstructing,
+} from "./simulation/EconomyRules";
+import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
+import { VictorySystem } from "./simulation/VictorySystem";
+import { CombatSystem } from "./simulation/CombatSystem";
+import type { DeterministicRngState } from "./DeterministicRng";
+import { allocateFairPathBudgets, resolveCommandBudgetPolicy, type CommandBudgetPolicy } from "./CommandBudget";
 
-type AttackIntent = {
-  type: "attack";
-  targetId?: string;
-  targetX?: number;
-  targetY?: number;
-  targetPriority?: AttackTargetType[];
-};
-
-type AttackMoveIntent = {
-  type: "attack_move";
-  targetX?: number;
-  targetY?: number;
-  targetId?: string;
-  targetPriority?: AttackTargetType[];
-};
-
-type HarvestLoopIntent = {
-  type: "harvest_loop";
-  targetX?: number;
-  targetY?: number;
-  targetId?: string;
-};
-
-type RuntimeUnit = Omit<Unit, "intent" | "lastAttackTick"> & {
-  intent?: UnitIntent | AttackIntent | AttackMoveIntent | HarvestLoopIntent;
-  lastAttackTick?: number;
-  nextAttackTick?: number;
-};
+interface GameSimulationCheckpoint {
+  tick: number;
+  revision: number;
+  units: ReturnType<UnitManager["createCheckpoint"]>;
+  buildings: ReturnType<BuildingManager["createCheckpoint"]>;
+  resourceRemaining: Array<[string, number]>;
+  playerCredits: Array<[PlayerId, number]>;
+  logs: GameLog[];
+  pendingSnapshotLogs: GameLog[];
+  commandQueue: Command[];
+  projectiles: ActiveProjectile[];
+  projectileCounter: number;
+  rng: DeterministicRngState;
+  winner: PlayerId | null;
+  isRunning: boolean;
+}
 
 export interface AgentReadState {
   tick: number;
+  revision: number;
   players: Player[];
   tiles: Tile[][];
   winner: PlayerId | null;
 }
 
-const STARTING_CREDITS = 800;
-const TICK_LAG_WARNING_MS = TICK_INTERVAL_MS * 1.8;
-const TICK_DURATION_WARNING_MS = 250;
-const SNAPSHOT_DURATION_WARNING_MS = 100;
-const PERF_WARNING_THROTTLE_MS = 2000;
-const MAX_PATH_COMMANDS_PER_TICK = 4;
-const MAX_PURSUIT_PATHS_PER_TICK = 4;
-const MAX_BLOCKED_REPATHS_PER_TICK = 4;
-const TICK_DELTA_CHUNK_SIZE = 100;
+export interface CommandExecutionOutcome {
+  tick: number;
+  command: Command;
+  resultCode: ResultCode;
+  resultType: ResultType;
+  resultData: unknown;
+  success: boolean;
+}
 
+export interface CommandBatchExecutionResult {
+  committed: boolean;
+  outcomes: CommandExecutionOutcome[];
+  failureReason?: "command_failed" | "command_budget_exceeded" | "path_budget_exceeded";
+  failedCommandId?: string;
+}
+
+export interface GameCommandBatch {
+  actorId: string;
+  commands: readonly Command[];
+}
+
+export interface GameTickResult {
+  commandOutcomes: CommandExecutionOutcome[];
+  commandBatchResults: CommandBatchExecutionResult[];
+  simulation: SimulationStepResult;
+}
+
+const TICK_DELTA_CHUNK_SIZE = 100;
 export class Game {
-  private tick = 0;
-  private unitManager = new UnitManager();
-  private buildingManager = new BuildingManager();
-  private tiles: TileType[][] = [];
-  private resourceRemaining = new Map<string, number>();
-  private tileView: Tile[][] = [];
-  private players: Player[] = [];
+  private readonly definition: MatchDefinition;
+  private readonly commandBudgetPolicy: CommandBudgetPolicy;
+  private readonly world: WorldState;
+  private readonly simulationCore = new SimulationCore();
+  private readonly harvestOrderSystem = new HarvestOrderSystem();
+  private readonly victorySystem = new VictorySystem();
+  private readonly commandCombatSystem = new CombatSystem();
   private logs: GameLog[] = [];
   private pendingSnapshotLogs: GameLog[] = [];
   private commandQueue: Command[] = [];
+  private activeCommandOutcomes: CommandExecutionOutcome[] | null = null;
   private initialSnapshot: GameSnapshot | null = null;
   private latestSnapshot: GameSnapshot | null = null;
   private tickDeltaBuffer: TickDeltaRecord[] = [];
   private tickDeltaChunks: string[] = [];
   private aiOutputs: Record<string, string> = {};
-  private projectiles: ActiveProjectile[] = [];
-  private projectileCounter = 0;
-  private winner: PlayerId | null = null;
   private isRunning = false;
-  private tickInterval: NodeJS.Timeout | null = null;
-  private lastTickStartTimeMs: number | null = null;
-  private lastTickLagWarningAtMs = 0;
-  private lastTickDurationWarningAtMs = 0;
 
-  constructor() {
-    this.initializeGame();
-  }
-
-  private initializeGame(): void {
-    // 1. Generate map
-    this.tiles = MapGenerator.generate();
-    this.resourceRemaining.clear();
-    for (const position of DEFAULT_MAP_LAYOUT.resources) {
-      this.resourceRemaining.set(`${position.x},${position.y}`, ECONOMY_RULES.RESOURCE_DEPOSIT_CAPACITY);
-    }
-    this.tileView = this.createTileView();
-
-    // 2. Create two players
-    this.players = [
-      {
-        id: "player_1",
-        units: [],
-        buildings: [],
-        resources: { credits: STARTING_CREDITS },
-      },
-      {
-        id: "player_2",
-        units: [],
-        buildings: [],
-        resources: { credits: STARTING_CREDITS },
-      },
-    ];
-
-    // 3. Place HQ
-    this.buildingManager.createBuilding(
-      BUILDING_TYPES.HQ,
-      DEFAULT_MAP_LAYOUT.player1Hq.x,
-      DEFAULT_MAP_LAYOUT.player1Hq.y,
-      "player_1"
-    );
-    this.buildingManager.createBuilding(
-      BUILDING_TYPES.HQ,
-      DEFAULT_MAP_LAYOUT.player2Hq.x,
-      DEFAULT_MAP_LAYOUT.player2Hq.y,
-      "player_2"
-    );
-
-    // 4. Place initial units: 2 workers for each player
-    for (const workerPosition of DEFAULT_MAP_LAYOUT.player1Workers) {
-      this.unitManager.createUnit(UNIT_TYPES.WORKER, workerPosition.x, workerPosition.y, "player_1");
-    }
-
-    for (const workerPosition of DEFAULT_MAP_LAYOUT.player2Workers) {
-      this.unitManager.createUnit(UNIT_TYPES.WORKER, workerPosition.x, workerPosition.y, "player_2");
-    }
-
+  constructor(definition: MatchDefinition = createDefaultMatchDefinition()) {
+    validateMatchDefinition(definition);
+    this.definition = structuredClone(definition);
+    this.commandBudgetPolicy = resolveCommandBudgetPolicy(this.definition);
+    this.world = new WorldState(this.definition);
     this.addLog(LOG_TYPES.GAME_INIT, "Game initialized successfully");
     this.saveSnapshot();
   }
 
   getState(): GameState {
-    this.refreshPlayerCollections();
-
     return this.cloneValue({
-      tick: this.tick,
-      players: this.players,
-      tiles: this.tileView,
-      winner: this.winner,
+      tick: this.world.tick,
+      players: this.world.players,
+      tiles: this.world.tileView,
+      winner: this.world.winner,
       logs: this.logs,
-      projectiles: this.projectiles,
+      projectiles: this.world.projectiles,
     });
   }
 
+  getDefinition(): MatchDefinition {
+    return structuredClone(this.definition);
+  }
+
+  getDeterministicRngState(): DeterministicRngState {
+    return this.world.rng.createCheckpoint();
+  }
+
   getAgentReadState(): AgentReadState {
-    this.refreshPlayerCollections();
     return {
-      tick: this.tick,
-      players: this.players,
-      tiles: this.tileView,
-      winner: this.winner,
+      tick: this.world.tick,
+      revision: this.world.revision,
+      players: this.world.players,
+      tiles: this.world.tileView,
+      winner: this.world.winner,
     };
-  }
-
-  private refreshPlayerCollections(): void {
-    for (const player of this.players) {
-      player.units = this.unitManager.getUnitsByPlayer(player.id);
-      player.buildings = this.buildingManager.getBuildingsByPlayer(player.id);
-    }
-  }
-
-  private createTileView(): Tile[][] {
-    const tiles: Tile[][] = [];
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      tiles[y] = [];
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        tiles[y][x] = {
-          x,
-          y,
-          type: this.tiles[y][x],
-          ...(this.tiles[y][x] === TILE_TYPES.RESOURCE
-            ? { resourceRemaining: this.resourceRemaining.get(`${x},${y}`) ?? 0 }
-            : {}),
-        };
-      }
-    }
-    return tiles;
   }
 
   queueCommand(command: Command): void {
     this.commandQueue.push(this.normalizeCommand(command));
   }
 
-  processCommands(): void {
+  processCommands(): CommandExecutionOutcome[] {
+    return this.processQueuedCommands(this.commandBudgetPolicy.maxPathCommandsPerTick).outcomes;
+  }
+
+  private processQueuedCommands(pathBudget: number): {
+    outcomes: CommandExecutionOutcome[];
+    remainingPathBudget: number;
+  } {
+    if (this.activeCommandOutcomes) {
+      throw new Error("Command processing is already active.");
+    }
+    const outcomes: CommandExecutionOutcome[] = [];
+    this.activeCommandOutcomes = outcomes;
+    try {
+      return {
+        outcomes,
+        remainingPathBudget: this.processPendingCommands(pathBudget, true),
+      };
+    } finally {
+      this.activeCommandOutcomes = null;
+    }
+  }
+
+  private processPendingCommands(pathBudget: number, deferExcessPathCommands: boolean): number {
     const pendingCommands = this.commandQueue;
     this.commandQueue = [];
-    let remainingPathCommands = MAX_PATH_COMMANDS_PER_TICK;
+    if (pendingCommands.length > 0) {
+      this.world.markChanged();
+    }
+    let remainingPathCommands = pathBudget;
     for (const command of pendingCommands) {
       const requiresPath = command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
       if (requiresPath && remainingPathCommands <= 0) {
-        this.commandQueue.push(command);
+        if (deferExcessPathCommands) this.commandQueue.push(command);
         continue;
       }
       if (requiresPath) remainingPathCommands -= 1;
+      const outcomeCountBefore = this.activeCommandOutcomes?.length ?? 0;
       try {
         this.processCommand(command);
       } catch (error) {
@@ -264,13 +226,117 @@ export class Game {
         });
         console.error("命令处理异常:", error, command);
       }
+      if ((this.activeCommandOutcomes?.length ?? 0) === outcomeCountBefore) {
+        this.addLog(LOG_TYPES.COMMAND_RESULT, `Command ${command.type} was rejected`, {
+          command,
+          result_code: RESULT_CODES.ERR_INVALID_TARGET,
+          type: RESULT_TYPES.COMMAND_INVALID,
+          result_data: { hint: "The command is incomplete, unsupported, or targets an entity not owned by the actor." },
+        }, {
+          owner: command.playerId,
+          feedbackTarget: command.playerId,
+          level: LOG_LEVELS.WARNING,
+        });
+      }
     }
+    return remainingPathCommands;
+  }
+
+  private executeCommandBatch(
+    commands: readonly Command[],
+    pathBudget: number,
+    commandBudget: number,
+  ): {
+    result: CommandBatchExecutionResult;
+    consumedCommands: number;
+    consumedPathCommands: number;
+  } {
+    const pathCommandCount = commands.filter((command) => (
+      command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop"
+    )).length;
+    if (commands.length > commandBudget) {
+      return {
+        result: this.recordRolledBackBatch(commands, "command_budget_exceeded"),
+        consumedCommands: 0,
+        consumedPathCommands: 0,
+      };
+    }
+    if (pathCommandCount > pathBudget) {
+      return {
+        result: this.recordRolledBackBatch(commands, "path_budget_exceeded"),
+        consumedCommands: 0,
+        consumedPathCommands: 0,
+      };
+    }
+
+    const checkpoint = this.createSimulationCheckpoint();
+    for (const command of commands) this.queueCommand(command);
+    const processed = this.processQueuedCommands(pathBudget);
+    const failed = processed.outcomes.find((outcome) => !outcome.success);
+    if (!failed) {
+      return {
+        result: { committed: true, outcomes: processed.outcomes },
+        consumedCommands: commands.length,
+        consumedPathCommands: pathCommandCount,
+      };
+    }
+
+    this.restoreSimulationCheckpoint(checkpoint);
+    return {
+      result: this.recordRolledBackBatch(commands, "command_failed", failed),
+      consumedCommands: commands.length,
+      consumedPathCommands: pathCommandCount,
+    };
+  }
+
+  private recordRolledBackBatch(
+    commands: readonly Command[],
+    failureReason: CommandBatchExecutionResult["failureReason"],
+    failedOutcome?: CommandExecutionOutcome,
+  ): CommandBatchExecutionResult {
+    const outcomes: CommandExecutionOutcome[] = [];
+    if (this.activeCommandOutcomes) {
+      throw new Error("Cannot record a rolled-back batch while command processing is active.");
+    }
+    this.activeCommandOutcomes = outcomes;
+    try {
+      for (const command of commands) {
+        this.addLog(LOG_TYPES.COMMAND_RESULT, `Command batch rolled back for ${command.type}`, {
+          command,
+          result_code: RESULT_CODES.ERR_INVALID_TARGET,
+          type: RESULT_TYPES.COMMAND_INVALID,
+          result_data: {
+            hint: failureReason === "path_budget_exceeded"
+              ? "The complete command envelope exceeded this actor's fair path-command budget for the tick and was rolled back."
+              : failureReason === "command_budget_exceeded"
+                ? "The complete command envelope exceeded this actor's remaining command budget for the tick and was rolled back."
+                : "At least one command failed, so the complete command envelope was rolled back.",
+            reason: failureReason,
+            failedCommandId: failedOutcome?.command.id,
+            failedResultCode: failedOutcome?.resultCode,
+            failedResultType: failedOutcome?.resultType,
+          },
+        }, {
+          owner: command.playerId,
+          feedbackTarget: command.playerId,
+          level: LOG_LEVELS.WARNING,
+        });
+      }
+    } finally {
+      this.activeCommandOutcomes = null;
+    }
+    return {
+      committed: false,
+      outcomes,
+      failureReason,
+      ...(failedOutcome ? { failedCommandId: failedOutcome.command.id } : {}),
+    };
   }
 
   private processCommand(command: Command): void {
     if (command.unitId && command.type !== "build") {
-      const unit = this.unitManager.getUnit(command.unitId);
-      if (unit && unit.playerId === command.playerId && this.isWorkerConstructing(unit)) {
+      const unit = this.world.units.getUnit(command.unitId);
+      if (unit && unit.playerId === command.playerId && isWorkerConstructing(unit)) {
         this.addLog(
           LOG_TYPES.COMMAND_RESULT,
           `${command.type} command failed: worker is constructing`,
@@ -296,15 +362,15 @@ export class Game {
     switch (command.type) {
       case "move": {
         if (command.unitId && command.position) {
-          const unit = this.unitManager.getUnit(command.unitId);
+          const unit = this.world.units.getUnit(command.unitId);
           if (unit && unit.playerId === command.playerId) {
-            const blockedPositions = this.buildingManager.getOccupiedPositions();
+            const blockedPositions = this.world.buildings.getOccupiedPositions();
             // 使用寻路移动：设置目标，让系统每 tick 自动沿路径移动
-            const result: ResultCode = this.unitManager.setMoveTarget(
+            const result: ResultCode = this.world.units.setMoveTarget(
               unit,
               command.position.x,
               command.position.y,
-              this.tiles,
+              this.world.tiles,
               blockedPositions
             );
             if (result === RESULT_CODES.OK) {
@@ -404,9 +470,9 @@ export class Game {
 
       case "attack": {
         if (command.unitId && command.targetId) {
-          const attacker = this.unitManager.getUnit(command.unitId);
+          const attacker = this.world.units.getUnit(command.unitId);
           if (attacker && attacker.playerId === command.playerId) {
-            const result = this.executeAttackIntent(attacker, command.playerId, {
+            const result = this.commandCombatSystem.executeAttackOrder(this.world, attacker, command.playerId, {
               type: "attack",
               targetId: command.targetId,
             });
@@ -492,9 +558,9 @@ export class Game {
 
       case "attack_in_range": {
         if (command.unitId) {
-          const attacker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
+          const attacker = this.world.units.getUnit(command.unitId);
           if (attacker && attacker.playerId === command.playerId) {
-            const result = this.executeAttackIntent(attacker, command.playerId, {
+            const result = this.commandCombatSystem.executeAttackOrder(this.world, attacker, command.playerId, {
               type: "attack",
               targetPriority: command.targetPriority,
             });
@@ -559,21 +625,21 @@ export class Game {
 
       case "attack_move": {
         if (command.unitId && command.position) {
-          const attacker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
+          const attacker = this.world.units.getUnit(command.unitId);
           if (attacker && attacker.playerId === command.playerId) {
-            const blockedPositions = this.buildingManager.getOccupiedPositions();
-            const result = this.unitManager.setMoveTarget(
+            const blockedPositions = this.world.buildings.getOccupiedPositions();
+            const result = this.world.units.setMoveTarget(
               attacker,
               command.position.x,
               command.position.y,
-              this.tiles,
+              this.world.tiles,
               blockedPositions,
               true
             );
 
             if (result === RESULT_CODES.OK) {
               const resolvedTarget = attacker.pathTarget;
-              attacker.intent = {
+              attacker.order = {
                 type: "attack_move",
                 targetX: resolvedTarget?.x ?? command.position.x,
                 targetY: resolvedTarget?.y ?? command.position.y,
@@ -675,7 +741,7 @@ export class Game {
 
       case "harvest_loop": {
         if (command.unitId) {
-          const worker = this.unitManager.getUnit(command.unitId) as RuntimeUnit | undefined;
+          const worker = this.world.units.getUnit(command.unitId);
           if (!worker || worker.playerId !== command.playerId || worker.type !== UNIT_TYPES.WORKER) {
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
@@ -698,7 +764,7 @@ export class Game {
             break;
           }
 
-          const resourceTarget = this.resolveHarvestResourceTarget(worker, command.position);
+          const resourceTarget = this.harvestOrderSystem.resolveResourceTarget(this.world, worker, command.position);
           if (!resourceTarget) {
             const fallbackX = command.position?.x ?? worker.x;
             const fallbackY = command.position?.y ?? worker.y;
@@ -727,12 +793,12 @@ export class Game {
             break;
           }
 
-          worker.intent = {
+          worker.order = {
             type: "harvest_loop",
             targetX: resourceTarget.x,
             targetY: resourceTarget.y,
           };
-          this.unitManager.clearPath(worker);
+          this.world.units.clearPath(worker);
           this.addLog(
             LOG_TYPES.COMMAND_RESULT,
             `Worker ${command.unitId} harvesting in a loop from (${resourceTarget.x}, ${resourceTarget.y})`,
@@ -756,11 +822,11 @@ export class Game {
 
       case "hold": {
         if (command.unitId) {
-          const unit = this.unitManager.getUnit(command.unitId);
+          const unit = this.world.units.getUnit(command.unitId);
           if (unit && unit.playerId === command.playerId) {
-            this.unitManager.holdPosition(unit);
+            this.world.units.holdPosition(unit);
             // 清除寻路路径
-            this.unitManager.clearPath(unit);
+            this.world.units.clearPath(unit);
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
               `Unit ${command.unitId} holding position`,
@@ -784,9 +850,9 @@ export class Game {
 
       case "spawn": {
         if (command.buildingId && command.unitType) {
-          const building = this.buildingManager.getBuilding(command.buildingId);
+          const building = this.world.buildings.getBuilding(command.buildingId);
           if (building && building.playerId === command.playerId) {
-            const player = this.players.find((p) => p.id === command.playerId);
+            const player = this.world.getPlayerState(command.playerId);
             if (player) {
               const unitCost = this.getUnitCost(command.unitType);
               if (building.constructionProgress) {
@@ -811,7 +877,7 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
-              } else if (!this.buildingManager.canProduce(building, command.unitType)) {
+              } else if (!this.world.buildings.canProduce(building, command.unitType)) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
@@ -837,7 +903,7 @@ export class Game {
                 );
               } else if (player.resources.credits >= unitCost) {
                 player.resources.credits -= unitCost;
-                this.buildingManager.spawnUnit(building, command.unitType);
+                this.world.buildings.spawnUnit(building, command.unitType);
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
                   `Spawn command queued: ${command.unitType} from ${building.type}`,
@@ -886,8 +952,8 @@ export class Game {
 
       case "build": {
         if (command.unitId && command.position && command.buildingType) {
-          const unit = this.unitManager.getUnit(command.unitId);
-          const player = this.players.find((p) => p.id === command.playerId);
+          const unit = this.world.units.getUnit(command.unitId);
+          const player = this.world.getPlayerState(command.playerId);
 
           if (!unit || !player || unit.playerId !== command.playerId || unit.type !== UNIT_TYPES.WORKER) {
             this.addLog(
@@ -911,7 +977,7 @@ export class Game {
             break;
           }
 
-          if (this.isWorkerConstructing(unit)) {
+          if (isWorkerConstructing(unit)) {
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
               "Build command failed: worker is already constructing",
@@ -1053,7 +1119,7 @@ export class Game {
 
           player.resources.credits -= buildingCost;
           const constructionTicks = getBuildingConstructionTicks(command.buildingType);
-          const newBuilding = this.buildingManager.createBuilding(
+          const newBuilding = this.world.createBuilding(
             command.buildingType,
             command.position.x,
             command.position.y,
@@ -1066,9 +1132,9 @@ export class Game {
               },
             }
           );
-          this.unitManager.clearPath(unit);
+          this.world.units.clearPath(unit);
           unit.state = UNIT_STATES.BUILDING;
-          unit.intent = { type: "build", targetX: newBuilding.x, targetY: newBuilding.y, targetId: newBuilding.id };
+          unit.order = { type: "build", targetX: newBuilding.x, targetY: newBuilding.y, targetId: newBuilding.id };
           unit.constructingBuildingId = newBuilding.id;
           this.addLog(LOG_TYPES.COMMAND_RESULT, `${command.buildingType} construction started for ${command.playerId}`, {
             command,
@@ -1100,10 +1166,6 @@ export class Game {
     return isBuildingType(buildingType) ? getRulesetBuildingCost(buildingType) : 0;
   }
 
-  private isWorkerConstructing(unit: Unit): boolean {
-    return unit.type === UNIT_TYPES.WORKER && Boolean(unit.constructingBuildingId);
-  }
-
   private isBuildingComplete(building: Building): boolean {
     return building.exists && !building.constructionProgress;
   }
@@ -1112,7 +1174,7 @@ export class Game {
     if (buildingType !== BUILDING_TYPES.WAR_FACTORY) {
       return true;
     }
-    return this.buildingManager
+    return this.world.buildings
       .getBuildingsByPlayer(playerId)
       .some((building) => building.type === BUILDING_TYPES.BARRACKS && this.isBuildingComplete(building));
   }
@@ -1123,803 +1185,206 @@ export class Game {
     );
   }
 
-  private attackBuilding(attacker: RuntimeUnit, target: Building): ResultCode {
-    if (!attacker.exists || !target.exists) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    if (attacker.playerId === target.playerId) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    const distance = this.buildingManager.getDistanceToBuilding(target, attacker.x, attacker.y);
-    if (distance > attacker.attackRange) {
-      return RESULT_CODES.ERR_NOT_IN_RANGE;
-    }
-
-    return this.launchProjectile(attacker, target, "building", target.x, target.y);
-  }
-
-  private executeAttackTarget(
-    attacker: RuntimeUnit,
-    target: Unit | Building,
-    kind: "unit" | "building"
-  ): ResultCode {
-    if (kind === "building") {
-      return this.attackBuilding(attacker, target as Building);
-    }
-
-    const targetUnit = target as RuntimeUnit;
-    const result = this.attackUnit(attacker, targetUnit);
-    if (result === RESULT_CODES.OK) {
-      this.processUnitRetaliation(targetUnit, attacker);
-    }
-    return result;
-  }
-
-  private attackUnit(attacker: RuntimeUnit, target: RuntimeUnit): ResultCode {
-    if (!attacker.exists || !target.exists) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    if (attacker.playerId === target.playerId) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    const distance = this.getChebyshevDistance(attacker, target);
-    if (distance > attacker.attackRange) {
-      return RESULT_CODES.ERR_NOT_IN_RANGE;
-    }
-
-    return this.launchProjectile(attacker, target, "unit", target.x, target.y);
-  }
-
-  private launchProjectile(
-    attacker: RuntimeUnit,
-    target: Unit | Building,
-    targetKind: "unit" | "building",
-    targetX: number,
-    targetY: number,
-  ): ResultCode {
-    if (!unitCanAttack(attacker.type)) {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    if (attacker.nextAttackTick !== undefined && this.tick < attacker.nextAttackTick) {
-      return RESULT_CODES.ERR_BUSY;
-    }
-
-    const weapon = getUnitWeapon(attacker.type);
-    const distance = targetKind === "building"
-      ? this.buildingManager.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
-      : this.getChebyshevDistance(attacker, target);
-    const flightTicks = weapon.projectileType === "instant"
-      ? 1
-      : Math.max(1, Math.ceil(Math.max(1, distance) / Math.max(1, weapon.projectileSpeed)));
-    const projectile: ActiveProjectile = {
-      id: `projectile_${++this.projectileCounter}`,
-      playerId: attacker.playerId,
-      attackerId: attacker.id,
-      attackerType: attacker.type,
-      projectileType: weapon.projectileType,
-      x: attacker.x,
-      y: attacker.y,
-      startX: attacker.x,
-      startY: attacker.y,
-      targetX,
-      targetY,
-      launchedTick: this.tick,
-      impactTick: this.tick + flightTicks,
-      targetId: target.id,
-      targetKind,
-      splashRadius: weapon.splashRadius,
-    };
-    this.projectiles.push(projectile);
-
-    attacker.state = UNIT_STATES.ATTACKING;
-    attacker.intent = { type: "attack", targetId: target.id, targetX, targetY };
-    attacker.lastAttackTick = this.tick;
-    attacker.nextAttackTick = this.tick + weapon.reloadTicks;
-
-    return RESULT_CODES.OK;
-  }
-
-  private processUnitRetaliation(defender: RuntimeUnit, attacker: RuntimeUnit): void {
-    if (!this.canUseUnitRetaliation(defender, attacker)) {
-      return;
-    }
-
-    const result = this.attackUnit(defender, attacker);
-    if (result === RESULT_CODES.OK) {
-      this.unitManager.clearPath(defender);
-      defender.lastAttackTick = this.tick;
-    }
-  }
-
-  private canUseUnitRetaliation(defender: RuntimeUnit, attacker: RuntimeUnit): boolean {
-    if (
-      !defender.exists ||
-      !attacker.exists ||
-      defender.playerId === attacker.playerId ||
-      defender.lastAttackTick === this.tick ||
-      (defender.nextAttackTick !== undefined && this.tick < defender.nextAttackTick) ||
-      !unitCanAttack(defender.type) ||
-      defender.attackRange <= 0
-    ) {
-      return false;
-    }
-
-    if (defender.path?.length || defender.pathTarget) {
-      return false;
-    }
-
-    if (defender.intent && defender.intent.type !== "hold") {
-      return false;
-    }
-
-    return this.getChebyshevDistance(defender, attacker) <= defender.attackRange;
-  }
-
-  private getChebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
-    return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
-  }
-
-  private getNearestCell(position: { x: number; y: number }): { x: number; y: number } {
-    return {
-      x: Math.max(0, Math.min(MAP_WIDTH - 1, Math.round(position.x))),
-      y: Math.max(0, Math.min(MAP_HEIGHT - 1, Math.round(position.y))),
-    };
-  }
-
-  private isNearPosition(position: { x: number; y: number }, target: { x: number; y: number }, tolerance = 0.35): boolean {
-    return Math.max(Math.abs(position.x - target.x), Math.abs(position.y - target.y)) <= tolerance;
-  }
-
-  private processProjectiles(): void {
-    if (this.projectiles.length === 0) {
-      return;
-    }
-
-    const remaining: ActiveProjectile[] = [];
-    for (const projectile of this.projectiles) {
-      const liveTarget = projectile.targetId ? this.resolveProjectileTarget(projectile) : null;
-      if (liveTarget) {
-        projectile.targetX = liveTarget.x;
-        projectile.targetY = liveTarget.y;
-      }
-
-      if (this.tick >= projectile.impactTick) {
-        this.applyProjectileImpact(projectile);
-        continue;
-      }
-
-      const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
-      const elapsedTicks = Math.max(0, this.tick - projectile.launchedTick);
-      const progress = Math.min(1, elapsedTicks / totalTicks);
-      projectile.x = projectile.startX + (projectile.targetX - projectile.startX) * progress;
-      projectile.y = projectile.startY + (projectile.targetY - projectile.startY) * progress;
-      remaining.push(projectile);
-    }
-    this.projectiles = remaining;
-  }
-
-  private resolveProjectileTarget(projectile: ActiveProjectile): { x: number; y: number } | null {
-    if (!projectile.targetId) {
-      return null;
-    }
-    if (projectile.targetKind === "building") {
-      const building = this.buildingManager.getBuilding(projectile.targetId);
-      return building?.exists ? { x: building.x, y: building.y } : null;
-    }
-    const unit = this.unitManager.getUnit(projectile.targetId);
-    return unit?.exists ? { x: unit.x, y: unit.y } : null;
-  }
-
-  private applyProjectileImpact(projectile: ActiveProjectile): void {
-    const impact = this.resolveProjectileTarget(projectile) ?? { x: projectile.targetX, y: projectile.targetY };
-    const weapon = getUnitWeapon(projectile.attackerType);
-    const radius = weapon.splashRadius ?? 0;
-    const damagedUnits = new Set<string>();
-    const damagedBuildings = new Set<string>();
-
-    if (projectile.targetId && projectile.targetKind === "unit") {
-      const target = this.unitManager.getUnit(projectile.targetId);
-      if (target?.exists && target.playerId !== projectile.playerId) {
-        this.applyProjectileDamageToUnit(projectile, target as RuntimeUnit, 1);
-        damagedUnits.add(target.id);
-      }
-    } else if (projectile.targetId && projectile.targetKind === "building") {
-      const target = this.buildingManager.getBuilding(projectile.targetId);
-      if (target?.exists && target.playerId !== projectile.playerId) {
-        this.applyProjectileDamageToBuilding(projectile, target, 1);
-        damagedBuildings.add(target.id);
-      }
-    }
-
-    if (radius <= 0) {
-      return;
-    }
-
-    for (const unit of this.unitManager.getAllUnits()) {
-      if (unit.playerId === projectile.playerId || damagedUnits.has(unit.id)) {
-        continue;
-      }
-      const distance = this.getChebyshevDistance(unit, impact);
-      const multiplier = this.getSplashDamageMultiplier(distance, weapon.splashFalloff, radius);
-      if (multiplier > 0) {
-        this.applyProjectileDamageToUnit(projectile, unit as RuntimeUnit, multiplier);
-      }
-    }
-
-    for (const building of this.buildingManager.getAllBuildings()) {
-      if (building.playerId === projectile.playerId || damagedBuildings.has(building.id)) {
-        continue;
-      }
-      const distance = this.buildingManager.getDistanceToBuilding(building, impact.x, impact.y);
-      const multiplier = this.getSplashDamageMultiplier(distance, weapon.splashFalloff, radius);
-      if (multiplier > 0) {
-        this.applyProjectileDamageToBuilding(projectile, building, multiplier);
-      }
-    }
-  }
-
-  private getSplashDamageMultiplier(distance: number, falloff: number[] | undefined, radius: number): number {
-    if (distance < 0 || distance > radius) {
-      return 0;
-    }
-    if (!falloff || falloff.length === 0) {
-      return distance === 0 ? 1 : 0.5;
-    }
-    const index = Math.min(falloff.length - 1, Math.max(0, Math.ceil(distance)));
-    return falloff[index] ?? 0;
-  }
-
-  private applyProjectileDamageToUnit(projectile: ActiveProjectile, target: RuntimeUnit, multiplier: number): void {
-    const damage = Math.max(0, Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier));
-    if (damage <= 0) {
-      return;
-    }
-    target.hp -= damage;
-    if (target.hp <= 0) {
-      target.hp = 0;
-      target.exists = false;
-    }
-  }
-
-  private applyProjectileDamageToBuilding(projectile: ActiveProjectile, target: Building, multiplier: number): void {
-    const damage = Math.max(0, Math.round(getAttackDamageAgainstBuilding(projectile.attackerType, target.type) * multiplier));
-    if (damage <= 0) {
-      return;
-    }
-    const destroyed = this.buildingManager.takeDamage(target, damage);
-    if (destroyed) {
-      this.releaseConstructionWorker(target);
-    }
-  }
-
-  private releaseConstructionWorker(building: Building): void {
-    const workerId = building.constructionProgress?.workerId;
-    building.constructionProgress = undefined;
-    if (!workerId) {
-      return;
-    }
-    const worker = this.unitManager.getUnit(workerId);
-    if (!worker || !worker.exists || worker.constructingBuildingId !== building.id) {
-      return;
-    }
-    worker.constructingBuildingId = undefined;
-    worker.state = UNIT_STATES.IDLE;
-    worker.intent = undefined;
-  }
-
-  private executeAttackIntent(
-    attacker: RuntimeUnit,
-    playerId: PlayerId,
-    intent: AttackIntent | UnitIntent
-  ): ResultCode {
-    if (!attacker.exists || !intent || intent.type !== "attack") {
-      return RESULT_CODES.ERR_INVALID_TARGET;
-    }
-
-    let result: ResultCode;
-
-    if (intent.targetId) {
-      const unitTarget = this.unitManager.getUnit(intent.targetId);
-      const buildingTarget = this.buildingManager.getBuilding(intent.targetId);
-      result = unitTarget
-        ? this.executeAttackTarget(attacker, unitTarget, "unit")
-        : buildingTarget
-          ? this.executeAttackTarget(attacker, buildingTarget, "building")
-          : RESULT_CODES.ERR_INVALID_TARGET;
-    } else {
-      const prioritizedTarget = this.findPrioritizedAttackTarget(attacker, playerId, intent.targetPriority);
-      result = prioritizedTarget
-        ? this.executeAttackTarget(attacker, prioritizedTarget.target, prioritizedTarget.kind)
-        : RESULT_CODES.ERR_NOT_IN_RANGE;
-    }
-
-    if (result === RESULT_CODES.OK) {
-      this.unitManager.clearPath(attacker);
-      const resolvedIntent = attacker.intent;
-      attacker.intent = {
-        type: "attack",
-        targetId: intent.targetId,
-        targetPriority: intent.targetPriority,
-        targetX: resolvedIntent?.targetX,
-        targetY: resolvedIntent?.targetY,
-      };
-      attacker.lastAttackTick = this.tick;
-    }
-
-    return result;
-  }
-
-  private processAttackMoveIntents(): void {
-    let remainingPursuitPaths = MAX_PURSUIT_PATHS_PER_TICK;
-    for (const unit of this.unitManager.getAllUnits()) {
-      const runtimeUnit = unit as RuntimeUnit;
-      if (!runtimeUnit.exists || runtimeUnit.intent?.type !== "attack_move") {
-        continue;
-      }
-
-      const attackMoveIntent = runtimeUnit.intent;
-      const moveTarget = attackMoveIntent.targetX !== undefined && attackMoveIntent.targetY !== undefined
-        ? { x: attackMoveIntent.targetX, y: attackMoveIntent.targetY }
-        : null;
-
-      if (!moveTarget || this.isNearPosition(runtimeUnit, moveTarget)) {
-        this.unitManager.clearPath(runtimeUnit);
-        runtimeUnit.intent = { type: "hold" };
-        runtimeUnit.state = UNIT_STATES.IDLE;
-        continue;
-      }
-
-      if (runtimeUnit.lastAttackTick !== this.tick) {
-        const prioritizedTarget = this.findPrioritizedAttackTarget(
-          runtimeUnit,
-          runtimeUnit.playerId,
-          attackMoveIntent.targetPriority
-        );
-
-        if (prioritizedTarget) {
-          const result = this.executeAttackTarget(runtimeUnit, prioritizedTarget.target, prioritizedTarget.kind);
-          if (result === RESULT_CODES.OK) {
-            runtimeUnit.intent = {
-              ...attackMoveIntent,
-              targetId: prioritizedTarget.target.id,
-            };
-            runtimeUnit.lastAttackTick = this.tick;
-            this.unitManager.clearPath(runtimeUnit);
-            continue;
-          }
-          if (result === RESULT_CODES.ERR_BUSY) {
-            runtimeUnit.intent = {
-              ...attackMoveIntent,
-              targetId: prioritizedTarget.target.id,
-            };
-            this.unitManager.clearPath(runtimeUnit);
-            continue;
-          }
-          if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
-            if (attackMoveIntent.targetId === prioritizedTarget.target.id && runtimeUnit.pathTarget) {
-              continue;
-            }
-            if (remainingPursuitPaths <= 0) {
-              continue;
-            }
-            remainingPursuitPaths -= 1;
-            const blockedPositions = this.buildingManager.getOccupiedPositions();
-            const moveResult = this.unitManager.setMoveTarget(
-              runtimeUnit,
-              prioritizedTarget.target.x,
-              prioritizedTarget.target.y,
-              this.tiles,
-              blockedPositions,
-              true,
-            );
-            if (moveResult === RESULT_CODES.OK) {
-              runtimeUnit.intent = {
-                ...attackMoveIntent,
-                targetId: prioritizedTarget.target.id,
-              };
-              continue;
-            }
-          }
-        }
-      }
-
-      delete attackMoveIntent.targetId;
-      const alreadyPathing =
-        runtimeUnit.pathTarget?.x === moveTarget.x &&
-        runtimeUnit.pathTarget?.y === moveTarget.y;
-      if (!alreadyPathing) {
-        const blockedPositions = this.buildingManager.getOccupiedPositions();
-        const result = this.unitManager.setMoveTarget(
-          runtimeUnit,
-          moveTarget.x,
-          moveTarget.y,
-          this.tiles,
-          blockedPositions,
-          true
-        );
-        if (result === RESULT_CODES.OK) {
-          runtimeUnit.intent = {
-            ...attackMoveIntent,
-            targetX: runtimeUnit.pathTarget?.x ?? moveTarget.x,
-            targetY: runtimeUnit.pathTarget?.y ?? moveTarget.y,
-          };
-        }
-      }
-
-      if (!runtimeUnit.pathTarget && runtimeUnit.lastAttackTick !== this.tick) {
-        runtimeUnit.state = UNIT_STATES.IDLE;
-      }
-    }
-  }
-
-  private processAttackIntents(): void {
-    for (const unit of this.unitManager.getAllUnits()) {
-      if (!unit.exists || unit.intent?.type !== "attack") {
-        continue;
-      }
-
-      const runtimeUnit = unit as RuntimeUnit;
-
-      if (runtimeUnit.lastAttackTick === this.tick) {
-        continue;
-      }
-
-      const result = this.executeAttackIntent(runtimeUnit, runtimeUnit.playerId, runtimeUnit.intent as AttackIntent);
-      if (result === RESULT_CODES.ERR_INVALID_TARGET && runtimeUnit.intent?.targetId) {
-        runtimeUnit.intent = { type: "hold" };
-        runtimeUnit.state = UNIT_STATES.IDLE;
-      } else if (result !== RESULT_CODES.OK && runtimeUnit.intent?.targetId) {
-        runtimeUnit.state = UNIT_STATES.IDLE;
-      }
-    }
-  }
-
-  private processHarvestLoopIntents(): void {
-    for (const unit of this.unitManager.getAllUnits()) {
-      const runtimeUnit = unit as RuntimeUnit;
-      if (
-        !runtimeUnit.exists ||
-        runtimeUnit.intent?.type !== "harvest_loop" ||
-        runtimeUnit.type !== UNIT_TYPES.WORKER
-      ) {
-        continue;
-      }
-
-      const harvestIntent = runtimeUnit.intent;
-      const deliveryBuilding = this.buildingManager
-        .getBuildingsByPlayer(runtimeUnit.playerId)
-        .filter((building) => this.isResourceDeliveryBuilding(building))
-        .sort((left, right) =>
-          this.buildingManager.getDistanceToBuilding(left, runtimeUnit.x, runtimeUnit.y) -
-          this.buildingManager.getDistanceToBuilding(right, runtimeUnit.x, runtimeUnit.y)
-        )[0];
-      if (!deliveryBuilding) {
-        continue;
-      }
-
-      const resourceTarget = this.resolveHarvestResourceTarget(runtimeUnit, {
-        x: harvestIntent.targetX ?? runtimeUnit.x,
-        y: harvestIntent.targetY ?? runtimeUnit.y,
-      });
-      if (!resourceTarget) {
-        continue;
-      }
-
-      runtimeUnit.intent = {
-        type: "harvest_loop",
-        targetX: resourceTarget.x,
-        targetY: resourceTarget.y,
-      };
-
-      if (runtimeUnit.carryingCredits >= runtimeUnit.carryCapacity) {
-        if (!this.isWithinDeliveryRange(runtimeUnit, deliveryBuilding) && !this.isPathingIntoDeliveryRange(runtimeUnit, deliveryBuilding)) {
-          const blockedPositions = this.buildingManager.getOccupiedPositions();
-          if (this.unitManager.setMoveTarget(runtimeUnit, deliveryBuilding.x, deliveryBuilding.y, this.tiles, blockedPositions) === RESULT_CODES.OK) {
-            runtimeUnit.intent = {
-              type: "harvest_loop",
-              targetX: resourceTarget.x,
-              targetY: resourceTarget.y,
-            };
-          }
-        }
-        continue;
-      }
-
-      const onResourceTile = this.isNearPosition(runtimeUnit, resourceTarget);
-      const pathingToResource =
-        runtimeUnit.pathTarget?.x === resourceTarget.x &&
-        runtimeUnit.pathTarget?.y === resourceTarget.y;
-
-      if (!onResourceTile && !pathingToResource) {
-        const blockedPositions = this.buildingManager.getOccupiedPositions();
-        if (
-          this.unitManager.setMoveTarget(runtimeUnit, resourceTarget.x, resourceTarget.y, this.tiles, blockedPositions) ===
-          RESULT_CODES.OK
-        ) {
-          runtimeUnit.intent = {
-            type: "harvest_loop",
-            targetX: resourceTarget.x,
-            targetY: resourceTarget.y,
-          };
-        }
-      }
-    }
-  }
-
-  private findPrioritizedAttackTarget(
-    attacker: Unit,
-    playerId: PlayerId,
-    targetPriority?: AttackTargetType[]
-  ): { kind: "unit"; target: Unit } | { kind: "building"; target: Building } | null {
-    const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
-    const priority = (
-      hasExplicitPriority
-        ? targetPriority!
-        : getDefaultAttackMovePriority(attacker.type)
-    ).map((value) => String(value).toLowerCase());
-
-    const acquisitionRange = getUnitVisionRange(attacker.type);
-    const enemyUnits = this.unitManager
-      .getAllUnits()
-      .filter((unit) => unit.exists && unit.playerId !== playerId)
-      .filter((unit) => Math.max(Math.abs(attacker.x - unit.x), Math.abs(attacker.y - unit.y)) <= acquisitionRange);
-    const enemyBuildings = this.buildingManager
-      .getAllBuildings()
-      .filter((building) => building.exists && building.playerId !== playerId)
-      .filter(
-        (building) =>
-          this.buildingManager.getDistanceToBuilding(building, attacker.x, attacker.y) <= acquisitionRange
-      );
-
-    const fallbackUnits = enemyUnits.sort((a, b) => a.id.localeCompare(b.id));
-    const fallbackBuildings = enemyBuildings.sort((a, b) => a.id.localeCompare(b.id));
-
-    for (const requestedType of priority) {
-      const unitTarget = fallbackUnits.find((unit) => unit.type === requestedType);
-      if (unitTarget) {
-        return { kind: "unit", target: unitTarget };
-      }
-
-      const buildingTarget = fallbackBuildings.find((building) => building.type === requestedType);
-      if (buildingTarget) {
-        return { kind: "building", target: buildingTarget };
-      }
-    }
-
-    if (hasExplicitPriority) {
-      return null;
-    }
-
-    if (fallbackBuildings.length > 0) {
-      return { kind: "building", target: fallbackBuildings[0] };
-    }
-    if (fallbackUnits.length > 0) {
-      return { kind: "unit", target: fallbackUnits[0] };
-    }
-
-    return null;
-  }
-
-  private resolveHarvestResourceTarget(
-    worker: Unit,
-    requestedPosition?: { x: number; y: number }
-  ): { x: number; y: number } | null {
-    if (
-      requestedPosition &&
-      requestedPosition.x >= 0 &&
-      requestedPosition.x < MAP_WIDTH &&
-      requestedPosition.y >= 0 &&
-      requestedPosition.y < MAP_HEIGHT &&
-      this.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
-    ) {
-      return requestedPosition;
-    }
-
-    if (requestedPosition) {
-      return null;
-    }
-
-    const assignedHarvesters = new Map<string, number>();
-    for (const unit of this.unitManager.getUnitsByPlayer(worker.playerId)) {
-      if (unit.id === worker.id || unit.type !== UNIT_TYPES.WORKER || unit.intent?.type !== "harvest_loop") {
-        continue;
-      }
-      const targetX = unit.intent.targetX;
-      const targetY = unit.intent.targetY;
-      if (targetX === undefined || targetY === undefined) {
-        continue;
-      }
-      assignedHarvesters.set(`${targetX},${targetY}`, (assignedHarvesters.get(`${targetX},${targetY}`) ?? 0) + 1);
-    }
-
-    let best: { x: number; y: number; distance: number; assignedHarvesters: number; score: number } | null = null;
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        if (
-          this.tiles[y][x] !== TILE_TYPES.RESOURCE ||
-          (this.resourceRemaining.get(`${x},${y}`) ?? 0) <= 0
-        ) {
-          continue;
-        }
-        const distance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
-        const assigned = assignedHarvesters.get(`${x},${y}`) ?? 0;
-        const score = distance + assigned * 4;
-        if (
-          !best ||
-          score < best.score ||
-          (score === best.score &&
-            (assigned < best.assignedHarvesters ||
-              (assigned === best.assignedHarvesters &&
-                (distance < best.distance || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))))))
-        ) {
-          best = { x, y, distance, assignedHarvesters: assigned, score };
-        }
-      }
-    }
-
-    return best ? { x: best.x, y: best.y } : null;
-  }
-
-  private isPathingIntoDeliveryRange(unit: RuntimeUnit, building: Building): boolean {
-    return Boolean(
-      unit.pathTarget &&
-      this.buildingManager.getDistanceToBuilding(building, unit.pathTarget.x, unit.pathTarget.y) <= this.getDeliveryRange(building)
-    );
-  }
-
   checkWinCondition(): boolean {
-    for (const player of this.players) {
-      const buildings = this.buildingManager.getBuildingsByPlayer(player.id);
-      const hasAnyBuilding = buildings.length > 0;
+    const outcome = this.victorySystem.step(this.world);
+    if (!outcome) return false;
+    this.addLog(LOG_TYPES.GAME_END, `Player ${outcome.winnerId} wins! Player ${outcome.loserId} has no remaining buildings.`, {
+      winner: outcome.winnerId,
+      loser: outcome.loserId,
+    });
+    this.stop();
+    return true;
+  }
 
-      if (!hasAnyBuilding) {
-        // Find the other player as winner
-        const winner = this.players.find((p) => p.id !== player.id);
-        if (winner) {
-          this.winner = winner.id;
-          this.addLog(LOG_TYPES.GAME_END, `Player ${winner.id} wins! Player ${player.id} has no remaining buildings.`, {
-            winner: winner.id,
-            loser: player.id,
+  createSimulationCheckpoint(): GameSimulationCheckpoint {
+    return {
+      tick: this.world.tick,
+      revision: this.world.revision,
+      units: this.world.units.createCheckpoint(),
+      buildings: this.world.buildings.createCheckpoint(),
+      resourceRemaining: Array.from(this.world.resourceRemaining.entries()),
+      playerCredits: this.world.getPlayerCredits(),
+      logs: [...this.logs],
+      pendingSnapshotLogs: [...this.pendingSnapshotLogs],
+      commandQueue: structuredClone(this.commandQueue),
+      projectiles: structuredClone(this.world.projectiles),
+      projectileCounter: this.world.projectileCounter,
+      rng: this.world.rng.createCheckpoint(),
+      winner: this.world.winner,
+      isRunning: this.isRunning,
+    };
+  }
+
+  restoreSimulationCheckpoint(checkpointValue: unknown): void {
+    const checkpoint = checkpointValue as GameSimulationCheckpoint;
+    this.world.tick = checkpoint.tick;
+    this.world.revision = checkpoint.revision;
+    this.world.units.restoreCheckpoint(checkpoint.units);
+    this.world.buildings.restoreCheckpoint(checkpoint.buildings);
+    this.world.resourceRemaining = new Map(checkpoint.resourceRemaining);
+    this.world.rebuildMapProjection();
+    this.world.restorePlayerCredits(checkpoint.playerCredits);
+    this.logs = [...checkpoint.logs];
+    this.pendingSnapshotLogs = [...checkpoint.pendingSnapshotLogs];
+    this.commandQueue = structuredClone(checkpoint.commandQueue);
+    this.world.projectiles = structuredClone(checkpoint.projectiles);
+    this.world.projectileCounter = checkpoint.projectileCounter;
+    this.world.rng.restoreCheckpoint(checkpoint.rng);
+    this.world.winner = checkpoint.winner;
+    this.isRunning = checkpoint.isRunning;
+  }
+
+  beginSimulationTick(): void {
+    this.world.tick++;
+    this.world.markChanged();
+  }
+
+  private applySimulationEvents(events: readonly SimulationEvent[]): void {
+    for (const event of events) {
+      switch (event.type) {
+        case "resource_gathered":
+          this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${event.unitId} gathered ${event.amount} credits`, {
+            unitId: event.unitId,
+            amount: event.amount,
+            carryingCredits: event.carryingCredits,
+          }, {
+            owner: event.playerId,
+            feedbackTarget: event.playerId,
+          });
+          break;
+        case "credits_delivered":
+          this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${event.unitId} delivered ${event.amount} credits to HQ`, {
+            unitId: event.unitId,
+            buildingId: event.buildingId,
+            amount: event.amount,
+            credits: event.credits,
+          }, {
+            owner: event.playerId,
+            feedbackTarget: event.playerId,
+          });
+          break;
+        case "building_completed":
+          this.addLog(LOG_TYPES.BUILDING_COMPLETED, `${event.buildingType} completed for ${event.playerId}`, {
+            buildingId: event.buildingId,
+            buildingType: event.buildingType,
+            workerId: event.workerId,
+          }, {
+            owner: event.playerId,
+            feedbackTarget: event.playerId,
+          });
+          break;
+        case "building_cancelled":
+          // Legacy Game never exposed this outcome; the versioned event journal will.
+          break;
+        case "unit_spawned":
+          this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${event.unitType} spawned for ${event.playerId}`, {
+            unitType: event.unitType,
+          }, {
+            owner: event.playerId,
+            feedbackTarget: event.playerId,
+          });
+          break;
+        case "unit_spawn_failed":
+          this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${event.unitType} for ${event.playerId}`, {
+            unitType: event.unitType,
+          }, { owner: event.playerId });
+          break;
+        case "player_eliminated":
+          this.addLog(LOG_TYPES.GAME_END, `Player ${event.winnerId} wins! Player ${event.loserId} has no remaining buildings.`, {
+            winner: event.winnerId,
+            loser: event.loserId,
           });
           this.stop();
-          return true;
-        }
+          break;
       }
     }
-    return false;
   }
 
   tickUpdate(): void {
     if (!this.isRunning) return;
 
-    const tickStartedAt = performance.now();
-    if (this.lastTickStartTimeMs !== null) {
-      const elapsedMs = tickStartedAt - this.lastTickStartTimeMs;
-      if (elapsedMs > TICK_LAG_WARNING_MS && tickStartedAt - this.lastTickLagWarningAtMs > PERF_WARNING_THROTTLE_MS) {
-        this.lastTickLagWarningAtMs = tickStartedAt;
-        this.addLog(LOG_TYPES.PERF_WARNING, `Tick interval lagged by ${Math.round(elapsedMs - TICK_INTERVAL_MS)}ms`, {
-          scope: "game_tick",
-          phase: "interval",
-          elapsedMs: Math.round(elapsedMs),
-          expectedMs: TICK_INTERVAL_MS,
-          tick: this.tick,
-        });
-      }
-    }
-    this.lastTickStartTimeMs = tickStartedAt;
-
     try {
-      this.tick++;
-
-      // Process commands
-      this.processCommands();
-
-      // Process unit path movement (自动寻路移动)
-      const blockedPositions = this.buildingManager.getOccupiedPositions();
-      const repathBudget = { remaining: MAX_BLOCKED_REPATHS_PER_TICK };
-      for (const unit of this.unitManager.getAllUnits()) {
-        this.unitManager.processPathMovement(unit, this.tiles, blockedPositions, repathBudget);
-      }
-      this.unitManager.resolveUnitSeparation(this.tiles, blockedPositions);
-
-      // Resolve delayed weapon projectiles after movement, before new attacks fire.
-      this.processProjectiles();
-
-      // Process worker economy loop: gather on resource tiles, then deliver near HQ
-      this.processWorkerEconomy();
-
-      // Sustain harvest loops and attack-move intents.
-      this.processHarvestLoopIntents();
-      this.processAttackMoveIntents();
-
-      // Sustain attack intents every tick so units keep attacking in range.
-      this.processAttackIntents();
-
-      // Advance building construction before production queues tick.
-      this.processBuildingConstruction();
-
-      // Process building production queues
-      const completedUnits = this.buildingManager.processProductionQueues();
-      for (const [playerId, completions] of completedUnits) {
-        for (const completion of completions) {
-          const spawnBuilding = this.buildingManager.getBuilding(completion.buildingId);
-
-          if (spawnBuilding && spawnBuilding.exists) {
-            // Find an empty position near the building
-            const spawnPos = this.findEmptySpawnPosition(spawnBuilding);
-            if (spawnPos) {
-              this.unitManager.createUnit(completion.unitType, spawnPos.x, spawnPos.y, playerId);
-              this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${completion.unitType} spawned for ${playerId}`, {
-                unitType: completion.unitType,
-              }, {
-                owner: playerId,
-                feedbackTarget: playerId,
-              });
-            } else {
-              this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${completion.unitType} for ${playerId}`, {
-                unitType: completion.unitType,
-              }, { owner: playerId });
-            }
-          }
-        }
-      }
-      this.unitManager.resolveUnitSeparation(this.tiles, this.buildingManager.getOccupiedPositions());
-
-      // Check win condition
-      this.checkWinCondition();
+      this.advanceSimulationTick();
     } catch (error) {
       this.addLog(LOG_TYPES.TICK_ERROR, "Tick update crashed", {
         error: error instanceof Error ? error.message : String(error),
       });
       console.error("Tick 更新异常:", error);
+      this.stop();
     } finally {
-      // Save snapshot even if the tick had partial failure so the client stays connected.
-      const snapshotStartedAt = performance.now();
       this.saveSnapshot();
-      const snapshotMs = performance.now() - snapshotStartedAt;
-      const tickDurationMs = performance.now() - tickStartedAt;
-      if (
-        (tickDurationMs > TICK_DURATION_WARNING_MS || snapshotMs > SNAPSHOT_DURATION_WARNING_MS) &&
-        tickStartedAt - this.lastTickDurationWarningAtMs > PERF_WARNING_THROTTLE_MS
-      ) {
-        this.lastTickDurationWarningAtMs = tickStartedAt;
-        this.addLog(LOG_TYPES.PERF_WARNING, `Tick work took ${Math.round(tickDurationMs)}ms`, {
-          scope: "game_tick",
-          phase: "work",
-          elapsedMs: Math.round(tickDurationMs),
-          tick: this.tick,
-          details: {
-            snapshotMs: Math.round(snapshotMs),
-          },
-        });
-      }
     }
+  }
+
+  /** Compatibility transaction boundary used by MatchRuntime and legacy tickUpdate. */
+  advanceSimulationTick(commandBatches: readonly GameCommandBatch[] = []): GameTickResult | null {
+    if (!this.isRunning) return null;
+
+    const checkpoint = this.createSimulationCheckpoint();
+    try {
+      this.beginSimulationTick();
+      const queued = this.processQueuedCommands(this.commandBudgetPolicy.maxPathCommandsPerTick);
+      const deferredLegacyCommands = structuredClone(this.commandQueue);
+      this.commandQueue = [];
+      const pathDemandByActor = new Map<string, number>();
+      for (const batch of commandBatches) {
+        const pathDemand = batch.commands.filter((command) => (
+          command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop"
+        )).length;
+        pathDemandByActor.set(batch.actorId, (pathDemandByActor.get(batch.actorId) ?? 0) + pathDemand);
+      }
+      const remainingPathBudgetByActor = allocateFairPathBudgets(
+        pathDemandByActor,
+        queued.remainingPathBudget,
+        this.world.tick,
+      );
+      const remainingCommandBudgetByActor = new Map<string, number>();
+      const commandBatchResults: CommandBatchExecutionResult[] = [];
+      for (const batch of commandBatches) {
+        const commandBudget = remainingCommandBudgetByActor.get(batch.actorId)
+          ?? this.commandBudgetPolicy.maxCommandsPerActorPerTick;
+        const pathBudget = remainingPathBudgetByActor.get(batch.actorId) ?? 0;
+        const executed = this.executeCommandBatch(batch.commands, pathBudget, commandBudget);
+        commandBatchResults.push(executed.result);
+        remainingCommandBudgetByActor.set(batch.actorId, commandBudget - executed.consumedCommands);
+        remainingPathBudgetByActor.set(batch.actorId, pathBudget - executed.consumedPathCommands);
+      }
+      this.commandQueue.push(...deferredLegacyCommands);
+      const simulation = this.simulationCore.step(this.world);
+      this.applySimulationEvents(simulation.events);
+      return {
+        commandOutcomes: [
+          ...queued.outcomes,
+          ...commandBatchResults.flatMap((batch) => batch.outcomes),
+        ],
+        commandBatchResults,
+        simulation,
+      };
+    } catch (error) {
+      this.restoreSimulationCheckpoint(checkpoint);
+      throw error;
+    }
+  }
+
+  captureSimulationSnapshot(): TickDeltaRecord | null {
+    return this.saveSnapshot();
+  }
+
+  /** MatchRuntime persists deltas in MatchJournal and releases this compatibility cache every tick. */
+  discardRecordedTickDeltas(): void {
+    this.tickDeltaBuffer = [];
+    this.tickDeltaChunks = [];
   }
 
   start(): void {
     if (this.isRunning) return;
 
     this.isRunning = true;
-    this.lastTickStartTimeMs = null;
     this.addLog(LOG_TYPES.GAME_STARTED, "Game started");
-
-    this.tickInterval = setInterval(() => {
-      this.tickUpdate();
-    }, TICK_INTERVAL_MS);
   }
 
   stop(): void {
     this.isRunning = false;
-    if (this.tickInterval) {
-      clearInterval(this.tickInterval);
-      this.tickInterval = null;
-    }
-    this.lastTickStartTimeMs = null;
     this.addLog(LOG_TYPES.GAME_STOPPED, "Game stopped");
   }
 
@@ -1937,7 +1402,7 @@ export class Game {
     const base = defaultLogMeta(type);
 
     const log: GameLog = {
-      tick: this.tick,
+      tick: this.world.tick,
       type,
       message,
       data,
@@ -1948,6 +1413,17 @@ export class Game {
         displayTarget: overrides?.displayTarget ?? base.displayTarget,
       },
     } as GameLog;
+    if (type === LOG_TYPES.COMMAND_RESULT && data && this.activeCommandOutcomes) {
+      const result = data as GameLogDataMap[typeof LOG_TYPES.COMMAND_RESULT];
+      this.activeCommandOutcomes.push({
+        tick: this.world.tick,
+        command: this.cloneValue(result.command),
+        resultCode: result.result_code,
+        resultType: result.type,
+        resultData: this.cloneValue(result.result_data),
+        success: result.result_code === RESULT_CODES.OK,
+      });
+    }
     this.logs.push(log);
     this.pendingSnapshotLogs.push(log);
     // 限制日志数量，防止内存泄漏
@@ -1957,9 +1433,8 @@ export class Game {
     return log;
   }
 
-  private saveSnapshot(): void {
-    this.refreshPlayerCollections();
-    const players = this.players.map((player) => ({
+  private saveSnapshot(): TickDeltaRecord | null {
+    const players = this.world.players.map((player) => ({
       ...player,
       resources: { ...player.resources },
       units: player.units.map((unit) => {
@@ -1978,21 +1453,25 @@ export class Game {
       })),
     }));
     const snapshot: GameSnapshot = {
-      tick: this.tick,
+      tick: this.world.tick,
       state: {
-        tick: this.tick,
+        tick: this.world.tick,
         players,
-        tiles: this.tileView,
-        winner: this.winner,
+        tiles: this.world.tileView,
+        winner: this.world.winner,
         logs: [...this.logs],
       },
       aiOutputs: { ...this.aiOutputs },
     };
 
+    let delta: TickDeltaRecord | null = null;
     if (!this.initialSnapshot) {
       this.initialSnapshot = snapshot;
     } else if (this.latestSnapshot) {
-      this.tickDeltaBuffer.push(buildTickDelta(this.latestSnapshot, snapshot, [...this.pendingSnapshotLogs]));
+      if (snapshot.tick > this.latestSnapshot.tick) {
+        delta = buildTickDelta(this.latestSnapshot, snapshot, [...this.pendingSnapshotLogs]);
+        this.tickDeltaBuffer.push(delta);
+      }
       if (this.tickDeltaBuffer.length >= TICK_DELTA_CHUNK_SIZE) {
         this.tickDeltaChunks.push(gzipSync(JSON.stringify(this.tickDeltaBuffer)).toString("base64"));
         this.tickDeltaBuffer = [];
@@ -2000,10 +1479,11 @@ export class Game {
     }
     this.latestSnapshot = snapshot;
     this.pendingSnapshotLogs = [];
+    return delta ? this.cloneValue(delta) : null;
   }
 
   getWinner(): PlayerId | null {
-    return this.winner;
+    return this.world.winner;
   }
 
   isGameRunning(): boolean {
@@ -2011,7 +1491,11 @@ export class Game {
   }
 
   getTick(): number {
-    return this.tick;
+    return this.world.tick;
+  }
+
+  getStateRevision(): number {
+    return this.world.revision;
   }
 
   setAIOutput(playerId: PlayerId, output: string): void {
@@ -2026,174 +1510,6 @@ export class Game {
       if (target === AI_FEEDBACK_TARGETS.BOTH) return true;
       return target === playerId;
     });
-  }
-
-  private processBuildingConstruction(): void {
-    for (const building of this.buildingManager.getAllBuildings()) {
-      const construction = building.constructionProgress;
-      if (!construction) {
-        continue;
-      }
-
-      const worker = this.unitManager.getUnit(construction.workerId);
-      if (!worker || !worker.exists || worker.constructingBuildingId !== building.id) {
-        building.exists = false;
-        continue;
-      }
-
-      this.unitManager.clearPath(worker);
-      worker.state = UNIT_STATES.BUILDING;
-      worker.intent = { type: "build", targetX: building.x, targetY: building.y, targetId: building.id };
-
-      construction.remainingTicks -= 1;
-      if (construction.remainingTicks > 0) {
-        continue;
-      }
-
-      building.constructionProgress = undefined;
-      worker.constructingBuildingId = undefined;
-      worker.state = UNIT_STATES.IDLE;
-      worker.intent = undefined;
-      this.addLog(LOG_TYPES.BUILDING_COMPLETED, `${building.type} completed for ${building.playerId}`, {
-        buildingId: building.id,
-        buildingType: building.type,
-        workerId: worker.id,
-      }, {
-        owner: building.playerId,
-        feedbackTarget: building.playerId,
-      });
-    }
-  }
-
-  private processWorkerEconomy(): void {
-    for (const player of this.players) {
-      const deliveryBuildings = this.buildingManager
-        .getBuildingsByPlayer(player.id)
-        .filter((building) => this.isResourceDeliveryBuilding(building));
-
-      if (deliveryBuildings.length === 0) {
-        continue;
-      }
-
-      for (const unit of this.unitManager.getUnitsByPlayer(player.id)) {
-        if (unit.type !== UNIT_TYPES.WORKER || !unit.exists || this.isWorkerConstructing(unit)) {
-          continue;
-        }
-
-        const preserveHarvestLoop = unit.intent?.type === "harvest_loop" ? unit.intent : null;
-        const unitCell = this.getNearestCell(unit);
-        const onResourceTile = this.tiles[unitCell.y]?.[unitCell.x] === TILE_TYPES.RESOURCE;
-        const deliveryBuilding = deliveryBuildings
-          .filter((building) => this.isWithinDeliveryRange(unit, building))
-          .sort((left, right) =>
-            this.buildingManager.getDistanceToBuilding(left, unit.x, unit.y) -
-            this.buildingManager.getDistanceToBuilding(right, unit.x, unit.y)
-          )[0];
-        let economyActionTaken = false;
-
-        if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
-          const resourceKey = `${unitCell.x},${unitCell.y}`;
-          const depositRemaining = this.resourceRemaining.get(resourceKey) ?? 0;
-          const gatheredCredits = Math.min(
-            ECONOMY_RULES.WORKER_GATHER_RATE,
-            unit.carryCapacity - unit.carryingCredits,
-            depositRemaining,
-          );
-
-          if (gatheredCredits > 0) {
-            unit.carryingCredits += gatheredCredits;
-            const nextDepositRemaining = depositRemaining - gatheredCredits;
-            this.resourceRemaining.set(resourceKey, nextDepositRemaining);
-            const currentTile = this.tileView[unitCell.y]?.[unitCell.x];
-            const nextTile: Tile | undefined = currentTile
-              ? nextDepositRemaining <= 0
-                ? { x: currentTile.x, y: currentTile.y, type: TILE_TYPES.EMPTY }
-                : { ...currentTile, resourceRemaining: nextDepositRemaining }
-              : undefined;
-            if (nextDepositRemaining <= 0) {
-              this.tiles[unitCell.y][unitCell.x] = TILE_TYPES.EMPTY;
-            }
-            if (nextTile) {
-              const nextRow = [...this.tileView[unitCell.y]];
-              nextRow[unitCell.x] = nextTile;
-              const nextTileView = [...this.tileView];
-              nextTileView[unitCell.y] = nextRow;
-              this.tileView = nextTileView;
-            }
-            unit.state = UNIT_STATES.GATHERING;
-            unit.intent = preserveHarvestLoop ?? { type: "gather", targetX: unitCell.x, targetY: unitCell.y };
-            this.addLog(LOG_TYPES.RESOURCE_GATHERED, `Worker ${unit.id} gathered ${gatheredCredits} credits`, {
-              unitId: unit.id,
-              amount: gatheredCredits,
-              carryingCredits: unit.carryingCredits,
-            }, {
-              owner: player.id,
-              feedbackTarget: player.id,
-            });
-            economyActionTaken = true;
-          }
-        }
-
-        if (deliveryBuilding && !onResourceTile && unit.carryingCredits > 0) {
-          const deliveredCredits = unit.carryingCredits;
-          player.resources.credits += deliveredCredits;
-          unit.carryingCredits = 0;
-          unit.state = UNIT_STATES.IDLE;
-          unit.intent = preserveHarvestLoop ?? { type: "deposit", targetX: deliveryBuilding.x, targetY: deliveryBuilding.y, targetId: deliveryBuilding.id };
-          this.addLog(LOG_TYPES.CREDITS_DELIVERED, `Worker ${unit.id} delivered ${deliveredCredits} credits to HQ`, {
-            unitId: unit.id,
-            buildingId: deliveryBuilding.id,
-            amount: deliveredCredits,
-            credits: player.resources.credits,
-          }, {
-            owner: player.id,
-            feedbackTarget: player.id,
-          });
-          economyActionTaken = true;
-        }
-
-        if (
-          !economyActionTaken &&
-          !unit.path?.length &&
-          unit.state === UNIT_STATES.GATHERING &&
-          (!onResourceTile || unit.carryingCredits >= unit.carryCapacity)
-        ) {
-          unit.state = UNIT_STATES.IDLE;
-        }
-      }
-    }
-  }
-
-  /**
-   * Find an empty position near the given coordinates for spawning a unit
-   * Searches in expanding circles around the center point
-   */
-  private findEmptySpawnPosition(building: Building): { x: number; y: number } | null {
-    const footprint = getBuildingFootprint(building.type);
-    const halfWidth = Math.floor(footprint.width / 2);
-    const halfHeight = Math.floor(footprint.height / 2);
-    for (let distance = 1; distance <= 4; distance++) {
-      for (let dx = -halfWidth - distance; dx <= halfWidth + distance; dx++) {
-        for (let dy = -halfHeight - distance; dy <= halfHeight + distance; dy++) {
-          if (this.buildingManager.getDistanceToBuilding(building, building.x + dx, building.y + dy) !== distance) continue;
-
-          const x = building.x + dx;
-          const y = building.y + dy;
-
-          // Check bounds
-          if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
-
-          // Check if position is not an obstacle
-          if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) continue;
-
-          // Check if position is not occupied by another unit or building
-          if (!this.unitManager.hasUnitAt(x, y) && !this.buildingManager.hasBuildingAt(x, y)) {
-            return { x, y };
-          }
-        }
-      }
-    }
-    return null; // No empty position found
   }
 
   getSnapshots(): GameSnapshot[] {
@@ -2217,14 +1533,20 @@ export class Game {
     return Array.from(this.iterateTickDeltas(), (delta) => this.cloneValue(delta));
   }
 
-  *iterateTickDeltas(): Generator<TickDeltaRecord> {
+  *iterateTickDeltas(throughTick?: number): Generator<TickDeltaRecord> {
     for (const chunk of this.tickDeltaChunks) {
       const deltas = JSON.parse(
         gunzipSync(Buffer.from(chunk, "base64")).toString("utf8"),
       ) as TickDeltaRecord[];
-      yield* deltas;
+      for (const delta of deltas) {
+        if (throughTick !== undefined && delta.tick > throughTick) return;
+        yield delta;
+      }
     }
-    yield* this.tickDeltaBuffer;
+    for (const delta of this.tickDeltaBuffer) {
+      if (throughTick !== undefined && delta.tick > throughTick) return;
+      yield delta;
+    }
   }
 
   getAIOutputs(): Record<string, string> {
@@ -2235,7 +1557,7 @@ export class Game {
     return Array.from(this.iterateCommandResults(sinceTick), (log) => this.cloneValue(log));
   }
 
-  *iterateCommandResults(sinceTick?: number): Generator<GameLog> {
+  *iterateCommandResults(sinceTick?: number, throughTick?: number): Generator<GameLog> {
     const recordedLogs = function* (game: Game): Generator<GameLog> {
       yield* game.initialSnapshot?.state.logs ?? [];
       for (const delta of game.iterateTickDeltas()) {
@@ -2246,31 +1568,18 @@ export class Game {
     for (const log of recordedLogs) {
       if (log.type !== LOG_TYPES.COMMAND_RESULT) continue;
       if (sinceTick !== undefined && log.tick <= sinceTick) continue;
+      if (throughTick !== undefined && log.tick > throughTick) continue;
       yield log;
     }
   }
 
   // For testing purposes
   getUnitManager(): UnitManager {
-    return this.unitManager;
+    return this.world.units;
   }
 
   getBuildingManager(): BuildingManager {
-    return this.buildingManager;
-  }
-
-  private isResourceDeliveryBuilding(building: Building): boolean {
-    return this.isBuildingComplete(building) && (building.type === BUILDING_TYPES.HQ || building.type === BUILDING_TYPES.REFINERY);
-  }
-
-  private getDeliveryRange(building: Building): number {
-    return building.type === BUILDING_TYPES.REFINERY
-      ? ECONOMY_RULES.REFINERY_DELIVERY_RANGE
-      : ECONOMY_RULES.HQ_DELIVERY_RANGE;
-  }
-
-  private isWithinDeliveryRange(unit: Unit, building: Building): boolean {
-    return this.buildingManager.getDistanceToBuilding(building, unit.x, unit.y) <= this.getDeliveryRange(building);
+    return this.world.buildings;
   }
 
   private validateBuildPosition(playerId: PlayerId, buildingType: BuildingType, x: number, y: number): ResultCode {
@@ -2284,18 +1593,18 @@ export class Game {
         return RESULT_CODES.ERR_INVALID_TARGET;
       }
       if (
-        this.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY ||
-        this.unitManager.hasUnitAt(cell.x, cell.y) ||
-        this.buildingManager.hasBuildingAt(cell.x, cell.y)
+        this.world.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY ||
+        this.world.units.hasUnitAt(cell.x, cell.y) ||
+        this.world.buildings.hasBuildingAt(cell.x, cell.y)
       ) {
         return RESULT_CODES.ERR_POSITION_OCCUPIED;
       }
     }
 
-    const hq = this.buildingManager
+    const hq = this.world.buildings
       .getBuildingsByPlayer(playerId)
       .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
-    if (hq && footprintCells.some((cell) => this.buildingManager.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
+    if (hq && footprintCells.some((cell) => this.world.buildings.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
       return RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
@@ -2311,15 +1620,15 @@ export class Game {
       return { type: "move_bad_target", hint: "Choose a tile inside the map bounds." };
     }
 
-    if (this.tiles[y][x] === TILE_TYPES.OBSTACLE) {
+    if (this.world.tiles[y][x] === TILE_TYPES.OBSTACLE) {
       return { type: "move_blocked_tile", hint: "That tile is an obstacle. Pick a nearby empty tile." };
     }
 
-    if (this.buildingManager.hasBuildingAt(x, y)) {
+    if (this.world.buildings.hasBuildingAt(x, y)) {
       return { type: "move_blocked_tile", hint: "Buildings occupy their tile. Move to an adjacent empty tile instead." };
     }
 
-    if (this.unitManager.hasUnitAt(x, y, unitId)) {
+    if (this.world.units.hasUnitAt(x, y, unitId)) {
       return { type: "move_blocked_tile", hint: "Another unit is already on that tile. Pick a different nearby tile." };
     }
 
@@ -2336,14 +1645,14 @@ export class Game {
       return { type: "build_bad_target", hint: "The full building footprint must stay inside the map." };
     }
 
-    const hq = this.buildingManager
+    const hq = this.world.buildings
       .getBuildingsByPlayer(playerId)
       .find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
-    if (hq && footprintCells.some((cell) => this.buildingManager.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
+    if (hq && footprintCells.some((cell) => this.world.buildings.getDistanceToBuilding(hq, cell.x, cell.y) <= 1)) {
       return { type: "build_too_close_to_hq", hint: "Leave at least one clear tile between the full building footprint and HQ." };
     }
 
-    if (footprintCells.some((cell) => this.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY || this.buildingManager.hasBuildingAt(cell.x, cell.y) || this.unitManager.hasUnitAt(cell.x, cell.y))) {
+    if (footprintCells.some((cell) => this.world.tiles[cell.y][cell.x] !== TILE_TYPES.EMPTY || this.world.buildings.hasBuildingAt(cell.x, cell.y) || this.world.units.hasUnitAt(cell.x, cell.y))) {
       return { type: "build_blocked_tile", hint: "The building footprint overlaps terrain, resources, units, or another structure." };
     }
 
@@ -2375,6 +1684,7 @@ export class Game {
       unitType: command.unitType,
       buildingType: command.buildingType,
       playerId: command.playerId,
+      provenance: command.provenance ? this.cloneValue(command.provenance) : undefined,
     };
   }
 }

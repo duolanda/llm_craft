@@ -7,7 +7,7 @@ import {
 } from "@llmcraft/shared";
 import { GameAgentBridge } from "./GameAgentBridge";
 import { AgentToolDefinition, executeAgentTool, getAgentToolDefinitions } from "./AgentTools";
-import { LLMProvider, RunAgentOptions, WarmupAgentResult } from "../LLMProvider";
+import { AgentSession, RunAgentOptions, WarmupAgentResult } from "../LLMProvider";
 
 export interface AgentRuntimeResult {
   assistantMessages: string[];
@@ -19,8 +19,10 @@ export interface AgentRuntimeResult {
 }
 
 export interface AgentRuntimeCallbacks {
+  traceContext?: RunAgentOptions["traceContext"];
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
+  onModelRequest?: RunAgentOptions["onModelRequest"];
   onPerformanceWarning?: RunAgentOptions["onPerformanceWarning"];
   spawnSubAgent?: RunAgentOptions["spawnSubAgent"];
   drainSubAgentNotifications?: RunAgentOptions["drainSubAgentNotifications"];
@@ -29,12 +31,12 @@ export interface AgentRuntimeCallbacks {
 export class AgentRuntime {
   private readonly toolDefinitions: AgentToolDefinition[];
 
-  constructor(private readonly provider: LLMProvider, private readonly bridge: GameAgentBridge) {
+  constructor(private readonly session: AgentSession, private readonly bridge: GameAgentBridge) {
     this.toolDefinitions = getAgentToolDefinitions();
   }
 
   async warmup(input: AgentRunInput, callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<WarmupAgentResult> {
-    return await this.provider.warmupAgent(input, {
+    return await this.session.warmupAgent(input, {
       tools: this.toolDefinitions,
       executeTool: () => {
         throw new Error("Warmup must not execute tools before the game starts.");
@@ -48,16 +50,28 @@ export class AgentRuntime {
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
+      onModelRequest: callbacks?.onModelRequest,
       onPerformanceWarning: callbacks?.onPerformanceWarning,
+      traceContext: callbacks?.traceContext,
       signal,
     });
   }
 
   async run(input: AgentRunInput, callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<AgentRuntimeResult> {
-    this.bridge.beginRun();
-    const result = await this.provider.runAgent(input, {
+    this.bridge.beginRun(callbacks?.traceContext ? {
+      controllerId: callbacks.traceContext.controllerId,
+      source: "macro_tool",
+      turnId: callbacks.traceContext.turnId,
+      ...(callbacks.traceContext.parentControllerId
+        ? { parentControllerId: callbacks.traceContext.parentControllerId }
+        : {}),
+    } : undefined);
+    const result = await this.session.runAgent(input, {
       tools: this.toolDefinitions,
-      executeTool: async (name, args) => executeAgentTool(this.bridge, name, args),
+      executeTool: async (name, args, context) => {
+        if (context) this.bridge.setCommandProvenance(context);
+        return executeAgentTool(this.bridge, name, args);
+      },
       getRuntimeState: () => ({
         mapState: this.bridge.getMapState({ trackRead: false }).result,
         myState: this.bridge.getMyState({ trackRead: false }).result,
@@ -67,9 +81,11 @@ export class AgentRuntime {
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
+      onModelRequest: callbacks?.onModelRequest,
       onPerformanceWarning: callbacks?.onPerformanceWarning,
       spawnSubAgent: callbacks?.spawnSubAgent,
       drainSubAgentNotifications: callbacks?.drainSubAgentNotifications,
+      traceContext: callbacks?.traceContext,
       signal,
     });
 

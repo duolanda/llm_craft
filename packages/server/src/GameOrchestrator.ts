@@ -1,12 +1,10 @@
 import {
   AgentRunInput,
+  AgentModelRequestRecord,
   AgentToolCallRecord,
   AITerminalEvent,
   AITurnRecord,
-  GameRecord,
   GameState,
-  MAP_HEIGHT,
-  MAP_WIDTH,
   MatchLLMConfig,
   PlayerId,
   PLAYER_IDS,
@@ -17,21 +15,28 @@ import {
   LOG_DISPLAY_TARGETS,
   AIFeedbackTarget,
   TICK_INTERVAL_MS,
+  type Command,
 } from "@llmcraft/shared";
 import fs from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Game } from "./Game";
-import { createLLMProvider } from "./createLLMProvider";
-import { LLMProvider, SubAgentParentContext } from "./LLMProvider";
-import { SYSTEM_PROMPT } from "./SystemPrompt";
+import { SubAgentParentContext } from "./LLMProvider";
+import { createSystemPrompt } from "./SystemPrompt";
 import { GameAgentBridge } from "./agent/GameAgentBridge";
-import { AgentRuntime, AgentRuntimeResult } from "./agent/AgentRuntime";
+import type { AgentRuntimeResult } from "./agent/AgentRuntime";
 import { SubAgentTaskRegistry, SubAgentRunner, SpawnAgentInput } from "./agent/SubAgentTaskRegistry";
 import { getHQUnderAttackAlertFromGameState } from "./HQAlert";
 import { MatchJournal } from "./MatchJournal";
+import { MatchRuntime } from "./MatchRuntime";
+import { MatchRecorder } from "./MatchRecorder";
+import type { MatchDefinition } from "./MatchDefinition";
+import type { RegisteredMatchStatus } from "./MatchRegistry";
+import type { JournalLifecycleService } from "./JournalLifecycle";
+import type { Controller } from "./controller/Controller";
+import { createController } from "./controller/createController";
+import { ControllerDecisionScheduler } from "./controller/ControllerDecisionScheduler";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
@@ -44,7 +49,7 @@ const AI_RUNTIME_SYNC_PHASE_WARNING_MS = 150;
 const AI_RUNTIME_WARNING_THROTTLE_MS = 2000;
 const MAX_TERMINAL_EVENTS = 500;
 
-type RuntimeMap = Record<PlayerId, AgentRuntime>;
+type ControllerMap = Record<PlayerId, Controller>;
 type BridgeMap = Record<PlayerId, GameAgentBridge>;
 
 export interface AITerminalFeed {
@@ -60,6 +65,8 @@ export interface GameOrchestratorRuntimeOptions {
   aiIntervalTicksByPlayer?: Partial<Record<"player_1" | "player_2", number>>;
   recordDir?: string;
   transcriptDir?: string;
+  matchDefinition?: MatchDefinition;
+  journalLifecycle?: JournalLifecycleService;
 }
 
 export type GameOrchestratorConfig = MatchLLMConfig & {
@@ -68,9 +75,10 @@ export type GameOrchestratorConfig = MatchLLMConfig & {
 
 export class GameOrchestrator {
   private game: Game;
-  private llm1: LLMProvider;
-  private llm2: LLMProvider;
-  private runtimeByPlayer: RuntimeMap;
+  private readonly matchRuntime: MatchRuntime;
+  private controllerByPlayer: ControllerMap;
+  private readonly systemPromptByPlayer: Record<PlayerId, string>;
+  private readonly decisionScheduler: ControllerDecisionScheduler;
   private bridgeByPlayer: BridgeMap;
   private lastAIDispatchTick = { player_1: -100, player_2: -100 };
   private aiInterval = 5;
@@ -78,7 +86,6 @@ export class GameOrchestrator {
   private isRunningAI = { player_1: false, player_2: false };
   private activeRunControllers: Partial<Record<PlayerId, AbortController>> = {};
   private warmupController: AbortController | null = null;
-  private aiDirty = { player_1: true, player_2: true };
   private lastObservedTick = -1;
   private isPolling = false;
   private isPreparing = false;
@@ -86,11 +93,9 @@ export class GameOrchestrator {
   private runSession = 0;
   private startedAt = new Date().toISOString();
   private journal: MatchJournal;
+  private readonly recorder: MatchRecorder;
   private readonly transcriptEnabled: boolean;
   private readonly transcriptFilePath: string | null;
-  private readonly recordDir: string;
-  private lastSavedRecordSignature: string | null = null;
-  private lastSavedRecordPath: string | null = null;
   private transcriptWriteChain = Promise.resolve();
   private transcriptSequence = 0;
   private aiTerminalSessionId = `terminal-${this.startedAt.replace(/[:.]/g, "-")}`;
@@ -102,9 +107,15 @@ export class GameOrchestrator {
   private lastAIRuntimeWarningAtMs: Partial<Record<PlayerId, number>> = {};
 
   constructor(config: GameOrchestratorConfig) {
-    this.recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
-    this.journal = new MatchJournal(this.recordDir, this.aiTerminalSessionId);
-    this.game = new Game();
+    const recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
+    this.matchRuntime = new MatchRuntime({
+      definition: config.runtime?.matchDefinition,
+      recordDir,
+      journalLifecycle: config.runtime?.journalLifecycle,
+    });
+    this.journal = this.matchRuntime.getJournal();
+    this.recorder = new MatchRecorder(this.matchRuntime);
+    this.game = this.matchRuntime.getGame();
     this.aiInterval = config.runtime?.aiIntervalTicks ?? 5;
     this.aiIntervals = {
       player_1: config.runtime?.aiIntervalTicksByPlayer?.player_1 ?? this.aiInterval,
@@ -114,20 +125,44 @@ export class GameOrchestrator {
     this.transcriptFilePath = this.transcriptEnabled
       ? path.join(config.runtime?.transcriptDir ?? LLM_DEBUG_DIR, `match-${this.startedAt.replace(/[:.]/g, "-")}.log`)
       : null;
-    this.llm1 = createLLMProvider(config.player1);
-    this.llm2 = createLLMProvider(config.player2);
     this.bridgeByPlayer = {
-      player_1: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1),
-      player_2: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2),
+      player_1: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1, {
+        submitCommands: (commands, options) => this.submitCommands(PLAYER_IDS.PLAYER_1, commands, options),
+      }),
+      player_2: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2, {
+        submitCommands: (commands, options) => this.submitCommands(PLAYER_IDS.PLAYER_2, commands, options),
+      }),
     };
-    this.runtimeByPlayer = {
-      player_1: new AgentRuntime(this.llm1, this.bridgeByPlayer.player_1),
-      player_2: new AgentRuntime(this.llm2, this.bridgeByPlayer.player_2),
+    const definition = this.matchRuntime.getDefinition();
+    this.systemPromptByPlayer = {
+      player_1: createSystemPrompt(definition, PLAYER_IDS.PLAYER_1),
+      player_2: createSystemPrompt(definition, PLAYER_IDS.PLAYER_2),
     };
+    this.controllerByPlayer = {
+      player_1: createController(PLAYER_IDS.PLAYER_1, config.player1, this.bridgeByPlayer.player_1, this.systemPromptByPlayer.player_1),
+      player_2: createController(PLAYER_IDS.PLAYER_2, config.player2, this.bridgeByPlayer.player_2, this.systemPromptByPlayer.player_2),
+    };
+    this.decisionScheduler = new ControllerDecisionScheduler({
+      intervalTicksByPlayer: this.aiIntervals,
+    });
   }
 
   getGame(): Game {
     return this.game;
+  }
+
+  getMatchRuntime(): MatchRuntime {
+    return this.matchRuntime;
+  }
+
+  getMatchId(): string {
+    return this.matchRuntime.getMatchId();
+  }
+
+  getMatchStatus(): RegisteredMatchStatus {
+    if (this.isPreparing) return "preparing";
+    if (this.game.getWinner()) return "finished";
+    return this.game.isGameRunning() ? "running" : "stopped";
   }
 
   getTranscriptFilePath(): string | null {
@@ -164,22 +199,28 @@ export class GameOrchestrator {
     const timings: Record<string, number> = {};
     let requestTick: number | undefined;
     let runtimeResult: AgentRuntimeResult | undefined;
+    let runInput: AgentRunInput | undefined;
+    let turnId: string | undefined;
+    let controllerDescriptor: ReturnType<Controller["getDescriptor"]> | undefined;
+    const observedModelRequests: AgentModelRequestRecord[] = [];
+    const observedToolCalls: AgentToolCallRecord[] = [];
 
     try {
       const stateStartedAt = performance.now();
       const state = this.game.getState();
       timings.getStateMs = performance.now() - stateStartedAt;
       requestTick = state.tick;
-      this.aiDirty[playerId] = false;
       this.lastAIDispatchTick[playerId] = state.tick;
       const buildInputStartedAt = performance.now();
-      const runInput = this.buildRunInput(playerId, state);
+      runInput = this.buildRunInput(playerId, state);
       timings.buildInputMs = performance.now() - buildInputStartedAt;
-      const runtime = this.runtimeByPlayer[playerId];
+      const controllerRuntime = this.controllerByPlayer[playerId];
       const controller = new AbortController();
       this.activeRunControllers[playerId] = controller;
       const warmupRequestNumber = this.warmupRequestNumbers[playerId];
       const requestNumber = warmupRequestNumber ?? ++this.aiRequestCounts[playerId];
+      controllerDescriptor = controllerRuntime.getDescriptor();
+      turnId = `turn_${this.getMatchId()}_${playerId}_${requestNumber}`;
       const transcriptRunId = `tx_${++this.transcriptSequence}`;
       if (warmupRequestNumber === undefined) {
         this.appendTerminalRequestEvent(playerId, requestNumber, state.tick);
@@ -189,7 +230,11 @@ export class GameOrchestrator {
       timings.transcriptStartMs = performance.now() - transcriptStartStartedAt;
       let callbackSyncMs = 0;
       const runtimeStartedAt = performance.now();
-      const result = await runtime.run(runInput, {
+      const result = await controllerRuntime.run(runInput, {
+        traceContext: {
+          turnId,
+          controllerId: controllerDescriptor.controllerId,
+        },
         onAssistantMessage: (message) => {
           const callbackStartedAt = performance.now();
           this.appendTerminalAssistantEvent(playerId, requestNumber, state.tick, message);
@@ -197,10 +242,14 @@ export class GameOrchestrator {
           callbackSyncMs += performance.now() - callbackStartedAt;
         },
         onToolCall: (record) => {
+          observedToolCalls.push(structuredClone(record));
           const callbackStartedAt = performance.now();
           this.appendTerminalToolCallEvent(playerId, requestNumber, state.tick, record);
           void this.writeTranscriptToolCall(transcriptRunId, playerId, state.tick, record);
           callbackSyncMs += performance.now() - callbackStartedAt;
+        },
+        onModelRequest: (record) => {
+          observedModelRequests.push(structuredClone(record));
         },
         onPerformanceWarning: (warning) => {
           this.game.addLog(LOG_TYPES.PERF_WARNING, `Provider phase ${warning.phase} took ${Math.round(warning.elapsedMs ?? 0)}ms`, {
@@ -226,15 +275,11 @@ export class GameOrchestrator {
       await this.writeTranscriptRunComplete(transcriptRunId, playerId, state.tick, latestState.tick, result);
       timings.transcriptCompleteMs = performance.now() - transcriptCompleteStartedAt;
       this.maybeLogAIRuntimePerformance(playerId, state.tick, performance.now() - runStartedAt, timings, result);
-      if (!this.isPolling || sessionId !== this.runSession) {
-        return;
-      }
-
-      const assistantPreview = result.assistantMessages.at(-1) ?? `tool-calls=${result.toolCalls.length}`;
-      this.game.setAIOutput(playerId, assistantPreview);
-
       const createdAt = new Date().toISOString();
       this.journal.appendAITurn({
+        turnId,
+        controllerId: controllerDescriptor.controllerId,
+        decisionKind: "macro",
         playerId,
         requestTick: state.tick,
         executeTick: latestState.tick,
@@ -245,10 +290,20 @@ export class GameOrchestrator {
         commands: result.commands,
         stopReason: result.stopReason,
         metrics: result.metrics,
-        model: this.getProvider(playerId).getModel(),
-        baseURL: this.getProvider(playerId).getBaseURL(),
+        model: controllerDescriptor.model ?? "unknown",
+        baseURL: controllerDescriptor.baseURL,
         createdAt,
       });
+
+      // A turn that finishes because quiesce/stop aborted the controller is still
+      // part of the match history. Persist it before rejecting stale UI/runtime
+      // side effects from an earlier run session.
+      if (!this.isPolling || sessionId !== this.runSession) {
+        return;
+      }
+
+      const assistantPreview = result.assistantMessages.at(-1) ?? `tool-calls=${result.toolCalls.length}`;
+      this.game.setAIOutput(playerId, assistantPreview);
 
       if (latestState.winner) {
         return;
@@ -277,6 +332,31 @@ export class GameOrchestrator {
         runtimeResult
       );
       const errorMessage = error instanceof Error ? error.message : String(error);
+      if (requestTick !== undefined && runInput && turnId && controllerDescriptor) {
+        this.journal.appendAITurn({
+          turnId,
+          controllerId: controllerDescriptor.controllerId,
+          decisionKind: "macro",
+          playerId,
+          requestTick,
+          executeTick: this.game.getState().tick,
+          runInput,
+          assistantMessages: [],
+          toolCalls: observedToolCalls,
+          plans: this.bridgeByPlayer[playerId].takeRunPlans(),
+          commands: this.bridgeByPlayer[playerId].takeIssuedCommands(),
+          stopReason: "runtime_error",
+          metrics: {
+            modelRequests: observedModelRequests.length,
+            toolCalls: observedToolCalls.length,
+            stallDetected: false,
+            modelRequestRecords: observedModelRequests,
+          },
+          model: controllerDescriptor.model ?? "unknown",
+          baseURL: controllerDescriptor.baseURL,
+          createdAt: new Date().toISOString(),
+        });
+      }
       this.game.addLog(
         LOG_TYPES.AI_GENERATION_ERROR,
         errorMessage,
@@ -313,8 +393,8 @@ export class GameOrchestrator {
     const sessionId = this.runSession;
     this.isPolling = true;
     this.lastObservedTick = -1;
-    this.aiDirty = { player_1: true, player_2: true };
-    this.game.start();
+    this.decisionScheduler.reset(this.game.getState().tick);
+    this.matchRuntime.start();
 
     const poll = async () => {
       if (!this.isPolling) {
@@ -330,29 +410,33 @@ export class GameOrchestrator {
       if (state.tick !== this.lastObservedTick) {
         this.lastObservedTick = state.tick;
         for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
-          const planCommands = this.runtimeByPlayer[playerId].advancePlans();
-          for (const command of planCommands) {
-            this.game.queueCommand(command);
-          }
+          const planCommands = this.controllerByPlayer[playerId].advancePlans();
+          this.submitCommands(playerId, planCommands);
         }
-        this.aiDirty.player_1 = true;
-        this.aiDirty.player_2 = true;
       }
 
-      for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
-        if (
-          this.aiDirty[playerId] &&
-          !this.isRunningAI[playerId] &&
-          state.tick - this.lastAIDispatchTick[playerId] >= this.aiIntervals[playerId]
-        ) {
-          void this.runAI(playerId, this.runSession);
-        }
+      const scheduledPlayers = this.decisionScheduler.select(state.tick, this.isRunningAI);
+      for (const playerId of scheduledPlayers) {
+        void this.runAI(playerId, this.runSession);
       }
 
       this.pollTimeout = setTimeout(poll, 100);
     };
 
     await poll();
+  }
+
+  private submitCommands(
+    playerId: PlayerId,
+    commands: readonly Command[],
+    options: { clientRequestId?: string } = {},
+  ): { duplicate: boolean } {
+    if (commands.length === 0) return { duplicate: false };
+    const result = this.matchRuntime.submitCommands(playerId, commands, options);
+    if (!result.accepted) {
+      throw new Error(`CommandGateway rejected ${result.clientRequestId}: ${result.code} (${result.message})`);
+    }
+    return { duplicate: result.duplicate };
   }
 
   stop(): void {
@@ -367,7 +451,23 @@ export class GameOrchestrator {
       clearTimeout(this.pollTimeout);
       this.pollTimeout = null;
     }
-    this.game.stop();
+    this.matchRuntime.stop();
+  }
+
+  async quiesce(): Promise<void> {
+    this.stop();
+    for (let attempt = 0; attempt < 3_000; attempt++) {
+      if (
+        !this.isRunningAI.player_1
+        && !this.isRunningAI.player_2
+        && this.warmupController === null
+      ) {
+        await this.transcriptWriteChain;
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("Timed out waiting for agent/transcript work to quiesce before journal finalization.");
   }
 
   async prepare(warmup: Partial<Record<PlayerId, boolean>>): Promise<void> {
@@ -419,7 +519,7 @@ export class GameOrchestrator {
     const runInput = this.buildRunInput(playerId, this.game.getState());
     this.appendTerminalRequestEvent(playerId, requestNumber, 0);
     try {
-      const result = await this.runtimeByPlayer[playerId].warmup(
+      const result = await this.controllerByPlayer[playerId].warmup(
         runInput,
         {
           onAssistantMessage: (message) => {
@@ -441,88 +541,32 @@ export class GameOrchestrator {
   }
 
   async saveRecord(): Promise<string> {
-    const state = this.game.getState();
-    const recordStatus = this.game.getWinner() ? "finished" : this.game.isGameRunning() ? "running" : "stopped";
-    const recordSignature = JSON.stringify({
-      tick: state.tick,
-      winner: this.game.getWinner(),
-      status: recordStatus,
-      aiTurns: this.journal.aiTurnCount,
-      commandResults: this.game.getCommandResults().length,
-    });
-
-    if (this.lastSavedRecordSignature === recordSignature && this.lastSavedRecordPath) {
-      return this.lastSavedRecordPath;
+    if (this.game.getWinner() || !this.game.isGameRunning()) {
+      await this.quiesce();
     }
-
-    const initialState = this.game.getInitialSnapshot()?.state || state;
-    const metadata: GameRecord["metadata"] = {
+    return this.recorder.save({
       startedAt: this.startedAt,
-      savedAt: new Date().toISOString(),
-      endedAt: this.game.getWinner() || !this.game.isGameRunning() ? new Date().toISOString() : undefined,
-      status: recordStatus,
-      winner: this.game.getWinner(),
       aiIntervalTicks: this.aiInterval,
-      aiContextWindowTurns: this.journal.aiTurnCount,
-      map: {
-        width: MAP_WIDTH,
-        height: MAP_HEIGHT,
-      },
-      recordFormat: "compact-v2",
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: JSON.stringify(this.systemPromptByPlayer),
       players: [
         {
           playerId: PLAYER_IDS.PLAYER_1,
-          model: this.llm1.getModel(),
-          baseURL: this.llm1.getBaseURL(),
+          model: this.getControllerDescriptor(PLAYER_IDS.PLAYER_1).model ?? "unknown",
+          baseURL: this.getControllerDescriptor(PLAYER_IDS.PLAYER_1).baseURL,
         },
         {
           playerId: PLAYER_IDS.PLAYER_2,
-          model: this.llm2.getModel(),
-          baseURL: this.llm2.getBaseURL(),
+          model: this.getControllerDescriptor(PLAYER_IDS.PLAYER_2).model ?? "unknown",
+          baseURL: this.getControllerDescriptor(PLAYER_IDS.PLAYER_2).baseURL,
         },
       ],
-    };
-
-    await fs.mkdir(this.recordDir, { recursive: true });
-    const fileName = `match-${metadata.savedAt.replace(/[:.]/g, "-")}.json`;
-    const filePath = path.join(this.recordDir, fileName);
-    const temporaryPath = `${filePath}.tmp`;
-    const handle = await fs.open(temporaryPath, "w");
-    try {
-      await handle.write(`{"metadata":${JSON.stringify(metadata)},"initialState":${JSON.stringify(initialState)},"finalState":${JSON.stringify(state)},"tickDeltas":[`);
-      await this.writeJsonIterable(handle, this.game.iterateTickDeltas());
-      await handle.write(`],"commandResults":[`);
-      await this.writeJsonIterable(handle, this.game.iterateCommandResults());
-      await handle.write(`],"aiTurns":[`);
-      await this.writeJsonAsyncIterable(handle, this.journal.readAITurns());
-      await handle.write("]}");
-      await handle.sync();
-    } catch (error) {
-      await handle.close();
-      await fs.rm(temporaryPath, { force: true });
-      throw error;
-    }
-    await handle.close();
-    await fs.rename(temporaryPath, filePath);
-    this.lastSavedRecordSignature = recordSignature;
-    this.lastSavedRecordPath = filePath;
-    return filePath;
+    });
   }
 
-  private async writeJsonIterable(handle: FileHandle, values: Iterable<unknown>): Promise<void> {
-    let first = true;
-    for (const value of values) {
-      await handle.write(`${first ? "" : ","}${JSON.stringify(value)}`);
-      first = false;
-    }
-  }
-
-  private async writeJsonAsyncIterable(handle: FileHandle, values: AsyncIterable<unknown>): Promise<void> {
-    let first = true;
-    for await (const value of values) {
-      await handle.write(`${first ? "" : ","}${JSON.stringify(value)}`);
-      first = false;
+  async discardJournal(): Promise<void> {
+    const result = await this.journal.discard();
+    if (!result.cleaned) {
+      throw new Error(result.error ?? `Unable to discard journal ${result.directory}.`);
     }
   }
 
@@ -542,7 +586,7 @@ export class GameOrchestrator {
       `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemySoldiers=${enemy.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
       myHQ ? `myHQHp=${myHQ.hp}/${myHQ.maxHp}` : "myHQMissing=true",
       enemyHQ ? `enemyHQHp=${enemyHQ.hp}/${enemyHQ.maxHp}` : "enemyHQMissing=true",
-      `activePlans=${this.runtimeByPlayer[playerId].getActivePlans().length}`,
+      `activePlans=${this.controllerByPlayer[playerId].getActivePlans().length}`,
     ];
     const alert = getHQUnderAttackAlertFromGameState(state, playerId);
     if (alert) {
@@ -624,10 +668,16 @@ export class GameOrchestrator {
     args: unknown,
     context: SubAgentParentContext,
   ): { effect: "read"; result: unknown } {
-    const provider = this.getProvider(playerId);
+    const controller = this.controllerByPlayer[playerId];
+    if (!controller.runSubAgentTask) {
+      return {
+        effect: "read",
+        result: { ok: false, error: "spawn_agent_unavailable" },
+      };
+    }
     const input = args as SpawnAgentInput;
     const runner: SubAgentRunner = (taskId, spawnInput, signal) =>
-      provider.runSubAgentTask({
+      controller.runSubAgentTask!({
         taskId,
         description: spawnInput.description,
         objective: spawnInput.objective,
@@ -644,8 +694,8 @@ export class GameOrchestrator {
     };
   }
 
-  private getProvider(playerId: PlayerId): LLMProvider {
-    return playerId === PLAYER_IDS.PLAYER_1 ? this.llm1 : this.llm2;
+  private getControllerDescriptor(playerId: PlayerId) {
+    return this.controllerByPlayer[playerId].getDescriptor();
   }
 
   private formatErrorMessage(error: unknown): string {
@@ -829,10 +879,10 @@ export class GameOrchestrator {
     input: AgentRunInput
   ): string {
     return [
-      `[${new Date().toISOString()}] transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick} model=${this.getProvider(playerId).getModel()}`,
+      `[${new Date().toISOString()}] transcript=${transcriptRunId} player=${playerId} requestTick=${requestTick} model=${this.getControllerDescriptor(playerId).model ?? "unknown"}`,
       "--- request ---",
       "(system)",
-      SYSTEM_PROMPT,
+      this.systemPromptByPlayer[playerId],
       "",
       "(user)",
       JSON.stringify(input, null, 2),

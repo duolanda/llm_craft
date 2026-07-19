@@ -3,9 +3,12 @@ import {
   AgentPlanRecord,
   Building,
   Command,
+  CommandProvenance,
   getBuildingCost,
+  getDistanceToBuildingFootprint,
   getUnitCost,
   isBuildableBuildingType,
+  isBuildingType,
   isUnitType,
   OrchestratePlanInput,
   PlanCallToolName,
@@ -37,6 +40,14 @@ interface InternalPlan {
   lastAttempt?: AgentPlanAttemptRecord;
 }
 
+interface AgentPlanRuntimeState {
+  planCounter: number;
+  plans: Array<[
+    string,
+    Omit<InternalPlan, "issuedUnitIds"> & { issuedUnitIds: string[] },
+  ]>;
+}
+
 export interface PlanToolContext {
   args: Record<string, unknown>;
   unit?: Unit;
@@ -54,13 +65,41 @@ export interface PlanToolHandler {
 
 export type PlanToolHandlers = Partial<Record<PlanCallToolName, PlanToolHandler>>;
 
-export class AgentPlanRuntime {
+interface MissionAdvanceLimits {
+  maxPathCommands?: number;
+}
+
+export class MissionRuntime {
   private plans = new Map<string, InternalPlan>();
   private planCounter = 0;
 
   constructor(private readonly toolHandlers: PlanToolHandlers) {}
 
-  register(input: OrchestratePlanInput): AgentPlanRecord {
+  captureState(): AgentPlanRuntimeState {
+    return {
+      planCounter: this.planCounter,
+      plans: [...this.plans.entries()].map(([planId, plan]) => {
+        const { issuedUnitIds, ...serializable } = plan;
+        return [planId, {
+          ...structuredClone(serializable),
+          issuedUnitIds: [...issuedUnitIds],
+        }];
+      }),
+    };
+  }
+
+  restoreState(state: AgentPlanRuntimeState): void {
+    this.planCounter = state.planCounter;
+    this.plans = new Map(state.plans.map(([planId, plan]) => {
+      const { issuedUnitIds, ...serializable } = plan;
+      return [planId, {
+        ...structuredClone(serializable),
+        issuedUnitIds: new Set(issuedUnitIds),
+      }];
+    }));
+  }
+
+  register(input: OrchestratePlanInput, provenance?: CommandProvenance): AgentPlanRecord {
     const loop = input.loop ?? 1;
     if (loop === 0) {
       throw new Error("orchestrate_plan loop cannot be 0");
@@ -70,6 +109,9 @@ export class AgentPlanRuntime {
     const internal: InternalPlan = {
       record: {
         planId,
+        missionId: planId,
+        controllerId: provenance?.controllerId,
+        createdByTurnId: provenance?.turnId,
         unitIds: [...input.unitIds],
         scope: input.scope,
         loop,
@@ -109,9 +151,28 @@ export class AgentPlanRuntime {
     return [...this.plans.values()].map((plan) => this.summarizePlan(plan));
   }
 
-  advance(snapshot: PlanSnapshot): Command[] {
+  failMission(missionId: string, tick: number, detail: string): boolean {
+    const plan = [...this.plans.values()].find(
+      (candidate) =>
+        candidate.status === "active" &&
+        (candidate.record.missionId ?? candidate.record.planId) === missionId,
+    );
+    if (!plan) {
+      return false;
+    }
+    const step = plan.record.steps[plan.currentStepIndex];
+    if (step) {
+      this.recordAttempt(plan, tick, step, "failed", detail);
+    }
+    plan.waitingReason = undefined;
+    plan.status = "failed";
+    return true;
+  }
+
+  advance(snapshot: PlanSnapshot, limits: MissionAdvanceLimits = {}): Command[] {
     const commands: Command[] = [];
     let availableCredits = snapshot.myCredits;
+    let remainingPathCommands = limits.maxPathCommands ?? Number.POSITIVE_INFINITY;
     for (const plan of this.plans.values()) {
       if (plan.status !== "active") {
         continue;
@@ -119,16 +180,17 @@ export class AgentPlanRuntime {
       const planCommands = this.advancePlan(plan, {
         ...snapshot,
         myCredits: availableCredits,
-      });
+      }, remainingPathCommands);
       for (const command of planCommands) {
         availableCredits -= this.getCommandCost(command);
+        if (this.isPathCommand(command)) remainingPathCommands--;
         commands.push(command);
       }
     }
     return commands;
   }
 
-  private advancePlan(plan: InternalPlan, snapshot: PlanSnapshot): Command[] {
+  private advancePlan(plan: InternalPlan, snapshot: PlanSnapshot, maxPathCommands: number): Command[] {
     let guard = 0;
     while (guard < 8) {
       guard++;
@@ -154,8 +216,8 @@ export class AgentPlanRuntime {
 
       const scope = step.scope ?? plan.record.scope ?? handler.defaultScope;
       const produced = scope === "global"
-        ? this.advanceGlobalStep(plan, step, handler, snapshot)
-        : this.advancePerUnitStep(plan, step, handler, snapshot);
+        ? this.advanceGlobalStep(plan, step, handler, snapshot, maxPathCommands)
+        : this.advancePerUnitStep(plan, step, handler, snapshot, maxPathCommands);
 
       if (produced === "advance") {
         continue;
@@ -169,11 +231,13 @@ export class AgentPlanRuntime {
     plan: InternalPlan,
     step: PlanStep,
     handler: PlanToolHandler,
-    snapshot: PlanSnapshot
+    snapshot: PlanSnapshot,
+    maxPathCommands: number,
   ): Command[] | "advance" {
     this.ensureStepStarted(plan, snapshot.tick);
+    const unit = this.resolveGlobalStepUnit(plan, step, snapshot);
 
-    if (step.until && this.matchesCondition(step.until, step, undefined, snapshot)) {
+    if (step.until && this.matchesCondition(step.until, step, unit, snapshot)) {
       this.recordAttempt(plan, snapshot.tick, step, "advanced", `until matched: ${this.describeCondition(step.until)}`);
       this.advanceStep(plan);
       return "advance";
@@ -185,7 +249,7 @@ export class AgentPlanRuntime {
       return "advance";
     }
 
-    if (step.when && !this.matchesCondition(step.when, step, undefined, snapshot)) {
+    if (step.when && !this.matchesCondition(step.when, step, unit, snapshot)) {
       this.recordWaiting(plan, snapshot.tick, step, `waiting for when: ${this.describeCondition(step.when)}`);
       return [];
     }
@@ -203,6 +267,7 @@ export class AgentPlanRuntime {
 
     const context = {
       args: step.args,
+      unit,
       snapshot,
       planUnitIds: plan.record.unitIds,
     };
@@ -222,6 +287,10 @@ export class AgentPlanRuntime {
       plan.status = "failed";
       return [];
     }
+    if (this.isPathCommand(command) && maxPathCommands <= 0) {
+      this.recordWaiting(plan, snapshot.tick, step, "waiting for this actor's path-command share");
+      return [];
+    }
 
     const commandCost = this.getCommandCost(command);
     if (commandCost > snapshot.myCredits) {
@@ -234,14 +303,29 @@ export class AgentPlanRuntime {
     if (!step.until && !shouldRetry) {
       this.advanceStep(plan);
     }
-    return [command];
+    return [this.decorateMissionCommand(command, plan)];
+  }
+
+  private resolveGlobalStepUnit(
+    plan: InternalPlan,
+    step: PlanStep,
+    snapshot: PlanSnapshot,
+  ): Unit | undefined {
+    const requestedUnitId = step.args.unitId;
+    if (typeof requestedUnitId === "string" && requestedUnitId !== "$unitId") {
+      return snapshot.myUnits.find((unit) => unit.id === requestedUnitId && unit.exists);
+    }
+    return plan.record.unitIds
+      .map((unitId) => snapshot.myUnits.find((unit) => unit.id === unitId && unit.exists))
+      .find((unit): unit is Unit => Boolean(unit));
   }
 
   private advancePerUnitStep(
     plan: InternalPlan,
     step: PlanStep,
     handler: PlanToolHandler,
-    snapshot: PlanSnapshot
+    snapshot: PlanSnapshot,
+    maxPathCommands: number,
   ): Command[] | "advance" {
     this.ensureStepStarted(plan, snapshot.tick);
 
@@ -297,6 +381,13 @@ export class AgentPlanRuntime {
         waitingReason ??= "waiting for command prerequisites";
         continue;
       }
+      if (
+        this.isPathCommand(command)
+        && commands.filter((candidate) => this.isPathCommand(candidate)).length >= maxPathCommands
+      ) {
+        waitingReason ??= "waiting for this actor's path-command share";
+        continue;
+      }
       const cost = this.getCommandCost(command);
       if (cost > availableCredits) {
         waitingReason = `waiting for budget: need ${cost} credits, available ${availableCredits}`;
@@ -304,7 +395,7 @@ export class AgentPlanRuntime {
       }
       availableCredits -= cost;
       plan.issuedUnitIds.add(unit.id);
-      commands.push(command);
+      commands.push(this.decorateMissionCommand(command, plan));
     }
 
     if (commands.length > 0) {
@@ -319,6 +410,18 @@ export class AgentPlanRuntime {
     }
 
     return commands;
+  }
+
+  private decorateMissionCommand(command: Command, plan: InternalPlan): Command {
+    return {
+      ...command,
+      provenance: {
+        controllerId: plan.record.controllerId ?? command.provenance?.controllerId ?? command.playerId,
+        source: "mission",
+        turnId: plan.record.createdByTurnId,
+        missionId: plan.record.missionId ?? plan.record.planId,
+      },
+    };
   }
 
   private ensureStepStarted(plan: InternalPlan, tick: number): void {
@@ -374,7 +477,13 @@ export class AgentPlanRuntime {
           return false;
         }
         const target = this.findVisibleTarget(condition.targetId, snapshot);
-        return Boolean(target && Math.max(Math.abs(unit.x - target.x), Math.abs(unit.y - target.y)) <= unit.attackRange);
+        if (!target) {
+          return false;
+        }
+        const distance = isBuildingType(target.type)
+          ? getDistanceToBuildingFootprint(target.type, target.x, target.y, unit.x, unit.y)
+          : Math.max(Math.abs(unit.x - target.x), Math.abs(unit.y - target.y));
+        return distance <= unit.attackRange;
       }
       case "target_destroyed":
         return this.findVisibleTarget(condition.targetId, snapshot) === null;
@@ -438,7 +547,7 @@ export class AgentPlanRuntime {
       (building) =>
         building.relation === "enemy" &&
         building.type === "hq" &&
-        Math.max(Math.abs(unit.x - building.x), Math.abs(unit.y - building.y)) <= unit.attackRange
+        getDistanceToBuildingFootprint(building.type, building.x, building.y, unit.x, unit.y) <= unit.attackRange
     );
   }
 
@@ -452,7 +561,7 @@ export class AgentPlanRuntime {
       snapshot.visibleBuildings.some(
         (enemy) =>
           enemy.relation === "enemy" &&
-          Math.max(Math.abs(unit.x - enemy.x), Math.abs(unit.y - enemy.y)) <= unit.attackRange
+          getDistanceToBuildingFootprint(enemy.type, enemy.x, enemy.y, unit.x, unit.y) <= unit.attackRange
       )
     );
   }
@@ -465,6 +574,10 @@ export class AgentPlanRuntime {
       return getBuildingCost(command.buildingType);
     }
     return 0;
+  }
+
+  private isPathCommand(command: Command): boolean {
+    return command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
   }
 
   private recordWaiting(plan: InternalPlan, tick: number, step: PlanStep, detail: string): void {
@@ -508,3 +621,6 @@ export class AgentPlanRuntime {
     };
   }
 }
+
+/** @deprecated Use MissionRuntime. */
+export { MissionRuntime as AgentPlanRuntime };

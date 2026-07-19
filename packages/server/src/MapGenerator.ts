@@ -1,18 +1,24 @@
-import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
+import { TileType, TILE_TYPES } from "@llmcraft/shared";
+
+export interface MapGenerationDefinition {
+  width: number;
+  height: number;
+  resources: ReadonlyArray<{ x: number; y: number }>;
+}
 
 export class MapGenerator {
-  static generate(): TileType[][] {
+  static generate(definition: MapGenerationDefinition): TileType[][] {
     const tiles: TileType[][] = [];
 
     // Initialize empty map
-    for (let y = 0; y < MAP_HEIGHT; y++) {
+    for (let y = 0; y < definition.height; y++) {
       tiles[y] = [];
-      for (let x = 0; x < MAP_WIDTH; x++) {
+      for (let x = 0; x < definition.width; x++) {
         tiles[y][x] = TILE_TYPES.EMPTY;
       }
     }
 
-    for (const pos of DEFAULT_MAP_LAYOUT.resources) {
+    for (const pos of definition.resources) {
       tiles[pos.y][pos.x] = TILE_TYPES.RESOURCE;
     }
 
@@ -21,7 +27,7 @@ export class MapGenerator {
 
   static isWalkable(tiles: TileType[][], x: number, y: number): boolean {
     // Check bounds
-    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) {
+    if (x < 0 || y < 0 || y >= tiles.length || x >= (tiles[y]?.length ?? 0)) {
       return false;
     }
 

@@ -1,4 +1,4 @@
-import { BUILDING_TYPES, UNIT_TYPES, type PlayerId } from "@llmcraft/shared";
+import { BUILDING_TYPES, LOG_TYPES, UNIT_TYPES, type PlayerId } from "@llmcraft/shared";
 import { Game } from "../src/Game";
 import { executeAgentTool } from "../src/agent/AgentTools";
 import { GameAgentBridge } from "../src/agent/GameAgentBridge";
@@ -28,8 +28,9 @@ function countActiveFronts(): number {
   const activeBands = new Set<number>();
   for (const playerId of ["player_1", "player_2"] as const) {
     for (const unit of combatUnits(playerId)) {
-      if (unit.intent?.type !== "attack_move" && unit.intent?.type !== "attack") continue;
-      activeBands.add(unit.y < 34 ? 0 : unit.y > 62 ? 2 : 1);
+      if (unit.order?.type !== "attack_move" && unit.order?.type !== "attack") continue;
+      const targetY = unit.order.targetY ?? unit.y;
+      activeBands.add(targetY < 34 ? 0 : targetY > 62 ? 2 : 1);
     }
   }
   return activeBands.size;
@@ -79,7 +80,7 @@ function benchmarkScale(combinedUnits: number): { combinedUnits: number; maxTick
     benchmarkGame.tickUpdate();
     maxTickMs = Math.max(maxTickMs, performance.now() - startedAt);
     for (const unitId of [...playerOneIds, ...playerTwoIds]) {
-      if (benchmarkGame.getUnitManager().getUnit(unitId)?.intent?.type === "attack_move") orderedUnitIds.add(unitId);
+      if (benchmarkGame.getUnitManager().getUnit(unitId)?.order?.type === "attack_move") orderedUnitIds.add(unitId);
     }
   }
   benchmarkGame.stop();
@@ -113,6 +114,12 @@ game.stop();
 
 const state = game.getState();
 const scaleBenchmarks = [40, 80, 160].map(benchmarkScale);
+const commandFailureCounts = new Map<string, number>();
+for (const log of game.getCommandResults()) {
+  if (log.type !== LOG_TYPES.COMMAND_RESULT || log.data.result_code >= 0) continue;
+  const key = `${log.meta.owner}:${log.data.type}`;
+  commandFailureCounts.set(key, (commandFailureCounts.get(key) ?? 0) + 1);
+}
 const summary = {
   ticks: game.getTick(),
   winner: game.getWinner(),
@@ -124,11 +131,15 @@ const summary = {
     credits: player.resources.credits,
     combatUnits: player.units.filter((unit) => unit.type !== UNIT_TYPES.WORKER).length,
     workers: player.units.filter((unit) => unit.type === UNIT_TYPES.WORKER).length,
+    workerStates: player.units
+      .filter((unit) => unit.type === UNIT_TYPES.WORKER)
+      .map((unit) => ({ id: unit.id, x: unit.x, y: unit.y, state: unit.state, intent: unit.intent })),
     refineries: player.buildings.filter((building) => building.type === BUILDING_TYPES.REFINERY).length,
     barracks: player.buildings.filter((building) => building.type === BUILDING_TYPES.BARRACKS).length,
     warFactories: player.buildings.filter((building) => building.type === BUILDING_TYPES.WAR_FACTORY).length,
     peakInfrastructure: peakInfrastructure.get(player.id),
   })),
+  commandFailureCounts: Object.fromEntries([...commandFailureCounts.entries()].sort(([a], [b]) => a.localeCompare(b))),
   scaleBenchmarks,
 };
 

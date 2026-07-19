@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentRunInput, Command, DEFAULT_MAP_LAYOUT, MAP_WIDTH, TICK_INTERVAL_MS } from "@llmcraft/shared";
+import { projectTraceV3ToGameRecord } from "@llmcraft/trace";
 import { GameOrchestrator } from "../GameOrchestrator";
+import { readTraceRecordFile } from "../TraceFile";
 
 function createMatchConfig() {
   return {
@@ -66,18 +68,26 @@ describe("GameOrchestrator", () => {
       },
     });
 
-    expect((orchestrator as any).llm1.getModel()).toBe("model-one");
-    expect((orchestrator as any).llm2.getModel()).toBe("model-two");
-    expect((orchestrator as any).llm1.getBaseURL()).toBe("https://api.one.test/v1");
-    expect((orchestrator as any).llm2.getBaseURL()).toBe("https://api.two.test/v1");
+    expect((orchestrator as any).controllerByPlayer.player_1.getDescriptor()).toMatchObject({
+      kind: "llm",
+      playerId: "player_1",
+      model: "model-one",
+      baseURL: "https://api.one.test/v1",
+    });
+    expect((orchestrator as any).controllerByPlayer.player_2.getDescriptor()).toMatchObject({
+      kind: "llm",
+      playerId: "player_2",
+      model: "model-two",
+      baseURL: "https://api.two.test/v1",
+    });
   });
 
   it("does not start multiple polling loops when start is called twice", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");
     const runSpy = vi.fn(async (_input: AgentRunInput) => createRunResult());
-    (orchestrator as any).runtimeByPlayer.player_1.run = runSpy;
-    (orchestrator as any).runtimeByPlayer.player_2.run = runSpy;
+    (orchestrator as any).controllerByPlayer.player_1.run = runSpy;
+    (orchestrator as any).controllerByPlayer.player_2.run = runSpy;
 
     await orchestrator.start();
     await orchestrator.start();
@@ -141,9 +151,9 @@ describe("GameOrchestrator", () => {
       };
     });
     const runSpy = vi.fn(async (_input: AgentRunInput) => createRunResult());
-    (orchestrator as any).runtimeByPlayer.player_1.warmup = warmupSpy;
-    (orchestrator as any).runtimeByPlayer.player_1.run = runSpy;
-    (orchestrator as any).runtimeByPlayer.player_2.run = runSpy;
+    (orchestrator as any).controllerByPlayer.player_1.warmup = warmupSpy;
+    (orchestrator as any).controllerByPlayer.player_1.run = runSpy;
+    (orchestrator as any).controllerByPlayer.player_2.run = runSpy;
 
     await orchestrator.prepare({ player_1: true });
     await orchestrator.start();
@@ -168,8 +178,8 @@ describe("GameOrchestrator", () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const run1 = vi.fn(async (_input: AgentRunInput) => createRunResult());
     const run2 = vi.fn(async (_input: AgentRunInput) => createRunResult());
-    (orchestrator as any).runtimeByPlayer.player_1.run = run1;
-    (orchestrator as any).runtimeByPlayer.player_2.run = run2;
+    (orchestrator as any).controllerByPlayer.player_1.run = run1;
+    (orchestrator as any).controllerByPlayer.player_2.run = run2;
 
     await orchestrator.start();
     await vi.advanceTimersByTimeAsync(150);
@@ -185,15 +195,21 @@ describe("GameOrchestrator", () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const game = orchestrator.getGame();
 
+    const runtime = orchestrator.getMatchRuntime();
     game.start();
     for (let i = 0; i < 1001; i++) {
-      game.tickUpdate();
+      runtime.advanceOneTick();
     }
-    game.stop();
+    runtime.stop();
+
+    expect(game.getTickDeltas()).toHaveLength(0);
 
     const recordPath = await orchestrator.saveRecord();
-    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+    const trace = await readTraceRecordFile(recordPath);
+    const record = projectTraceV3ToGameRecord(trace);
 
+    expect(trace.manifest.capabilities.replay).toBe("complete");
+    expect(trace.stateHashes).toHaveLength(1002);
     expect(record.initialState.tick).toBe(0);
     expect(record.finalState.tick).toBe(1001);
     expect(record.tickDeltas.length).toBe(1001);
@@ -211,16 +227,21 @@ describe("GameOrchestrator", () => {
     });
     const game = orchestrator.getGame();
 
+    const runtime = orchestrator.getMatchRuntime();
     game.start();
     for (let i = 0; i < 5; i++) {
-      game.tickUpdate();
+      runtime.advanceOneTick();
     }
-    game.stop();
+    runtime.stop();
 
-    const firstPath = await orchestrator.saveRecord();
+    const [firstPath, concurrentPath] = await Promise.all([
+      orchestrator.saveRecord(),
+      orchestrator.saveRecord(),
+    ]);
     const secondPath = await orchestrator.saveRecord();
     const files = await fs.readdir(recordDir);
 
+    expect(concurrentPath).toBe(firstPath);
     expect(secondPath).toBe(firstPath);
     expect(files).toHaveLength(1);
 
@@ -234,7 +255,7 @@ describe("GameOrchestrator", () => {
       runtime: { recordDir },
     });
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (input: AgentRunInput) =>
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(async (input: AgentRunInput) =>
       createRunResult({
         commands: [
           {
@@ -251,7 +272,7 @@ describe("GameOrchestrator", () => {
     await orchestrator.runAI("player_1");
 
     const recordPath = await orchestrator.saveRecord();
-    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+    const record = await readTraceRecordFile(recordPath);
     const turns = record.aiTurns;
     expect(turns).toHaveLength(1);
     expect(turns[0].runInput.tick).toBe(0);
@@ -266,7 +287,7 @@ describe("GameOrchestrator", () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const queueSpy = vi.spyOn(orchestrator.getGame(), "queueCommand");
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput) =>
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput) =>
       createRunResult({
         commands: [
           {
@@ -296,13 +317,38 @@ describe("GameOrchestrator", () => {
     });
     const run1 = vi.fn(async (_input: AgentRunInput) => createRunResult());
     const run2 = vi.fn(async (_input: AgentRunInput) => createRunResult());
-    (orchestrator as any).runtimeByPlayer.player_1.run = run1;
-    (orchestrator as any).runtimeByPlayer.player_2.run = run2;
+    (orchestrator as any).controllerByPlayer.player_1.run = run1;
+    (orchestrator as any).controllerByPlayer.player_2.run = run2;
 
     await orchestrator.start();
     await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 6 + 200);
 
     expect(run1.mock.calls.length).toBeGreaterThan(run2.mock.calls.length);
+    orchestrator.stop();
+  });
+
+  it("keeps scheduling an idle LLM while its opponent remains in a long tool loop", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    let resolveSlowRun: ((value: ReturnType<typeof createRunResult>) => void) | undefined;
+    const slowResult = new Promise<ReturnType<typeof createRunResult>>((resolve) => {
+      resolveSlowRun = resolve;
+    });
+    const fastRun = vi.fn(async () => createRunResult());
+    const slowRun = vi.fn(async () => slowResult);
+    (orchestrator as any).controllerByPlayer.player_1.run = fastRun;
+    (orchestrator as any).controllerByPlayer.player_2.run = slowRun;
+
+    await orchestrator.start();
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 8);
+
+    expect(fastRun).toHaveBeenCalledTimes(2);
+    expect(slowRun).toHaveBeenCalledTimes(1);
+
+    resolveSlowRun?.(createRunResult());
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(fastRun).toHaveBeenCalledTimes(2);
+    expect(slowRun).toHaveBeenCalledTimes(2);
     orchestrator.stop();
   });
 
@@ -320,14 +366,18 @@ describe("GameOrchestrator", () => {
   });
 
   it("aborts the active run when stop is called", async () => {
-    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-record-"));
+    const orchestrator = new GameOrchestrator({
+      ...createMatchConfig(),
+      runtime: { recordDir },
+    });
     (orchestrator as any).isPolling = true;
     let capturedSignal: AbortSignal | undefined;
     let resolveSignalReady: (() => void) | null = null;
     const signalReady = new Promise<void>((resolve) => {
       resolveSignalReady = resolve;
     });
-    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(
       async (_input: AgentRunInput, _callbacks?: unknown, signal?: AbortSignal) => {
         capturedSignal = signal;
         resolveSignalReady?.();
@@ -344,6 +394,14 @@ describe("GameOrchestrator", () => {
     await runPromise;
 
     expect(capturedSignal?.aborted).toBe(true);
+    const recordPath = await orchestrator.saveRecord();
+    const trace = await readTraceRecordFile(recordPath);
+    expect(trace.aiTurns).toHaveLength(1);
+    expect(trace.aiTurns[0]).toMatchObject({
+      playerId: "player_1",
+      stopReason: "aborted",
+    });
+    await fs.rm(recordDir, { recursive: true, force: true });
   });
 
   it("writes a readable transcript file when per-match debug recording is enabled", async () => {
@@ -355,7 +413,7 @@ describe("GameOrchestrator", () => {
     });
 
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput, callbacks?: {
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(async (_input: AgentRunInput, callbacks?: {
       onAssistantMessage?: (message: string) => void;
       onToolCall?: (record: { toolCallId: string; toolName: string; args: unknown; result: unknown; isError: boolean }) => void;
     }) => {
@@ -406,7 +464,7 @@ describe("GameOrchestrator", () => {
     });
 
     (orchestrator as any).isPolling = true;
-    (orchestrator as any).runtimeByPlayer.player_1.run = vi.fn(
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(
       async (_input: AgentRunInput, callbacks?: {
         onAssistantMessage?: (message: string) => void;
         onToolCall?: (record: { toolCallId: string; toolName: string; args: unknown; result: unknown; isError: boolean }) => void;

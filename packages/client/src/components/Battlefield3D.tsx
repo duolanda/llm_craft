@@ -12,10 +12,13 @@ import {
   Tile,
   Unit,
 } from "@llmcraft/shared";
+import type { SimulationFrameBuffer } from "@llmcraft/trace";
 
 interface Battlefield3DProps {
   state: GameState | null;
   projectileFxMode?: ProjectileFxMode;
+  frameBuffer?: SimulationFrameBuffer;
+  simulationTimeMs?: number;
 }
 
 interface MapDimensions {
@@ -34,6 +37,7 @@ interface CameraFocus {
 }
 
 interface ModelTransform {
+  entityId?: string;
   position: Vec3;
   rotation: Vec3;
   scale: number;
@@ -192,9 +196,6 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const STRUCTURE_VISUAL_SCALE = 1.16;
-const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
-const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
-const UNIT_INTERPOLATION_DEADZONE = 0.075;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -486,10 +487,16 @@ function InstancedPart({
   part,
   transforms,
   castShadow,
+  frameBuffer,
+  dimensions,
+  simulationTimeMs,
 }: {
   part: InstancedModelPart;
   transforms: ModelTransform[];
   castShadow: boolean;
+  frameBuffer?: SimulationFrameBuffer;
+  dimensions?: MapDimensions;
+  simulationTimeMs?: number;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const lastMotionUpdate = useRef(0);
@@ -538,10 +545,16 @@ function InstancedPart({
       const totalRecoilPulse = recoilPulse + timedRecoilPulse;
       const sway = Math.sin(elapsed * swayFrequency + phase) * (transform.swayAmplitude ?? 0);
       const heading = transform.rotation[1];
+      const sampled = transform.entityId && frameBuffer && dimensions
+        ? frameBuffer.sampleEntityPosition(transform.entityId, simulationTimeMs ?? frameBuffer.getRenderSimulationTime())
+        : null;
+      const sampledPosition = sampled
+        ? toWorldPosition(sampled.x, sampled.y, dimensions!, transform.position[1])
+        : transform.position;
       scratch.position.set(
-        transform.position[0] - Math.sin(heading) * totalRecoilPulse,
-        transform.position[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
-        transform.position[2] - Math.cos(heading) * totalRecoilPulse,
+        sampledPosition[0] - Math.sin(heading) * totalRecoilPulse,
+        sampledPosition[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
+        sampledPosition[2] - Math.cos(heading) * totalRecoilPulse,
       );
       scratch.rotation.set(transform.rotation[0], heading, transform.rotation[2] + sway);
       scratch.quaternion.setFromEuler(scratch.rotation);
@@ -559,7 +572,7 @@ function InstancedPart({
   }, [part.localMatrix, transforms]);
 
   useFrame(({ clock }) => {
-    if (!hasMotion) {
+    if (!hasMotion && !frameBuffer) {
       return;
     }
     const elapsed = clock.getElapsedTime();
@@ -586,11 +599,17 @@ function InstancedModelBatch({
   palette,
   transforms,
   castShadow = false,
+  frameBuffer,
+  dimensions,
+  simulationTimeMs,
 }: {
   url: string;
   palette: TeamPalette;
   transforms: ModelTransform[];
   castShadow?: boolean;
+  frameBuffer?: SimulationFrameBuffer;
+  dimensions?: MapDimensions;
+  simulationTimeMs?: number;
 }) {
   const { scene } = useGLTF(url) as { scene: THREE.Object3D };
   const parts = useMemo(() => {
@@ -623,6 +642,9 @@ function InstancedModelBatch({
           part={part}
           transforms={transforms}
           castShadow={castShadow}
+          frameBuffer={frameBuffer}
+          dimensions={dimensions}
+          simulationTimeMs={simulationTimeMs}
         />
       ))}
     </>
@@ -866,11 +888,15 @@ function UnitBatches({
   buildings,
   dimensions,
   tick,
+  frameBuffer,
+  simulationTimeMs,
 }: {
   units: Unit[];
   buildings: Building[];
   dimensions: MapDimensions;
   tick: number;
+  frameBuffer?: SimulationFrameBuffer;
+  simulationTimeMs?: number;
 }) {
   const objectPositions = useMemo(() => new Map(
     [...units, ...buildings].map((object) => [object.id, { x: object.x, y: object.y }]),
@@ -885,6 +911,7 @@ function UnitBatches({
       const motionProfile = getUnitMotionProfile(unit, moving, firing);
       const previewFxTimedRecoil = getPreviewFxTimedRecoil(unit.id);
       const baseTransform: ModelTransform = {
+        entityId: unit.id,
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
         scale: getUnitVisualScale(unit),
@@ -932,6 +959,9 @@ function UnitBatches({
           palette={batch.palette}
           transforms={batch.transforms}
           castShadow={units.length <= 60}
+          frameBuffer={frameBuffer}
+          dimensions={dimensions}
+          simulationTimeMs={simulationTimeMs}
         />
       ))}
       {units
@@ -1559,103 +1589,16 @@ function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDime
   );
 }
 
-function useInterpolatedUnits(units: Unit[]): Unit[] {
-  const sourceUnits = useRef(units);
-  const visualPositions = useRef(new Map<string, { x: number; y: number }>());
-  const transitions = useRef(new Map<string, { fromX: number; fromY: number; toX: number; toY: number; startedAtMs: number }>());
-  const [displayUnits, setDisplayUnits] = useState(units);
-
-  useEffect(() => {
-    const now = performance.now();
-    sourceUnits.current = units;
-    const liveIds = new Set(units.map((unit) => unit.id));
-    for (const [unitId] of visualPositions.current) {
-      if (!liveIds.has(unitId)) {
-        visualPositions.current.delete(unitId);
-        transitions.current.delete(unitId);
-      }
-    }
-
-    for (const unit of units) {
-      const existing = visualPositions.current.get(unit.id);
-      if (!existing) {
-        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y });
-        transitions.current.set(unit.id, {
-          fromX: unit.x,
-          fromY: unit.y,
-          toX: unit.x,
-          toY: unit.y,
-          startedAtMs: now,
-        });
-        continue;
-      }
-      const jumpDistance = Math.max(Math.abs(existing.x - unit.x), Math.abs(existing.y - unit.y));
-      if (jumpDistance > UNIT_INTERPOLATION_SNAP_DISTANCE) {
-        existing.x = unit.x;
-        existing.y = unit.y;
-      }
-      if (jumpDistance < UNIT_INTERPOLATION_DEADZONE && unit.state !== "moving") {
-        continue;
-      }
-      transitions.current.set(unit.id, {
-        fromX: existing.x,
-        fromY: existing.y,
-        toX: unit.x,
-        toY: unit.y,
-        startedAtMs: now,
-      });
-    }
-
-    setDisplayUnits(units.map((unit) => {
-      const visual = visualPositions.current.get(unit.id);
-      return visual ? { ...unit, x: visual.x, y: visual.y } : unit;
-    }));
-  }, [units]);
-
-  useFrame(() => {
-    const now = performance.now();
-    let changed = false;
-    for (const [unitId, transition] of transitions.current) {
-      const visual = visualPositions.current.get(unitId);
-      if (!visual) {
-        transitions.current.delete(unitId);
-        continue;
-      }
-
-      const progress = Math.min(1, Math.max(0, (now - transition.startedAtMs) / UNIT_INTERPOLATION_DURATION_MS));
-      const easedProgress = progress * progress * (3 - 2 * progress);
-      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, easedProgress);
-      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, easedProgress);
-      if (Math.abs(nextX - visual.x) > 0.001 || Math.abs(nextY - visual.y) > 0.001) {
-        changed = true;
-      }
-      visual.x = progress >= 1 ? transition.toX : nextX;
-      visual.y = progress >= 1 ? transition.toY : nextY;
-
-      if (progress >= 1) {
-        transitions.current.delete(unitId);
-      }
-    }
-
-    if (!changed) {
-      return;
-    }
-
-    setDisplayUnits(sourceUnits.current.map((unit) => {
-      const visual = visualPositions.current.get(unit.id);
-      return visual ? { ...unit, x: visual.x, y: visual.y } : unit;
-    }));
-  });
-
-  return displayUnits;
-}
-
 const BattlefieldScene = memo(function BattlefieldScene({
   state,
   projectileFxMode = "game",
+  frameBuffer,
+  simulationTimeMs,
 }: {
   state: GameState;
   projectileFxMode?: ProjectileFxMode;
+  frameBuffer?: SimulationFrameBuffer;
+  simulationTimeMs?: number;
 }) {
   const dimensions = useMemo(() => getMapDimensions(state), [state]);
   const terrainWidth = dimensions.width * CELL_SIZE;
@@ -1686,7 +1629,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
       buildings: state.players.flatMap((player) => player.buildings).filter((building) => building.exists),
     };
   }, [state]);
-  const displayUnits = useInterpolatedUnits(units);
+  const displayUnits = units;
   const resourceTransforms = useMemo(
     () => resourceTiles.flatMap((tile) => getResourceClusterTransforms(tile, dimensions)),
     [dimensions, resourceTiles],
@@ -1734,7 +1677,14 @@ const BattlefieldScene = memo(function BattlefieldScene({
         {buildings.map((building) => (
           <BuildingModel key={building.id} building={building} dimensions={dimensions} />
         ))}
-        <UnitBatches units={displayUnits} buildings={buildings} dimensions={dimensions} tick={state.tick} />
+        <UnitBatches
+          units={displayUnits}
+          buildings={buildings}
+          dimensions={dimensions}
+          tick={state.tick}
+          frameBuffer={frameBuffer}
+          simulationTimeMs={simulationTimeMs}
+        />
         <UnitReadabilityLayer units={displayUnits} dimensions={dimensions} />
         {projectileFxMode === "game" ? (
           <CombatEffects
@@ -1764,7 +1714,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
   );
 });
 
-export function Battlefield3D({ state, projectileFxMode = "game" }: Battlefield3DProps) {
+export function Battlefield3D({ state, projectileFxMode = "game", frameBuffer, simulationTimeMs }: Battlefield3DProps) {
   const dimensions = state ? getMapDimensions(state) : { width: 96, height: 64 };
   const cameraFocus = state
     ? getInitialCameraFocus(state, dimensions)
@@ -1791,7 +1741,12 @@ export function Battlefield3D({ state, projectileFxMode = "game" }: Battlefield3
           gl.toneMappingExposure = 1.08;
         }}
       >
-        <BattlefieldScene state={state} projectileFxMode={projectileFxMode} />
+        <BattlefieldScene
+          state={state}
+          projectileFxMode={projectileFxMode}
+          frameBuffer={frameBuffer}
+          simulationTimeMs={simulationTimeMs}
+        />
       </Canvas>
     </div>
   );

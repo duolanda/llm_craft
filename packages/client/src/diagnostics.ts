@@ -157,7 +157,7 @@ export function buildMatchDiagnosticReport(record: GameRecord, recordName: strin
     status: record.metadata?.status ?? "unknown",
     winner: record.metadata?.winner ?? record.finalState?.winner ?? null,
     durationTicks: record.finalState?.tick ?? 0,
-    durationSeconds: ((record.finalState?.tick ?? 0) * 500) / 1000,
+    durationSeconds: ((record.finalState?.tick ?? 0) * (record.metadata.tickIntervalMs ?? 500)) / 1000,
     mapWidth: record.metadata?.map?.width ?? record.initialState.tiles[0]?.length ?? 0,
     mapHeight: record.metadata?.map?.height ?? record.initialState.tiles.length ?? 0,
     players,

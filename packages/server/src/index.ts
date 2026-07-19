@@ -1,8 +1,10 @@
 import * as dotenv from "dotenv";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   AITerminalEvent,
@@ -22,19 +24,33 @@ import {
   LOG_TYPES,
   ServerPrepareStatusMessage,
   ServerMessage,
+  StateProjectionFrameV1,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
   UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
+import { applyStateProjectionDelta, createStateProjectionDelta } from "@llmcraft/trace";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
 import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager } from "./ControlHandler";
-import { ControlPlaneMatch } from "./control/ControlPlaneMatch";
 import { handleControlHttpRequest } from "./control/ControlRoutes";
+import {
+  MatchRegistry,
+  type MatchRegistration,
+  type RegisteredMatchHandle,
+  type RegisteredMatchStatus,
+} from "./MatchRegistry";
+import { JournalLifecycleService } from "./JournalLifecycle";
+import { ArtifactRetentionService, type ArtifactGroup } from "./ArtifactRetention";
+import { isSupportedRecordFileName, readRecordJsonText, traceFileEncoding } from "./TraceFile";
+import {
+  MAX_WEBSOCKET_BUFFERED_BYTES,
+  shouldDeferLatestProjection,
+} from "./WebSocketBackpressure";
 
 dotenv.config();
 
@@ -43,13 +59,18 @@ const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
-const PORT = parseInt(process.env.PORT || "3001", 10);
+const PORT = parseInt(process.env.PORT || "3101", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
+const BENCHMARK_RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-records");
+const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
+const BENCHMARK_LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-llm-debug");
+const ORPHAN_JOURNALS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "orphan-journals");
+const RETENTION_PINS_FILE = path.resolve(SERVER_PACKAGE_DIR, "data", "retention-pins.json");
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const BROADCAST_TOTAL_WARNING_MS = 250;
 const BROADCAST_PHASE_WARNING_MS = 150;
-const BROADCAST_BUFFERED_WARNING_BYTES = 1_000_000;
+const BROADCAST_BUFFERED_WARNING_BYTES = MAX_WEBSOCKET_BUFFERED_BYTES;
 const BROADCAST_PERF_WARNING_THROTTLE_MS = 2000;
 
 export function getDefaultPresetPaths() {
@@ -62,10 +83,14 @@ const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
 const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
 
 interface OrchestratorLike {
+  getMatchId?(): string;
+  getMatchStatus?(): RegisteredMatchStatus;
   prepare?(warmup: MatchWarmupOptions): Promise<void>;
   start(): Promise<void>;
   stop(): void;
+  quiesce?: () => Promise<void>;
   saveRecord(): Promise<string>;
+  discardJournal?: () => Promise<void>;
   getAITerminalFeed?: (sinceSequence?: number) => {
     sessionId: string;
     events: AITerminalEvent[];
@@ -82,6 +107,7 @@ interface OrchestratorLike {
     getTick?: () => number;
     getAIOutputs?: () => Record<string, string>;
     getLatestSnapshot?: () => GameSnapshot | null;
+    getDefinition?: () => { tickIntervalMs: number };
     addLog?: (
       type: typeof LOG_TYPES.PERF_WARNING,
       message: string,
@@ -90,14 +116,21 @@ interface OrchestratorLike {
   };
 }
 
+interface BenchmarkCoordinatorLike {
+  start(): Promise<void>;
+  stop(): void;
+}
+
 export interface ServerState {
   presetStore: PresetStore;
-  orchestrator: OrchestratorLike | null;
-  controlMatch: ControlPlaneMatch | null;
+  matchRegistry: MatchRegistry;
+  journalLifecycle: JournalLifecycleService;
+  artifactRetention: ArtifactRetentionService;
   pendingMatch: {
     signature: string;
-    orchestrator: OrchestratorLike;
+    matchId: string;
   } | null;
+  activeBenchmark: BenchmarkCoordinatorLike | null;
   controlSessions: ControlSessionManager;
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
@@ -112,7 +145,7 @@ export interface ServerState {
       debug?: ClientStartBenchmarkMessage["debug"];
     },
     ws: Pick<WebSocket, "send"> | null
-  ) => OrchestratorLike;
+  ) => BenchmarkCoordinatorLike;
   liveEnabled: boolean | null;
 }
 
@@ -129,30 +162,169 @@ export function createPresetStore(options?: {
   });
 }
 
+const DEFAULT_RETENTION: Record<ArtifactGroup, { maxAgeDays: number; maxEntries: number; maxMiB: number }> = {
+  records: { maxAgeDays: 90, maxEntries: 500, maxMiB: 10_240 },
+  "benchmark-records": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 10_240 },
+  "llm-debug": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 5_120 },
+  "benchmark-llm-debug": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 5_120 },
+  "orphan-journals": { maxAgeDays: 14, maxEntries: 200, maxMiB: 2_048 },
+};
+
+export function createArtifactRetentionService(
+  env: NodeJS.ProcessEnv = process.env,
+): ArtifactRetentionService {
+  const protectedNames = loadRetentionPins();
+  const directories: Record<ArtifactGroup, string> = {
+    records: RECORDS_DIR,
+    "benchmark-records": BENCHMARK_RECORDS_DIR,
+    "llm-debug": LLM_DEBUG_DIR,
+    "benchmark-llm-debug": BENCHMARK_LLM_DEBUG_DIR,
+    "orphan-journals": ORPHAN_JOURNALS_DIR,
+  };
+  return new ArtifactRetentionService({
+    sources: (Object.keys(directories) as ArtifactGroup[]).map((group) => {
+      const prefix = `LLMCRAFT_RETENTION_${group.replace(/-/g, "_").toUpperCase()}`;
+      const defaults = DEFAULT_RETENTION[group];
+      const maxAgeDays = parseRetentionNumber(env[`${prefix}_MAX_AGE_DAYS`], defaults.maxAgeDays);
+      const maxEntries = parseRetentionNumber(env[`${prefix}_MAX_ENTRIES`], defaults.maxEntries);
+      const maxMiB = parseRetentionNumber(env[`${prefix}_MAX_MIB`], defaults.maxMiB);
+      return {
+        group,
+        directory: directories[group],
+        protectedNames: protectedNames[group] ?? [],
+        limit: {
+          maxAgeMs: maxAgeDays * 24 * 60 * 60 * 1_000,
+          maxEntries,
+          maxBytes: maxMiB * 1024 * 1024,
+        },
+      };
+    }),
+  });
+}
+
+function loadRetentionPins(): Partial<Record<ArtifactGroup, string[]>> {
+  try {
+    const parsed = JSON.parse(fsSync.readFileSync(RETENTION_PINS_FILE, "utf8")) as {
+      version?: unknown;
+      groups?: Partial<Record<ArtifactGroup, unknown>>;
+    };
+    if (parsed.version !== 1 || !parsed.groups) return {};
+    return Object.fromEntries(
+      Object.entries(parsed.groups).map(([group, names]) => [
+        group,
+        Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [],
+      ]),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("无法读取 retention pins:", error);
+    }
+    return {};
+  }
+}
+
+function parseRetentionNumber(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid retention value: ${raw}`);
+  }
+  return parsed;
+}
+
 export function createServerState(
   presetStore: PresetStore,
-  createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike = (config) => new GameOrchestrator(config),
-  createBenchmarkOrchestrator: ServerState["createBenchmarkOrchestrator"] = (config, ws) =>
-    new BenchmarkOrchestrator(config, ws)
+  createOrchestrator?: (config: GameOrchestratorConfig) => OrchestratorLike,
+  createBenchmarkOrchestrator?: ServerState["createBenchmarkOrchestrator"],
 ): ServerState {
+  const matchRegistry = new MatchRegistry();
+  const journalLifecycle = new JournalLifecycleService({
+    journalRootDir: process.env.LLMCRAFT_JOURNAL_ROOT || undefined,
+    recoveryDir: process.env.LLMCRAFT_JOURNAL_RECOVERY_DIR || ORPHAN_JOURNALS_DIR,
+  });
+  const artifactRetention = createArtifactRetentionService();
+  const orchestratorFactory = createOrchestrator ?? ((config: GameOrchestratorConfig) => new GameOrchestrator({
+    ...config,
+    runtime: { ...config.runtime, journalLifecycle },
+  }));
   return {
     presetStore,
-    orchestrator: null,
-    controlMatch: null,
+    matchRegistry,
+    journalLifecycle,
+    artifactRetention,
     pendingMatch: null,
+    activeBenchmark: null,
     controlSessions: new ControlSessionManager(),
-    createOrchestrator,
-    createBenchmarkOrchestrator,
+    createOrchestrator: orchestratorFactory,
+    createBenchmarkOrchestrator: createBenchmarkOrchestrator
+      ?? ((config, ws) => new BenchmarkOrchestrator(
+        config,
+        ws,
+        undefined,
+        matchRegistry,
+        journalLifecycle,
+      )),
     liveEnabled: null,
   };
+}
+
+const orchestratorAdapters = new WeakMap<object, OrchestratorLike & RegisteredMatchHandle>();
+
+function asRegisteredMatchHandle(orchestrator: OrchestratorLike): OrchestratorLike & RegisteredMatchHandle {
+  if (orchestrator.getMatchId) {
+    return orchestrator as OrchestratorLike & RegisteredMatchHandle;
+  }
+  const existing = orchestratorAdapters.get(orchestrator);
+  if (existing) return existing;
+  const matchId = `match_${randomUUID()}`;
+  const adapter: OrchestratorLike & RegisteredMatchHandle = {
+    getMatchId: () => matchId,
+    getMatchStatus: orchestrator.getMatchStatus
+      ? () => orchestrator.getMatchStatus!()
+      : undefined,
+    prepare: orchestrator.prepare ? (warmup) => orchestrator.prepare!(warmup) : undefined,
+    start: () => orchestrator.start(),
+    stop: () => orchestrator.stop(),
+    quiesce: orchestrator.quiesce ? () => orchestrator.quiesce!() : undefined,
+    saveRecord: () => orchestrator.saveRecord(),
+    discardJournal: orchestrator.discardJournal
+      ? () => orchestrator.discardJournal!()
+      : undefined,
+    getGame: () => orchestrator.getGame(),
+    getAITerminalFeed: orchestrator.getAITerminalFeed
+      ? (sinceSequence) => orchestrator.getAITerminalFeed!(sinceSequence)
+      : undefined,
+    getTerminalHistory: orchestrator.getTerminalHistory
+      ? (beforeSequence, limit) => orchestrator.getTerminalHistory!(beforeSequence, limit)
+      : undefined,
+  };
+  orchestratorAdapters.set(orchestrator, adapter);
+  return adapter;
+}
+
+function registerOrchestrator(
+  state: ServerState,
+  orchestrator: OrchestratorLike,
+  registration: MatchRegistration,
+): OrchestratorLike & RegisteredMatchHandle {
+  const handle = asRegisteredMatchHandle(orchestrator);
+  state.matchRegistry.register(handle, registration);
+  return handle;
+}
+
+function getRegisteredOrchestrator(state: ServerState, matchId: string): OrchestratorLike | null {
+  const entry = state.matchRegistry.get(matchId);
+  return entry ? entry.handle as OrchestratorLike : null;
 }
 
 type StateMessagePayload = {
   type: "state";
   state: GameState | null;
+  frame: StateProjectionFrameV1 | null;
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  matchStatus: RegisteredMatchStatus | null;
 };
 
 type AITerminalMessagePayload = {
@@ -169,17 +341,56 @@ async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
   return state.liveEnabled;
 }
 
-export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
-  const currentOrchestrator = state.orchestrator;
-  const game = currentOrchestrator?.getGame();
+export function buildStateMessagePayload(
+  state: ServerState,
+  options: {
+    frameSequence?: number;
+    baseFrameSequence?: number;
+    previousState?: GameState | null;
+    forceKeyframe?: boolean;
+  } = {},
+): StateMessagePayload {
+  const currentMatch = state.matchRegistry.getObserved();
+  const game = currentMatch?.handle.getGame();
   const latestSnapshot = game?.getLatestSnapshot?.();
+  const currentState = game?.getState() ?? null;
+  const aiOutputs = game?.getAIOutputs?.() ?? {};
+  const frameSequence = options.frameSequence ?? 1;
+  const tickIntervalMs = game?.getDefinition?.().tickIntervalMs ?? 500;
+  const metadata = currentState ? {
+    frameVersion: 1 as const,
+    frameSequence,
+    simulationTick: currentState.tick,
+    simulationTimeMs: currentState.tick * tickIntervalMs,
+    tickIntervalMs,
+    serverTimeMs: Date.now(),
+  } : null;
+  const keyframe = Boolean(currentState) && (
+    options.forceKeyframe === true
+    || !options.previousState
+    || options.baseFrameSequence === undefined
+    || frameSequence % 20 === 1
+  );
+  const frame: StateProjectionFrameV1 | null = !currentState || !metadata
+    ? null
+    : keyframe
+      ? { kind: "keyframe", metadata, state: currentState, aiOutputs }
+      : {
+          kind: "delta",
+          metadata,
+          baseFrameSequence: options.baseFrameSequence!,
+          delta: createStateProjectionDelta(options.previousState!, currentState),
+          aiOutputs,
+        };
 
   return {
     type: "state",
-    state: game?.getState() ?? null,
-    aiOutputs: game?.getAIOutputs?.() ?? {},
+    state: keyframe ? currentState : null,
+    frame,
+    aiOutputs,
     snapshots: latestSnapshot ? [latestSnapshot] : [],
     liveEnabled: Boolean(state.liveEnabled),
+    matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
   };
 }
 
@@ -416,7 +627,7 @@ async function listRecordEntries() {
     const entries = await fs.readdir(RECORDS_DIR, { withFileTypes: true });
     const files = await Promise.all(
       entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .filter((entry) => entry.isFile() && isSupportedRecordFileName(entry.name))
         .map(async (entry) => {
           const fullPath = path.join(RECORDS_DIR, entry.name);
           const stat = await fs.stat(fullPath);
@@ -425,6 +636,7 @@ async function listRecordEntries() {
             fullPath,
             size: stat.size,
             modifiedAt: stat.mtime.toISOString(),
+            encoding: traceFileEncoding(entry.name),
           };
         })
     );
@@ -466,14 +678,14 @@ export async function handleHttpRequest(
     if (req.method === "GET" && url.pathname.startsWith("/api/replay/records/")) {
       const requestedFile = decodeURIComponent(url.pathname.replace("/api/replay/records/", ""));
       const safeFileName = path.basename(requestedFile);
-      if (!safeFileName.endsWith(".json") || safeFileName !== requestedFile) {
+      if (!isSupportedRecordFileName(safeFileName) || safeFileName !== requestedFile) {
         sendJson(res, 400, { error: "记录文件名无效。" });
         return;
       }
 
       const fullPath = path.join(RECORDS_DIR, safeFileName);
       try {
-        const content = await fs.readFile(fullPath, "utf8");
+        const content = await readRecordJsonText(fullPath);
         setCorsHeaders(res);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(content);
@@ -627,19 +839,18 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
       let orchestrator = state.pendingMatch?.signature === signature
-        ? state.pendingMatch.orchestrator
+        ? getRegisteredOrchestrator(state, state.pendingMatch.matchId)
         : null;
 
       if (!orchestrator) {
-        const previousOrchestrator = state.orchestrator;
-        orchestrator = state.createOrchestrator({
+        orchestrator = registerOrchestrator(state, state.createOrchestrator({
           player1,
           player2,
           debug: message.debug,
-        });
-        state.orchestrator = orchestrator;
-        state.pendingMatch = { signature, orchestrator };
-        previousOrchestrator?.stop();
+        }), { kind: "live", signature, observe: true });
+        state.pendingMatch = { signature, matchId: orchestrator.getMatchId!() };
+      } else {
+        state.matchRegistry.observe(orchestrator.getMatchId!());
       }
 
       sendPrepareStatus(
@@ -677,21 +888,30 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       const signature = buildMatchSignature(message);
-      const preparedMatch = state.pendingMatch?.signature === signature ? state.pendingMatch : null;
-      const previousOrchestrator = preparedMatch ? null : state.orchestrator;
-      const nextOrchestrator = preparedMatch?.orchestrator ?? state.createOrchestrator({
-        player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
-        player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
-        debug: message.debug,
-      });
-      state.orchestrator = nextOrchestrator;
+      const previousObservedId = state.matchRegistry.getObservedMatchId();
+      const preparedMatch = state.pendingMatch?.signature === signature
+        ? getRegisteredOrchestrator(state, state.pendingMatch.matchId)
+        : null;
+      const createdNew = !preparedMatch;
+      const nextOrchestrator = preparedMatch ?? registerOrchestrator(
+        state,
+        state.createOrchestrator({
+          player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
+          player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
+          debug: message.debug,
+        }),
+        { kind: "live", signature, observe: true },
+      );
+      const nextMatchId = nextOrchestrator.getMatchId!();
+      state.matchRegistry.observe(nextMatchId);
 
       try {
         await nextOrchestrator.start();
       } catch (error) {
-        nextOrchestrator.stop();
-        if (state.orchestrator === nextOrchestrator) {
-          state.orchestrator = previousOrchestrator;
+        await state.matchRegistry.stopAndSave(nextMatchId);
+        if (createdNew) state.matchRegistry.remove(nextMatchId);
+        if (previousObservedId && state.matchRegistry.get(previousObservedId)) {
+          state.matchRegistry.observe(previousObservedId);
         }
         if (error instanceof Error && error.message === MATCH_START_ABORTED) {
           return;
@@ -700,18 +920,20 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       state.pendingMatch = null;
-      previousOrchestrator?.stop();
       return;
     }
 
     if (message.type === "stop") {
-      state.orchestrator?.stop();
+      state.activeBenchmark?.stop();
+      state.activeBenchmark = null;
+      const observedMatchId = state.matchRegistry.getObservedMatchId();
+      if (observedMatchId) await state.matchRegistry.stopAndSave(observedMatchId);
       state.pendingMatch = null;
       return;
     }
 
     if (message.type === "load_terminal_history") {
-      const orchestrator = state.orchestrator;
+      const orchestrator = state.matchRegistry.getObserved()?.handle;
       if (!orchestrator?.getTerminalHistory || !orchestrator.getAITerminalFeed) {
         return;
       }
@@ -736,17 +958,23 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
-      const previousOrchestrator = state.orchestrator;
-      const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
-
-      state.orchestrator = nextOrchestrator;
+      const previousMatchId = state.matchRegistry.getObservedMatchId();
+      const nextOrchestrator = registerOrchestrator(
+        state,
+        state.createOrchestrator({ player1, player2, debug: message.debug }),
+        { kind: "live", observe: true },
+      );
       state.pendingMatch = null;
-      previousOrchestrator?.stop();
+      if (previousMatchId && previousMatchId !== nextOrchestrator.getMatchId!()) {
+        await state.matchRegistry.stopAndSave(previousMatchId);
+        state.matchRegistry.remove(previousMatchId);
+      }
       return;
     }
 
     if (message.type === "save_record") {
-      if (!state.orchestrator) {
+      const currentMatch = state.matchRegistry.getObserved();
+      if (!currentMatch) {
         ws.send(JSON.stringify({
           type: "error",
           message: "当前没有可保存的实时对局。",
@@ -754,7 +982,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
-      const filePath = await state.orchestrator.saveRecord();
+      const filePath = await state.matchRegistry.save(currentMatch.matchId);
       ws.send(JSON.stringify({
         type: "record_saved",
         filePath,
@@ -795,7 +1023,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         throw new Error("BENCHMARK_PRESET_INVALID");
       }
 
-      const previousOrchestrator = state.orchestrator;
+      const previousObservedId = state.matchRegistry.getObservedMatchId();
+      state.activeBenchmark?.stop();
       const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
         {
           presetId: message.presetId,
@@ -810,15 +1039,17 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         ws
       );
 
-      state.orchestrator = benchmarkOrchestrator;
+      state.activeBenchmark = benchmarkOrchestrator;
       state.pendingMatch = null;
-      previousOrchestrator?.stop();
 
       try {
         await benchmarkOrchestrator.start();
       } catch (error) {
         benchmarkOrchestrator.stop();
-        state.orchestrator = previousOrchestrator;
+        state.activeBenchmark = null;
+        if (previousObservedId && state.matchRegistry.get(previousObservedId)) {
+          state.matchRegistry.observe(previousObservedId);
+        }
         throw error;
       }
 
@@ -849,6 +1080,22 @@ function createServer(state: ServerState) {
   });
 
   const wss = new WebSocketServer({ server });
+  let terminalSweepRunning = false;
+  const terminalSweep = setInterval(() => {
+    if (terminalSweepRunning) return;
+    terminalSweepRunning = true;
+    void state.matchRegistry.finalizeTerminalMatches()
+      .then((results) => {
+        for (const result of results) {
+          if (!result.ok) console.error(`对局 ${result.matchId} 自动收尾失败: ${result.error}`);
+        }
+      })
+      .finally(() => {
+        terminalSweepRunning = false;
+      });
+  }, 1_000);
+  terminalSweep.unref();
+  server.once("close", () => clearInterval(terminalSweep));
 
   wss.on("connection", (ws) => {
     console.log("客户端已连接");
@@ -856,10 +1103,12 @@ function createServer(state: ServerState) {
     let lastAITerminalSessionId: string | null = null;
     let lastAITerminalEventSequence = 0;
     let lastStateTick: number | null | undefined;
-    let lastStateOrchestrator: OrchestratorLike | null = null;
+    let lastStateOrchestrator: RegisteredMatchHandle | null = null;
     let lastStateLiveEnabled: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
+    let lastProjectedState: GameState | null = null;
+    let lastFrameSequence = 0;
 
     const logBroadcastPerfWarning = (
       phase: "state" | "ai_terminal",
@@ -880,7 +1129,7 @@ function createServer(state: ServerState) {
         return lastWarningAtMs;
       }
 
-      const game = state.orchestrator?.getGame();
+      const game = state.matchRegistry.getObserved()?.handle.getGame();
       const tick = typeof details.tick === "number" ? details.tick : game?.getState()?.tick;
       game?.addLog?.(LOG_TYPES.PERF_WARNING, `${phase} broadcast took ${Math.round(elapsedMs)}ms`, {
         scope: "state_broadcast",
@@ -897,10 +1146,14 @@ function createServer(state: ServerState) {
     };
 
     const sendState = async (force = false) => {
-      if (isSendingState) {
+      if (
+        isSendingState
+        || ws.readyState !== WebSocket.OPEN
+        || shouldDeferLatestProjection(ws.bufferedAmount)
+      ) {
         return;
       }
-      const currentOrchestrator = state.orchestrator;
+      const currentOrchestrator = state.matchRegistry.getObserved()?.handle ?? null;
       const currentTick = currentOrchestrator?.getGame().getTick?.();
       if (
         !force
@@ -917,13 +1170,31 @@ function createServer(state: ServerState) {
         }
         const startedAt = performance.now();
         const buildStartedAt = performance.now();
-        const payload = buildStateMessagePayload(state);
+        const matchChanged = currentOrchestrator !== lastStateOrchestrator;
+        if (matchChanged) {
+          lastProjectedState = null;
+          lastFrameSequence = 0;
+        }
+        const nextFrameSequence = lastFrameSequence + 1;
+        const payload = buildStateMessagePayload(state, {
+          frameSequence: nextFrameSequence,
+          baseFrameSequence: lastFrameSequence || undefined,
+          previousState: lastProjectedState,
+          forceKeyframe: force || matchChanged,
+        });
         const buildMs = performance.now() - buildStartedAt;
         const stringifyStartedAt = performance.now();
         const serialized = JSON.stringify(payload);
         const stringifyMs = performance.now() - stringifyStartedAt;
         const sendStartedAt = performance.now();
         ws.send(serialized);
+        const sentState = payload.frame?.kind === "keyframe"
+          ? payload.frame.state
+          : payload.frame?.kind === "delta" && lastProjectedState
+            ? applyStateProjectionDelta(lastProjectedState, payload.frame.delta)
+            : null;
+        lastProjectedState = sentState ? structuredClone(sentState) : null;
+        lastFrameSequence = payload.frame?.metadata.frameSequence ?? lastFrameSequence;
         lastStateOrchestrator = currentOrchestrator;
         lastStateTick = currentTick;
         lastStateLiveEnabled = state.liveEnabled;
@@ -947,13 +1218,20 @@ function createServer(state: ServerState) {
     };
 
     const sendAITerminalEvents = () => {
-      let feed = state.orchestrator?.getAITerminalFeed?.(lastAITerminalEventSequence) ?? null;
+      const observedHandle = state.matchRegistry.getObserved()?.handle;
+      let feed = observedHandle?.getAITerminalFeed?.(lastAITerminalEventSequence) ?? null;
       if (feed && feed.sessionId !== lastAITerminalSessionId) {
-        feed = state.orchestrator?.getAITerminalFeed?.() ?? feed;
+        feed = observedHandle?.getAITerminalFeed?.() ?? feed;
       }
       const sessionId = feed?.sessionId ?? null;
       const events = feed?.events ?? [];
       const sendPayload = (reset: boolean, nextEvents: AITerminalEvent[]) => {
+        if (
+          ws.readyState !== WebSocket.OPEN
+          || shouldDeferLatestProjection(ws.bufferedAmount)
+        ) {
+          return false;
+        }
         const startedAt = performance.now();
         const buildStartedAt = performance.now();
         const payload = buildAITerminalMessagePayload(sessionId, reset, nextEvents, feed?.hasMore ?? false);
@@ -978,18 +1256,21 @@ function createServer(state: ServerState) {
           },
           lastAITerminalBroadcastWarningAtMs
         );
+        return true;
       };
 
       if (sessionId !== lastAITerminalSessionId) {
-        lastAITerminalSessionId = sessionId;
-        lastAITerminalEventSequence = feed?.latestSequence ?? 0;
-        sendPayload(true, events);
+        if (sendPayload(true, events)) {
+          lastAITerminalSessionId = sessionId;
+          lastAITerminalEventSequence = feed?.latestSequence ?? 0;
+        }
         return;
       }
 
       if (events.length > 0) {
-        lastAITerminalEventSequence = feed?.latestSequence ?? lastAITerminalEventSequence;
-        sendPayload(Boolean(feed?.reset), events);
+        if (sendPayload(Boolean(feed?.reset), events)) {
+          lastAITerminalEventSequence = feed?.latestSequence ?? lastAITerminalEventSequence;
+        }
       }
     };
 
@@ -1020,14 +1301,61 @@ export function startServer() {
   console.log("启动 LLMCraft 服务器...");
   console.log(`HTTP/WebSocket 服务器运行在端口 ${PORT}`);
 
-  process.on("SIGINT", () => {
-    console.log("\n关闭服务器...");
-    state.orchestrator?.stop();
-    state.controlMatch?.stop();
-    server.close();
-    wss.close();
-    process.exit(0);
+  void state.journalLifecycle.recoverOrphans().then(async (report) => {
+    const recovered = report.entries.filter((entry) => entry.action === "recover");
+    const legacy = report.entries.filter((entry) => entry.action === "report_legacy");
+    if (recovered.length > 0 || legacy.length > 0) {
+      console.log(
+        `Journal 启动扫描: 恢复 ${recovered.length} 个异常 owner（${report.recoveredBytes} bytes），`
+        + `识别 ${legacy.length} 个 legacy 目录。`,
+      );
+    }
+    const applyRetention = process.env.LLMCRAFT_RETENTION_APPLY_ON_STARTUP === "true";
+    const retention = await state.artifactRetention.inspect({ apply: applyRetention });
+    if (!applyRetention) {
+      await state.artifactRetention.inspect({ apply: true, groups: ["orphan-journals"] });
+    }
+    if (retention.deleteCount > 0) {
+      console.log(
+        `存储保留策略${applyRetention ? "已清理" : "预览"}: `
+        + `${retention.deleteCount} 个 artifact，${retention.deleteBytes} bytes。`,
+      );
+    }
+  }).catch((error) => {
+    console.error("Journal/存储生命周期启动扫描失败:", error);
   });
+
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n收到 ${signal}，正在保存并关闭服务器...`);
+    const forcedExit = setTimeout(() => {
+      console.error("服务器优雅关闭超时。未完成 journal 将留待下次启动恢复。");
+      process.exit(1);
+    }, 10_000);
+    forcedExit.unref();
+
+    state.activeBenchmark?.stop();
+    const results = await state.matchRegistry.stopAndSaveAll();
+    for (const result of results) {
+      if (!result.ok) console.error(`对局 ${result.matchId} 关闭保存失败: ${result.error}`);
+    }
+    const ownerClose = await state.journalLifecycle.closeOwner();
+    if (!ownerClose.closed) {
+      console.warn(`仍有 ${ownerClose.remainingJournalIds.length} 个 journal 未封存，将在下次启动恢复。`);
+    }
+    for (const client of wss.clients) client.close();
+    await Promise.all([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => wss.close(() => resolve())),
+    ]);
+    clearTimeout(forcedExit);
+    process.exit(results.every((result) => result.ok) ? 0 : 1);
+  };
+
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
   server.listen(PORT);
   return { server, wss, state };

@@ -82,7 +82,6 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
       state: change.state ?? "idle",
-      my: false,
       playerId: player.id,
       exists: true,
       attackRange: change.attackRange ?? 0,
@@ -132,7 +131,6 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       y: change.y ?? 0,
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
-      my: false,
       playerId: player.id,
       exists: true,
       productionQueue: change.productionQueue ?? [],
@@ -486,8 +484,8 @@ export function buildReplaySnapshots(frames: ReplayFrame[]): GameSnapshot[] {
   }));
 }
 
-export function formatTickTime(tick: number) {
-  const totalSeconds = Math.floor((tick * 500) / 1000);
+export function formatTickTime(tick: number, tickIntervalMs = 500) {
+  const totalSeconds = Math.floor((tick * tickIntervalMs) / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;

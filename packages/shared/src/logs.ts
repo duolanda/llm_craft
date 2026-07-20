@@ -192,7 +192,7 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.COMMAND_INVALID]: {
     hint: string;
-    reason?: "command_failed" | "command_budget_exceeded" | "path_budget_exceeded";
+    reason?: "command_failed";
     failedCommandId?: string;
     failedResultCode?: ResultCode;
     failedResultType?: ResultType;

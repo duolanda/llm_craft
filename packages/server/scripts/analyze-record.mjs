@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { analyzeGameRecord, detectRecordFormat, projectRecordToGameRecord } from "@llmcraft/trace";
+import { analyzeMatchRecord, detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
 
 const args = process.argv.slice(2);
 const options = parseArgs(args);
@@ -35,16 +35,15 @@ if (statSync(filePath).isDirectory() || options.format !== "human" || options.co
 }
 const sourceRecord = JSON.parse(readRecordText(filePath));
 const sourceFormat = detectRecordFormat(sourceRecord);
-const record = projectRecordToGameRecord(sourceRecord);
+const record = projectRecordToMatchRecord(sourceRecord);
 const debugPath = options.debugFile ? resolveInputPath(options.debugFile) : null;
 const debugText = debugPath ? readFileSync(debugPath, "utf8") : null;
 const players = (record.finalState?.players ?? record.initialState?.players ?? []).map((player) => player.id);
 const aiTurns = record.aiTurns ?? [];
 const metadataByPlayer = new Map((record.metadata?.players ?? []).map((player) => [player.playerId, player]));
-const sourceCapabilities = sourceFormat === "trace-v3" ? sourceRecord.manifest?.capabilities ?? {} : {};
-const commandFacts = buildCommandFacts(sourceRecord, record, sourceFormat);
+const commandFacts = record.commandResults ?? [];
 const analysis = buildReplayAnalysis(record, players, options.skill, commandFacts);
-const registryReport = analyzeGameRecord(record);
+const registryReport = analyzeMatchRecord(record);
 
 function readRecordText(recordPath) {
   const bytes = readFileSync(recordPath);
@@ -52,29 +51,8 @@ function readRecordText(recordPath) {
   return content.toString("utf8");
 }
 
-function buildCommandFacts(source, projected, format) {
-  if (format === "trace-v3" && source.manifest?.capabilities?.domainEvents !== "absent") {
-    return (source.domainEvents ?? [])
-      .filter((event) => event.type === "command_result")
-      .map((event) => ({
-        tick: event.tick,
-        eventSequence: event.eventSequence,
-        commandId: event.commandId,
-        data: {
-          command: event.payload?.command,
-          type: event.payload?.resultType,
-          result_code: event.payload?.resultCode,
-          result_data: event.payload?.resultData,
-          success: event.payload?.success,
-        },
-      }));
-  }
-  return projected.commandResults ?? [];
-}
-
-if (sourceFormat === "trace-v3") {
-  console.log(`Source: trace-v3 (${Object.entries(sourceCapabilities).map(([key, value]) => `${key}=${value}`).join(", ")})`);
-  console.log(`Facts: DomainEvent command_result=${commandFacts.length}; compatibility GameLog is not used for command metrics`);
+if (sourceFormat !== "unknown") {
+  console.log(`Source: ${sourceFormat}; profile=${record.metadata.recordingProfile}; transcript=${record.metadata.includeTranscript}`);
 }
 
 const createCounter = () => Object.create(null);
@@ -216,15 +194,15 @@ for (const playerId of players) {
   const entry = metrics[playerId];
   const flags = registryReport.findings
     .filter((finding) => finding.scopeId === playerId)
-    .map((finding) => `${finding.detectorId}@v${finding.detectorVersion}`);
+    .map((finding) => finding.detectorId);
 
   console.log(`${playerId}:`);
   console.log(`  economy: finalCredits=${entry.finalCredits}, maxCredits=${entry.maxCredits}`);
   console.log(`  units: ${formatCounter(entry.unitCounts)}`);
   console.log(`  buildings: ${formatCounter(entry.buildingCounts)}; hqAlive=${entry.hqAlive}`);
   if (isAgentMetricsUnavailable(playerId)) {
-    if (sourceCapabilities.agentTurns === "complete") {
-      console.log("  agent: no turns recorded before this trace cut");
+    if (record.metadata.recordingProfile === "evaluation") {
+      console.log("  agent: no turns recorded before the Match Record was saved");
       console.log("  tools: none");
     } else {
       console.log("  agent: unavailable (record has no aiTurns; model/tool metrics were not persisted)");
@@ -323,7 +301,7 @@ function printBatchAnalysis(inputPath, batchOptions) {
     return;
   }
   if (batchOptions.format === "csv") {
-    console.log("file,status,winner,ruleset,scope,metric,metric_version,value,source_paths");
+    console.log("file,status,winner,ruleset,scope,metric,value");
     for (const entry of reports) {
       for (const metric of entry.report.metrics) {
         console.log([
@@ -333,9 +311,7 @@ function printBatchAnalysis(inputPath, batchOptions) {
           csv(entry.report.match.rulesetId),
           csv(metric.scopeId),
           csv(metric.metricId),
-          metric.metricVersion,
           metric.value,
-          csv(metric.sourcePaths.join("|")),
         ].join(","));
       }
     }
@@ -362,7 +338,7 @@ function analyzePath(inputPath) {
     : [inputPath];
   return files.map((recordPath) => {
     const source = JSON.parse(readRecordText(recordPath));
-    return { file: basename(recordPath), report: analyzeGameRecord(projectRecordToGameRecord(source)) };
+    return { file: basename(recordPath), report: analyzeMatchRecord(projectRecordToMatchRecord(source)) };
   });
 }
 

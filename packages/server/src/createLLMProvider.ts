@@ -15,7 +15,7 @@ export function createAgentSession(
   options: OpenAIAgentSessionOptions = {},
 ): AgentSession {
   if (config.providerType === "builtin-cpu") {
-    throw new Error("builtin-cpu is a deterministic Controller test driver, not an AgentSession");
+    throw new Error("builtin-cpu is a DecisionController-backed opponent, not an AgentSession");
   }
 
   switch (config.providerType) {
@@ -26,7 +26,7 @@ export function createAgentSession(
   }
 }
 
-/** Connection-test compatibility factory; match Controllers use createAgentSession. */
+/** Factory for the preset connection-test endpoint; matches use createAgentSession. */
 export function createLLMProvider(config: LLMProviderConfig): LLMProvider {
   if (config.providerType === "builtin-cpu") {
     throw new Error("builtin-cpu is not an LLM provider and cannot test model connectivity");

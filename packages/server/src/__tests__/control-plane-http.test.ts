@@ -73,35 +73,6 @@ async function request(
 }
 
 describe("control plane HTTP routes", () => {
-  it("previews storage cleanup unless apply=true is explicit", async () => {
-    const state = createServerState(createPresetStore());
-    const inspect = vi.fn(async ({ apply = false }: { apply?: boolean } = {}) => ({
-      generatedAt: "2026-07-16T00:00:00.000Z",
-      applied: apply,
-      groups: [],
-      deleteCount: 2,
-      deleteBytes: 128,
-      failures: [],
-    }));
-    state.artifactRetention = { inspect } as any;
-
-    const preview = await request(state, {
-      method: "POST",
-      url: "/api/control/storage/cleanup",
-      body: "{}",
-    });
-    const applied = await request(state, {
-      method: "POST",
-      url: "/api/control/storage/cleanup",
-      body: JSON.stringify({ apply: true }),
-    });
-
-    expect(preview.json()).toMatchObject({ applied: false, deleteCount: 2 });
-    expect(applied.json()).toMatchObject({ applied: true, deleteCount: 2 });
-    expect(inspect).toHaveBeenNthCalledWith(1, { apply: false });
-    expect(inspect).toHaveBeenNthCalledWith(2, { apply: true });
-  });
-
   it("returns 400 for malformed JSON when creating a control session", async () => {
     const state = createServerState(createPresetStore());
 
@@ -117,7 +88,7 @@ describe("control plane HTTP routes", () => {
     });
   });
 
-  it("creates multiple control matches with stable identities", async () => {
+  it("reuses the active control match when play is requested again", async () => {
     const state = createServerState(createPresetStore());
 
     const first = await request(state, {
@@ -132,15 +103,16 @@ describe("control plane HTTP routes", () => {
     });
 
     expect(first.statusCode).toBe(201);
-    expect(second.statusCode).toBe(201);
+    expect(second.statusCode).toBe(200);
     const firstMatchId = first.json<{ data: { matchId: string } }>().data.matchId;
-    const secondMatchId = second.json<{ data: { matchId: string } }>().data.matchId;
-    expect(secondMatchId).not.toBe(firstMatchId);
-    expect(state.matchRegistry.list()).toHaveLength(2);
-    expect(state.matchRegistry.getObservedMatchId()).toBe(secondMatchId);
+    expect(second.json()).toMatchObject({
+      data: { matchId: firstMatchId, reused: true },
+    });
+    expect(state.matchRegistry.list()).toHaveLength(1);
+    expect(state.matchRegistry.getObservedMatchId()).toBe(firstMatchId);
   });
 
-  it("binds a control session to the requested match instead of a global singleton", async () => {
+  it("binds a control session to the reused active match", async () => {
     const state = createServerState(createPresetStore());
 
     const first = await request(state, {
@@ -155,7 +127,7 @@ describe("control plane HTTP routes", () => {
       url: "/api/control/start-game",
       body: "{}",
     });
-    expect(next.statusCode).toBe(201);
+    expect(next.statusCode).toBe(200);
     const firstMatchId = first.json<{ data: { matchId: string } }>().data.matchId;
     const session = await request(state, {
       method: "POST",
@@ -165,16 +137,14 @@ describe("control plane HTTP routes", () => {
 
     expect(session.statusCode).toBe(201);
     expect(session.json()).toMatchObject({ data: { gameId: firstMatchId } });
-    expect(state.matchRegistry.getObservedMatchId()).toBe(
-      next.json<{ data: { matchId: string } }>().data.matchId,
-    );
+    expect(state.matchRegistry.getObservedMatchId()).toBe(firstMatchId);
   });
 
   it("lists, observes, saves, and stops a match through registry routes", async () => {
     const state = createServerState(createPresetStore());
     const game = new Game();
     const stop = vi.fn(() => game.stop());
-    const saveRecord = vi.fn(async () => "/tmp/match_registry_api.trace.json");
+    const saveRecord = vi.fn(async () => "/tmp/match_registry_api.match.json");
     state.matchRegistry.register({
       getMatchId: () => "match_registry_api",
       getGame: () => game,
@@ -201,13 +171,13 @@ describe("control plane HTTP routes", () => {
       matches: [expect.objectContaining({ matchId: "match_registry_api", kind: "live" })],
     });
     expect(observe.statusCode).toBe(200);
-    expect(save.json()).toMatchObject({ filePath: "/tmp/match_registry_api.trace.json" });
+    expect(save.json()).toMatchObject({ filePath: "/tmp/match_registry_api.match.json" });
     expect(stopResponse.statusCode).toBe(200);
     expect(saveRecord).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts one HTTP action batch and records one multi-command envelope", async () => {
+  it("accepts more than 100 HTTP actions without a command quota", async () => {
     const state = createServerState(createPresetStore());
     const started = await request(state, {
       method: "POST",
@@ -233,28 +203,31 @@ describe("control plane HTTP routes", () => {
       method: "POST",
       url: `/api/control/sessions/${sessionId}/actions`,
       body: JSON.stringify({
-        clientRequestId: "http_atomic_batch",
-        actions: workers.slice(0, 2).map((worker) => ({
+        clientRequestId: "http_large_batch",
+        actions: Array.from({ length: 101 }, (_, index) => ({
           tool: "hold_unit",
-          args: { unitId: worker.id },
+          args: { unitId: workers[index % 2]!.id },
         })),
       }),
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
+    const payload = response.json<{ data: { results: Array<{ ok: boolean }> } }>();
+    expect(payload).toMatchObject({
       ok: true,
       kind: "batch_result",
-      data: { clientRequestId: "http_atomic_batch", duplicate: false },
+      data: {
+        clientRequestId: "http_large_batch",
+        duplicate: false,
+        results: expect.arrayContaining([expect.objectContaining({ ok: true })]),
+      },
     });
-    const submissions = [];
-    for await (const submission of match.getMatchRuntime().getJournal().readCommandSubmissions()) {
-      submissions.push(submission);
-    }
-    expect(submissions).toHaveLength(1);
-    expect(submissions[0]).toMatchObject({
-      envelope: { clientRequestId: "http_atomic_batch", commands: [{ type: "hold" }, { type: "hold" }] },
-    });
+    expect(payload.data.results).toHaveLength(101);
+    match.advanceOneTick();
+    expect(match.getGame().getState().players[0]!.units.filter((unit) => (
+      workers.slice(0, 2).some((worker) => worker.id === unit.id)
+      && unit.intent?.type === "hold"
+    ))).toHaveLength(2);
     match.stop();
   });
 });

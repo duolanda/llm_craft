@@ -5,6 +5,7 @@
 | ADR | 状态 | 决策 |
 |---|---|---|
 | [0001](0001-match-runtime-ownership.md) | Accepted | MatchRuntime、SimulationCore 与对局所有权 |
-| [0002](0002-command-event-contract.md) | Accepted | CommandEnvelope、CommandGateway 与 DomainEvent |
-| [0003](0003-controller-agent-runtime.md) | Accepted | Controller、AgentSession 与 ModelTransport 分层 |
-| [0004](0004-record-trace-journal.md) | Accepted | Record/Trace Journal 与分析事实源 |
+| [0002](0002-command-event-contract.md) | Superseded in part | CommandEnvelope 与 CommandGateway；持久事件流由 0005 删除 |
+| [0003](0003-controller-agent-runtime.md) | Amended | AgentSession 与 ModelTransport 分层；Controller 命名由 0005 修正 |
+| [0004](0004-record-trace-journal.md) | Superseded | 由 0005 的轻量 Match Record 取代 |
+| [0005](0005-terminology-and-control-boundaries.md) | Accepted | 统一术语、两个控制面与 Match Record |

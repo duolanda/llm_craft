@@ -25,7 +25,8 @@ export interface BuiltinCPURuntimeConfig {
 export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig | BuiltinCPURuntimeConfig;
 
 export interface MatchDebugOptions {
-  recordLLMTranscript?: boolean;
+  recordingProfile?: MatchRecordingProfile;
+  includeTranscript?: boolean;
 }
 
 export interface MatchWarmupOptions {
@@ -265,15 +266,14 @@ export interface Command {
 
 export interface CommandProvenance {
   controllerId: string;
-  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "test";
+  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "cpu";
   turnId?: string;
   toolCallId?: string;
   missionId?: string;
   parentControllerId?: string;
 }
 
-export interface CommandEnvelopeV1 {
-  envelopeVersion: 1;
+export interface CommandEnvelope {
   matchId: string;
   actorId: string;
   baseTick: number;
@@ -283,15 +283,11 @@ export interface CommandEnvelopeV1 {
   commands: Command[];
 }
 
-export type CommandEnvelope = CommandEnvelopeV1;
-
 export type CommandEnvelopeRejectCode =
   | "invalid_envelope"
   | "wrong_match"
   | "invalid_tick"
   | "unauthorized_actor"
-  | "batch_too_large"
-  | "tick_command_budget_exceeded"
   | "duplicate_command_id"
   | "idempotency_conflict";
 
@@ -312,143 +308,51 @@ export type CommandEnvelopeSubmissionResult =
       message: string;
     };
 
-export type DomainEventType =
-  | "command_envelope_accepted"
-  | "command_envelope_duplicate"
-  | "command_envelope_rejected"
-  | "command_envelope_released"
-  | "command_envelope_rolled_back"
-  | "command_result"
-  | "simulation_tick_failed"
-  | "resource_gathered"
-  | "credits_delivered"
-  | "building_completed"
-  | "building_cancelled"
-  | "unit_spawned"
-  | "unit_spawn_failed"
-  | "player_eliminated";
-
-export interface DomainEvent<TPayload = Record<string, unknown>> {
-  eventVersion: 1;
-  matchId: string;
-  eventSequence: number;
-  tick: number;
-  type: DomainEventType;
-  actorId?: string;
-  commandId?: string;
-  entityIds?: string[];
-  payload: TPayload;
-}
-
 export interface MatchPlayerDefinition {
   id: PlayerId;
   startingCredits: number;
-  hq: Position;
-  workers: Position[];
 }
 
-export interface CommandBudgetPolicy {
-  maxCommandsPerActorPerTick: number;
-  maxPathCommandsPerTick: number;
+export interface MapStartingUnit {
+  type: UnitType;
+  position: Position;
 }
 
-interface MatchDefinitionBase {
+export interface MapStartingBuilding {
+  type: BuildingType;
+  position: Position;
+}
+
+export interface MapPlayerStart {
+  playerId: PlayerId;
+  units: MapStartingUnit[];
+  buildings: MapStartingBuilding[];
+}
+
+export interface MapDefinition {
+  id: string;
+  width: number;
+  height: number;
+  resources: Position[];
+  obstacles: Position[];
+  playerStarts: [MapPlayerStart, MapPlayerStart];
+}
+
+export interface MatchDefinition {
   rulesetId: string;
-  scenarioId: string;
-  seed: number;
   tickIntervalMs: number;
-  map: {
-    width: number;
-    height: number;
-    resources: Position[];
-  };
+  map: MapDefinition;
   players: [MatchPlayerDefinition, MatchPlayerDefinition];
   victoryCondition: {
     type: "eliminate_all_buildings";
   };
 }
 
-/** Legacy definition persisted before runtime budgets became explicit. */
-export interface MatchDefinitionV1 extends MatchDefinitionBase {
-  definitionVersion: 1;
-}
+export type MatchRecordingProfile = "off" | "replay" | "evaluation";
 
-export interface MatchDefinitionV2 extends MatchDefinitionBase {
-  definitionVersion: 2;
-  rules: {
-    schemaVersion: 1;
-    commandBudget: CommandBudgetPolicy;
-  };
-}
-
-export type MatchDefinition = MatchDefinitionV1 | MatchDefinitionV2;
-
-export type TraceCapabilityState = "complete" | "partial" | "absent";
-
-export interface TraceCapabilitiesV3 {
-  commandSubmissions: TraceCapabilityState;
-  domainEvents: TraceCapabilityState;
-  commandResults: TraceCapabilityState;
-  agentTurns: TraceCapabilityState;
-  terminalEvents: TraceCapabilityState;
-  modelRequestSpans: TraceCapabilityState;
-  toolCallSpans: TraceCapabilityState;
-  stateHashes: TraceCapabilityState;
-  replay: TraceCapabilityState;
-}
-
-export interface TraceManifestV3 {
-  schemaVersion: 3;
-  recordFormat: "trace-v3";
-  matchId: string;
-  createdAt: string;
-  updatedAt: string;
-  status: "created" | "running" | "stopped" | "finished" | "failed";
-  definition: MatchDefinition;
-  capabilities: TraceCapabilitiesV3;
-}
-
-export interface TraceStateHashRecord {
-  hashVersion: 2;
-  tick: number;
-  algorithm: "sha256";
-  hash: string;
-}
-
-export interface TraceCommandSubmissionRecord {
-  submissionVersion: 1;
-  matchId: string;
-  submissionSequence: number;
-  receivedAtTick: number;
-  envelope: unknown;
-  result: CommandEnvelopeSubmissionResult;
-}
-
-export type TraceReplayMetadataV1 = Omit<GameRecord["metadata"], "recordFormat">;
-
-/** Cached, reproducible compatibility projection; not an authoritative fact stream. */
-export interface TraceReplayProjectionV1 {
-  projectionVersion: 1;
-  metadata: TraceReplayMetadataV1;
-  tickDeltas: TickDeltaRecord[];
-  commandResults: GameLog[];
-}
-
-/**
- * Formal trace-v3 interchange shape. Active journals may contain only a prefix
- * of these streams until they are atomically finalized into this record.
- */
-export interface MatchTraceRecordV3 {
-  schemaVersion: 3;
-  manifest: TraceManifestV3;
-  initialKeyframe: GameState;
-  finalKeyframe: GameState;
-  commandSubmissions: TraceCommandSubmissionRecord[];
-  stateHashes: TraceStateHashRecord[];
-  domainEvents: DomainEvent[];
-  aiTurns: SavedAITurnRecord[];
-  terminalEvents: AITerminalEvent[];
-  replayProjection?: TraceReplayProjectionV1;
+export interface MatchRecordingOptions {
+  profile: MatchRecordingProfile;
+  includeTranscript: boolean;
 }
 
 export interface GameSnapshot {
@@ -664,11 +568,10 @@ export interface AgentRunMetrics {
   toolCalls: number;
   stallDetected: boolean;
   modelRequestRecords?: AgentModelRequestRecord[];
-  memory?: AgentMemoryPolicyRecord;
+  contextWindow?: ContextWindowLimitRecord;
 }
 
-export interface AgentMemoryPolicyRecord {
-  policyVersion: 1;
+export interface ContextWindowLimitRecord {
   maxMessages: number;
   maxBytes: number;
   messagesBefore: number;
@@ -697,8 +600,6 @@ export interface AgentModelRequestRecord {
   attempt?: number;
   retryOfRequestIndex?: number;
   error?: string;
-  messagesVersion?: 1;
-  messagesHash?: string;
   messages?: unknown[];
 }
 
@@ -778,8 +679,7 @@ export interface TickDeltaRecord {
   winner?: PlayerId | null;
 }
 
-export interface StateFrameMetadataV1 {
-  frameVersion: 1;
+export interface StateFrameMetadata {
   frameSequence: number;
   simulationTick: number;
   simulationTimeMs: number;
@@ -787,7 +687,7 @@ export interface StateFrameMetadataV1 {
   serverTimeMs: number;
 }
 
-export interface StateProjectionDeltaV1 {
+export interface StateProjectionDelta {
   tick: number;
   players: Array<{
     playerId: PlayerId;
@@ -803,38 +703,34 @@ export interface StateProjectionDeltaV1 {
   winner?: PlayerId | null;
 }
 
-export type StateProjectionFrameV1 =
+export type StateProjectionFrame =
   | {
       kind: "keyframe";
-      metadata: StateFrameMetadataV1;
+      metadata: StateFrameMetadata;
       state: GameState;
       aiOutputs: Record<string, string>;
     }
   | {
       kind: "delta";
-      metadata: StateFrameMetadataV1;
+      metadata: StateFrameMetadata;
       baseFrameSequence: number;
-      delta: StateProjectionDeltaV1;
+      delta: StateProjectionDelta;
       aiOutputs: Record<string, string>;
     };
 
-export interface GameRecord {
+export interface MatchRecord {
+  recordFormat: "match-record";
+  matchId: string;
+  definition: MatchDefinition;
   metadata: {
     startedAt: string;
     savedAt: string;
     endedAt?: string;
-    status: "running" | "stopped" | "finished";
+    status: "running" | "stopped" | "finished" | "failed";
     winner: PlayerId | null;
-    aiIntervalTicks: number;
-    aiContextWindowTurns: number;
-    tickIntervalMs?: number;
-    rulesetId?: string;
-    map: {
-      width: number;
-      height: number;
-    };
-    recordFormat: "compact-v2";
-    systemPrompt: string;
+    recordingProfile: Exclude<MatchRecordingProfile, "off">;
+    includeTranscript: boolean;
+    systemPrompt?: string;
     players: Array<{
       playerId: PlayerId;
       model: string;
@@ -844,9 +740,12 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: GameLog[];
-  aiTurns: SavedAITurnRecord[];
+  commandResults?: GameLog[];
+  aiTurns?: SavedAITurnRecord[];
 }
+
+/** @deprecated Use MatchRecord. */
+export type GameRecord = MatchRecord;
 
 // --- Control Plane Types ---
 
@@ -900,7 +799,7 @@ export interface ControlActionBatchRequest {
 export type MatchRegistryKind = "live" | "control" | "benchmark";
 
 export type MatchRegistryStatus =
-  | "preparing"
+  | "warming_up"
   | "waiting_for_players"
   | "running"
   | "stopped"

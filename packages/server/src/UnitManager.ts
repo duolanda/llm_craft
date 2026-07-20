@@ -53,20 +53,6 @@ export class UnitManager {
   private units: Map<string, Unit> = new Map();
   private idCounter = 0;
 
-  createCheckpoint(): { units: Unit[]; idCounter: number } {
-    return {
-      units: structuredClone(Array.from(this.units.values())),
-      idCounter: this.idCounter,
-    };
-  }
-
-  restoreCheckpoint(checkpoint: { units: Unit[]; idCounter: number }): void {
-    this.units = new Map(
-      structuredClone(checkpoint.units).map((unit) => [unit.id, unit]),
-    );
-    this.idCounter = checkpoint.idCounter;
-  }
-
   /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): Unit {
     const stats = getUnitStats(type);
@@ -300,7 +286,6 @@ export class UnitManager {
     unit: Unit,
     tiles: TileType[][],
     blockedPositions?: Set<string>,
-    repathBudget?: { remaining: number },
   ): ResultCode {
     if (!unit.exists || unit.state === UNIT_STATES.BUILDING || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
@@ -329,10 +314,6 @@ export class UnitManager {
         this.isPositionBlockedForUnit(unit, nextX, nextY, tiles, blockedPositions) ||
         this.hasUnitCollisionAt(unit, nextX, nextY)
       ) {
-        if (repathBudget && repathBudget.remaining <= 0) {
-          return RESULT_CODES.ERR_BUSY;
-        }
-        if (repathBudget) repathBudget.remaining -= 1;
         // 路径被阻挡，需要重新寻路
         const startCell = getPathCell(unit.x, unit.y);
         const occupiedPositions = this.getOccupiedPositions(unit.id, blockedPositions);

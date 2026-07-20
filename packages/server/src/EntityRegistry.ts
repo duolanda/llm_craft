@@ -65,35 +65,6 @@ export class EntityRegistry {
     return ref;
   }
 
-  assertInvariants(): void {
-    const ids = new Set<string>();
-    for (const ref of this.iterateStoredEntities()) {
-      const entity = ref.entity;
-      if (!entity.id || ids.has(entity.id)) {
-        throw new Error(`Duplicate or empty entity id: ${entity.id}`);
-      }
-      ids.add(entity.id);
-      if (!this.playerIds.has(entity.playerId)) {
-        throw new Error(`Entity ${entity.id} belongs to unknown player ${entity.playerId}`);
-      }
-      if (!Number.isFinite(entity.x) || !Number.isFinite(entity.y)) {
-        throw new Error(`Entity ${entity.id} has a non-finite position`);
-      }
-      if (entity.exists && entity.hp <= 0) {
-        throw new Error(`Live entity ${entity.id} has non-positive HP`);
-      }
-    }
-  }
-
-  private *iterateStoredEntities(): Generator<WorldEntityRef> {
-    for (const unit of this.units.iterateStoredUnits()) {
-      yield { kind: "unit", entity: unit };
-    }
-    for (const building of this.buildings.iterateStoredBuildings()) {
-      yield { kind: "building", entity: building };
-    }
-  }
-
   private assertKnownPlayer(playerId: PlayerId): void {
     if (!this.playerIds.has(playerId)) {
       throw new Error(`Cannot create entity for unknown player: ${playerId}`);

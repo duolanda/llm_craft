@@ -34,7 +34,6 @@ export interface RegisteredMatchHandle {
   stop(): void;
   quiesce?: () => Promise<void>;
   saveRecord(): Promise<string>;
-  discardJournal?: () => Promise<void>;
   getAITerminalFeed?: (sinceSequence?: number) => {
     sessionId: string;
     events: AITerminalEvent[];
@@ -54,7 +53,7 @@ export interface MatchRegistration {
   parentId?: string;
   signature?: string;
   observe?: boolean;
-  terminalPolicy?: "save" | "discard";
+  terminalPolicy?: "save" | "none";
 }
 
 export type RegisteredMatchSummary = MatchRegistrySummary;
@@ -70,7 +69,7 @@ export interface MatchFinalizationResult {
   ok: boolean;
   filePath?: string;
   error?: string;
-  discarded?: boolean;
+  skipped?: boolean;
 }
 
 /** Owns match identity and selection; it never mutates simulation or render state. */
@@ -117,12 +116,6 @@ export class MatchRegistry {
     const entry = this.entries.get(matchId);
     if (!entry) throw new Error(`Match not found: ${matchId}`);
     return entry;
-  }
-
-  findBySignature(signature: string, kind?: RegisteredMatchKind): RegisteredMatchEntry | undefined {
-    return [...this.entries.values()].find((entry) => (
-      entry.signature === signature && (kind === undefined || entry.kind === kind)
-    ));
   }
 
   list(): RegisteredMatchSummary[] {
@@ -179,16 +172,16 @@ export class MatchRegistry {
       return status === "finished" || status === "failed";
     });
     return Promise.all(terminalEntries.map((entry) => (
-      entry.terminalPolicy === "discard"
-        ? this.discardTerminalEntry(entry)
+      entry.terminalPolicy === "none"
+        ? this.skipTerminalEntry(entry)
         : this.finalizeEntry(entry, true)
     )));
   }
 
   async stopAndSaveAll(): Promise<MatchFinalizationResult[]> {
     return Promise.all([...this.entries.values()].map((entry) => (
-      entry.terminalPolicy === "discard"
-        ? this.discardTerminalEntry(entry)
+      entry.terminalPolicy === "none"
+        ? this.skipTerminalEntry(entry)
         : this.finalizeEntry(entry, true)
     )));
   }
@@ -244,16 +237,12 @@ export class MatchRegistry {
     return finalization;
   }
 
-  private async discardTerminalEntry(entry: RegisteredMatchEntry): Promise<MatchFinalizationResult> {
+  private async skipTerminalEntry(entry: RegisteredMatchEntry): Promise<MatchFinalizationResult> {
     const finalized = this.finalizedByMatch.get(entry.matchId);
     if (finalized) return finalized;
     try {
       await this.quiesceEntry(entry);
-      if (!entry.handle.discardJournal) {
-        throw new Error("Registered match does not support journal discard.");
-      }
-      await entry.handle.discardJournal();
-      const result = { matchId: entry.matchId, ok: true, discarded: true } satisfies MatchFinalizationResult;
+      const result = { matchId: entry.matchId, ok: true, skipped: true } satisfies MatchFinalizationResult;
       this.finalizedByMatch.set(entry.matchId, result);
       return result;
     } catch (error) {

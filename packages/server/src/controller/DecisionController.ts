@@ -1,7 +1,5 @@
 import type {
-  AgentPlanRecord,
   AgentRunInput,
-  Command,
   PlayerId,
 } from "@llmcraft/shared";
 import type {
@@ -13,26 +11,23 @@ import type {
   AgentRuntimeResult,
 } from "../agent/AgentRuntime";
 
-export type ControllerKind = "llm" | "cli" | "human" | "test";
+export type DecisionControllerKind = "llm" | "cpu";
 
-export interface ControllerDescriptor {
+export interface DecisionControllerDescriptor {
   controllerId: string;
-  kind: ControllerKind;
+  kind: DecisionControllerKind;
   playerId: PlayerId;
   model?: string;
   baseURL?: string;
 }
 
 /**
- * Match-facing decision source. GameOrchestrator schedules Controllers without
- * knowing whether their implementation is backed by a model provider.
- *
- * The current adapter preserves the existing AgentRuntime behavior. Later P3A
- * slices can move session state out of LLMProvider without changing the match
- * scheduler again.
+ * A tick-scheduled decision source. GameOrchestrator only needs to know whether
+ * the source is idle; gameplay observations and actions remain in
+ * GameplayController.
  */
-export interface Controller {
-  getDescriptor(): ControllerDescriptor;
+export interface DecisionController {
+  getDescriptor(): DecisionControllerDescriptor;
   warmup(
     input: AgentRunInput,
     callbacks?: AgentRuntimeCallbacks,
@@ -43,7 +38,5 @@ export interface Controller {
     callbacks?: AgentRuntimeCallbacks,
     signal?: AbortSignal,
   ): Promise<AgentRuntimeResult>;
-  advancePlans(): Command[];
-  getActivePlans(): AgentPlanRecord[];
   runSubAgentTask?(input: RunSubAgentTaskInput): Promise<string>;
 }

@@ -4,7 +4,6 @@ import { CommandGateway } from "../CommandGateway";
 
 function createEnvelope(overrides: Partial<CommandEnvelope> = {}): CommandEnvelope {
   return {
-    envelopeVersion: 1,
     matchId: "match_test",
     actorId: "player_1",
     baseTick: 5,
@@ -77,12 +76,8 @@ describe("CommandGateway", () => {
     });
   });
 
-  it("applies the per-actor tick command budget across multiple envelopes", () => {
-    const gateway = new CommandGateway({
-      matchId: "match_test",
-      getCurrentTick: () => 5,
-      maxCommandsPerActorPerTick: 3,
-    });
+  it("accepts multiple same-tick envelopes without an artificial command quota", () => {
+    const gateway = new CommandGateway({ matchId: "match_test", getCurrentTick: () => 5 });
     const commands = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => ({
       id: `${prefix}_${index}`,
       type: "hold",
@@ -94,7 +89,7 @@ describe("CommandGateway", () => {
       sequence: 2,
       clientRequestId: "request_2",
       commands: commands("second", 2),
-    }))).toMatchObject({ accepted: false, code: "tick_command_budget_exceeded" });
+    }))).toMatchObject({ accepted: true });
     expect(gateway.submit(createEnvelope({
       actorId: "player_2",
       sequence: 1,

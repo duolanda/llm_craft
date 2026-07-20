@@ -39,6 +39,16 @@ function getControlMatch(state: ServerState, matchId?: string): ControlPlaneMatc
   return null;
 }
 
+function getActiveControlMatch(state: ServerState): ControlPlaneMatch | null {
+  for (const summary of state.matchRegistry.list()) {
+    if (summary.kind !== "control") continue;
+    if (summary.status !== "waiting_for_players" && summary.status !== "running") continue;
+    const entry = state.matchRegistry.get(summary.matchId);
+    if (entry?.handle instanceof ControlPlaneMatch) return entry.handle;
+  }
+  return null;
+}
+
 export async function handleControlHttpRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -47,46 +57,6 @@ export async function handleControlHttpRequest(
   helpers: ControlRouteHelpers,
 ): Promise<boolean> {
   const { sendJson, readJsonBody } = helpers;
-
-  if (req.method === "GET" && url.pathname === "/api/control/storage/retention") {
-    sendJson(res, 200, await state.artifactRetention.inspect());
-    return true;
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/control/storage/journals") {
-    sendJson(res, 200, await state.journalLifecycle.recoverOrphans({ dryRun: true }));
-    return true;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/control/storage/recover-journals") {
-    let body: { apply?: boolean } = {};
-    try {
-      body = await readJsonBody<{ apply?: boolean }>(req);
-    } catch {
-      // Empty body is a dry-run request.
-    }
-    if (body.apply !== undefined && typeof body.apply !== "boolean") {
-      sendJson(res, 400, { error: "apply 必须是 boolean。" });
-      return true;
-    }
-    sendJson(res, 200, await state.journalLifecycle.recoverOrphans({ dryRun: body.apply !== true }));
-    return true;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/control/storage/cleanup") {
-    let body: { apply?: boolean } = {};
-    try {
-      body = await readJsonBody<{ apply?: boolean }>(req);
-    } catch {
-      // Empty body is a dry-run request.
-    }
-    if (body.apply !== undefined && typeof body.apply !== "boolean") {
-      sendJson(res, 400, { error: "apply 必须是 boolean。" });
-      return true;
-    }
-    sendJson(res, 200, await state.artifactRetention.inspect({ apply: body.apply === true }));
-    return true;
-  }
 
   if (req.method === "GET" && url.pathname === "/api/control/matches") {
     sendJson(res, 200, {
@@ -145,10 +115,25 @@ export async function handleControlHttpRequest(
       return true;
     }
 
-    const controlMatch = new ControlPlaneMatch({
-      cpuStrategy: cpu,
-      journalLifecycle: state.journalLifecycle,
-    });
+    const activeMatch = getActiveControlMatch(state);
+    if (activeMatch) {
+      state.matchRegistry.observe(activeMatch.getMatchId());
+      const lobby = activeMatch.getLobbyStatus();
+      sendJson(res, 200, {
+        ok: true,
+        tick: activeMatch.getGame().getTick(),
+        kind: "state",
+        data: {
+          matchId: activeMatch.getMatchId(),
+          status: lobby.status,
+          reused: true,
+          message: "An active control match already exists; no new match was created.",
+        },
+      });
+      return true;
+    }
+
+    const controlMatch = new ControlPlaneMatch({ cpuStrategy: cpu });
     state.matchRegistry.register(controlMatch, { kind: "control", observe: true });
     sendJson(res, 201, {
       ok: true,
@@ -157,6 +142,7 @@ export async function handleControlHttpRequest(
       data: {
         matchId: controlMatch.getMatchId(),
         status: "waiting_for_players",
+        reused: false,
         ...(cpu ? { cpu, cpuPlayer: "player_2" } : {}),
       },
     });
@@ -184,7 +170,7 @@ export async function handleControlHttpRequest(
 
     const game = controlMatch.getGame();
     const session = state.controlSessions.create(
-      controlMatch.getBridge(body.playerId),
+      controlMatch.getGameplayController(body.playerId),
       controlMatch.getMatchId(),
       body.playerId,
     );
@@ -235,8 +221,8 @@ export async function handleControlHttpRequest(
   const game = controlMatch.getGame();
 
   if (req.method === "GET" && subPath === "/state") {
-    const mapResult = session.bridge.getMapState({ includeCells: false, includeEmptyTiles: false });
-    const myResult = session.bridge.getMyState();
+    const mapResult = session.gameplayController.getMapState({ includeCells: false, includeEmptyTiles: false });
+    const myResult = session.gameplayController.getMyState();
     const gameState = game.getState();
     const lobby = controlMatch.getLobbyStatus();
     const response = buildControlResponse(mapResult, "state");
@@ -288,7 +274,6 @@ export async function handleControlHttpRequest(
       || !body.clientRequestId.trim()
       || !Array.isArray(body.actions)
       || body.actions.length === 0
-      || body.actions.length > 100
       || body.actions.some((action) => (
         !action
         || typeof action.tool !== "string"
@@ -303,7 +288,7 @@ export async function handleControlHttpRequest(
         data: {},
         error: {
           code: "invalid_action_batch",
-          message: "clientRequestId and 1-100 well-formed actions are required.",
+          message: "clientRequestId and at least one well-formed action are required.",
         },
       });
       return true;

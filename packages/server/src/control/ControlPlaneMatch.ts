@@ -1,19 +1,23 @@
-import { CPUStrategyType, PlayerId, PLAYER_IDS, TICK_INTERVAL_MS, type Command } from "@llmcraft/shared";
+import {
+  CPUStrategyType,
+  PlayerId,
+  PLAYER_IDS,
+  type Command,
+  type MatchRecordingOptions,
+} from "@llmcraft/shared";
 import { Game } from "../Game";
-import { GameAgentBridge } from "../agent/GameAgentBridge";
-import { BuiltinTestController } from "../controller/BuiltinTestController";
+import { GameplayController } from "../controller/GameplayController";
+import { BuiltinCPUController } from "../controller/BuiltinCPUController";
 import { MatchRuntime } from "../MatchRuntime";
 import { MatchRecorder } from "../MatchRecorder";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RegisteredMatchStatus } from "../MatchRegistry";
-import type { JournalLifecycleService } from "../JournalLifecycle";
 
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONTROL_RECORDS_DIR = path.resolve(CURRENT_DIR, "..", "..", "logs", "records");
 
 export interface ControlLobbyStatus {
-  status: "waiting_for_players" | "running";
+  status: "waiting_for_players" | "running" | "finished" | "stopped";
   ready: { player_1: boolean; player_2: boolean };
 }
 
@@ -22,20 +26,18 @@ export class ControlPlaneMatch {
   private readonly game: Game;
   private readonly recorder: MatchRecorder;
   private readonly startedAt = new Date().toISOString();
-  private readonly bridgeByPlayer: Record<PlayerId, GameAgentBridge>;
+  private readonly gameplayControllerByPlayer: Record<PlayerId, GameplayController>;
   private readonly ready = { player_1: false, player_2: false };
   private started = false;
   private stopped = false;
-  private cpuLoop: NodeJS.Timeout | null = null;
   private cpuRun: Promise<void> | null = null;
-  private planLoop: NodeJS.Timeout | null = null;
-  private lastPlanAdvanceTick = -1;
-  private cpuNextActTick = 0;
+  private readonly recording: MatchRecordingOptions;
+  private unsubscribeTick: (() => void) | null = null;
   private readonly cpu:
     | {
         playerId: PlayerId;
         strategy: CPUStrategyType;
-        controller: BuiltinTestController;
+        controller: BuiltinCPUController;
       }
     | null;
 
@@ -43,20 +45,22 @@ export class ControlPlaneMatch {
     cpuStrategy?: CPUStrategyType;
     recordDir?: string;
     matchId?: string;
-    journalLifecycle?: JournalLifecycleService;
+    recording?: MatchRecordingOptions;
   }) {
     this.matchRuntime = new MatchRuntime({
-      recordDir: options?.recordDir ?? DEFAULT_CONTROL_RECORDS_DIR,
       matchId: options?.matchId,
-      journalLifecycle: options?.journalLifecycle,
     });
     this.game = this.matchRuntime.getGame();
-    this.recorder = new MatchRecorder(this.matchRuntime);
-    this.bridgeByPlayer = {
-      [PLAYER_IDS.PLAYER_1]: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_1, {
+    this.recorder = new MatchRecorder(
+      this.matchRuntime,
+      options?.recordDir ?? DEFAULT_CONTROL_RECORDS_DIR,
+    );
+    this.recording = options?.recording ?? { profile: "replay", includeTranscript: false };
+    this.gameplayControllerByPlayer = {
+      [PLAYER_IDS.PLAYER_1]: new GameplayController(this.game, PLAYER_IDS.PLAYER_1, {
         submitCommands: (commands, submitOptions) => this.submitCommands(PLAYER_IDS.PLAYER_1, commands, submitOptions),
       }),
-      [PLAYER_IDS.PLAYER_2]: new GameAgentBridge(this.game, PLAYER_IDS.PLAYER_2, {
+      [PLAYER_IDS.PLAYER_2]: new GameplayController(this.game, PLAYER_IDS.PLAYER_2, {
         submitCommands: (commands, submitOptions) => this.submitCommands(PLAYER_IDS.PLAYER_2, commands, submitOptions),
       }),
     };
@@ -64,10 +68,10 @@ export class ControlPlaneMatch {
       ? {
           playerId: PLAYER_IDS.PLAYER_2,
           strategy: options.cpuStrategy,
-          controller: new BuiltinTestController(
+          controller: new BuiltinCPUController(
             PLAYER_IDS.PLAYER_2,
             { providerType: "builtin-cpu", strategy: options.cpuStrategy },
-            this.bridgeByPlayer[PLAYER_IDS.PLAYER_2],
+            this.gameplayControllerByPlayer[PLAYER_IDS.PLAYER_2],
           ),
         }
       : null;
@@ -92,39 +96,27 @@ export class ControlPlaneMatch {
   saveRecord(): Promise<string> {
     return this.recorder.save({
       startedAt: this.startedAt,
-      aiIntervalTicks: 0,
+      recording: this.recording,
       systemPrompt: "",
       players: [
         { playerId: PLAYER_IDS.PLAYER_1, model: "external-controller" },
         {
           playerId: PLAYER_IDS.PLAYER_2,
-          model: this.cpu ? `deterministic-test:${this.cpu.strategy}` : "external-controller",
+          model: this.cpu ? `builtin-cpu:${this.cpu.strategy}` : "external-controller",
         },
       ],
+      aiTurns: [],
     });
   }
 
-  getMatchStatus(): RegisteredMatchStatus {
+  getMatchStatus(): ControlLobbyStatus["status"] {
     if (this.game.getWinner()) return "finished";
     if (this.stopped) return "stopped";
     return this.started ? "running" : "waiting_for_players";
   }
 
-  getBridge(playerId: PlayerId): GameAgentBridge {
-    return this.bridgeByPlayer[playerId];
-  }
-
-  advancePlans(): void {
-    const state = this.game.getState();
-    if (!state || state.winner || state.tick === this.lastPlanAdvanceTick) {
-      return;
-    }
-
-    this.lastPlanAdvanceTick = state.tick;
-    for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
-      const commands = this.bridgeByPlayer[playerId].advancePlans();
-      this.submitCommands(playerId, commands);
-    }
+  getGameplayController(playerId: PlayerId): GameplayController {
+    return this.gameplayControllerByPlayer[playerId];
   }
 
   advanceOneTick(): void {
@@ -146,7 +138,7 @@ export class ControlPlaneMatch {
 
   getLobbyStatus(): ControlLobbyStatus {
     return {
-      status: this.started ? "running" : "waiting_for_players",
+      status: this.getMatchStatus(),
       ready: { ...this.ready },
     };
   }
@@ -163,8 +155,8 @@ export class ControlPlaneMatch {
   stop(): void {
     this.stopped = true;
     this.matchRuntime.stop();
-    this.stopCpuLoop();
-    this.stopPlanLoop();
+    this.unsubscribeTick?.();
+    this.unsubscribeTick = null;
   }
 
   async quiesce(): Promise<void> {
@@ -177,48 +169,19 @@ export class ControlPlaneMatch {
       return;
     }
     this.started = true;
+    this.unsubscribeTick = this.matchRuntime.onTickCommitted((state) => {
+      for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
+        this.submitCommands(playerId, this.gameplayControllerByPlayer[playerId].handleCommittedTick());
+      }
+      if (!state.winner && this.cpu && !this.cpuRun) {
+        const run = this.runCpuTick();
+        this.cpuRun = run;
+        void run.finally(() => {
+          if (this.cpuRun === run) this.cpuRun = null;
+        });
+      }
+    });
     this.matchRuntime.start();
-    this.startPlanLoop();
-    this.startCpuLoop();
-  }
-
-  private startPlanLoop(): void {
-    if (this.planLoop) {
-      return;
-    }
-    this.planLoop = setInterval(() => {
-      this.advancePlans();
-    }, 100);
-  }
-
-  private stopPlanLoop(): void {
-    if (!this.planLoop) {
-      return;
-    }
-    clearInterval(this.planLoop);
-    this.planLoop = null;
-  }
-
-  private startCpuLoop(): void {
-    if (!this.cpu || this.cpuLoop) {
-      return;
-    }
-    this.cpuLoop = setInterval(() => {
-      if (this.cpuRun) return;
-      const run = this.runCpuTick();
-      this.cpuRun = run;
-      void run.finally(() => {
-        if (this.cpuRun === run) this.cpuRun = null;
-      });
-    }, 200);
-  }
-
-  private stopCpuLoop(): void {
-    if (!this.cpuLoop) {
-      return;
-    }
-    clearInterval(this.cpuLoop);
-    this.cpuLoop = null;
   }
 
   private async runCpuTick(): Promise<void> {
@@ -230,23 +193,19 @@ export class ControlPlaneMatch {
       return;
     }
     if (state.winner) {
-      this.stopCpuLoop();
       return;
     }
-    if (state.tick < this.cpuNextActTick) {
-      return;
-    }
-    this.cpuNextActTick = state.tick + 10;
 
     try {
+      const tickIntervalMs = this.matchRuntime.getDefinition().tickIntervalMs;
       await this.cpu.controller.run({
         playerId: this.cpu.playerId,
         tick: state.tick,
-        tickIntervalMs: TICK_INTERVAL_MS,
-        summary: "deterministic control-plane smoke turn",
+        tickIntervalMs,
+        summary: "built-in CPU control turn",
       }, {
-        traceContext: {
-          turnId: `test_${this.getMatchId()}_${state.tick}`,
+        runContext: {
+          turnId: `cpu_${this.getMatchId()}_${state.tick}`,
           controllerId: this.cpu.controller.getDescriptor().controllerId,
         },
       });

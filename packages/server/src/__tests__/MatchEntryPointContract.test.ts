@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { GameOrchestrator } from "../GameOrchestrator";
 import type { MatchRuntime } from "../MatchRuntime";
 import { ControlPlaneMatch } from "../control/ControlPlaneMatch";
-import { readTraceRecordFile } from "../TraceFile";
+import { readMatchRecordFile } from "../RecordFile";
 
 type ContractHandle = {
   runtime: MatchRuntime;
@@ -64,7 +64,7 @@ describe("Match entry-point contract", () => {
     },
   ];
 
-  it.each(entryPoints)("applies the same runtime/Trace contract through $name", async ({ create }) => {
+  it.each(entryPoints)("applies the same runtime/Match Record contract through $name", async ({ create }) => {
     const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-entry-contract-"));
     const handle = create(recordDir);
     const game = handle.runtime.getGame();
@@ -81,21 +81,21 @@ describe("Match entry-point contract", () => {
     handle.runtime.stop();
 
     const filePath = await handle.saveRecord();
-    const trace = await readTraceRecordFile(filePath);
-    expect(filePath).toMatch(/\.trace\.json\.gz$/);
-    expect(trace.manifest.definition).toMatchObject({
-      definitionVersion: 2,
-      rules: { schemaVersion: 1, commandBudget: { maxCommandsPerActorPerTick: 100 } },
+    const record = await readMatchRecordFile(filePath);
+    expect(filePath).toMatch(/\.match\.json$/);
+    expect(record.definition).toMatchObject({
+      rulesetId: "standard",
+      map: {
+        id: "standard",
+        playerStarts: [
+          expect.objectContaining({ playerId: "player_1" }),
+          expect.objectContaining({ playerId: "player_2" }),
+        ],
+      },
     });
-    expect(trace.commandSubmissions).toHaveLength(1);
-    expect(trace.domainEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "command_envelope_released", actorId: "player_1" }),
-      expect.objectContaining({ type: "command_result", commandId: "contract_hold" }),
-    ]));
-    expect(trace.replayProjection?.commandResults).toEqual([
-      expect.objectContaining({ type: "command_result", data: expect.objectContaining({ type: "hold_success" }) }),
-    ]);
-    expect(trace.stateHashes.map((entry) => entry.tick)).toEqual([0, 1]);
+    expect(record.initialState.tick).toBe(0);
+    expect(record.finalState.tick).toBe(1);
+    expect(record.tickDeltas).toHaveLength(1);
 
     await fs.rm(recordDir, { recursive: true, force: true });
   });

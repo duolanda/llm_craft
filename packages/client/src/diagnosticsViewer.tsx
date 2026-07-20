@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { GameRecord, PlayerId } from "@llmcraft/shared";
-import { projectRecordToGameRecord } from "@llmcraft/trace";
+import { projectRecordToMatchRecord } from "@llmcraft/record";
 import {
   buildMatchDiagnosticReport,
   DiagnosticTag,
@@ -115,7 +115,7 @@ function DiagnosticsApp() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const record = projectRecordToGameRecord(await response.json() as unknown);
+      const record = projectRecordToMatchRecord(await response.json() as unknown);
       setSelectedRecord(record);
       setSelectedRecordName(selectedRecordFile);
       setTimelineFilter("all");

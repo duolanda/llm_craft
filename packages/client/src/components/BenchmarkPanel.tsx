@@ -10,7 +10,6 @@ interface BenchmarkPanelProps {
     cpuStrategy: CPUStrategyType;
     rounds: number;
     recordReplay: boolean;
-    decisionIntervalTicks: number;
     concurrency: number;
     debug?: MatchDebugOptions;
   }) => void;
@@ -21,7 +20,6 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
   const [presetId, setPresetId] = useState(initialPresetId);
   const [cpuStrategy, setCpuStrategy] = useState<CPUStrategyType>("random");
   const [rounds, setRounds] = useState("1");
-  const [decisionIntervalTicks, setDecisionIntervalTicks] = useState("10");
   const [concurrency, setConcurrency] = useState("1");
   const [recordReplay, setRecordReplay] = useState(true);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
@@ -53,12 +51,6 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       return;
     }
 
-    const parsedDecisionInterval = Number(decisionIntervalTicks);
-    if (!Number.isInteger(parsedDecisionInterval) || parsedDecisionInterval <= 0 || parsedDecisionInterval > 60) {
-      setError("决策间隔必须是 1 到 60 之间的整数。");
-      return;
-    }
-
     const parsedConcurrency = Number(concurrency);
     if (!Number.isInteger(parsedConcurrency) || parsedConcurrency <= 0 || parsedConcurrency > 10) {
       setError("并发数必须是 1 到 10 之间的整数。");
@@ -71,9 +63,8 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       cpuStrategy,
       rounds: parsedRounds,
       recordReplay,
-      decisionIntervalTicks: parsedDecisionInterval,
       concurrency: parsedConcurrency,
-      debug: recordLLMTranscript ? { recordLLMTranscript: true } : undefined,
+      debug: recordLLMTranscript ? { includeTranscript: true } : undefined,
     });
   };
 
@@ -136,18 +127,6 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
           />
         </label>
 
-        <label className="settings-field">
-          <span>决策间隔</span>
-          <input
-            className="settings-input benchmark-number-input"
-            type="number"
-            min={1}
-            max={60}
-            value={decisionIntervalTicks}
-            onChange={(event) => setDecisionIntervalTicks(event.target.value)}
-            disabled={running}
-          />
-        </label>
       </div>
 
       <div className="benchmark-toggle-group">
@@ -168,7 +147,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
             onChange={(event) => setRecordLLMTranscript(event.target.checked)}
             disabled={running}
           />
-          <span>LLM Debug</span>
+          <span>记录完整 transcript</span>
         </label>
       </div>
 

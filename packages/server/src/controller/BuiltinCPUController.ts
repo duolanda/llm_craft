@@ -7,35 +7,35 @@ import type {
 import type { WarmupAgentResult } from "../LLMProvider";
 import { executeAgentTool } from "../agent/AgentTools";
 import type { AgentRuntimeCallbacks, AgentRuntimeResult } from "../agent/AgentRuntime";
-import type { GameAgentBridge } from "../agent/GameAgentBridge";
+import type { GameplayController } from "./GameplayController";
 import { runBuiltinCPUStrategy } from "../benchmark/BuiltinCPUStrategy";
-import type { Controller, ControllerDescriptor } from "./Controller";
+import type { DecisionController, DecisionControllerDescriptor } from "./DecisionController";
 
-/** Deterministic rules smoke driver. This is intentionally not a model session. */
-export class BuiltinTestController implements Controller {
-  private readonly descriptor: ControllerDescriptor;
+/** Built-in CPU opponent used as a benchmark baseline. It is not a model session. */
+export class BuiltinCPUController implements DecisionController {
+  private readonly descriptor: DecisionControllerDescriptor;
 
   constructor(
     playerId: PlayerId,
     private readonly config: BuiltinCPURuntimeConfig,
-    private readonly bridge: GameAgentBridge,
+    private readonly gameplayController: GameplayController,
   ) {
     this.descriptor = {
-      controllerId: `test:${playerId}`,
-      kind: "test",
+      controllerId: `cpu:${playerId}`,
+      kind: "cpu",
       playerId,
-      model: `test-${config.strategy}`,
+      model: `builtin-cpu-${config.strategy}`,
     };
   }
 
-  getDescriptor(): ControllerDescriptor {
+  getDescriptor(): DecisionControllerDescriptor {
     return { ...this.descriptor };
   }
 
   async warmup(_input: AgentRunInput, _callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<WarmupAgentResult> {
     return {
       assistantMessages: [],
-      stopReason: signal?.aborted ? "aborted" : "test_driver_ready",
+      stopReason: signal?.aborted ? "aborted" : "cpu_ready",
       hasPendingToolCalls: false,
       metrics: { modelRequests: 0 },
     };
@@ -43,23 +43,23 @@ export class BuiltinTestController implements Controller {
 
   async run(_input: AgentRunInput, callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<AgentRuntimeResult> {
     if (signal?.aborted) return this.emptyResult("aborted");
-    this.bridge.beginRun({
+    this.gameplayController.beginRun({
       controllerId: this.descriptor.controllerId,
-      source: "test",
-      ...(callbacks?.traceContext?.turnId ? { turnId: callbacks.traceContext.turnId } : {}),
+      source: "cpu",
+      ...(callbacks?.runContext?.turnId ? { turnId: callbacks.runContext.turnId } : {}),
     });
     let toolCallIndex = 0;
     const toolCalls: AgentToolCallRecord[] = [];
     const callTool = async (toolName: string, args: Record<string, unknown>) => {
-      const toolCallId = `test_tool_${++toolCallIndex}`;
+      const toolCallId = `cpu_tool_${++toolCallIndex}`;
       const startedAtMs = Date.now();
-      this.bridge.setCommandProvenance({
+      this.gameplayController.setCommandProvenance({
         toolCallId,
         controllerId: this.descriptor.controllerId,
-        turnId: callbacks?.traceContext?.turnId,
+        turnId: callbacks?.runContext?.turnId,
         source: "macro_tool",
       });
-      const execution = await executeAgentTool(this.bridge, toolName, args);
+      const execution = await executeAgentTool(this.gameplayController, toolName, args);
       const result = execution.result;
       const completedAtMs = Date.now();
       const record: AgentToolCallRecord = {
@@ -68,7 +68,7 @@ export class BuiltinTestController implements Controller {
         args,
         result,
         isError: Boolean(result && typeof result === "object" && "ok" in result && result.ok === false),
-        turnId: callbacks?.traceContext?.turnId,
+        turnId: callbacks?.runContext?.turnId,
         controllerId: this.descriptor.controllerId,
         startedAt: new Date(startedAtMs).toISOString(),
         completedAt: new Date(completedAtMs).toISOString(),
@@ -82,9 +82,9 @@ export class BuiltinTestController implements Controller {
     await runBuiltinCPUStrategy({
       strategy: this.config.strategy,
       runtime: {
-        mapState: this.bridge.getMapState({ trackRead: false }).result,
-        myState: this.bridge.getMyState({ trackRead: false }).result,
-        myUnits: this.bridge.getMyUnits({ trackRead: false }).result,
+        mapState: this.gameplayController.getMapState({ trackRead: false }).result,
+        myState: this.gameplayController.getMyState({ trackRead: false }).result,
+        myUnits: this.gameplayController.getMyUnits({ trackRead: false }).result,
       },
       callTool,
     });
@@ -92,23 +92,15 @@ export class BuiltinTestController implements Controller {
     return {
       assistantMessages: [],
       toolCalls,
-      plans: this.bridge.takeRunPlans(),
-      commands: this.bridge.takeIssuedCommands(),
-      stopReason: "test_driver_turn_complete",
+      plans: this.gameplayController.takeRunPlans(),
+      commands: this.gameplayController.takeIssuedCommands(),
+      stopReason: "cpu_turn_complete",
       metrics: {
         modelRequests: 0,
         toolCalls: toolCalls.length,
         stallDetected: false,
       },
     };
-  }
-
-  advancePlans() {
-    return this.bridge.advancePlans();
-  }
-
-  getActivePlans() {
-    return this.bridge.getActivePlans();
   }
 
   private emptyResult(stopReason: string): AgentRuntimeResult {

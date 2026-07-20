@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentRunInput, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
-import { AgentMemoryPolicy } from "../agent/AgentMemoryPolicy";
+import { ContextWindowLimiter } from "../agent/ContextWindowLimiter";
 
 function createInput(): AgentRunInput {
   return {
@@ -62,19 +62,18 @@ describe("OpenAICompatibleProvider", () => {
       tools: [],
       executeTool: async () => ({ effect: "read" as const, result: {} }),
       getRuntimeState: () => ({ mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null }),
-      traceContext: { turnId: "turn-1", controllerId: "llm:player_1" },
+      runContext: { turnId: "turn-1", controllerId: "llm:player_1" },
     });
 
     expect(result.metrics.modelRequests).toBe(2);
     expect(result.metrics.modelRequestRecords).toEqual([
-      expect.objectContaining({ requestIndex: 1, status: "error", attempt: 1, error: "temporarily unavailable", messagesVersion: 1 }),
-      expect.objectContaining({ requestIndex: 2, status: "success", attempt: 2, retryOfRequestIndex: 1, messagesVersion: 1 }),
+      expect.objectContaining({ requestIndex: 1, status: "error", attempt: 1, error: "temporarily unavailable" }),
+      expect.objectContaining({ requestIndex: 2, status: "success", attempt: 2, retryOfRequestIndex: 1 }),
     ]);
     expect(result.metrics.modelRequestRecords?.[0].messages).toEqual(result.metrics.modelRequestRecords?.[1].messages);
-    expect(result.metrics.modelRequestRecords?.[0].messagesHash).toBe(result.metrics.modelRequestRecords?.[1].messagesHash);
   });
 
-  it("keeps persistent session history within its explicit MemoryPolicy budget", async () => {
+  it("keeps provider history within its explicit context-window limit", async () => {
     const provider = new OpenAICompatibleProvider(
       {
         providerType: "openai-compatible",
@@ -84,7 +83,7 @@ describe("OpenAICompatibleProvider", () => {
       },
       undefined,
       {
-        memoryPolicy: new AgentMemoryPolicy({
+        contextWindowLimiter: new ContextWindowLimiter({
           maxMessages: 5,
           maxBytes: 4096,
           maxMessageBytes: 512,
@@ -115,16 +114,15 @@ describe("OpenAICompatibleProvider", () => {
       finalResult = await provider.runAgent({ ...createInput(), tick }, options);
     }
 
-    expect(finalResult?.metrics.memory).toMatchObject({
-      policyVersion: 1,
+    expect(finalResult?.metrics.contextWindow).toMatchObject({
       maxMessages: 5,
       messagesAfter: 5,
     });
-    expect(finalResult?.metrics.memory?.droppedMessages).toBeGreaterThan(0);
+    expect(finalResult?.metrics.contextWindow?.droppedMessages).toBeGreaterThan(0);
     expect((provider as any).history).toHaveLength(5);
   });
 
-  it("prepares the first real turn and defers tool execution until runAgent continues it", async () => {
+  it("warms up the first real turn and defers tool execution until runAgent continues it", async () => {
     const { provider, create } = createProviderWithResponses([
       {
         choices: [

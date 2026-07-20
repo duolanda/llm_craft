@@ -1,23 +1,22 @@
 import type { MatchPlayerLLMConfig, PlayerId } from "@llmcraft/shared";
 import { createAgentSession } from "../createLLMProvider";
-import type { GameAgentBridge } from "../agent/GameAgentBridge";
-import type { Controller } from "./Controller";
+import { BuiltinCPUController } from "./BuiltinCPUController";
+import type { DecisionController } from "./DecisionController";
+import type { GameplayController } from "./GameplayController";
 import { LLMControllerAdapter } from "./LLMControllerAdapter";
-import { BuiltinTestController } from "./BuiltinTestController";
 
-export function createController(
+export function createDecisionController(
   playerId: PlayerId,
   config: MatchPlayerLLMConfig,
-  bridge: GameAgentBridge,
+  gameplayController: GameplayController,
   systemPrompt: string,
-): Controller {
+): DecisionController {
   if (config.providerType === "builtin-cpu") {
-    return new BuiltinTestController(playerId, config, bridge);
+    return new BuiltinCPUController(playerId, config, gameplayController);
   }
   return new LLMControllerAdapter(
     playerId,
     createAgentSession(config, { systemPrompt }),
-    bridge,
-    "llm",
+    gameplayController,
   );
 }

@@ -1,5 +1,4 @@
 import * as dotenv from "dotenv";
-import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -15,22 +14,22 @@ import {
   GameState,
   MatchDebugOptions,
   MatchLLMConfig,
-  MatchPrepareState,
+  MatchWarmupState,
   MatchWarmupOptions,
   OpenAICompatibleRuntimeConfig,
   PlayerId,
   PLAYER_IDS,
   GameLogDataMap,
   LOG_TYPES,
-  ServerPrepareStatusMessage,
+  ServerWarmupStatusMessage,
   ServerMessage,
-  StateProjectionFrameV1,
+  StateProjectionFrame,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
   UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
-import { applyStateProjectionDelta, createStateProjectionDelta } from "@llmcraft/trace";
+import { applyStateProjectionDelta, createStateProjectionDelta } from "@llmcraft/record";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
 import { PresetStore } from "./PresetStore";
@@ -44,9 +43,7 @@ import {
   type RegisteredMatchHandle,
   type RegisteredMatchStatus,
 } from "./MatchRegistry";
-import { JournalLifecycleService } from "./JournalLifecycle";
-import { ArtifactRetentionService, type ArtifactGroup } from "./ArtifactRetention";
-import { isSupportedRecordFileName, readRecordJsonText, traceFileEncoding } from "./TraceFile";
+import { isSupportedRecordFileName, readRecordJsonText, recordFileEncoding } from "./RecordFile";
 import {
   MAX_WEBSOCKET_BUFFERED_BYTES,
   shouldDeferLatestProjection,
@@ -61,11 +58,6 @@ const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3101", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
-const BENCHMARK_RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-records");
-const LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "llm-debug");
-const BENCHMARK_LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-llm-debug");
-const ORPHAN_JOURNALS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "orphan-journals");
-const RETENTION_PINS_FILE = path.resolve(SERVER_PACKAGE_DIR, "data", "retention-pins.json");
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const BROADCAST_TOTAL_WARNING_MS = 250;
@@ -85,12 +77,11 @@ const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
 interface OrchestratorLike {
   getMatchId?(): string;
   getMatchStatus?(): RegisteredMatchStatus;
-  prepare?(warmup: MatchWarmupOptions): Promise<void>;
+  warmup?(warmup: MatchWarmupOptions): Promise<void>;
   start(): Promise<void>;
   stop(): void;
   quiesce?: () => Promise<void>;
   saveRecord(): Promise<string>;
-  discardJournal?: () => Promise<void>;
   getAITerminalFeed?: (sinceSequence?: number) => {
     sessionId: string;
     events: AITerminalEvent[];
@@ -124,9 +115,7 @@ interface BenchmarkCoordinatorLike {
 export interface ServerState {
   presetStore: PresetStore;
   matchRegistry: MatchRegistry;
-  journalLifecycle: JournalLifecycleService;
-  artifactRetention: ArtifactRetentionService;
-  pendingMatch: {
+  warmupMatch: {
     signature: string;
     matchId: string;
   } | null;
@@ -140,7 +129,6 @@ export interface ServerState {
       cpuStrategy: ClientStartBenchmarkMessage["cpuStrategy"];
       rounds: number;
       recordReplay: boolean;
-      decisionIntervalTicks?: number;
       concurrency?: number;
       debug?: ClientStartBenchmarkMessage["debug"];
     },
@@ -162,97 +150,17 @@ export function createPresetStore(options?: {
   });
 }
 
-const DEFAULT_RETENTION: Record<ArtifactGroup, { maxAgeDays: number; maxEntries: number; maxMiB: number }> = {
-  records: { maxAgeDays: 90, maxEntries: 500, maxMiB: 10_240 },
-  "benchmark-records": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 10_240 },
-  "llm-debug": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 5_120 },
-  "benchmark-llm-debug": { maxAgeDays: 30, maxEntries: 1_000, maxMiB: 5_120 },
-  "orphan-journals": { maxAgeDays: 14, maxEntries: 200, maxMiB: 2_048 },
-};
-
-export function createArtifactRetentionService(
-  env: NodeJS.ProcessEnv = process.env,
-): ArtifactRetentionService {
-  const protectedNames = loadRetentionPins();
-  const directories: Record<ArtifactGroup, string> = {
-    records: RECORDS_DIR,
-    "benchmark-records": BENCHMARK_RECORDS_DIR,
-    "llm-debug": LLM_DEBUG_DIR,
-    "benchmark-llm-debug": BENCHMARK_LLM_DEBUG_DIR,
-    "orphan-journals": ORPHAN_JOURNALS_DIR,
-  };
-  return new ArtifactRetentionService({
-    sources: (Object.keys(directories) as ArtifactGroup[]).map((group) => {
-      const prefix = `LLMCRAFT_RETENTION_${group.replace(/-/g, "_").toUpperCase()}`;
-      const defaults = DEFAULT_RETENTION[group];
-      const maxAgeDays = parseRetentionNumber(env[`${prefix}_MAX_AGE_DAYS`], defaults.maxAgeDays);
-      const maxEntries = parseRetentionNumber(env[`${prefix}_MAX_ENTRIES`], defaults.maxEntries);
-      const maxMiB = parseRetentionNumber(env[`${prefix}_MAX_MIB`], defaults.maxMiB);
-      return {
-        group,
-        directory: directories[group],
-        protectedNames: protectedNames[group] ?? [],
-        limit: {
-          maxAgeMs: maxAgeDays * 24 * 60 * 60 * 1_000,
-          maxEntries,
-          maxBytes: maxMiB * 1024 * 1024,
-        },
-      };
-    }),
-  });
-}
-
-function loadRetentionPins(): Partial<Record<ArtifactGroup, string[]>> {
-  try {
-    const parsed = JSON.parse(fsSync.readFileSync(RETENTION_PINS_FILE, "utf8")) as {
-      version?: unknown;
-      groups?: Partial<Record<ArtifactGroup, unknown>>;
-    };
-    if (parsed.version !== 1 || !parsed.groups) return {};
-    return Object.fromEntries(
-      Object.entries(parsed.groups).map(([group, names]) => [
-        group,
-        Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [],
-      ]),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("无法读取 retention pins:", error);
-    }
-    return {};
-  }
-}
-
-function parseRetentionNumber(raw: string | undefined, fallback: number): number {
-  if (raw === undefined || raw.trim() === "") return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`Invalid retention value: ${raw}`);
-  }
-  return parsed;
-}
-
 export function createServerState(
   presetStore: PresetStore,
   createOrchestrator?: (config: GameOrchestratorConfig) => OrchestratorLike,
   createBenchmarkOrchestrator?: ServerState["createBenchmarkOrchestrator"],
 ): ServerState {
   const matchRegistry = new MatchRegistry();
-  const journalLifecycle = new JournalLifecycleService({
-    journalRootDir: process.env.LLMCRAFT_JOURNAL_ROOT || undefined,
-    recoveryDir: process.env.LLMCRAFT_JOURNAL_RECOVERY_DIR || ORPHAN_JOURNALS_DIR,
-  });
-  const artifactRetention = createArtifactRetentionService();
-  const orchestratorFactory = createOrchestrator ?? ((config: GameOrchestratorConfig) => new GameOrchestrator({
-    ...config,
-    runtime: { ...config.runtime, journalLifecycle },
-  }));
+  const orchestratorFactory = createOrchestrator ?? ((config: GameOrchestratorConfig) => new GameOrchestrator(config));
   return {
     presetStore,
     matchRegistry,
-    journalLifecycle,
-    artifactRetention,
-    pendingMatch: null,
+    warmupMatch: null,
     activeBenchmark: null,
     controlSessions: new ControlSessionManager(),
     createOrchestrator: orchestratorFactory,
@@ -262,7 +170,6 @@ export function createServerState(
         ws,
         undefined,
         matchRegistry,
-        journalLifecycle,
       )),
     liveEnabled: null,
   };
@@ -282,14 +189,11 @@ function asRegisteredMatchHandle(orchestrator: OrchestratorLike): OrchestratorLi
     getMatchStatus: orchestrator.getMatchStatus
       ? () => orchestrator.getMatchStatus!()
       : undefined,
-    prepare: orchestrator.prepare ? (warmup) => orchestrator.prepare!(warmup) : undefined,
+    warmup: orchestrator.warmup ? (options) => orchestrator.warmup!(options) : undefined,
     start: () => orchestrator.start(),
     stop: () => orchestrator.stop(),
     quiesce: orchestrator.quiesce ? () => orchestrator.quiesce!() : undefined,
     saveRecord: () => orchestrator.saveRecord(),
-    discardJournal: orchestrator.discardJournal
-      ? () => orchestrator.discardJournal!()
-      : undefined,
     getGame: () => orchestrator.getGame(),
     getAITerminalFeed: orchestrator.getAITerminalFeed
       ? (sinceSequence) => orchestrator.getAITerminalFeed!(sinceSequence)
@@ -317,10 +221,20 @@ function getRegisteredOrchestrator(state: ServerState, matchId: string): Orchest
   return entry ? entry.handle as OrchestratorLike : null;
 }
 
+function getActiveLiveMatch(state: ServerState) {
+  return state.matchRegistry.list()
+    .find((match) => (
+      match.kind === "live"
+      && (match.status === "warming_up"
+        || match.status === "waiting_for_players"
+        || match.status === "running")
+    )) ?? null;
+}
+
 type StateMessagePayload = {
   type: "state";
   state: GameState | null;
-  frame: StateProjectionFrameV1 | null;
+  frame: StateProjectionFrame | null;
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
@@ -358,7 +272,6 @@ export function buildStateMessagePayload(
   const frameSequence = options.frameSequence ?? 1;
   const tickIntervalMs = game?.getDefinition?.().tickIntervalMs ?? 500;
   const metadata = currentState ? {
-    frameVersion: 1 as const,
     frameSequence,
     simulationTick: currentState.tick,
     simulationTimeMs: currentState.tick * tickIntervalMs,
@@ -371,7 +284,7 @@ export function buildStateMessagePayload(
     || options.baseFrameSequence === undefined
     || frameSequence % 20 === 1
   );
-  const frame: StateProjectionFrameV1 | null = !currentState || !metadata
+  const frame: StateProjectionFrame | null = !currentState || !metadata
     ? null
     : keyframe
       ? { kind: "keyframe", metadata, state: currentState, aiOutputs }
@@ -421,16 +334,20 @@ function buildMatchSignature(input: {
   });
 }
 
-function sendPrepareStatus(
+function liveTerminalPolicy(debug?: MatchDebugOptions): "save" | "none" {
+  return debug?.recordingProfile === "off" ? "none" : "save";
+}
+
+function sendWarmupStatus(
   ws: Pick<WebSocket, "send">,
-  statuses: Partial<Record<PlayerId, MatchPrepareState>>,
+  statuses: Partial<Record<PlayerId, MatchWarmupState>>,
   message?: string
 ): void {
   ws.send(JSON.stringify({
-    type: "prepare_status",
+    type: "warmup_status",
     statuses,
     message,
-  } satisfies ServerPrepareStatusMessage));
+  } satisfies ServerWarmupStatusMessage));
 }
 
 function normalizeWarmupOptions(warmup?: MatchWarmupOptions): MatchWarmupOptions {
@@ -636,7 +553,7 @@ async function listRecordEntries() {
             fullPath,
             size: stat.size,
             modifiedAt: stat.mtime.toISOString(),
-            encoding: traceFileEncoding(entry.name),
+            encoding: recordFileEncoding(entry.name),
           };
         })
     );
@@ -816,11 +733,11 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
     const message: ClientMessage = parsed;
 
-    if (message.type === "prepare") {
+    if (message.type === "warmup") {
       if (!message.player1PresetId || !message.player2PresetId) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "准备对局前必须为红蓝双方选择预设。",
+        message: "预热模型前必须为红蓝双方选择预设。",
         } satisfies ServerMessage));
         return;
       }
@@ -830,50 +747,78 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       if (warmupPlayers.length === 0) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "至少选择一方进行准备。",
+          message: "至少选择一方进行模型预热。",
         } satisfies ServerMessage));
         return;
       }
 
       const signature = buildMatchSignature(message);
+      const activeLive = getActiveLiveMatch(state);
+      if (activeLive?.status === "running") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "已有实时对局正在运行。请先停止或重置当前对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (
+        state.warmupMatch
+        && state.warmupMatch.signature !== signature
+      ) {
+        state.matchRegistry.remove(state.warmupMatch.matchId, { stop: true });
+        state.warmupMatch = null;
+      }
+      if (
+        activeLive?.status === "waiting_for_players"
+        && state.matchRegistry.get(activeLive.matchId)?.signature !== signature
+      ) {
+        state.matchRegistry.remove(activeLive.matchId, { stop: true });
+      }
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
-      let orchestrator = state.pendingMatch?.signature === signature
-        ? getRegisteredOrchestrator(state, state.pendingMatch.matchId)
-        : null;
+      let orchestrator = state.warmupMatch?.signature === signature
+        ? getRegisteredOrchestrator(state, state.warmupMatch.matchId)
+        : getActiveLiveMatch(state)?.status === "waiting_for_players"
+          ? getRegisteredOrchestrator(state, getActiveLiveMatch(state)!.matchId)
+          : null;
 
       if (!orchestrator) {
         orchestrator = registerOrchestrator(state, state.createOrchestrator({
           player1,
           player2,
           debug: message.debug,
-        }), { kind: "live", signature, observe: true });
-        state.pendingMatch = { signature, matchId: orchestrator.getMatchId!() };
+        }), {
+          kind: "live",
+          signature,
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
+        });
+        state.warmupMatch = { signature, matchId: orchestrator.getMatchId!() };
       } else {
         state.matchRegistry.observe(orchestrator.getMatchId!());
       }
 
-      sendPrepareStatus(
+      sendWarmupStatus(
         ws,
-        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "preparing"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-        "模型准备中。"
+        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "warming_up"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+        "模型预热中。"
       );
 
       try {
-        await orchestrator.prepare?.(warmup);
+        await orchestrator.warmup?.(warmup);
       } catch (error) {
-        sendPrepareStatus(
+        sendWarmupStatus(
           ws,
-          Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "error"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-          error instanceof Error && error.message.startsWith("模型准备失败") ? error.message : "模型准备失败。"
+          Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "error"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+          error instanceof Error && error.message.startsWith("模型预热失败") ? error.message : "模型预热失败。"
         );
         throw error;
       }
 
-      sendPrepareStatus(
+      sendWarmupStatus(
         ws,
-        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "ready"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-        "模型已准备，可以启动模拟。"
+        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "ready"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+        "模型预热完成，可以启动模拟。"
       );
       return;
     }
@@ -888,19 +833,46 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       const signature = buildMatchSignature(message);
+      const activeLive = getActiveLiveMatch(state);
+      if (activeLive?.status === "running") {
+        state.matchRegistry.observe(activeLive.matchId);
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "已有实时对局正在运行，不会重复启动。请先停止或重置当前对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (state.warmupMatch && state.warmupMatch.signature !== signature) {
+        state.matchRegistry.remove(state.warmupMatch.matchId, { stop: true });
+        state.warmupMatch = null;
+      }
+      if (
+        activeLive?.status === "waiting_for_players"
+        && state.matchRegistry.get(activeLive.matchId)?.signature !== signature
+      ) {
+        state.matchRegistry.remove(activeLive.matchId, { stop: true });
+      }
       const previousObservedId = state.matchRegistry.getObservedMatchId();
-      const preparedMatch = state.pendingMatch?.signature === signature
-        ? getRegisteredOrchestrator(state, state.pendingMatch.matchId)
-        : null;
-      const createdNew = !preparedMatch;
-      const nextOrchestrator = preparedMatch ?? registerOrchestrator(
+      const warmedMatch = state.warmupMatch?.signature === signature
+        ? getRegisteredOrchestrator(state, state.warmupMatch.matchId)
+        : activeLive?.status === "waiting_for_players"
+          && state.matchRegistry.get(activeLive.matchId)?.signature === signature
+          ? getRegisteredOrchestrator(state, activeLive.matchId)
+          : null;
+      const createdNew = !warmedMatch;
+      const nextOrchestrator = warmedMatch ?? registerOrchestrator(
         state,
         state.createOrchestrator({
           player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
           player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
           debug: message.debug,
         }),
-        { kind: "live", signature, observe: true },
+        {
+          kind: "live",
+          signature,
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
+        },
       );
       const nextMatchId = nextOrchestrator.getMatchId!();
       state.matchRegistry.observe(nextMatchId);
@@ -919,7 +891,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         throw error;
       }
 
-      state.pendingMatch = null;
+      state.warmupMatch = null;
       return;
     }
 
@@ -928,7 +900,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       state.activeBenchmark = null;
       const observedMatchId = state.matchRegistry.getObservedMatchId();
       if (observedMatchId) await state.matchRegistry.stopAndSave(observedMatchId);
-      state.pendingMatch = null;
+      state.warmupMatch = null;
       return;
     }
 
@@ -962,9 +934,14 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const nextOrchestrator = registerOrchestrator(
         state,
         state.createOrchestrator({ player1, player2, debug: message.debug }),
-        { kind: "live", observe: true },
+        {
+          kind: "live",
+          signature: buildMatchSignature(message),
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
+        },
       );
-      state.pendingMatch = null;
+      state.warmupMatch = null;
       if (previousMatchId && previousMatchId !== nextOrchestrator.getMatchId!()) {
         await state.matchRegistry.stopAndSave(previousMatchId);
         state.matchRegistry.remove(previousMatchId);
@@ -1032,7 +1009,6 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           cpuStrategy: message.cpuStrategy,
           rounds: message.rounds,
           recordReplay: message.recordReplay ?? true,
-          decisionIntervalTicks: message.decisionIntervalTicks,
           concurrency: message.concurrency,
           debug: message.debug,
         },
@@ -1040,7 +1016,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       );
 
       state.activeBenchmark = benchmarkOrchestrator;
-      state.pendingMatch = null;
+      state.warmupMatch = null;
 
       try {
         await benchmarkOrchestrator.start();
@@ -1066,7 +1042,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
             : error.message === "BENCHMARK_PRESET_INVALID"
               ? "Benchmark 只能使用 OpenAI-compatible 预设。"
-              : error.message.startsWith("模型准备失败")
+              : error.message.startsWith("模型预热失败")
                 ? error.message
                 : "处理客户端消息失败。"
         : "处理客户端消息失败。",
@@ -1301,37 +1277,13 @@ export function startServer() {
   console.log("启动 LLMCraft 服务器...");
   console.log(`HTTP/WebSocket 服务器运行在端口 ${PORT}`);
 
-  void state.journalLifecycle.recoverOrphans().then(async (report) => {
-    const recovered = report.entries.filter((entry) => entry.action === "recover");
-    const legacy = report.entries.filter((entry) => entry.action === "report_legacy");
-    if (recovered.length > 0 || legacy.length > 0) {
-      console.log(
-        `Journal 启动扫描: 恢复 ${recovered.length} 个异常 owner（${report.recoveredBytes} bytes），`
-        + `识别 ${legacy.length} 个 legacy 目录。`,
-      );
-    }
-    const applyRetention = process.env.LLMCRAFT_RETENTION_APPLY_ON_STARTUP === "true";
-    const retention = await state.artifactRetention.inspect({ apply: applyRetention });
-    if (!applyRetention) {
-      await state.artifactRetention.inspect({ apply: true, groups: ["orphan-journals"] });
-    }
-    if (retention.deleteCount > 0) {
-      console.log(
-        `存储保留策略${applyRetention ? "已清理" : "预览"}: `
-        + `${retention.deleteCount} 个 artifact，${retention.deleteBytes} bytes。`,
-      );
-    }
-  }).catch((error) => {
-    console.error("Journal/存储生命周期启动扫描失败:", error);
-  });
-
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n收到 ${signal}，正在保存并关闭服务器...`);
     const forcedExit = setTimeout(() => {
-      console.error("服务器优雅关闭超时。未完成 journal 将留待下次启动恢复。");
+      console.error("服务器优雅关闭超时。");
       process.exit(1);
     }, 10_000);
     forcedExit.unref();
@@ -1340,10 +1292,6 @@ export function startServer() {
     const results = await state.matchRegistry.stopAndSaveAll();
     for (const result of results) {
       if (!result.ok) console.error(`对局 ${result.matchId} 关闭保存失败: ${result.error}`);
-    }
-    const ownerClose = await state.journalLifecycle.closeOwner();
-    if (!ownerClose.closed) {
-      console.warn(`仍有 ${ownerClose.remainingJournalIds.length} 个 journal 未封存，将在下次启动恢复。`);
     }
     for (const client of wss.clients) client.close();
     await Promise.all([

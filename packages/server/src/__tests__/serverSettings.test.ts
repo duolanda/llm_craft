@@ -315,7 +315,7 @@ describe("server settings", () => {
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("必须为红蓝双方选择预设"));
   });
 
-  it("creates a fresh orchestrator from the selected presets for each player", async () => {
+  it("creates one live orchestrator and rejects a duplicate start", async () => {
     const presetStore = await createStore();
     const player1Preset = await presetStore.create({
       name: "Red",
@@ -341,6 +341,7 @@ describe("server settings", () => {
     }));
     const createOrchestrator = vi.fn((config) => ({
       getMatchId: () => "match_started",
+      getMatchStatus: () => start.mock.calls.length > 0 ? "running" as const : "waiting_for_players" as const,
       start,
       stop,
       saveRecord,
@@ -349,13 +350,23 @@ describe("server settings", () => {
     }));
     const state = createServerState(presetStore, createOrchestrator);
 
+    const ws = { send: vi.fn() };
     await handleClientMessage({
       data: JSON.stringify({
         type: "start",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
       }),
-      ws: { send: vi.fn() } as any,
+      ws: ws as any,
+      state,
+    });
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+      }),
+      ws: ws as any,
       state,
     });
 
@@ -376,6 +387,7 @@ describe("server settings", () => {
       debug: undefined,
     });
     expect(start).toHaveBeenCalledTimes(1);
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("不会重复启动"));
     expect(state.matchRegistry.getObservedMatchId()).toBe("match_started");
   });
 
@@ -516,7 +528,7 @@ describe("server settings", () => {
         type: "start",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       }),
       ws: { send: vi.fn() } as any,
       state,
@@ -524,12 +536,12 @@ describe("server settings", () => {
 
     expect(createOrchestrator).toHaveBeenCalledWith(
       expect.objectContaining({
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       })
     );
   });
 
-  it("prepares selected players before start and reports status", async () => {
+  it("warms up selected players before start and reports status", async () => {
     const presetStore = await createStore();
     const player1Preset = await presetStore.create({
       name: "Red",
@@ -545,9 +557,9 @@ describe("server settings", () => {
       model: "model-two",
       apiKey: "token-two",
     });
-    const prepare = vi.fn(async () => undefined);
+    const warmupHandler = vi.fn(async () => undefined);
     const createOrchestrator = vi.fn(() => ({
-      prepare,
+      warmup: warmupHandler,
       start: vi.fn(async () => undefined),
       stop: vi.fn(() => undefined),
       saveRecord: vi.fn(async () => "logs/records/mock.json"),
@@ -561,7 +573,7 @@ describe("server settings", () => {
 
     await handleClientMessage({
       data: JSON.stringify({
-        type: "prepare",
+        type: "warmup",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
         warmup: { player_1: true, player_2: false },
@@ -576,8 +588,8 @@ describe("server settings", () => {
         player2: expect.objectContaining({ model: "model-two" }),
       })
     );
-    expect(prepare).toHaveBeenCalledWith({ player_1: true, player_2: false });
-    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"prepare_status"'));
+    expect(warmupHandler).toHaveBeenCalledWith({ player_1: true, player_2: false });
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"warmup_status"'));
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"player_1":"ready"'));
   });
 
@@ -658,8 +670,7 @@ describe("server settings", () => {
         cpuStrategy: "random",
         rounds: 12,
         recordReplay: true,
-        decisionIntervalTicks: 7,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       }),
       ws: { send: vi.fn() } as any,
       state,
@@ -678,8 +689,7 @@ describe("server settings", () => {
         cpuStrategy: "random",
         rounds: 12,
         recordReplay: true,
-        decisionIntervalTicks: 7,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       },
       expect.any(Object)
     );
@@ -740,7 +750,6 @@ describe("server settings", () => {
     expect(payload.frame).toEqual(expect.objectContaining({
       kind: "keyframe",
       metadata: expect.objectContaining({
-        frameVersion: 1,
         frameSequence: 1,
         simulationTick: 24,
       }),

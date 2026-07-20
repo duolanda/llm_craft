@@ -15,7 +15,6 @@ import {
 import { WorldState } from "../WorldState";
 import type { WorldUnit } from "../WorldUnit";
 
-const MAX_PURSUIT_PATHS_PER_TICK = 4;
 type AttackOrder = Extract<UnitIntent, { type: "attack" }>;
 type AttackMoveOrder = Extract<UnitIntent, { type: "attack_move" }>;
 
@@ -168,7 +167,6 @@ export class CombatSystem {
   }
 
   private processAttackMoveOrders(world: WorldState): void {
-    let remainingPursuitPaths = MAX_PURSUIT_PATHS_PER_TICK;
     for (const unit of world.units.getAllUnits()) {
       if (!unit.exists || unit.order?.type !== "attack_move") continue;
       const attackMoveOrder: AttackMoveOrder = unit.order;
@@ -194,8 +192,6 @@ export class CombatSystem {
           }
           if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
             if (attackMoveOrder.targetId === target.target.id && unit.pathTarget) continue;
-            if (remainingPursuitPaths <= 0) continue;
-            remainingPursuitPaths -= 1;
             const moveResult = world.units.setMoveTarget(
               unit,
               target.target.x,

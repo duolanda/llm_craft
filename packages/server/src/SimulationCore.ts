@@ -44,7 +44,7 @@ function createDefaultSystems(): SimulationSystems {
 /**
  * Applies one deterministic rules step directly to authoritative WorldState.
  *
- * MatchRuntime owns clocks, lifecycle and transaction rollback. CommandGateway
+ * MatchRuntime owns clocks and lifecycle. CommandGateway
  * applies the accepted command batch at the tick boundary before this method.
  * The core has no timer, model, network, renderer, log or filesystem dependency.
  */
@@ -67,8 +67,6 @@ export class SimulationCore {
     events.push(...this.systems.production.step(world));
     const victory = this.systems.victory.step(world);
     if (victory) events.push(victory);
-    world.assertInvariants();
-
     return {
       advanced: true,
       tick: world.tick,

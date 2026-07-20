@@ -6,7 +6,6 @@ function createFakeRound(params: {
   winner: string | null;
   tick: number;
   recordPath?: string;
-  transcriptPath?: string;
 }) {
   const aiFeed = {
     sessionId: `session-${params.tick}`,
@@ -31,10 +30,10 @@ function createFakeRound(params: {
   return {
     getMatchId: () => `match_round_${params.tick}`,
     start: vi.fn(async () => undefined),
+    waitForEnd: vi.fn(async () => ({ status: "finished", state: game.getState() })),
     stop: vi.fn(() => undefined),
     saveRecord: vi.fn(async () => params.recordPath ?? `logs/records/round-${params.tick}.json`),
     getGame: vi.fn(() => game),
-    getTranscriptFilePath: vi.fn(() => params.transcriptPath ?? null),
     getAITerminalFeed: vi.fn(() => aiFeed),
   };
 }
@@ -44,7 +43,7 @@ describe("BenchmarkOrchestrator", () => {
     const ws = { send: vi.fn() };
     const rounds = [
       createFakeRound({ winner: "player_1", tick: 120, recordPath: "logs/records/round-1.json" }),
-      createFakeRound({ winner: "player_2", tick: 140, recordPath: "logs/records/round-2.json", transcriptPath: "logs/llm-debug/round-2.log" }),
+      createFakeRound({ winner: "player_2", tick: 140, recordPath: "logs/records/round-2.json" }),
       createFakeRound({ winner: null, tick: 180, recordPath: "logs/records/round-3.json" }),
     ];
     const configs: Array<{ player1: { providerType: string }; player2: { providerType: string } }> = [];
@@ -60,7 +59,6 @@ describe("BenchmarkOrchestrator", () => {
         cpuStrategy: "rush",
         rounds: 3,
         recordReplay: true,
-        decisionIntervalTicks: 9,
       },
       ws as any,
       (config) => {
@@ -80,16 +78,9 @@ describe("BenchmarkOrchestrator", () => {
     expect(configs[0]?.player2.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player1.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player2.providerType).toBe("openai-compatible");
-    expect((configs[0] as any)?.runtime?.aiIntervalTicksByPlayer).toMatchObject({
-      player_1: 5,
-      player_2: 9,
-    });
-    expect((configs[1] as any)?.runtime?.aiIntervalTicksByPlayer).toMatchObject({
-      player_1: 9,
-      player_2: 5,
-    });
+    expect((configs[0] as any)?.runtime?.aiIntervalTicksByPlayer).toBeUndefined();
+    expect((configs[1] as any)?.runtime?.aiIntervalTicksByPlayer).toBeUndefined();
     expect((configs[0] as any)?.runtime?.recordDir).toContain("benchmark-records");
-    expect((configs[0] as any)?.runtime?.transcriptDir).toContain("benchmark-llm-debug");
 
     expect(complete).toMatchObject({
       cpuStrategy: "rush",
@@ -106,7 +97,6 @@ describe("BenchmarkOrchestrator", () => {
       round: 2,
       llmSide: "player_2",
       winner: "llm",
-      transcriptPath: "logs/llm-debug/round-2.log",
     });
   });
 

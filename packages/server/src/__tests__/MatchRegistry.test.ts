@@ -5,7 +5,7 @@ import { MatchRegistry, type RegisteredMatchHandle } from "../MatchRegistry";
 function createHandle(matchId: string) {
   const game = new Game();
   const stop = vi.fn(() => game.stop());
-  const saveRecord = vi.fn(async () => `/tmp/${matchId}.trace.json`);
+  const saveRecord = vi.fn(async () => `/tmp/${matchId}.match.json`);
   const handle: RegisteredMatchHandle = {
     getMatchId: () => matchId,
     getGame: () => game,
@@ -58,7 +58,7 @@ describe("MatchRegistry", () => {
     const target = createHandle("match_target");
     registry.register(target.handle, { kind: "control" });
 
-    await expect(registry.save("match_target")).resolves.toBe("/tmp/match_target.trace.json");
+    await expect(registry.save("match_target")).resolves.toBe("/tmp/match_target.match.json");
     registry.stop("match_target");
 
     expect(target.saveRecord).toHaveBeenCalledTimes(1);
@@ -82,17 +82,16 @@ describe("MatchRegistry", () => {
     expect(target.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("finds prepared matches by signature and selects a fallback after removal", () => {
+  it("selects a fallback after the observed match is removed", () => {
     const registry = new MatchRegistry();
-    const prepared = createHandle("match_prepared");
+    const warmed = createHandle("match_warmed");
     const fallback = createHandle("match_fallback");
-    registry.register(prepared.handle, { kind: "live", signature: "preset-pair", observe: true });
+    registry.register(warmed.handle, { kind: "live", signature: "preset-pair", observe: true });
     registry.register(fallback.handle, { kind: "control" });
 
-    expect(registry.findBySignature("preset-pair", "live")?.matchId).toBe("match_prepared");
-    registry.remove("match_prepared", { stop: true });
+    registry.remove("match_warmed", { stop: true });
 
-    expect(prepared.stop).toHaveBeenCalledTimes(1);
+    expect(warmed.stop).toHaveBeenCalledTimes(1);
     expect(registry.getObservedMatchId()).toBe("match_fallback");
   });
 });

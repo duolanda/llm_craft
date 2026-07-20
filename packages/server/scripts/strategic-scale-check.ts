@@ -1,15 +1,15 @@
 import { BUILDING_TYPES, LOG_TYPES, UNIT_TYPES, type PlayerId } from "@llmcraft/shared";
 import { Game } from "../src/Game";
 import { executeAgentTool } from "../src/agent/AgentTools";
-import { GameAgentBridge } from "../src/agent/GameAgentBridge";
+import { GameplayController } from "../src/controller/GameplayController";
 import { runBuiltinCPUStrategy } from "../src/benchmark/BuiltinCPUStrategy";
 
-const TICKS = Number(process.env.STRATEGIC_SMOKE_TICKS ?? 360);
+const TICKS = Number(process.env.STRATEGIC_CHECK_TICKS ?? 360);
 async function main(): Promise<void> {
 const game = new Game();
-const bridges = new Map<PlayerId, GameAgentBridge>([
-  ["player_1", new GameAgentBridge(game, "player_1")],
-  ["player_2", new GameAgentBridge(game, "player_2")],
+const gameplayControllers = new Map<PlayerId, GameplayController>([
+  ["player_1", new GameplayController(game, "player_1")],
+  ["player_2", new GameplayController(game, "player_2")],
 ]);
 
 let peakCombinedCombatUnits = 0;
@@ -37,15 +37,15 @@ function countActiveFronts(): number {
 }
 
 async function runCpu(playerId: PlayerId): Promise<void> {
-  const bridge = bridges.get(playerId)!;
+  const gameplayController = gameplayControllers.get(playerId)!;
   await runBuiltinCPUStrategy({
     strategy: "rush",
     runtime: {
-      myState: bridge.getMyState().result,
-      myUnits: bridge.getMyUnits().result,
-      mapState: bridge.getMapState().result,
+      myState: gameplayController.getMyState().result,
+      myUnits: gameplayController.getMyUnits().result,
+      mapState: gameplayController.getMapState().result,
     },
-    callTool: (toolName, args) => executeAgentTool(bridge, toolName, args).result,
+    callTool: (toolName, args) => executeAgentTool(gameplayController, toolName, args).result,
   });
 }
 
@@ -68,14 +68,14 @@ function benchmarkScale(combinedUnits: number): { combinedUnits: number; maxTick
     const position = positionFor(index, false);
     return benchmarkGame.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, position.x, position.y, "player_2").id;
   });
-  const playerOneBridge = new GameAgentBridge(benchmarkGame, "player_1");
-  const playerTwoBridge = new GameAgentBridge(benchmarkGame, "player_2");
-  playerOneBridge.attackMoveGroup(playerOneIds, { x: 55, y: 48 }, "line");
-  playerTwoBridge.attackMoveGroup(playerTwoIds, { x: 88, y: 48 }, "line");
+  const playerOneController = new GameplayController(benchmarkGame, "player_1");
+  const playerTwoController = new GameplayController(benchmarkGame, "player_2");
+  playerOneController.attackMoveGroup(playerOneIds, { x: 55, y: 48 }, "line");
+  playerTwoController.attackMoveGroup(playerTwoIds, { x: 88, y: 48 }, "line");
   benchmarkGame.start();
   let maxTickMs = 0;
   const orderedUnitIds = new Set<string>();
-  for (let tick = 0; tick < Math.ceil(combinedUnits / 4) + 2; tick++) {
+  for (let tick = 0; tick < 2; tick++) {
     const startedAt = performance.now();
     benchmarkGame.tickUpdate();
     maxTickMs = Math.max(maxTickMs, performance.now() - startedAt);

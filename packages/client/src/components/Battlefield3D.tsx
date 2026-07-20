@@ -12,7 +12,7 @@ import {
   Tile,
   Unit,
 } from "@llmcraft/shared";
-import type { SimulationFrameBuffer } from "@llmcraft/trace";
+import type { SimulationFrameBuffer } from "@llmcraft/record";
 
 interface Battlefield3DProps {
   state: GameState | null;

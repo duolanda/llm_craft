@@ -13,7 +13,7 @@ import {
   UNIT_TYPES,
 } from "@llmcraft/shared";
 import { Game } from "../Game";
-import { GameAgentBridge } from "../agent/GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
 import {
   ControlSessionManager,
   executeControlActionBatch,
@@ -23,17 +23,17 @@ import {
 import { ControlPlaneMatch } from "../control/ControlPlaneMatch";
 
 describe("CLI Control Plane Integration", () => {
-  it("smoke-tests the OpenRA map baseline through control tools", () => {
+  it("checks the OpenRA map baseline through control tools", () => {
     const match = new ControlPlaneMatch({ cpuStrategy: "rush" });
     match.join("player_1");
     match.join("player_2");
 
     const game = match.getGame();
-    const bridge = match.getBridge("player_1");
+    const gameplayController = match.getGameplayController("player_1");
     const manager = new ControlSessionManager();
-    const session = manager.create(bridge, "openra-baseline-smoke", "player_1");
+    const session = manager.create(gameplayController, "openra-baseline-check", "player_1");
 
-    const mapResult = executeControlTool(session.bridge, "get_map_state", {
+    const mapResult = executeControlTool(session.gameplayController, "get_map_state", {
       includeCells: true,
       includeEmptyTiles: false,
     });
@@ -77,14 +77,14 @@ describe("CLI Control Plane Integration", () => {
       ))
     );
 
-    const unitsResult = executeControlTool(session.bridge, "get_my_units", {});
+    const unitsResult = executeControlTool(session.gameplayController, "get_my_units", {});
     const unitsData = unitsResult.result as Record<string, unknown>;
     const workers = (unitsData.units as Array<Record<string, unknown>>).filter((unit) => unit.type === UNIT_TYPES.WORKER);
     expect(workers).toEqual(
       expect.arrayContaining(DEFAULT_MAP_LAYOUT.player1Workers.map((position) => expect.objectContaining(position)))
     );
 
-    const harvestResult = executeControlTool(session.bridge, "start_harvest_loop", {
+    const harvestResult = executeControlTool(session.gameplayController, "start_harvest_loop", {
       unitId: workers[0].id,
     });
     expect(buildControlResponse(harvestResult).ok).toBe(true);
@@ -93,7 +93,7 @@ describe("CLI Control Plane Integration", () => {
     const builder = game.getUnitManager().getUnit(String(workers[1].id))!;
     builder.x = buildSite.x - 3;
     builder.y = buildSite.y;
-    const buildResult = executeControlTool(session.bridge, "build_structure", {
+    const buildResult = executeControlTool(session.gameplayController, "build_structure", {
       unitId: workers[1].id,
       buildingType: BUILDING_TYPES.BARRACKS,
       x: buildSite.x,
@@ -102,7 +102,6 @@ describe("CLI Control Plane Integration", () => {
     expect(buildControlResponse(buildResult).ok).toBe(true);
 
     match.advanceOneTick();
-    match.advancePlans();
     match.advanceOneTick();
     match.stop();
 
@@ -125,17 +124,17 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "movement-reservation-smoke", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "movement-reservation-check", "player_1");
     const unit1 = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 8, 12, "player_1");
     const unit2 = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 8, 14, "player_1");
     const target = { x: 12, y: 12 };
 
-    const result1 = executeControlTool(session.bridge, "move_unit", {
+    const result1 = executeControlTool(session.gameplayController, "move_unit", {
       unitId: unit1.id,
       x: target.x,
       y: target.y,
     });
-    const result2 = executeControlTool(session.bridge, "move_unit", {
+    const result2 = executeControlTool(session.gameplayController, "move_unit", {
       unitId: unit2.id,
       x: target.x,
       y: target.y,
@@ -154,14 +153,14 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
     expect(session.id).toMatch(/^cs_/);
     expect(session.playerId).toBe("player_1");
     expect(session.gameId).toBe("test-game");
 
     // Simulate CLI calling get_my_units via control endpoint
-    const result = executeControlTool(session.bridge, "get_my_units", {});
+    const result = executeControlTool(session.gameplayController, "get_my_units", {});
     const response = buildControlResponse(result);
 
     expect(response.ok).toBe(true);
@@ -178,16 +177,16 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
     // Get first worker
-    const readResult = executeControlTool(session.bridge, "get_my_units", {});
+    const readResult = executeControlTool(session.gameplayController, "get_my_units", {});
     const readData = readResult.result as Record<string, unknown>;
     const units = readData.units as Array<Record<string, unknown>>;
     const workerId = units[0].id as string;
 
     // Move it
-    const result = executeControlTool(session.bridge, "move_unit", {
+    const result = executeControlTool(session.gameplayController, "move_unit", {
       unitId: workerId,
       x: 5,
       y: 8,
@@ -203,14 +202,14 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
-    const readResult = executeControlTool(session.bridge, "get_my_units", {});
+    const readResult = executeControlTool(session.gameplayController, "get_my_units", {});
     const readData = readResult.result as Record<string, unknown>;
     const units = readData.units as Array<Record<string, unknown>>;
     const workerId = units[0].id as string;
 
-    const actionResult = executeControlTool(session.bridge, "move_unit", {
+    const actionResult = executeControlTool(session.gameplayController, "move_unit", {
       unitId: workerId,
       x: 5,
       y: 8,
@@ -221,36 +220,27 @@ describe("CLI Control Plane Integration", () => {
     expect(actionResponse.warnings).toBeUndefined();
   });
 
-  it("submits a successful CLI action batch as one idempotent command envelope", async () => {
+  it("submits valid CLI batch actions independently and deduplicates the request", async () => {
     const match = new ControlPlaneMatch();
     match.join("player_1");
     match.join("player_2");
-    const bridge = match.getBridge("player_1");
+    const gameplayController = match.getGameplayController("player_1");
     const workers = match.getGame().getState().players[0]!.units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const request = {
-      clientRequestId: "cli_atomic_success",
+      clientRequestId: "cli_batch_success",
       actions: workers.slice(0, 2).map((worker) => ({
         tool: "hold_unit",
         args: { unitId: worker.id },
       })),
     };
 
-    const first = executeControlActionBatch(bridge, request, 0);
+    const first = executeControlActionBatch(gameplayController, request, 0);
     expect(first).toMatchObject({ ok: true, kind: "batch_result", data: { duplicate: false } });
 
-    const submissions = [];
-    for await (const submission of match.getMatchRuntime().getJournal().readCommandSubmissions()) {
-      submissions.push(submission);
-    }
-    expect(submissions).toHaveLength(1);
-    expect(submissions[0]).toMatchObject({
-      envelope: { clientRequestId: "cli_atomic_success", commands: [{ type: "hold" }, { type: "hold" }] },
-      result: { accepted: true, duplicate: false },
-    });
     match.advanceOneTick();
-    const duplicate = executeControlActionBatch(bridge, request, 1);
+    const duplicate = executeControlActionBatch(gameplayController, request, 1);
     expect(duplicate).toMatchObject({ ok: true, kind: "batch_result", data: { duplicate: true } });
-    expect(() => executeControlActionBatch(bridge, {
+    expect(() => executeControlActionBatch(gameplayController, {
       clientRequestId: request.clientRequestId,
       actions: [{ tool: "hold_unit", args: { unitId: workers[0]!.id } }],
     }, 1)).toThrow(/different action batch/);
@@ -260,36 +250,38 @@ describe("CLI Control Plane Integration", () => {
     match.stop();
   });
 
-  it("does not submit or mutate controller state when one CLI batch action is invalid", async () => {
+  it("keeps successful CLI batch actions when another action is invalid", async () => {
     const match = new ControlPlaneMatch();
     match.join("player_1");
     match.join("player_2");
-    const bridge = match.getBridge("player_1");
+    const gameplayController = match.getGameplayController("player_1");
     const worker = match.getGame().getState().players[0]!.units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
-    bridge.orchestratePlan({
+    gameplayController.orchestratePlan({
       unitIds: [worker.id],
       loop: -1,
       steps: [{ call: "start_harvest_loop", args: { unitId: "$unitId" } }],
     });
-    expect(bridge.getActivePlans()).toHaveLength(1);
+    expect(gameplayController.getActivePlans()).toHaveLength(1);
 
-    const response = executeControlActionBatch(bridge, {
-      clientRequestId: "cli_atomic_rejected",
+    const response = executeControlActionBatch(gameplayController, {
+      clientRequestId: "cli_batch_partial",
       actions: [
         { tool: "hold_unit", args: { unitId: worker.id } },
         { tool: "hold_unit", args: { unitId: "missing_unit" } },
       ],
     }, 0);
-    expect(response).toMatchObject({ ok: false, kind: "batch_result" });
+    expect(response).toMatchObject({
+      ok: false,
+      kind: "batch_result",
+      data: {
+        partialSuccess: true,
+        results: [{ ok: true }, { ok: false }],
+      },
+    });
 
-    const submissions = [];
-    for await (const submission of match.getMatchRuntime().getJournal().readCommandSubmissions()) {
-      submissions.push(submission);
-    }
-    expect(submissions).toHaveLength(0);
-    expect(bridge.getActivePlans()).toHaveLength(1);
+    expect(gameplayController.getActivePlans()).toHaveLength(0);
     match.advanceOneTick();
-    expect(match.getGame().getState().players[0]!.units.find((unit) => unit.id === worker.id)?.intent?.type).not.toBe("hold");
+    expect(match.getGame().getState().players[0]!.units.find((unit) => unit.id === worker.id)?.intent?.type).toBe("hold");
     match.stop();
   });
 
@@ -297,9 +289,9 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
-    const result = executeControlTool(session.bridge, "nonexistent_tool", {});
+    const result = executeControlTool(session.gameplayController, "nonexistent_tool", {});
     const response = buildControlResponse(result);
 
     expect(response.ok).toBe(false);
@@ -310,9 +302,9 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
-    const result = executeControlTool(session.bridge, "get_my_units", {});
+    const result = executeControlTool(session.gameplayController, "get_my_units", {});
     const data = result.result as Record<string, unknown>;
     const allUnits = data.units as Array<Record<string, unknown>>;
 
@@ -326,14 +318,14 @@ describe("CLI Control Plane Integration", () => {
     const game = new Game();
     game.start();
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
-    const readResult = executeControlTool(session.bridge, "get_my_units", {});
+    const readResult = executeControlTool(session.gameplayController, "get_my_units", {});
     const readData = readResult.result as Record<string, unknown>;
     const units = readData.units as Array<Record<string, unknown>>;
     const workerId = units.find((unit) => unit.type === "worker")?.id as string;
 
-    const result = executeControlTool(session.bridge, "start_harvest_loop", { unitId: workerId });
+    const result = executeControlTool(session.gameplayController, "start_harvest_loop", { unitId: workerId });
     const response = buildControlResponse(result);
 
     expect(response.ok).toBe(true);
@@ -349,9 +341,9 @@ describe("CLI Control Plane Integration", () => {
       "player_2"
     );
     const manager = new ControlSessionManager();
-    const session = manager.create(new GameAgentBridge(game, "player_1"), "test-game", "player_1");
+    const session = manager.create(new GameplayController(game, "player_1"), "test-game", "player_1");
 
-    const result = executeControlTool(session.bridge, "get_map_state", {
+    const result = executeControlTool(session.gameplayController, "get_map_state", {
       includeCells: false,
       includeEmptyTiles: false,
     });
@@ -365,17 +357,17 @@ describe("CLI Control Plane Integration", () => {
   it("shares durable player control state across sessions", () => {
     const match = new ControlPlaneMatch();
     const manager = new ControlSessionManager();
-    const sessionA = manager.create(match.getBridge("player_1"), "test-game", "player_1");
-    const sessionB = manager.create(match.getBridge("player_1"), "test-game", "player_1");
+    const sessionA = manager.create(match.getGameplayController("player_1"), "test-game", "player_1");
+    const sessionB = manager.create(match.getGameplayController("player_1"), "test-game", "player_1");
     const worker = match.getGame().getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = executeControlTool(sessionA.bridge, "orchestrate_plan", {
+    const result = executeControlTool(sessionA.gameplayController, "orchestrate_plan", {
       unitIds: [worker.id],
       steps: [{ call: "start_harvest_loop", args: { unitId: "$unitId" } }],
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(sessionB.bridge.getActivePlans()).toHaveLength(1);
+    expect(sessionB.gameplayController.getActivePlans()).toHaveLength(1);
   });
 
   it("advances control-plane orchestration plans into game commands", () => {
@@ -383,16 +375,16 @@ describe("CLI Control Plane Integration", () => {
     match.join("player_1");
     match.join("player_2");
     const game = match.getGame();
-    const bridge = match.getBridge("player_1");
+    const gameplayController = match.getGameplayController("player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [{ call: "start_harvest_loop", args: { unitId: "$unitId" } }],
     });
     expect(result.result).toMatchObject({ ok: true });
 
-    match.advancePlans();
+    match.advanceOneTick();
     match.advanceOneTick();
     match.stop();
 

@@ -4,6 +4,7 @@ export interface MapGenerationDefinition {
   width: number;
   height: number;
   resources: ReadonlyArray<{ x: number; y: number }>;
+  obstacles: ReadonlyArray<{ x: number; y: number }>;
 }
 
 export class MapGenerator {
@@ -20,6 +21,9 @@ export class MapGenerator {
 
     for (const pos of definition.resources) {
       tiles[pos.y][pos.x] = TILE_TYPES.RESOURCE;
+    }
+    for (const pos of definition.obstacles) {
+      tiles[pos.y][pos.x] = TILE_TYPES.OBSTACLE;
     }
 
     return tiles;

@@ -5,7 +5,7 @@ import {
   AgentToolCallRecord,
   Command,
 } from "@llmcraft/shared";
-import { GameAgentBridge } from "./GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
 import { AgentToolDefinition, executeAgentTool, getAgentToolDefinitions } from "./AgentTools";
 import { AgentSession, RunAgentOptions, WarmupAgentResult } from "../LLMProvider";
 
@@ -19,7 +19,7 @@ export interface AgentRuntimeResult {
 }
 
 export interface AgentRuntimeCallbacks {
-  traceContext?: RunAgentOptions["traceContext"];
+  runContext?: RunAgentOptions["runContext"];
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
   onModelRequest?: RunAgentOptions["onModelRequest"];
@@ -31,7 +31,7 @@ export interface AgentRuntimeCallbacks {
 export class AgentRuntime {
   private readonly toolDefinitions: AgentToolDefinition[];
 
-  constructor(private readonly session: AgentSession, private readonly bridge: GameAgentBridge) {
+  constructor(private readonly session: AgentSession, private readonly gameplayController: GameplayController) {
     this.toolDefinitions = getAgentToolDefinitions();
   }
 
@@ -42,42 +42,42 @@ export class AgentRuntime {
         throw new Error("Warmup must not execute tools before the game starts.");
       },
       getRuntimeState: () => ({
-        mapState: this.bridge.getMapState({ trackRead: false }).result,
-        myState: this.bridge.getMyState({ trackRead: false }).result,
-        myUnits: this.bridge.getMyUnits({ trackRead: false }).result,
-        activePlans: this.bridge.getActivePlansTool({ trackRead: false }).result,
-        recentEvents: this.bridge.getRecentEvents({ trackRead: false }).result,
+        mapState: this.gameplayController.getMapState({ trackRead: false }).result,
+        myState: this.gameplayController.getMyState({ trackRead: false }).result,
+        myUnits: this.gameplayController.getMyUnits({ trackRead: false }).result,
+        activePlans: this.gameplayController.getActivePlansTool({ trackRead: false }).result,
+        recentEvents: this.gameplayController.getRecentEvents({ trackRead: false }).result,
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
       onModelRequest: callbacks?.onModelRequest,
       onPerformanceWarning: callbacks?.onPerformanceWarning,
-      traceContext: callbacks?.traceContext,
+      runContext: callbacks?.runContext,
       signal,
     });
   }
 
   async run(input: AgentRunInput, callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<AgentRuntimeResult> {
-    this.bridge.beginRun(callbacks?.traceContext ? {
-      controllerId: callbacks.traceContext.controllerId,
+    this.gameplayController.beginRun(callbacks?.runContext ? {
+      controllerId: callbacks.runContext.controllerId,
       source: "macro_tool",
-      turnId: callbacks.traceContext.turnId,
-      ...(callbacks.traceContext.parentControllerId
-        ? { parentControllerId: callbacks.traceContext.parentControllerId }
+      turnId: callbacks.runContext.turnId,
+      ...(callbacks.runContext.parentControllerId
+        ? { parentControllerId: callbacks.runContext.parentControllerId }
         : {}),
     } : undefined);
     const result = await this.session.runAgent(input, {
       tools: this.toolDefinitions,
       executeTool: async (name, args, context) => {
-        if (context) this.bridge.setCommandProvenance(context);
-        return executeAgentTool(this.bridge, name, args);
+        if (context) this.gameplayController.setCommandProvenance(context);
+        return executeAgentTool(this.gameplayController, name, args);
       },
       getRuntimeState: () => ({
-        mapState: this.bridge.getMapState({ trackRead: false }).result,
-        myState: this.bridge.getMyState({ trackRead: false }).result,
-        myUnits: this.bridge.getMyUnits({ trackRead: false }).result,
-        activePlans: this.bridge.getActivePlansTool({ trackRead: false }).result,
-        recentEvents: this.bridge.getRecentEvents({ trackRead: false }).result,
+        mapState: this.gameplayController.getMapState({ trackRead: false }).result,
+        myState: this.gameplayController.getMyState({ trackRead: false }).result,
+        myUnits: this.gameplayController.getMyUnits({ trackRead: false }).result,
+        activePlans: this.gameplayController.getActivePlansTool({ trackRead: false }).result,
+        recentEvents: this.gameplayController.getRecentEvents({ trackRead: false }).result,
       }),
       onAssistantMessage: callbacks?.onAssistantMessage,
       onToolCall: callbacks?.onToolCall,
@@ -85,22 +85,15 @@ export class AgentRuntime {
       onPerformanceWarning: callbacks?.onPerformanceWarning,
       spawnSubAgent: callbacks?.spawnSubAgent,
       drainSubAgentNotifications: callbacks?.drainSubAgentNotifications,
-      traceContext: callbacks?.traceContext,
+      runContext: callbacks?.runContext,
       signal,
     });
 
     return {
       ...result,
-      plans: this.bridge.takeRunPlans(),
-      commands: this.bridge.takeIssuedCommands(),
+      plans: this.gameplayController.takeRunPlans(),
+      commands: this.gameplayController.takeIssuedCommands(),
     };
   }
 
-  advancePlans(): Command[] {
-    return this.bridge.advancePlans();
-  }
-
-  getActivePlans(): AgentPlanRecord[] {
-    return this.bridge.getActivePlans();
-  }
 }

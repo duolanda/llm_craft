@@ -40,14 +40,6 @@ interface InternalPlan {
   lastAttempt?: AgentPlanAttemptRecord;
 }
 
-interface AgentPlanRuntimeState {
-  planCounter: number;
-  plans: Array<[
-    string,
-    Omit<InternalPlan, "issuedUnitIds"> & { issuedUnitIds: string[] },
-  ]>;
-}
-
 export interface PlanToolContext {
   args: Record<string, unknown>;
   unit?: Unit;
@@ -65,39 +57,11 @@ export interface PlanToolHandler {
 
 export type PlanToolHandlers = Partial<Record<PlanCallToolName, PlanToolHandler>>;
 
-interface MissionAdvanceLimits {
-  maxPathCommands?: number;
-}
-
 export class MissionRuntime {
   private plans = new Map<string, InternalPlan>();
   private planCounter = 0;
 
   constructor(private readonly toolHandlers: PlanToolHandlers) {}
-
-  captureState(): AgentPlanRuntimeState {
-    return {
-      planCounter: this.planCounter,
-      plans: [...this.plans.entries()].map(([planId, plan]) => {
-        const { issuedUnitIds, ...serializable } = plan;
-        return [planId, {
-          ...structuredClone(serializable),
-          issuedUnitIds: [...issuedUnitIds],
-        }];
-      }),
-    };
-  }
-
-  restoreState(state: AgentPlanRuntimeState): void {
-    this.planCounter = state.planCounter;
-    this.plans = new Map(state.plans.map(([planId, plan]) => {
-      const { issuedUnitIds, ...serializable } = plan;
-      return [planId, {
-        ...structuredClone(serializable),
-        issuedUnitIds: new Set(issuedUnitIds),
-      }];
-    }));
-  }
 
   register(input: OrchestratePlanInput, provenance?: CommandProvenance): AgentPlanRecord {
     const loop = input.loop ?? 1;
@@ -169,10 +133,9 @@ export class MissionRuntime {
     return true;
   }
 
-  advance(snapshot: PlanSnapshot, limits: MissionAdvanceLimits = {}): Command[] {
+  advance(snapshot: PlanSnapshot): Command[] {
     const commands: Command[] = [];
     let availableCredits = snapshot.myCredits;
-    let remainingPathCommands = limits.maxPathCommands ?? Number.POSITIVE_INFINITY;
     for (const plan of this.plans.values()) {
       if (plan.status !== "active") {
         continue;
@@ -180,17 +143,16 @@ export class MissionRuntime {
       const planCommands = this.advancePlan(plan, {
         ...snapshot,
         myCredits: availableCredits,
-      }, remainingPathCommands);
+      });
       for (const command of planCommands) {
         availableCredits -= this.getCommandCost(command);
-        if (this.isPathCommand(command)) remainingPathCommands--;
         commands.push(command);
       }
     }
     return commands;
   }
 
-  private advancePlan(plan: InternalPlan, snapshot: PlanSnapshot, maxPathCommands: number): Command[] {
+  private advancePlan(plan: InternalPlan, snapshot: PlanSnapshot): Command[] {
     let guard = 0;
     while (guard < 8) {
       guard++;
@@ -216,8 +178,8 @@ export class MissionRuntime {
 
       const scope = step.scope ?? plan.record.scope ?? handler.defaultScope;
       const produced = scope === "global"
-        ? this.advanceGlobalStep(plan, step, handler, snapshot, maxPathCommands)
-        : this.advancePerUnitStep(plan, step, handler, snapshot, maxPathCommands);
+        ? this.advanceGlobalStep(plan, step, handler, snapshot)
+        : this.advancePerUnitStep(plan, step, handler, snapshot);
 
       if (produced === "advance") {
         continue;
@@ -232,7 +194,6 @@ export class MissionRuntime {
     step: PlanStep,
     handler: PlanToolHandler,
     snapshot: PlanSnapshot,
-    maxPathCommands: number,
   ): Command[] | "advance" {
     this.ensureStepStarted(plan, snapshot.tick);
     const unit = this.resolveGlobalStepUnit(plan, step, snapshot);
@@ -273,7 +234,7 @@ export class MissionRuntime {
     };
     const estimatedCost = handler.estimateCost?.(context) ?? 0;
     if (estimatedCost > snapshot.myCredits) {
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for budget: need ${estimatedCost} credits, available ${snapshot.myCredits}`);
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for credits: need ${estimatedCost} credits, available ${snapshot.myCredits}`);
       return [];
     }
 
@@ -287,14 +248,9 @@ export class MissionRuntime {
       plan.status = "failed";
       return [];
     }
-    if (this.isPathCommand(command) && maxPathCommands <= 0) {
-      this.recordWaiting(plan, snapshot.tick, step, "waiting for this actor's path-command share");
-      return [];
-    }
-
     const commandCost = this.getCommandCost(command);
     if (commandCost > snapshot.myCredits) {
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for budget: need ${commandCost} credits, available ${snapshot.myCredits}`);
+      this.recordWaiting(plan, snapshot.tick, step, `waiting for credits: need ${commandCost} credits, available ${snapshot.myCredits}`);
       return [];
     }
 
@@ -325,7 +281,6 @@ export class MissionRuntime {
     step: PlanStep,
     handler: PlanToolHandler,
     snapshot: PlanSnapshot,
-    maxPathCommands: number,
   ): Command[] | "advance" {
     this.ensureStepStarted(plan, snapshot.tick);
 
@@ -372,7 +327,7 @@ export class MissionRuntime {
       };
       const estimatedCost = handler.estimateCost?.(context) ?? 0;
       if (estimatedCost > availableCredits) {
-        waitingReason = `waiting for budget: need ${estimatedCost} credits, available ${availableCredits}`;
+        waitingReason = `waiting for credits: need ${estimatedCost} credits, available ${availableCredits}`;
         continue;
       }
 
@@ -381,16 +336,9 @@ export class MissionRuntime {
         waitingReason ??= "waiting for command prerequisites";
         continue;
       }
-      if (
-        this.isPathCommand(command)
-        && commands.filter((candidate) => this.isPathCommand(candidate)).length >= maxPathCommands
-      ) {
-        waitingReason ??= "waiting for this actor's path-command share";
-        continue;
-      }
       const cost = this.getCommandCost(command);
       if (cost > availableCredits) {
-        waitingReason = `waiting for budget: need ${cost} credits, available ${availableCredits}`;
+        waitingReason = `waiting for credits: need ${cost} credits, available ${availableCredits}`;
         continue;
       }
       availableCredits -= cost;
@@ -574,10 +522,6 @@ export class MissionRuntime {
       return getBuildingCost(command.buildingType);
     }
     return 0;
-  }
-
-  private isPathCommand(command: Command): boolean {
-    return command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
   }
 
   private recordWaiting(plan: InternalPlan, tick: number, step: PlanStep, detail: string): void {

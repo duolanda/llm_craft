@@ -13,7 +13,6 @@ import {
   type UnitType,
 } from "@llmcraft/shared";
 import { BuildingManager } from "./BuildingManager";
-import { DeterministicRng } from "./DeterministicRng";
 import { EntityRegistry } from "./EntityRegistry";
 import type { MatchDefinition } from "./MatchDefinition";
 import { MapGenerator } from "./MapGenerator";
@@ -37,7 +36,6 @@ export class WorldState {
   revision = 0;
   readonly units = new UnitManager();
   readonly buildings = new BuildingManager();
-  readonly rng: DeterministicRng;
   readonly entities: EntityRegistry;
   tiles: TileType[][];
   resourceRemaining = new Map<string, number>();
@@ -48,7 +46,6 @@ export class WorldState {
   private readonly playerStates: WorldPlayerState[];
 
   constructor(private readonly definition: MatchDefinition) {
-    this.rng = new DeterministicRng(definition.seed);
     this.entities = new EntityRegistry(
       this.units,
       this.buildings,
@@ -67,10 +64,22 @@ export class WorldState {
       resources: { credits: player.startingCredits },
     }));
 
-    for (const player of definition.players) {
-      this.createBuilding(BUILDING_TYPES.HQ, player.hq.x, player.hq.y, player.id);
-      for (const workerPosition of player.workers) {
-        this.createUnit(UNIT_TYPES.WORKER, workerPosition.x, workerPosition.y, player.id);
+    for (const start of definition.map.playerStarts) {
+      for (const building of start.buildings) {
+        this.createBuilding(
+          building.type,
+          building.position.x,
+          building.position.y,
+          start.playerId,
+        );
+      }
+      for (const unit of start.units) {
+        this.createUnit(
+          unit.type,
+          unit.position.x,
+          unit.position.y,
+          start.playerId,
+        );
       }
     }
   }
@@ -78,7 +87,6 @@ export class WorldState {
   createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): WorldUnit {
     const unit = this.entities.createUnit(type, x, y, playerId);
     this.markChanged();
-    this.entities.assertInvariants();
     return unit;
   }
 
@@ -91,7 +99,6 @@ export class WorldState {
   ): Building {
     const building = this.entities.createBuilding(type, x, y, playerId, options);
     this.markChanged();
-    this.entities.assertInvariants();
     return building;
   }
 
@@ -139,16 +146,6 @@ export class WorldState {
     return this.playerStates.map((player) => [player.id, player.resources.credits]);
   }
 
-  restorePlayerCredits(playerCredits: ReadonlyArray<readonly [PlayerId, number]>): void {
-    const creditsByPlayer = new Map(playerCredits);
-    for (const player of this.playerStates) {
-      const credits = creditsByPlayer.get(player.id);
-      if (credits !== undefined) {
-        player.resources.credits = credits;
-      }
-    }
-  }
-
   setResourceRemaining(x: number, y: number, remaining: number): void {
     this.resourceRemaining.set(`${x},${y}`, remaining);
     if (remaining <= 0) {
@@ -178,10 +175,6 @@ export class WorldState {
       }
     }
     this.tileView = this.createTileView();
-  }
-
-  assertInvariants(): void {
-    this.entities.assertInvariants();
   }
 
   private createTileView(): Tile[][] {

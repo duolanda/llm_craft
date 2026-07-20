@@ -19,8 +19,7 @@ import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 import { runSubAgentTask } from "./agent/SubAgentRunner";
 import type { ModelTransport } from "./model/ModelTransport";
 import { OpenAICompatibleModelTransport } from "./model/OpenAICompatibleModelTransport";
-import { AgentMemoryPolicy } from "./agent/AgentMemoryPolicy";
-import { createHash } from "node:crypto";
+import { ContextWindowLimiter } from "./agent/ContextWindowLimiter";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
@@ -38,7 +37,7 @@ const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_recent_events",
 ]);
 
-interface PreparedTurn {
+interface WarmedTurn {
   input: AgentRunInput;
   assistantMessage: any;
   assistantText: string;
@@ -48,14 +47,14 @@ interface PreparedTurn {
 
 export interface OpenAIAgentSessionOptions {
   systemPrompt?: string;
-  memoryPolicy?: AgentMemoryPolicy;
+  contextWindowLimiter?: ContextWindowLimiter;
 }
 
 export class OpenAIAgentSession implements LLMProvider {
   private history: any[] = [];
-  private preparedTurn: PreparedTurn | null = null;
+  private warmedTurn: WarmedTurn | null = null;
   private readonly systemPrompt: string;
-  private readonly memoryPolicy: AgentMemoryPolicy;
+  private readonly contextWindowLimiter: ContextWindowLimiter;
 
   constructor(
     config: OpenAIProviderConfig,
@@ -63,7 +62,7 @@ export class OpenAIAgentSession implements LLMProvider {
     options: OpenAIAgentSessionOptions = {},
   ) {
     this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
-    this.memoryPolicy = options.memoryPolicy ?? new AgentMemoryPolicy();
+    this.contextWindowLimiter = options.contextWindowLimiter ?? new ContextWindowLimiter();
   }
 
   async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
@@ -84,25 +83,25 @@ export class OpenAIAgentSession implements LLMProvider {
       const response = await this.createAgentCompletion(messages, options, modelRequestRecords, "warmup");
       const assistantMessage = response.message;
       if (!assistantMessage) {
-        const memory = this.commitHistory(persistentHistory);
-        this.preparedTurn = null;
+        const contextWindow = this.limitContextWindow(persistentHistory);
+        this.warmedTurn = null;
         return {
           assistantMessages: [],
           stopReason: "empty_response",
           hasPendingToolCalls: false,
-          metrics: { modelRequests: 1, modelRequestRecords, memory },
+          metrics: { modelRequests: 1, modelRequestRecords, contextWindow },
         };
       }
 
       messages.push(assistantMessage);
       persistentHistory.push(assistantMessage);
-      const memory = this.commitHistory(persistentHistory);
+      const contextWindow = this.limitContextWindow(persistentHistory);
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
       if (assistantText) {
         options.onAssistantMessage?.(assistantText);
       }
       const finishReason = response.finishReason;
-      this.preparedTurn = {
+      this.warmedTurn = {
         input,
         assistantMessage,
         assistantText,
@@ -114,7 +113,7 @@ export class OpenAIAgentSession implements LLMProvider {
         assistantMessages: assistantText ? [assistantText] : [],
         stopReason: finishReason,
         hasPendingToolCalls: (assistantMessage.tool_calls ?? []).length > 0,
-        metrics: { modelRequests: 1, modelRequestRecords, memory },
+        metrics: { modelRequests: 1, modelRequestRecords, contextWindow },
       };
     } catch (error) {
       if (this.isAbortError(error, options.signal)) {
@@ -141,16 +140,16 @@ export class OpenAIAgentSession implements LLMProvider {
   }
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
-    const preparedTurn = this.takePreparedTurn(input);
+    const warmedTurn = this.takeWarmedTurn(input);
     const inputStringifyStartedAt = Date.now();
-    const inputContent = preparedTurn ? null : JSON.stringify(input);
+    const inputContent = warmedTurn ? null : JSON.stringify(input);
     this.maybeEmitProviderWarning(options, "input_stringify", Date.now() - inputStringifyStartedAt, {
       bytes: inputContent ? Buffer.byteLength(inputContent, "utf8") : 0,
       details: {
-        preparedTurn: Boolean(preparedTurn),
+        warmedTurn: Boolean(warmedTurn),
       },
     });
-    const messages: any[] = preparedTurn
+    const messages: any[] = warmedTurn
       ? [{ role: "system", content: this.systemPrompt }, ...this.history]
       : [
           { role: "system", content: this.systemPrompt },
@@ -158,17 +157,17 @@ export class OpenAIAgentSession implements LLMProvider {
           { role: "user", content: inputContent },
         ];
     const persistentHistory = messages.slice(1);
-    const assistantMessages: string[] = preparedTurn?.assistantText ? [preparedTurn.assistantText] : [];
+    const assistantMessages: string[] = warmedTurn?.assistantText ? [warmedTurn.assistantText] : [];
     const toolCalls: AgentToolCallRecord[] = [];
-    const modelRequestRecords: AgentModelRequestRecord[] = preparedTurn
-      ? [preparedTurn.modelRequestRecord]
+    const modelRequestRecords: AgentModelRequestRecord[] = warmedTurn
+      ? [warmedTurn.modelRequestRecord]
       : [];
     let consecutiveReadOnlyToolCalls = 0;
     let stopReason = "model_stopped";
     let lastRuntimeAlertSignature: string | null = null;
     let latestObservationTick = input.tick;
-    let pendingAssistantMessage = preparedTurn?.assistantMessage ?? null;
-    let pendingFinishReason = preparedTurn?.finishReason ?? null;
+    let pendingAssistantMessage = warmedTurn?.assistantMessage ?? null;
+    let pendingFinishReason = warmedTurn?.finishReason ?? null;
 
     while (true) {
       if (options.signal?.aborted) {
@@ -273,8 +272,8 @@ export class OpenAIAgentSession implements LLMProvider {
             });
             const parentContext: SubAgentParentContext = {
               playerId: input.playerId,
-              controllerId: options.traceContext?.controllerId,
-              turnId: options.traceContext?.turnId,
+              controllerId: options.runContext?.controllerId,
+              turnId: options.runContext?.turnId,
               input,
               messages: [...messages],
               runtimeState,
@@ -299,9 +298,9 @@ export class OpenAIAgentSession implements LLMProvider {
             const executeToolStartedAt = Date.now();
             execution = await options.executeTool(toolCall.function.name, args, {
               toolCallId: toolCall.id,
-              controllerId: options.traceContext?.controllerId,
-              parentControllerId: options.traceContext?.parentControllerId,
-              turnId: options.traceContext?.turnId,
+              controllerId: options.runContext?.controllerId,
+              parentControllerId: options.runContext?.parentControllerId,
+              turnId: options.runContext?.turnId,
               source: "macro_tool",
             });
             this.maybeEmitProviderWarning(options, "execute_tool", Date.now() - executeToolStartedAt, {
@@ -346,8 +345,8 @@ export class OpenAIAgentSession implements LLMProvider {
           isError: execution.result instanceof Object && "ok" in (execution.result as Record<string, unknown>)
             ? (execution.result as Record<string, unknown>).ok === false
             : false,
-          turnId: options.traceContext?.turnId,
-          controllerId: options.traceContext?.controllerId,
+          turnId: options.runContext?.turnId,
+          controllerId: options.runContext?.controllerId,
           modelRequestIndex: modelRequestRecords.length,
           startedAt: toolStartedAt,
           completedAt: new Date(toolCompletedAtMs).toISOString(),
@@ -410,7 +409,7 @@ export class OpenAIAgentSession implements LLMProvider {
       }
     }
 
-    const memory = this.commitHistory(persistentHistory);
+    const contextWindow = this.limitContextWindow(persistentHistory);
     return {
       assistantMessages,
       toolCalls,
@@ -421,7 +420,7 @@ export class OpenAIAgentSession implements LLMProvider {
         toolCalls: toolCalls.length,
         stallDetected: stopReason === "stall_detected",
         modelRequestRecords,
-        memory,
+        contextWindow,
       },
     };
   }
@@ -480,8 +479,8 @@ export class OpenAIAgentSession implements LLMProvider {
     return [...ids];
   }
 
-  private commitHistory(history: readonly unknown[]) {
-    const result = this.memoryPolicy.compact(history);
+  private limitContextWindow(history: readonly unknown[]) {
+    const result = this.contextWindowLimiter.limit(history);
     this.history = result.history;
     return result.record;
   }
@@ -493,7 +492,6 @@ export class OpenAIAgentSession implements LLMProvider {
     phase: AgentModelRequestRecord["phase"],
   ) {
     const messagesSnapshot = structuredClone(messages) as unknown[];
-    const messagesHash = createHash("sha256").update(JSON.stringify(messagesSnapshot)).digest("hex");
     const firstRequestIndex = records.length + 1;
     for (let attempt = 1; attempt <= MODEL_REQUEST_MAX_ATTEMPTS; attempt++) {
       const startedAtMs = Date.now();
@@ -523,8 +521,6 @@ export class OpenAIAgentSession implements LLMProvider {
           status: "success",
           attempt,
           ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
-          messagesVersion: 1,
-          messagesHash,
           messages: messagesSnapshot,
         };
         records.push(record);
@@ -543,8 +539,6 @@ export class OpenAIAgentSession implements LLMProvider {
           attempt,
           ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
           error: error instanceof Error ? error.message : String(error),
-          messagesVersion: 1,
-          messagesHash,
           messages: messagesSnapshot,
         };
         records.push(record);
@@ -587,14 +581,14 @@ export class OpenAIAgentSession implements LLMProvider {
     });
   }
 
-  private takePreparedTurn(input: AgentRunInput): PreparedTurn | null {
-    if (!this.preparedTurn || this.preparedTurn.input.playerId !== input.playerId) {
+  private takeWarmedTurn(input: AgentRunInput): WarmedTurn | null {
+    if (!this.warmedTurn || this.warmedTurn.input.playerId !== input.playerId) {
       return null;
     }
 
-    const preparedTurn = this.preparedTurn;
-    this.preparedTurn = null;
-    return preparedTurn;
+    const warmedTurn = this.warmedTurn;
+    this.warmedTurn = null;
+    return warmedTurn;
   }
 
   private injectSubAgentNotifications(messages: any[], persistentHistory: any[], options: RunAgentOptions): void {

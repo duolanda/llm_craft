@@ -101,15 +101,16 @@ interface TestLLMPresetResponse {
 - 如果没有 `presetId`，必须传 `apiKey`。
 - 响应不会返回明文 API Key。
 
-### 0.5 WebSocket `prepare`
+### 0.5 WebSocket `warmup`
 
 ```json
 {
-  "type": "prepare",
+  "type": "warmup",
   "player1PresetId": "preset-red",
   "player2PresetId": "preset-blue",
   "debug": {
-    "recordLLMTranscript": true
+    "recordingProfile": "evaluation",
+    "includeTranscript": true
   },
   "warmup": {
     "player_1": true,
@@ -121,10 +122,10 @@ interface TestLLMPresetResponse {
 说明：
 
 - 红蓝双方必须都选择预设
-- 服务端会按两个 preset 创建或复用一套待开战 orchestrator
-- `debug.recordLLMTranscript = true` 时，仅当前这一局会额外写出 transcript 到 `packages/server/logs/llm-debug/`
+- 服务端会按两个 preset 创建或复用一个尚未启动的 live match
 - `warmup.player_1/player_2 = true` 时，对应模型会在游戏 tick 启动前先收到首个真实 `AgentRunInput + tools` 请求。服务端只等待模型返回第一条 assistant message；如果该 message 包含 tool calls，会先挂起，不执行工具、不返回 tool result。
-- 服务端会发送 `prepare_status`，告知前端准备中、已准备或失败。用户仍需另外发送 `start` 才会启动游戏时间。
+- 服务端会发送 `warmup_status`，告知前端预热中、已完成或失败。用户仍需另外发送 `start` 才会启动游戏时间。
+- warmup 不创建第二局，也不启动 tick；已有 live 正在运行时会被拒绝。
 
 ### 0.6 WebSocket `start`
 
@@ -134,15 +135,17 @@ interface TestLLMPresetResponse {
   "player1PresetId": "preset-red",
   "player2PresetId": "preset-blue",
   "debug": {
-    "recordLLMTranscript": true
+    "recordingProfile": "evaluation",
+    "includeTranscript": true
   }
 }
 ```
 
 说明：
 
-- 如果同一组预设和 debug 选项已有待开战 prepared orchestrator，`start` 会直接复用它并开始 tick；已挂起的首个 assistant/tool calls 会在正式开局后继续执行。
-- 如果没有匹配的 prepared orchestrator，`start` 会创建普通实时对局并立即开始 tick。
+- 如果同一组预设和记录选项已有预热 match，`start` 会复用它并开始 tick；已挂起的首个 assistant/tool calls 会在正式开局后继续执行。
+- 如果没有匹配的预热 match，`start` 会创建实时对局并立即开始 tick。
+- 已有 live 正在运行时不会重复创建或启动。
 
 ### 0.7 WebSocket `reset`
 
@@ -152,7 +155,8 @@ interface TestLLMPresetResponse {
   "player1PresetId": "preset-red",
   "player2PresetId": "preset-blue",
   "debug": {
-    "recordLLMTranscript": true
+    "recordingProfile": "evaluation",
+    "includeTranscript": true
   }
 }
 ```
@@ -179,15 +183,15 @@ interface TestLLMPresetResponse {
 interface ServerStateMessage {
   type: "state";
   state: GameState | null;
-  frame?: StateProjectionFrameV1;
+  frame?: StateProjectionFrame;
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
-  matchStatus: "preparing" | "running" | "stopped" | "finished" | null;
+  matchStatus: "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed" | null;
 }
 ```
 
-`frame` 是正式 v1 投影：首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 固定携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。delta 帧中的兼容 `state` 为 `null`，新客户端必须用 `@llmcraft/trace` projector 组装状态。`snapshots` 仅为旧客户端兼容字段。backlog 达 `1 MB` 时暂停可替换投影，排空后从上一个已发帧直接构建 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。delta 帧中的 `state` 为 `null`，客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
 
 客户端的有界 `SimulationFrameBuffer` 同时服务 Live 和 Replay；它按 simulation time 取前后帧，包到达时间只用于估算带缓冲延迟的当前模拟时间，不再决定单位移动速度。
 
@@ -200,21 +204,21 @@ interface ServerErrorMessage {
 }
 ```
 
-### 0.12 WebSocket `prepare_status`
+### 0.12 WebSocket `warmup_status`
 
 ```ts
-type MatchPrepareState = "idle" | "preparing" | "ready" | "error";
+type MatchWarmupState = "idle" | "warming_up" | "ready" | "error";
 
-interface ServerPrepareStatusMessage {
-  type: "prepare_status";
-  statuses: Partial<Record<"player_1" | "player_2", MatchPrepareState>>;
+interface ServerWarmupStatusMessage {
+  type: "warmup_status";
+  statuses: Partial<Record<"player_1" | "player_2", MatchWarmupState>>;
   message?: string;
 }
 ```
 
 ### 0.13 WebSocket `ai_terminal_events`
 
-右侧 AI 指挥终端使用增量事件流。完整事件会原样追加到当前对局的磁盘 journal；服务端和浏览器的实时缓存只驻留最近 `500` 条，旧事件通过 `load_terminal_history` 分页读取，不截断模型文本、工具参数或工具结果。游标落后于实时窗口时会发送 `reset=true` 和当前窗口。
+右侧 AI 指挥终端使用有界的内存增量事件流，服务端最多保留最近 `500` 条。完整长期内容只有在 evaluation Match Record 开启 `includeTranscript` 时保存。游标落后于实时窗口时会发送 `reset=true` 和当前窗口。
 
 ```ts
 interface ServerAITerminalEventsMessage {
@@ -299,9 +303,8 @@ interface ServerRecordSavedMessage {
   "rounds": 10,
   "concurrency": 4,
   "recordReplay": true,
-  "decisionIntervalTicks": 10,
   "debug": {
-    "recordLLMTranscript": false
+    "includeTranscript": false
   }
 }
 ```
@@ -312,7 +315,7 @@ interface ServerRecordSavedMessage {
 - 当前 CPU 策略支持 `random` 和 `rush`
 - benchmark 与 live match 现在共用同一套 tool-calling runtime
 - `concurrency` 可选，默认 `1`，允许 `1` 到 `10`；并发运行时完成顺序可能不同于 round 编号，最终结果按 round 编号输出
-- `recordReplay=false` 表示 round 结束并 quiesce controller 后直接丢弃临时 journal；不会因为后台生命周期治理而偷偷生成 benchmark record
+- `recordReplay=false` 表示 round 不生成 Match Record
 
 ### 0.16 WebSocket `benchmark_progress`
 
@@ -395,30 +398,30 @@ interface AgentRunInput {
 
 ### 1.1 当前规则来源
 
-当前 MVP 规则由 shared 默认 ruleset（`DEFAULT_RULESET`）描述。Phase 1 已加入最小 OpenRA-lite 多兵种层：
+当前规则由 shared 的 `standard` ruleset 描述：
 
 - 单位类型是 `worker | soldier | rifleman | rocket_soldier | light_tank`
-- 建筑类型是 `hq | barracks | war_factory`
+- 建筑类型是 `hq | barracks | war_factory | refinery`
 - `hq` 可生产 `worker`
 - `barracks` 可生产 `soldier | rifleman | rocket_soldier`
 - `war_factory` 可生产 `light_tank`
+- `refinery` 是 worker 的采矿卸载点，不生产单位
 - 当前采用 144x96 三战线大战场尺度：`soldier` 115 HP / 10 damage / range 1 / vision 5 / cost 55 / reload 3；`rifleman` 95 HP / 9 damage / range 6 / vision 7 / cost 70 / reload 2；`rocket_soldier` 80 HP / 34 damage / range 6 / vision 7 / cost 110 / reload 8；`light_tank` 420 HP / 42 damage / range 5 / vision 7 / cost 240 / reload 6
 - 伤害按目标 armor 计算：`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x
 - 攻击结算为 weapon/projectile/warhead 模型：命令成功会生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `light_tank` 有 1 格 splash；`ok: true` 不表示目标 HP 已经立即变化。
-- `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。旧 compact-v2 录像可能没有该可选字段。
+- `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
 - 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
 - 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
-- `UNIT_STATS` / `BUILDING_STATS` 仍作为兼容导出存在
+- `UNIT_STATS` / `BUILDING_STATS` 是 `standard` ruleset 的便捷只读视图，供 UI、诊断和测试使用
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、生产关系、成本和攻击能力判断；工具 schema 已接受新增 unit/building 类型。
 
 ### 1.2 服务端命令交付契约
 
-Agent 动作工具和 control-plane 动作现在都会先进入对局专属的 `CommandGateway`，不再直接依赖 HTTP/模型返回的墙钟先后顺序。当前共享契约为：
+Agent、CLI 和 built-in CPU 都通过 `GameplayController` 生成命令，再由当前 `MatchRuntime` 提交到对局专属 `CommandGateway`：
 
 ```ts
-interface CommandEnvelopeV1 {
-  envelopeVersion: 1;
+interface CommandEnvelope {
   matchId: string;
   actorId: string;
   baseTick: number;
@@ -430,7 +433,7 @@ interface CommandEnvelopeV1 {
 
 interface CommandProvenance {
   controllerId: string;
-  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "test";
+  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "cpu";
   turnId?: string;
   toolCallId?: string;
   missionId?: string;
@@ -438,27 +441,15 @@ interface CommandProvenance {
 }
 ```
 
-- 一个 envelope 整体接受或整体拒绝；任一 command 越权、ID 重复或字段无效时，不会部分入队。
+- Gateway 对 envelope 做整体结构接纳；任一 command 越权、ID 重复或字段无效时，整份输入不入队。
+- `commands` 是数组，是因为同一 committed tick 可能同时推进多个 plan 或持续攻击；普通即时 tool 通常只提交一条。CLI action batch 不会为了“批量”而强行合成一个可回滚 envelope。
 - 完全相同的 `clientRequestId` + envelope 重试返回 `duplicate: true`，不会再执行；同一 ID 携带不同内容会返回 `idempotency_conflict`。
-- 正式 envelope actor 必须与 command 的 `playerId` 一致；Controller/子 Agent 身份不伪装成新玩家，而是写入命令的 `provenance`。子 Agent 使用 `subagent:<taskId>` controllerId，并保留 parentControllerId/turnId。
+- envelope actor 必须与 command 的 `playerId` 一致；决策来源写入命令 `provenance`，不会伪装成新玩家。
 - 命令只在 `applyAtTick` 的 tick 边界释放，同 tick 按 `actorId -> sequence -> clientRequestId` 稳定排序。
-- tick 执行时每个 envelope 具有独立 checkpoint；其中任一命令失败会恢复整个 envelope 的世界修改，并为所有命令产生 `success: false` 的 `command_result` 与 `command_envelope_rolled_back`。如果整批路径命令超过该 tick 的剩余预算，也会以 `path_budget_exceeded` 整批回滚，不会把尾部命令延期到下一 tick。
-- `MatchDefinition v2.rules.commandBudget` 版本化保存 `maxCommandsPerActorPerTick` 和 `maxPathCommandsPerTick`。默认值分别为 `100` 和 `4`；Gateway、Game 公平分配与 Trace manifest 消费同一份定义。旧 `MatchDefinition v1` 没有该字段，读取时固定解释为这两个历史默认值。Gateway 按 actor/apply tick跨 envelope 累计，拆分请求不能绕过；路径额度双方先等额保底，空余额以 simulation tick 轮换起点逐个借出。Game 仍保留 `command_budget_exceeded` 作为防御性执行不变量。
-- 这是服务端内部交付契约；当前 action tool 的入参和返回格式不变，但“工具返回成功”表示命令已被接纳，不表示游戏规则已在当前 tick 执行成功。
-
-`DomainEvent<TPayload>` v1 现在承载 Gateway 事实、命令结果和 SimulationCore outcome，基础字段为 `matchId / eventSequence / tick / type / actorId? / commandId? / entityIds? / payload`。`type` 是 shared 中的显式联合，不是任意字符串。它们由 MatchJournal 流式追加到临时 NDJSON，并进入正式 Trace v3；命令结果不需要解析 GameLog 文案。正式 replay projection 中的兼容 `commandResults` 已通过 `projectCommandResultEventToGameLog()` 从 `command_result` 事实生成；Game 内实时 UI/AI feedback 日志仍是兼容 adapter，不是权威事件总线。
-
-Trace v3 的正式共享外形为 `MatchTraceRecordV3`，schemaVersion 固定为 `3`，包含 manifest、初始/最终 keyframe、完整 command submissions、state hashes、DomainEvents、AI turns、terminal events，以及显式标为派生缓存的 `replayProjection`。manifest 保存完整 `MatchDefinition`（含 ruleset/scenario/seed）、状态和 capability；capability 必须显式为 `complete / partial / absent`，缺少模型请求 span 等能力时不能静默假定存在。`@llmcraft/trace` 的 `validateMatchTraceRecordV3()` 会校验版本、capability、matchId、连续 event/submission sequence、keyframe/hash tick 边界、replay delta 边界和 SHA-256 格式。
-
-活跃 MatchJournal 写入 manifest、command submissions、DomainEvents、AI/terminal 流、replay delta 和 hash v2 NDJSON；hash v2 包含确定性 RNG 状态。每个已提交 tick 的 replay delta 落盘后，MatchRuntime 会释放 Game 内兼容 delta 缓存。每个服务进程拥有 owner metadata，每局使用带随机 journalId 的独立 workspace，相同 matchId 不会清空已有目录。正式 `saveRecord()` 会先等待 controller/CPU/transcript 写入安静，再固定一致 cut，以 64 KiB gzip chunk 流式写 `.trace.json.gz` 临时文件，`fsync` 后原子 rename。相同 cut 的并发保存去重，校验失败会移除临时文件；终局成功后 workspace 被 seal 并删除，历史 terminal 分页从压缩 Trace 按需读取。读取边界同时接受历史 `.json` 和当前 `.json.gz`。
-
-服务器启动会跳过仍存活的 owner，将失活 owner 和超过安全宽限期的旧版 journal 搬入 durable orphan recovery 目录并保留 provenance。record、benchmark record、两类 transcript 和 orphan journal 使用分组的最大年龄、条目数和容量策略；版本化 pins、同名 `.keep` sidecar 和目录 `.llmcraft-keep` 都是不可删除项。正式 artifact 默认仅 dry-run，只有显式 apply 才删除；orphan recovery 目录会自动应用自身策略。
-
-`@llmcraft/trace` 是唯一跨 server/client 的 record 适配层：`projectRecordToGameRecord()` 同时接受 compact-v2 和 replay-capability 完整的 Trace v3；`migrateCompactV2ToTraceV3()` 必须由调用者提供 MatchDefinition，并把旧记录没有的 command submissions、DomainEvents、state hashes 等 capability 标记为 `absent`，禁止补造事实。Replay/Diagnostics 通过 projector 消费派生 `GameRecord`；Analyzer 对 Trace 的命令指标直接读取 DomainEvent，Transcript Viewer 直接读取 AI turns、tools、commands 和关联事件。`modelRequestSpans/toolCallSpans=partial` 时，工具必须显示能力缺口，不能伪造完整 waterfall。
-
-`tick_error` 的兼容日志数据可带 `attemptedTick / committedTick / committed`。`committed: false` 表示 SimulationCore 失败且权威状态已回滚；`committed: true` 表示 tick 已提交、随后 Trace Journal 写入失败。后一种情况必须 fail-stop，且不会产生虚假的 `simulation_tick_failed`。
-
-整批回滚时，每个兼容 `command_invalid` 结果的 `result_data` 至少含 `hint`，并可含 `reason: "command_failed" | "command_budget_exceeded" | "path_budget_exceeded"`、`failedCommandId`、`failedResultCode` 和 `failedResultType`；消费者应以 `success: false` 与 envelope rollback event 判断事实，不把批内早先一条命令原本的局部成功当成已提交状态。
+- 进入 Game 后每条命令独立执行。一条失败会产生自己的 command result，但不会撤销同 envelope 中已经成功的命令。
+- 不存在每 actor 命令数、每 tick 路径命令数或重新寻路次数额度。
+- 不存在 envelope/tick checkpoint 或失败回滚。SimulationCore 意外抛错时该局直接 fail-stop。
+- action tool 返回成功表示命令已接纳；实际规则结果在后续 tick 的 command feedback 中出现。
 
 ## 2. 工具体系
 
@@ -665,18 +656,13 @@ Trace v3 的正式共享外形为 `MatchTraceRecordV3`，schemaVersion 固定为
     center?: Position;
     hasActivePlanCount: number;
   }>;
-  pendingGroupMoves: {
-    count: number;
-    unitIds: string[];
-  };
   units: Array<Unit & {
     hasActivePlan: boolean;
-    hasPendingGroupMove: boolean;
   }>;
 }
 ```
 
-`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。`attack_move_group` 超出当 tick 寻路份额的成员会进入 `pendingGroupMoves`，短暂显示 idle 不代表漏下命令；对这些单位立刻补发逐个移动会取消其已接受的编队任务。
+`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。
 
 #### `get_army_summary`
 
@@ -750,7 +736,7 @@ interface AgentPlanRecord {
 说明：
 
 - `currentStep` 是当前正在等待或推进的 step
-- `waitingReason` 只在 active plan 当前没有生成命令时出现，例如等待 `when` 条件、等待 `until`、等待预算或等待命令前置条件
+- `waitingReason` 只在 active plan 当前没有生成命令时出现，例如等待 `when` 条件、等待 `until`、等待 credits 或等待命令前置条件
 - `lastAttempt` 记录最近一次推进尝试；`command_created` 表示该 tick 已生成命令，`advanced` 表示 step 已推进，`failed` 表示计划失败
 
 #### `get_recent_events`
@@ -814,11 +800,11 @@ interface AgentPlanRecord {
 
 说明：
 
-- 一次控制 1-100 个己方战斗单位，给每个单位分配不同推进落点
+- 一次控制一个或多个己方战斗单位，给每个单位分配不同推进落点
 - `battle_line` 是角色化编队：`light_tank` 前排，`soldier/rifleman` 居中，`rocket_soldier` 后排
 - 编队只影响目的地分配和默认攻击优先级；它不会强制 AI 攒兵，也不会自动替 AI 选择战略路线
 - 大军团推进、正面压制、侧翼小队推进时优先使用本工具，避免逐单位反复调用 `attack_move_unit`
-- 结果中的 `queuedNow` 是本 tick 立即下发数，`scheduled` 是已接受并会由 Bridge 跨后续 tick 下发的数量；`scheduled > 0` 时不要因单位暂时 idle 而补发逐个移动，先检查 `get_my_units.pendingGroupMoves`
+- 工具会为所有合法成员立即生成 `attack_move` 命令；结果返回 `commandIds`、`formation` 和每个单位的 `assignments`，没有跨 tick 释放队列
 
 #### `attack`
 
@@ -991,7 +977,7 @@ type PlanStepCondition =
 - `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
 - `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"`、`"$barracks"` 或 `"$war_factory"`，在执行时解析为当前友方建筑
 - plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；`build_structure` 仍要求 worker 已经在 footprint 相邻 1 格内，因此常见计划应先用 `move_unit` 把 builder 移到工地旁；即时动作工具仍会返回 `insufficient_credits`
-- 多个 active plan 在同一 tick 推进时共享同一份预算；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
+- 多个 active plan 在同一 tick 推进时按顺序检查实际可用 credits；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
 示例：先用即时 `start_harvest_loop` 把另外 3 个开局 worker 挂矿，再为保留的 builder 注册兵营计划并持续造到第一波 6 个 rifleman。
@@ -1162,7 +1148,7 @@ result:
 
 新增控制面 HTTP API，允许外部进程通过 REST 调用控制玩家行动。这些端点与现有 WebSocket 协议并行运行。
 
-Control session 是访问令牌；同一玩家的多个 session 共享 `ControlPlaneMatch` 中的 player 级运行时状态，包括 active plans、target memory 和持续 attack orders。`orchestrate_plan` 注册后由 control-plane match loop 随 tick 推进，不依赖发起该 plan 的 session 后续继续存活。
+Control session 是访问令牌；同一玩家的多个 session 共享 `ControlPlaneMatch` 中的 player 级运行时状态，包括 active plans、短期 target cache 和持续 attack orders。`orchestrate_plan` 注册后由已提交 tick 事件推进，不依赖发起该 plan 的 session 后续继续存活。
 
 ### 3.1 ControlResponse envelope
 
@@ -1185,7 +1171,7 @@ interface ControlResponse<T = unknown> {
 
 ### 3.2 `POST /api/control/start-game`
 
-创建新的 control match。该操作不会停止现有 live、control 或 benchmark match；返回的 `matchId` 是后续 session、保存、停止和观战选择的稳定身份。
+创建 control match；如果已经存在 `waiting_for_players` 或 `running` 的 control match，则直接返回该对局。CLI 收到 `reused: true` 后只显示现有信息，不再创建另一份 session。返回的 `matchId` 是后续 session、保存、停止和观战选择的稳定身份。
 
 Request:
 
@@ -1195,7 +1181,7 @@ interface StartControlGameRequest {
 }
 ```
 
-Response (201):
+Response (201；复用已有对局时为 200 且 `reused: true`):
 
 ```json
 {
@@ -1204,12 +1190,13 @@ Response (201):
   "kind": "state",
   "data": {
     "matchId": "match_abc123",
-    "status": "waiting_for_players"
+    "status": "waiting_for_players",
+    "reused": false
   }
 }
 ```
 
-`cpu` 仅表示 `player_2` 使用当前兼容的内建规则对手，主要用于单 agent 控制链路与 LLM-vs-CPU benchmark。CPU-vs-CPU 不属于产品对局、模型分析样本或平衡样本；确定性规则回归应使用 test driver/smoke 路径。
+`cpu` 仅表示 `player_2` 使用内建规则对手，主要用于单 agent 控制链路与 LLM-vs-CPU benchmark。CPU 是判断当前模型与提示词是否达到最低可用水平的基线；规则正确性和性能规模由测试与专门检查覆盖。
 
 ### 3.3 MatchRegistry 管理端点
 
@@ -1219,7 +1206,7 @@ Response (201):
 interface MatchRegistrySummary {
     matchId: string;
     kind: "live" | "control" | "benchmark";
-    status: "preparing" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed";
+    status: "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed";
     tick: number;
     winner: "player_1" | "player_2" | null;
     createdAt: string;
@@ -1235,17 +1222,8 @@ interface MatchRegistryListResponse {
 ```
 
 - `POST /api/control/matches/:matchId/observe`：只切换 WebSocket/Web UI 的观察投影，不停止或暂停其他 match。
-- `POST /api/control/matches/:matchId/save-record`：对指定 match 做稳定 cut，并通过统一 `MatchRecorder` 保存 Trace v3。
+- `POST /api/control/matches/:matchId/save-record`：保存已经停止或结束的指定 match；运行中对局应先 stop，服务端不会持续重写大 JSON。
 - `POST /api/control/matches/:matchId/stop`：quiesce、停止并保存指定 match，不影响其他 match；成功响应包含 `filePath`。
-
-### 3.4 Storage 生命周期端点
-
-- `GET /api/control/storage/retention`：逐 artifact 返回年龄/数量/容量策略的 dry-run 报告，包含保护状态、删除原因和预计释放容量。
-- `POST /api/control/storage/cleanup`：请求 `{ "apply": false }` 等同 dry-run；只有 `{ "apply": true }` 才删除报告中的正式 artifact。
-- `GET /api/control/storage/journals`：只读扫描当前 owner、失活 owner和 legacy journal。
-- `POST /api/control/storage/recover-journals`：默认预览；只有 `{ "apply": true }` 才把可恢复孤儿隔离到 durable recovery 目录。
-
-保留策略配置键采用 `LLMCRAFT_RETENTION_<GROUP>_MAX_AGE_DAYS / MAX_ENTRIES / MAX_MIB`；group 为 `RECORDS / BENCHMARK_RECORDS / LLM_DEBUG / BENCHMARK_LLM_DEBUG / ORPHAN_JOURNALS`。`LLMCRAFT_RETENTION_APPLY_ON_STARTUP=true` 才会在启动时自动清理正式 artifact。
 
 ### 3.5 `POST /api/control/sessions`
 
@@ -1301,7 +1279,7 @@ Response uses the standard `ControlResponse` envelope with `kind` set to `"state
 
 ### 3.8 `POST /api/control/sessions/:sessionId/actions`
 
-原子提交一组即时 action tools。该入口不接受 read tools 或 `orchestrate_plan`；请求在 controller 预校验阶段任一 action 失败时不会产生 CommandEnvelope，已经发生的 plan interrupt、attack order 等 controller 状态也会恢复。全部通过后只产生一个 CommandEnvelope，并在模拟 tick 内整批提交或回滚。
+批量调用一组即时 action tools。该入口不接受 read tools 或 `orchestrate_plan`；每个 action 独立校验和提交，合法 action 保留，非法 action 只在对应结果中失败，不回滚同一批次内已经接受的 action。
 
 ```ts
 interface ControlActionBatchRequest {
@@ -1314,88 +1292,52 @@ interface ControlActionBatchRequest {
 }
 ```
 
-约束：`actions.length` 为 `1-100`。相同 `clientRequestId` 与相同 canonical actions 重试返回原结果并标记 `data.duplicate: true`；同一 ID 携带不同动作返回 `batch_submission_rejected`。响应 `kind` 固定为 `batch_result`，`data.results` 保留每个 action 的预校验结果。
+相同 `clientRequestId` 与相同 canonical actions 重试返回原结果并标记 `data.duplicate: true`；同一 ID 携带不同动作返回 `batch_submission_rejected`。响应 `kind` 固定为 `batch_result`，`data.results` 保留每个 action 的独立结果；成功与失败并存时 `data.partialSuccess` 为 `true`。
 
 ### 3.9 `POST /api/control/sessions/:sessionId/save-record`
 
-保存该 session 所绑定 match 的 Trace v3，返回实际 `matchId` 与 `filePath`。它与 `POST /api/control/matches/:matchId/save-record` 使用同一个 `MatchRecorder`，不会产生另一套 control-plane record schema。
+保存该 session 所绑定 match 的 Match Record，返回实际 `matchId` 与 `filePath`。它与 `POST /api/control/matches/:matchId/save-record` 使用同一个 `MatchRecorder`，不会产生另一套 control-plane record schema。
 
 ## 4. 记录格式
 
-当前 `aiTurns` 不再保存生成的 JavaScript 和沙箱错误，而是保存 agent 行为：
+保存文件统一称为 Match Record，格式为单个 `.match.json`：
 
 ```ts
-interface SavedAITurnRecord {
-  turnId?: string;
-  controllerId?: string;
-  decisionKind?: "macro" | "tactical";
-  playerId: PlayerId;
-  requestTick: number;
-  executeTick: number;
-  runInput: AgentRunInput;
-  assistantMessages: string[];
-  toolCalls: AgentToolCallRecord[];
-  plans: AgentPlanRecord[];
-  commands: Command[];
-  stopReason: string;
-  metrics: {
-    modelRequests: number;
-    toolCalls: number;
-    stallDetected: boolean;
-    modelRequestRecords?: Array<{
-      requestIndex: number;
-      phase: "warmup" | "turn" | "subagent";
-      requestId?: string;
-      model?: string;
-      finishReason: string;
-      latencyMs?: number;
-      messageCount: number;
-      toolCount: number;
-      inputTokens?: number;
-      outputTokens?: number;
-      totalTokens?: number;
-      reasoningTokens?: number;
-      cachedInputTokens?: number;
-      status?: "success" | "error";
-      attempt?: number;
-      retryOfRequestIndex?: number;
-      error?: string;
-      messagesVersion?: 1;
-      messagesHash?: string;
-      messages?: unknown[];
+interface MatchRecord {
+  recordFormat: "match-record";
+  matchId: string;
+  definition: MatchDefinition;
+  metadata: {
+    startedAt: string;
+    savedAt: string;
+    endedAt?: string;
+    status: "running" | "stopped" | "finished" | "failed";
+    winner: PlayerId | null;
+    recordingProfile: "replay" | "evaluation";
+    includeTranscript: boolean;
+    systemPrompt?: string;
+    players: Array<{
+      playerId: PlayerId;
+      model: string;
+      baseURL?: string;
     }>;
-    memory?: {
-      policyVersion: 1;
-      maxMessages: number;
-      maxBytes: number;
-      messagesBefore: number;
-      messagesAfter: number;
-      bytesBefore: number;
-      bytesAfter: number;
-      droppedMessages: number;
-      truncatedMessages: number;
-    };
   };
-  model: string;
-  baseURL?: string;
-  createdAt: string;
+  initialState: GameState;
+  finalState: GameState;
+  tickDeltas: TickDeltaRecord[];
+  commandResults?: GameLog[];
+  aiTurns?: SavedAITurnRecord[];
 }
 ```
 
-`modelRequestRecords` 是 Phase 3A 的内部模型请求事实。warmup 与后续 tool-loop 请求共用同一 turn 链；每次显式尝试都有 success/error、attempt/retryOf、错误文本、messages v1 快照及 SHA-256。OpenAI SDK 内建重试已关闭，避免出现无法审计的隐式请求。当前子 Agent 自身的 model request span 尚未并入父 turn，因此 `modelRequestSpans` capability 仍为 `partial`。
+记录档位：
 
-`memory` 记录 AgentSession 在该 turn 结束时执行的 `MemoryPolicy v1`。默认持久历史上限为 `80` 条消息、`1 MiB`，单条消息默认不超过 `32 KiB`。压缩按 user 边界删除完整旧段，避免留下没有 assistant tool call 的孤立 tool result；过大的旧工具观察会替换成 `memory_policy_oversize` tombstone，并要求下轮重新读取当前状态。它只压缩模型会话历史，不删除 MatchJournal / Trace 中已经记录的事实。
+- `off`：不保存 Match Record。
+- `replay`：保存初始状态、逐 tick delta 和终态，足以供前端回放。
+- `evaluation`：在 replay 内容上增加命令结果和 `aiTurns`，供 benchmark 与 agent 行为分析。
 
-Trace 派生的 compact metadata 现在额外保存 `tickIntervalMs` 和 `rulesetId`，分析器和 Replay 必须优先使用它们；旧 compact-v2 缺少字段时才回退到历史 `500ms / default-v1` 解释。Analysis v1 的 facts 与 Detector 分层：每个 metric value 带 metric id/version、scope、value 和 `sourcePaths`，Detector 另行保存 id/version/ruleset/operator/threshold/severity，finding 记录实际适用的 ruleset；不得把启发式标签伪装成原始事实。CSV 输出保留这些版本和来源字段。
+`includeTranscript` 只在 evaluation 档位生效。关闭时仍保留 tool calls、commands、plans、性能指标和停止原因，但清空 assistant 原文与各模型请求的 messages；开启时才保存完整模型输出和请求消息。前端 transcript 页面直接从 Match Record 的 `aiTurns` 投影，不另写一种 transcript 文件。
 
-Benchmark complete 消息除原有胜负和平均时长外，返回可选 `llmWinRateConfidence95 / positionBias / medianDurationTicks / p90DurationTicks`。通用 Experiment Manifest v1 记录 experimentId、baseline、fixed variables、concurrency 和显式 trials（seed/repeat/side/variables）；结果文件按 trialId 恢复，只跳过 `completed` trial，失败 trial 可在下次运行重试。恢复时必须校验 baseline/fixed/trials 与原 Manifest 相同，并从已完成 trial 的 payload 重建完整 benchmark 汇总，禁止把不同实验混到同一 experimentId。
+`SavedAITurnRecord` 记录一次 agent turn 的输入 tick、工具调用、计划、命令、停止原因与模型请求指标。`metrics.contextWindow` 是当前 `ContextWindowLimiter` 的机械限长报告，包含裁剪前后消息数/字节数；它不是持久 memory，也不声称已经完成语义压缩。当前默认上限为 80 条消息、总计 1 MiB、单条 32 KiB，后续应由真正能生成模型可读摘要的 compactor 替代。
 
-transcript 当前记录：
-
-- summary
-- assistant text
-- tool calls
-- commands
-- plans
-- metrics
-- stop reason
+Benchmark complete 消息除原有胜负和平均时长外，可返回 `llmWinRateConfidence95 / positionBias / medianDurationTicks / p90DurationTicks`。`BenchmarkRunner` 只负责 benchmark trial 的并发执行和结果聚合；`analyze-record.mjs` 是面向开发者和 agent 的独立离线分析工具。

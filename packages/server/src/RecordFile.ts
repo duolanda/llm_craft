@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import { gunzip } from "node:zlib";
 import { promisify } from "node:util";
-import type { MatchTraceRecordV3 } from "@llmcraft/shared";
-import { parseMatchTraceRecordV3 } from "@llmcraft/trace";
+import type { MatchRecord } from "@llmcraft/shared";
+import { parseMatchRecord } from "@llmcraft/record";
 
 const gunzipAsync = promisify(gunzip);
 const GZIP_MAGIC_0 = 0x1f;
@@ -12,11 +12,11 @@ export function isSupportedRecordFileName(fileName: string): boolean {
   return fileName.endsWith(".json") || fileName.endsWith(".json.gz");
 }
 
-export function traceFileEncoding(fileName: string): "identity" | "gzip" {
+export function recordFileEncoding(fileName: string): "identity" | "gzip" {
   return fileName.endsWith(".gz") ? "gzip" : "identity";
 }
 
-/** Reads both historical plain JSON and current gzip-compressed Trace files. */
+/** Reads current JSON Match Records and historical gzip-compressed records. */
 export async function readRecordJsonText(filePath: string): Promise<string> {
   const bytes = await fs.readFile(filePath);
   const gzipEncoded = bytes.length >= 2
@@ -26,6 +26,6 @@ export async function readRecordJsonText(filePath: string): Promise<string> {
   return (await gunzipAsync(bytes)).toString("utf8");
 }
 
-export async function readTraceRecordFile(filePath: string): Promise<MatchTraceRecordV3> {
-  return parseMatchTraceRecordV3(await readRecordJsonText(filePath));
+export async function readMatchRecordFile(filePath: string): Promise<MatchRecord> {
+  return parseMatchRecord(await readRecordJsonText(filePath));
 }

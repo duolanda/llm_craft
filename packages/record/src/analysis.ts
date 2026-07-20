@@ -1,19 +1,8 @@
-import type { GameRecord, PlayerId } from "@llmcraft/shared";
+import type { MatchRecord, PlayerId } from "@llmcraft/shared";
 import { getBuildingCost, getUnitCost, RESULT_CODES } from "@llmcraft/shared";
 
-export type MetricScope = "match" | "player";
-
-export interface MetricDefinition {
+interface DetectorDefinition {
   id: string;
-  version: 1;
-  scope: MetricScope;
-  unit: "count" | "ticks" | "seconds" | "credits" | "credit_ticks" | "milliseconds" | "tokens" | "ratio";
-  description: string;
-}
-
-export interface DetectorDefinition {
-  id: string;
-  version: 1;
   ruleset: string;
   metricId: string;
   operator: ">" | "<" | ">=" | "<=";
@@ -23,15 +12,12 @@ export interface DetectorDefinition {
 
 export interface MetricValue {
   metricId: string;
-  metricVersion: number;
   scopeId: string;
   value: number;
-  sourcePaths: string[];
 }
 
 export interface DetectorFinding {
   detectorId: string;
-  detectorVersion: number;
   scopeId: string;
   metricId: string;
   value: number;
@@ -41,7 +27,6 @@ export interface DetectorFinding {
 }
 
 export interface RecordAnalysisReport {
-  analysisVersion: 1;
   match: {
     status: string;
     winner: PlayerId | null;
@@ -54,38 +39,16 @@ export interface RecordAnalysisReport {
   findings: DetectorFinding[];
 }
 
-export const METRIC_REGISTRY: readonly MetricDefinition[] = [
-  { id: "match.duration_ticks", version: 1, scope: "match", unit: "ticks", description: "Committed simulation duration." },
-  { id: "match.duration_seconds", version: 1, scope: "match", unit: "seconds", description: "Simulation duration using record tickIntervalMs." },
-  { id: "economy.final_credits", version: 1, scope: "player", unit: "credits", description: "Credits at the final keyframe." },
-  { id: "economy.peak_credits", version: 1, scope: "player", unit: "credits", description: "Peak observed credits." },
-  { id: "economy.idle_credit_integral", version: 1, scope: "player", unit: "credit_ticks", description: "Integral of observed credits over simulation ticks." },
-  { id: "army.final_resource_value", version: 1, scope: "player", unit: "credits", description: "Final live army value from the record ruleset." },
-  { id: "infrastructure.final_resource_value", version: 1, scope: "player", unit: "credits", description: "Final live building value from the record ruleset." },
-  { id: "army.final_units.*", version: 1, scope: "player", unit: "count", description: "Dynamic final unit count by recorded unit type." },
-  { id: "infrastructure.final_buildings.*", version: 1, scope: "player", unit: "count", description: "Dynamic final building count by recorded building type." },
-  { id: "agent.model_requests", version: 1, scope: "player", unit: "count", description: "Internal model request attempts, including retries." },
-  { id: "agent.request_latency_median", version: 1, scope: "player", unit: "milliseconds", description: "Median internal model request latency." },
-  { id: "agent.request_latency_p90", version: 1, scope: "player", unit: "milliseconds", description: "P90 internal model request latency." },
-  { id: "agent.input_tokens", version: 1, scope: "player", unit: "tokens", description: "Total model input tokens." },
-  { id: "agent.output_tokens", version: 1, scope: "player", unit: "tokens", description: "Total model output tokens." },
-  { id: "agent.cached_input_tokens", version: 1, scope: "player", unit: "tokens", description: "Total cached input tokens." },
-  { id: "agent.tool_calls", version: 1, scope: "player", unit: "count", description: "Tool calls executed by a controller." },
-  { id: "agent.invalid_tool_ratio", version: 1, scope: "player", unit: "ratio", description: "Fraction of tool calls returning an error." },
-  { id: "agent.command_success_ratio", version: 1, scope: "player", unit: "ratio", description: "Fraction of structured command results that succeeded." },
-  { id: "mission.registered", version: 1, scope: "player", unit: "count", description: "Missions registered by the controller." },
+const DETECTORS: readonly DetectorDefinition[] = [
+  { id: "floating_credits", ruleset: "standard", metricId: "economy.peak_credits", operator: ">=", threshold: 2000, severity: "warning" },
+  { id: "slow_model_p90", ruleset: "*", metricId: "agent.request_latency_p90", operator: ">=", threshold: 5000, severity: "warning" },
+  { id: "noisy_tools", ruleset: "*", metricId: "agent.invalid_tool_ratio", operator: ">", threshold: 0.25, severity: "warning" },
+  { id: "low_command_success", ruleset: "*", metricId: "agent.command_success_ratio", operator: "<", threshold: 0.75, severity: "warning" },
 ] as const;
 
-export const DETECTOR_REGISTRY: readonly DetectorDefinition[] = [
-  { id: "floating_credits", version: 1, ruleset: "default-v1", metricId: "economy.peak_credits", operator: ">=", threshold: 2000, severity: "warning" },
-  { id: "slow_model_p90", version: 1, ruleset: "*", metricId: "agent.request_latency_p90", operator: ">=", threshold: 5000, severity: "warning" },
-  { id: "noisy_tools", version: 1, ruleset: "*", metricId: "agent.invalid_tool_ratio", operator: ">", threshold: 0.25, severity: "warning" },
-  { id: "low_command_success", version: 1, ruleset: "*", metricId: "agent.command_success_ratio", operator: "<", threshold: 0.75, severity: "warning" },
-] as const;
-
-export function analyzeGameRecord(record: GameRecord): RecordAnalysisReport {
-  const tickIntervalMs = record.metadata.tickIntervalMs ?? 500;
-  const rulesetId = record.metadata.rulesetId ?? "default-v1";
+export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
+  const tickIntervalMs = record.definition.tickIntervalMs;
+  const rulesetId = record.definition.rulesetId;
   const durationTicks = record.finalState.tick;
   const metrics: MetricValue[] = [
     value("match.duration_ticks", "match", durationTicks),
@@ -107,11 +70,11 @@ export function analyzeGameRecord(record: GameRecord): RecordAnalysisReport {
     }
     idleCreditIntegral += credits * Math.max(0, durationTicks - previousTick);
     peakCredits = Math.max(peakCredits, finalPlayer.resources.credits);
-    const turns = record.aiTurns.filter((turn) => turn.playerId === playerId);
+    const turns = (record.aiTurns ?? []).filter((turn) => turn.playerId === playerId);
     const requests = turns.flatMap((turn) => turn.metrics?.modelRequestRecords ?? []);
     const latencies = requests.map((request) => request.latencyMs).filter((entry): entry is number => entry !== undefined);
     const tools = turns.flatMap((turn) => turn.toolCalls ?? []);
-    const commandFacts = record.commandResults.filter((result) => {
+    const commandFacts = (record.commandResults ?? []).filter((result) => {
       const command = (result.data as { command?: { playerId?: string } } | undefined)?.command;
       return command?.playerId === playerId;
     });
@@ -146,7 +109,6 @@ export function analyzeGameRecord(record: GameRecord): RecordAnalysisReport {
     }
   }
   return {
-    analysisVersion: 1,
     match: {
       status: record.metadata.status,
       winner: record.metadata.winner ?? record.finalState.winner,
@@ -160,15 +122,14 @@ export function analyzeGameRecord(record: GameRecord): RecordAnalysisReport {
   };
 }
 
-export function runDetectors(metrics: readonly MetricValue[], rulesetId = "default-v1"): DetectorFinding[] {
+export function runDetectors(metrics: readonly MetricValue[], rulesetId = "standard"): DetectorFinding[] {
   const findings: DetectorFinding[] = [];
-  for (const detector of DETECTOR_REGISTRY) {
+  for (const detector of DETECTORS) {
     if (detector.ruleset !== "*" && detector.ruleset !== rulesetId) continue;
     for (const metric of metrics.filter((entry) => entry.metricId === detector.metricId)) {
       if (!compare(metric.value, detector.operator, detector.threshold)) continue;
       findings.push({
         detectorId: detector.id,
-        detectorVersion: detector.version,
         scopeId: metric.scopeId,
         metricId: metric.metricId,
         value: metric.value,
@@ -182,28 +143,11 @@ export function runDetectors(metrics: readonly MetricValue[], rulesetId = "defau
 }
 
 function value(metricId: string, scopeId: string, metricValue: number): MetricValue {
-  const definition = METRIC_REGISTRY.find((entry) => (
-    entry.id === metricId || (entry.id.endsWith("*") && metricId.startsWith(entry.id.slice(0, -1)))
-  ));
-  if (!definition) throw new Error(`Metric ${metricId} is not registered.`);
   return {
     metricId,
-    metricVersion: definition.version,
     scopeId,
     value: Number.isFinite(metricValue) ? metricValue : 0,
-    sourcePaths: metricSourcePaths(metricId),
   };
-}
-
-function metricSourcePaths(metricId: string): string[] {
-  if (metricId.startsWith("match.")) return ["finalState.tick", "metadata.tickIntervalMs"];
-  if (metricId.startsWith("economy.")) return ["initialState.players", "tickDeltas[].players", "finalState.players"];
-  if (metricId.startsWith("army.") || metricId.startsWith("infrastructure.")) return ["finalState.players"];
-  if (metricId === "agent.command_success_ratio") return ["commandResults[].data.command", "commandResults[].data.result_code"];
-  if (metricId === "agent.tool_calls" || metricId === "agent.invalid_tool_ratio") return ["aiTurns[].toolCalls"];
-  if (metricId.startsWith("agent.")) return ["aiTurns[].metrics.modelRequestRecords"];
-  if (metricId.startsWith("mission.")) return ["aiTurns[].plans"];
-  return [];
 }
 
 function sum(values: Array<number | undefined>): number {

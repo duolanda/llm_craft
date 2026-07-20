@@ -1,7 +1,7 @@
 import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
-import type { AgentModelRequestRecord, DomainEvent, GameRecord, MatchTraceRecordV3, SavedAITurnRecord } from "@llmcraft/shared";
-import { detectRecordFormat, projectRecordToGameRecord, validateMatchTraceRecordV3 } from "@llmcraft/trace";
+import type { AgentModelRequestRecord, MatchRecord, SavedAITurnRecord } from "@llmcraft/shared";
+import { detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
 import { readLocalRecordText } from "./lib/readRecordFile";
 import { buildMatchDiagnosticReport, type MatchDiagnosticReport } from "./diagnostics";
 import "./transcriptViewer.css";
@@ -27,7 +27,7 @@ type TranscriptMessage = {
 type TranscriptEntry = {
   id: string;
   playerId: string;
-  mode: "full" | "delta" | "trace";
+  mode: "full" | "delta" | "record";
   requestTick: number;
   executeTick: number | null;
   model: string;
@@ -37,7 +37,7 @@ type TranscriptEntry = {
   providerError: string;
   commands: string;
   sandbox: string;
-  source: "trace-v3" | "compact-v2" | "legacy-log";
+  source: "match-record" | "legacy-log";
   modelRequests: AgentModelRequestRecord[];
 };
 
@@ -108,7 +108,7 @@ function parseStreamedEntry(chunk: string, index: number): TranscriptEntry | nul
   return {
     id: `${header.groups.transcriptId}-${index}`,
     playerId: header.groups.playerId,
-    mode: "trace",
+    mode: "record",
     requestTick: Number(header.groups.requestTick),
     executeTick: result?.groups ? Number(result.groups.executeTick) : null,
     model: header.groups.model.trim(),
@@ -183,57 +183,25 @@ function stringify(value: unknown, empty = "(none)"): string {
   return JSON.stringify(value, null, 2);
 }
 
-function mapTraceTurns(trace: MatchTraceRecordV3): TranscriptEntry[] {
-  const systemPrompt = trace.replayProjection?.metadata.systemPrompt?.trim() ?? "";
-  return trace.aiTurns.map((turn, index) => mapTraceTurn(
-    turn,
-    index,
-    systemPrompt,
-    trace.domainEvents,
-    trace.manifest.capabilities.modelRequestSpans,
-    trace.manifest.capabilities.toolCallSpans,
-    "trace-v3",
-  ));
-}
-
-function mapCompactRecordTurns(record: GameRecord): TranscriptEntry[] {
+function mapRecordTurns(record: MatchRecord): TranscriptEntry[] {
   const systemPrompt = record.metadata.systemPrompt?.trim() ?? "";
-  const hasModelRequestSpans = record.aiTurns.some((turn) => (turn.metrics.modelRequestRecords?.length ?? 0) > 0);
-  const hasToolCalls = record.aiTurns.some((turn) => turn.toolCalls.length > 0);
-  return record.aiTurns.map((turn, index) => mapTraceTurn(
+  const turns = record.aiTurns ?? [];
+  return turns.map((turn, index) => mapRecordTurn(
     turn,
     index,
     systemPrompt,
-    [],
-    hasModelRequestSpans ? "partial" : "absent",
-    hasToolCalls ? "partial" : "absent",
-    "compact-v2",
   ));
 }
 
-function mapTraceTurn(
+function mapRecordTurn(
   turn: SavedAITurnRecord,
   index: number,
   systemPrompt: string,
-  domainEvents: readonly DomainEvent[],
-  modelRequestCapability: string,
-  toolCallCapability: string,
-  source: "trace-v3" | "compact-v2",
 ): TranscriptEntry {
-  const commandIds = new Set(turn.commands.map((command) => command.id));
-  const relatedEvents = domainEvents.filter((event) => (
-    (event.commandId && commandIds.has(event.commandId))
-    || (
-      event.actorId === turn.playerId
-      && event.tick >= turn.requestTick
-      && event.tick <= Math.max(turn.executeTick, turn.requestTick + 1)
-      && event.type.startsWith("command_envelope_")
-    )
-  ));
   const runInput = turn.runInput ?? {
     playerId: turn.playerId,
     tick: turn.requestTick,
-    summary: "Trace did not persist this run input.",
+    summary: "Match Record did not persist this run input.",
   };
   const modelRequests = turn.metrics.modelRequestRecords ?? [];
   const exactMessages = modelRequests.at(-1)?.messages;
@@ -254,9 +222,9 @@ function mapTraceTurn(
     },
     ];
   return {
-    id: `trace-${turn.playerId}-${turn.requestTick}-${index}`,
+    id: `record-${turn.playerId}-${turn.requestTick}-${index}`,
     playerId: turn.playerId,
-    mode: "trace",
+    mode: "record",
     requestTick: turn.requestTick,
     executeTick: turn.executeTick,
     model: turn.model,
@@ -265,19 +233,17 @@ function mapTraceTurn(
     parsedCode: stringify(turn.assistantMessages),
     providerError: [
       `stopReason=${turn.stopReason}`,
-      `modelRequestSpans=${modelRequestCapability}`,
-      `toolCallSpans=${toolCallCapability}`,
       `modelRequests=${modelRequests.length}`,
       ...modelRequests.map((request) => `#${request.requestIndex} ${request.status ?? "success"} ${request.latencyMs ?? "?"}ms finish=${request.finishReason} tokens=${request.inputTokens ?? "?"}/${request.outputTokens ?? "?"} retryOf=${request.retryOfRequestIndex ?? "-"}`),
     ].join("\n"),
-    commands: stringify({ commands: turn.commands, relatedDomainEvents: relatedEvents }),
+    commands: stringify(turn.commands),
     sandbox: stringify({
       toolCalls: turn.toolCalls,
       plans: turn.plans,
       metrics: turn.metrics,
       createdAt: turn.createdAt,
     }),
-    source,
+    source: "match-record",
     modelRequests,
   };
 }
@@ -285,12 +251,8 @@ function mapTraceTurn(
 function parseTranscriptSource(text: string): TranscriptEntry[] {
   try {
     const value: unknown = JSON.parse(text);
-    if (detectRecordFormat(value) === "trace-v3") {
-      validateMatchTraceRecordV3(value);
-      return mapTraceTurns(value);
-    }
-    if (detectRecordFormat(value) === "compact-v2") {
-      return mapCompactRecordTurns(projectRecordToGameRecord(value));
+    if (detectRecordFormat(value) !== "unknown") {
+      return mapRecordTurns(projectRecordToMatchRecord(value));
     }
   } catch (error) {
     if (text.trimStart().startsWith("{")) throw error;
@@ -378,13 +340,9 @@ function App() {
     let parsed: TranscriptEntry[];
     try {
       const value: unknown = JSON.parse(text);
-      if (detectRecordFormat(value) === "trace-v3") {
-        validateMatchTraceRecordV3(value);
-        parsed = mapTraceTurns(value);
-        setDiagnostic(buildMatchDiagnosticReport(projectRecordToGameRecord(value), sourceName));
-      } else if (detectRecordFormat(value) === "compact-v2") {
-        const record = projectRecordToGameRecord(value);
-        parsed = mapCompactRecordTurns(record);
+      if (detectRecordFormat(value) !== "unknown") {
+        const record = projectRecordToMatchRecord(value);
+        parsed = mapRecordTurns(record);
         setDiagnostic(buildMatchDiagnosticReport(record, sourceName));
       } else {
         parsed = parseTranscriptSource(text);
@@ -396,7 +354,7 @@ function App() {
       setDiagnostic(null);
     }
     if (parsed.length === 0) {
-      throw new Error(`${sourceName} 没有可展示的 AI turn；Trace 可能在首轮模型调用前结束，或 agentTurns capability 不完整。`);
+      throw new Error(`${sourceName} 没有可展示的 AI turn；可能未启用 evaluation 记录或 transcript。`);
     }
     setEntries(parsed);
     setSelectedId(parsed[0]!.id);
@@ -412,7 +370,7 @@ function App() {
       setRecords(payload.records);
       setSelectedRecordFile((current) => current || payload.records[0]?.fileName || "");
     } catch (fetchError) {
-      setError(`获取 Trace 列表失败：${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
+      setError(`获取 Match Record 列表失败：${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
     }
   }
 
@@ -460,16 +418,16 @@ function App() {
           <p className="tv-eyebrow">LLMCraft Debug Tool</p>
           <h1>Match Explorer</h1>
           <p className="tv-subtitle">
-            用同一 Trace 对齐战场 tick、Agent request waterfall、工具调用、命令和 DomainEvent。
+            用同一 Match Record 对齐战场 tick、Agent request waterfall、工具调用和命令。
           </p>
         </div>
         <div className="tv-toolbar">
           <select
             value={selectedRecordFile}
             onChange={(event) => setSelectedRecordFile(event.target.value)}
-            aria-label="选择服务端 Trace"
+            aria-label="选择服务端 Match Record"
           >
-            {records.length === 0 ? <option value="">没有可用 Trace</option> : null}
+            {records.length === 0 ? <option value="">没有可用 Match Record</option> : null}
             {records.map((record) => (
               <option value={record.fileName} key={record.fileName}>
                 {record.fileName} · {(record.size / 1024).toFixed(1)} KiB
@@ -477,7 +435,7 @@ function App() {
             ))}
           </select>
           <button type="button" onClick={() => void loadSelectedRecord()} disabled={!selectedRecordFile || loading}>
-            {loading ? "读取中" : "打开 Trace"}
+            {loading ? "读取中" : "打开 Match Record"}
           </button>
           <label className="tv-upload">
             <input type="file" accept=".json,.gz,.log,.txt,application/json,application/gzip" onChange={handleFileChange} />
@@ -519,7 +477,7 @@ function App() {
           </div>
           {filteredEntries.length === 0 ? (
             <div className="tv-empty">
-              <p>先打开一份 Trace，或导入旧 transcript 日志。</p>
+              <p>先打开一份 Match Record，或导入旧 transcript 日志。</p>
               <p>这个面板会列出每次 AI turn 的 `player / source / requestTick`。</p>
             </div>
           ) : (
@@ -706,7 +664,7 @@ function App() {
                 </section>
               </details>
               <details className="tv-disclosure">
-                <summary>Stop / Trace Capability</summary>
+                <summary>Stop / Record Detail</summary>
                 <section className="tv-raw-section">
                   <pre>{selectedEntry.providerError || "(none)"}</pre>
                 </section>

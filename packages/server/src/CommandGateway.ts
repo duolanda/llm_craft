@@ -4,21 +4,17 @@ import {
   type CommandEnvelope,
   type CommandEnvelopeSubmissionResult,
 } from "@llmcraft/shared";
-import { DEFAULT_COMMAND_BUDGET_POLICY } from "./CommandBudget";
 /*
  * Keep the gateway independent from Game and MatchRuntime. The only live input
  * is the authoritative tick accessor supplied by the owning runtime.
  */
-const DEFAULT_MAX_BATCH_SIZE = 100;
 const DEFAULT_MAX_FUTURE_TICKS = 100;
 
 export interface CommandGatewayOptions {
   matchId: string;
   getCurrentTick: () => number;
   authorize?: (actorId: string, command: Command) => boolean;
-  maxBatchSize?: number;
   maxFutureTicks?: number;
-  maxCommandsPerActorPerTick?: number;
 }
 
 type StoredSubmission = {
@@ -27,7 +23,7 @@ type StoredSubmission = {
 };
 
 /**
- * Deterministic, versioned admission queue for all match commands.
+ * Deterministic admission queue for all match commands.
  *
  * It validates and accepts an entire envelope or rejects the entire envelope,
  * remembers clientRequestId for idempotent retry, and releases accepted batches
@@ -37,9 +33,7 @@ export class CommandGateway {
   private readonly matchId: string;
   private readonly getCurrentTick: () => number;
   private readonly authorize: (actorId: string, command: Command) => boolean;
-  private readonly maxBatchSize: number;
   private readonly maxFutureTicks: number;
-  private readonly maxCommandsPerActorPerTick: number;
   private readonly pendingByTick = new Map<number, CommandEnvelope[]>();
   private readonly submissions = new Map<string, StoredSubmission>();
   private readonly acceptedCommandIds = new Set<string>();
@@ -52,10 +46,7 @@ export class CommandGateway {
       (command.playerId === PLAYER_IDS.PLAYER_1 || command.playerId === PLAYER_IDS.PLAYER_2)
       && actorId === command.playerId
     );
-    this.maxBatchSize = options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE;
     this.maxFutureTicks = options.maxFutureTicks ?? DEFAULT_MAX_FUTURE_TICKS;
-    this.maxCommandsPerActorPerTick = options.maxCommandsPerActorPerTick
-      ?? DEFAULT_COMMAND_BUDGET_POLICY.maxCommandsPerActorPerTick;
   }
 
   submit(envelope: CommandEnvelope): CommandEnvelopeSubmissionResult {
@@ -103,8 +94,7 @@ export class CommandGateway {
   private validate(envelope: CommandEnvelope): CommandEnvelopeSubmissionResult | null {
     const clientRequestId = typeof envelope?.clientRequestId === "string" ? envelope.clientRequestId : "";
     if (
-      envelope?.envelopeVersion !== 1
-      || !clientRequestId.trim()
+      !clientRequestId.trim()
       || typeof envelope.actorId !== "string"
       || !envelope.actorId.trim()
       || !Number.isSafeInteger(envelope.baseTick)
@@ -119,20 +109,6 @@ export class CommandGateway {
     if (envelope.matchId !== this.matchId) {
       return this.reject(clientRequestId, "wrong_match", `Envelope targets ${envelope.matchId}, expected ${this.matchId}.`);
     }
-    if (envelope.commands.length > this.maxBatchSize) {
-      return this.reject(clientRequestId, "batch_too_large", `Envelope exceeds ${this.maxBatchSize} commands.`);
-    }
-    const acceptedForActorAtTick = (this.pendingByTick.get(envelope.applyAtTick) ?? [])
-      .filter((pending) => pending.actorId === envelope.actorId)
-      .reduce((count, pending) => count + pending.commands.length, 0);
-    if (acceptedForActorAtTick + envelope.commands.length > this.maxCommandsPerActorPerTick) {
-      return this.reject(
-        clientRequestId,
-        "tick_command_budget_exceeded",
-        `Actor ${envelope.actorId} exceeds ${this.maxCommandsPerActorPerTick} commands at tick ${envelope.applyAtTick}.`,
-      );
-    }
-
     const currentTick = this.getCurrentTick();
     if (
       envelope.baseTick > currentTick

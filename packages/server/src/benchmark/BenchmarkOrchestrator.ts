@@ -16,9 +16,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { MatchRegistry } from "../MatchRegistry";
-import type { JournalLifecycleService } from "../JournalLifecycle";
-import { percentile, wilsonInterval } from "../experiment/ExperimentRunner";
-import { createPairedTrials, ExperimentRunner, type ExperimentManifestV1 } from "../experiment/ExperimentRunner";
+import {
+  BenchmarkRunner,
+  createPairedBenchmarkTrials,
+  percentile,
+  wilsonInterval,
+} from "./BenchmarkRunner";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 
 type SendOnlyWebSocket = Pick<WebSocket, "send">;
@@ -38,7 +41,6 @@ const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..", "..");
 const BENCHMARK_RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-records");
-const BENCHMARK_LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-llm-debug");
 
 export interface BenchmarkConfig {
   presetId: string;
@@ -46,11 +48,8 @@ export interface BenchmarkConfig {
   cpuStrategy: CPUStrategyType;
   rounds: number;
   recordReplay: boolean;
-  decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
-  experimentId?: string;
-  seed?: number;
 }
 
 export class BenchmarkOrchestrator {
@@ -68,7 +67,6 @@ export class BenchmarkOrchestrator {
     ws: SendOnlyWebSocket | null,
     private readonly createGameOrchestrator: BenchmarkGameFactory = (matchConfig) => new GameOrchestrator(matchConfig),
     private readonly matchRegistry?: MatchRegistry,
-    private readonly journalLifecycle?: JournalLifecycleService,
   ) {
     this.ws = ws;
   }
@@ -129,49 +127,18 @@ export class BenchmarkOrchestrator {
   }
 
   private async run(): Promise<void> {
-    const pairCount = Math.ceil(this.config.rounds / 2);
-    const trials = createPairedTrials({
-      seeds: Array.from({ length: pairCount }, (_, index) => (this.config.seed ?? 0) + index),
-      repeats: 1,
-      variables: { presetId: this.config.presetId, cpuStrategy: this.config.cpuStrategy },
-    }).slice(0, this.config.rounds);
-    const manifest: ExperimentManifestV1 = {
-      manifestVersion: 1,
-      experimentId: this.config.experimentId ?? this.benchmarkId,
-      createdAt: new Date().toISOString(),
-      baseline: `builtin-test:${this.config.cpuStrategy}`,
-      fixed: { decisionIntervalTicks: this.config.decisionIntervalTicks ?? 5 },
-      concurrency: Math.min(this.config.rounds, this.config.concurrency ?? 1),
+    const trials = createPairedBenchmarkTrials(this.config.rounds);
+    await new BenchmarkRunner(
       trials,
-    };
-    const resultPath = this.config.experimentId
-      ? path.join(BENCHMARK_RECORDS_DIR, `${this.config.experimentId}.experiment.json`)
-      : undefined;
-    await new ExperimentRunner(
-      manifest,
-      async (trial) => {
-        const index = trials.findIndex((candidate) => candidate.trialId === trial.trialId);
-        const result = await this.runRound(index, trial.seed, trial.side);
-        if (!result) return { status: "failed", error: "stopped" };
-        return {
-          status: "completed",
-          winner: result.winner === "llm" ? "candidate" : result.winner === "cpu" ? "baseline" : "draw",
-          durationTicks: result.durationTicks,
-          payload: result,
-        };
-      },
-      resultPath,
+      Math.min(this.config.rounds, this.config.concurrency ?? 1),
+      (trial) => this.runRound(trial.round, trial.llmSide),
       () => this.stopRequested,
-      (file) => {
-        const recovered = file.results.flatMap((result) => isBenchmarkRoundResult(result.payload) ? [result.payload] : []);
-        this.rounds.splice(0, this.rounds.length, ...recovered.sort((left, right) => left.round - right.round));
-      },
     ).run();
 
     this.send(this.buildCompleteMessage());
   }
 
-  private async runRound(index: number, seed: number, llmSide: "player_1" | "player_2"): Promise<ServerBenchmarkRoundResult | null> {
+  private async runRound(roundNumber: number, llmSide: "player_1" | "player_2"): Promise<ServerBenchmarkRoundResult | null> {
     const cpuSide = llmSide === "player_1" ? "player_2" : "player_1";
     const cpuConfig: BuiltinCPURuntimeConfig = {
       providerType: "builtin-cpu",
@@ -180,27 +147,23 @@ export class BenchmarkOrchestrator {
     const matchConfig: GameOrchestratorConfig = {
       player1: llmSide === "player_1" ? this.config.llmConfig : cpuConfig,
       player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
-      debug: this.config.debug,
+      debug: {
+        recordingProfile: this.config.recordReplay ? "evaluation" : "off",
+        includeTranscript: this.config.debug?.includeTranscript ?? false,
+      },
       runtime: {
-        matchDefinition: { ...createDefaultMatchDefinition(), seed },
-        aiIntervalTicksByPlayer: {
-          [llmSide]: 5,
-          [cpuSide]: this.config.decisionIntervalTicks ?? 5,
-        },
+        matchDefinition: createDefaultMatchDefinition(),
         recordDir: BENCHMARK_RECORDS_DIR,
-        transcriptDir: BENCHMARK_LLM_DEBUG_DIR,
-        journalLifecycle: this.journalLifecycle,
       },
     };
 
-    const roundNumber = index + 1;
     const orchestrator = this.createGameOrchestrator(matchConfig);
     this.matchRegistry?.register(orchestrator, {
       kind: "benchmark",
       parentId: this.benchmarkId,
       label: `Benchmark round ${roundNumber}`,
       observe: this.viewedRound === null,
-      terminalPolicy: this.config.recordReplay ? "save" : "discard",
+      terminalPolicy: this.config.recordReplay ? "save" : "none",
     });
     this.activeRounds.set(roundNumber, { orchestrator, llmSide });
     if (this.viewedRound === null) {
@@ -210,7 +173,7 @@ export class BenchmarkOrchestrator {
     let completed = false;
     try {
       await orchestrator.start();
-      await this.waitForRoundEnd(orchestrator);
+      await orchestrator.waitForEnd();
 
       if (this.stopRequested) {
         return null;
@@ -224,11 +187,8 @@ export class BenchmarkOrchestrator {
       let recordPath: string | undefined;
       if (this.config.recordReplay) {
         recordPath = await orchestrator.saveRecord();
-      } else if (typeof orchestrator.discardJournal === "function") {
-        await orchestrator.discardJournal();
       }
 
-      const transcriptPath = orchestrator.getTranscriptFilePath() ?? undefined;
       const roundResult: ServerBenchmarkRoundResult = {
         round: roundNumber,
         llmSide,
@@ -240,7 +200,6 @@ export class BenchmarkOrchestrator {
               : "cpu",
         durationTicks,
         recordPath,
-        transcriptPath,
       };
       this.rounds.push(roundResult);
       completed = true;
@@ -296,20 +255,6 @@ export class BenchmarkOrchestrator {
       }));
   }
 
-  private async waitForRoundEnd(orchestrator: GameOrchestrator): Promise<void> {
-    await new Promise<void>((resolve) => {
-      const poll = () => {
-        const game = orchestrator.getGame();
-        if (this.stopRequested || game.getWinner() || !game.isGameRunning()) {
-          resolve();
-          return;
-        }
-        setTimeout(poll, 100);
-      };
-      poll();
-    });
-  }
-
   private buildCompleteMessage(): ServerBenchmarkCompleteMessage {
     const llmWins = this.rounds.filter((round) => round.winner === "llm").length;
     const cpuWins = this.rounds.filter((round) => round.winner === "cpu").length;
@@ -346,13 +291,4 @@ export class BenchmarkOrchestrator {
   private send(message: ServerBenchmarkProgressMessage | ServerBenchmarkCompleteMessage): void {
     this.ws?.send(JSON.stringify(message));
   }
-}
-
-function isBenchmarkRoundResult(value: unknown): value is ServerBenchmarkRoundResult {
-  if (!value || typeof value !== "object") return false;
-  const result = value as Partial<ServerBenchmarkRoundResult>;
-  return Number.isSafeInteger(result.round)
-    && (result.llmSide === "player_1" || result.llmSide === "player_2")
-    && (result.winner === "llm" || result.winner === "cpu" || result.winner === "draw")
-    && typeof result.durationTicks === "number";
 }

@@ -6,13 +6,14 @@ import {
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
-  MatchPrepareState,
+  MatchWarmupState,
+  MatchRecordingProfile,
   MatchRegistrySummary,
   PlayerId,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
-import { projectRecordToGameRecord, SimulationFrameBuffer } from "@llmcraft/trace";
+import { projectRecordToMatchRecord, SimulationFrameBuffer } from "@llmcraft/record";
 import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
@@ -44,7 +45,7 @@ interface ReplayRecordListEntry {
 const SERVER_HOST = window.location.hostname || "localhost";
 const WS_URL = `ws://${SERVER_HOST}:3101`;
 const API_BASE_URL = `http://${SERVER_HOST}:3101`;
-const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
+const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection";
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
 const REQUESTED_REPLAY_FILE = new URLSearchParams(window.location.search).get("replay");
 const requestedReplayTick = new URLSearchParams(window.location.search).get("tick");
@@ -191,10 +192,10 @@ function App() {
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
-    prepareStatuses,
-    prepareMessage,
-    setPrepareStatuses,
-    setPrepareMessage,
+    warmupStatuses,
+    warmupMessage,
+    setWarmupStatuses,
+    setWarmupMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,
@@ -220,7 +221,8 @@ function App() {
   const [presetError, setPresetError] = useState<string | null>(null);
   const [player1PresetId, setPlayer1PresetId] = useState(() => readStoredLivePresetSelection().player1PresetId);
   const [player2PresetId, setPlayer2PresetId] = useState(() => readStoredLivePresetSelection().player2PresetId);
-  const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
+  const [recordingProfile, setRecordingProfile] = useState<MatchRecordingProfile>("evaluation");
+  const [includeTranscript, setIncludeTranscript] = useState(false);
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -381,12 +383,12 @@ function App() {
         }
         return current + 1;
       });
-    }, Math.max(50, (activeReplayRecord?.metadata.tickIntervalMs ?? 500) / replaySpeed));
+    }, Math.max(50, (activeReplayRecord?.definition.tickIntervalMs ?? 500) / replaySpeed));
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [activeReplayRecord?.metadata.tickIntervalMs, mode, replayFrames.length, replayPlaying, replaySpeed]);
+  }, [activeReplayRecord?.definition.tickIntervalMs, mode, replayFrames.length, replayPlaying, replaySpeed]);
 
   const fetchRecordEntries = async () => {
     setRecordsLoading(true);
@@ -448,9 +450,9 @@ function App() {
   }, [player1PresetId, player2PresetId]);
 
   useEffect(() => {
-    setPrepareStatuses({});
-    setPrepareMessage(null);
-  }, [player1PresetId, player2PresetId, recordLLMTranscript, setPrepareMessage, setPrepareStatuses]);
+    setWarmupStatuses({});
+    setWarmupMessage(null);
+  }, [player1PresetId, player2PresetId, recordingProfile, includeTranscript, setWarmupMessage, setWarmupStatuses]);
 
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
@@ -470,7 +472,7 @@ function App() {
     void fetch(`${API_BASE_URL}/api/replay/records/${encodeURIComponent(REQUESTED_REPLAY_FILE)}`)
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const record = projectRecordToGameRecord(await response.json() as unknown);
+        const record = projectRecordToMatchRecord(await response.json() as unknown);
         const frames = buildReplayFrames(record);
         loadReplayRecord(record, REQUESTED_REPLAY_FILE);
         if (REQUESTED_REPLAY_TICK !== null && Number.isFinite(REQUESTED_REPLAY_TICK)) {
@@ -491,7 +493,7 @@ function App() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const record = projectRecordToGameRecord(await response.json() as unknown);
+      const record = projectRecordToMatchRecord(await response.json() as unknown);
       loadReplayRecord(record, selectedRecordFile);
     } catch (error) {
       setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -506,7 +508,7 @@ function App() {
 
     try {
       const text = await readLocalRecordText(file);
-      const record = projectRecordToGameRecord(JSON.parse(text) as unknown);
+      const record = projectRecordToMatchRecord(JSON.parse(text) as unknown);
       loadReplayRecord(record, file.name);
       event.target.value = "";
     } catch (error) {
@@ -531,7 +533,7 @@ function App() {
       type: "reset",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     });
   };
 
@@ -541,7 +543,7 @@ function App() {
     }
 
     clearServerMessage();
-    setPrepareMessage(null);
+    setWarmupMessage(null);
     setStartPending(true);
     setStartBaselineTick(state?.tick ?? -1);
     setIsPlaying(false);
@@ -549,26 +551,26 @@ function App() {
       type: "start",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     });
   };
 
-  const handlePrepare = (playerId: PlayerId) => {
+  const handleWarmup = (playerId: PlayerId) => {
     if (!player1PresetId || !player2PresetId) {
       return;
     }
 
     clearServerMessage();
-    setPrepareStatuses((current) => ({
+    setWarmupStatuses((current) => ({
       ...current,
-      [playerId]: "preparing",
+      [playerId]: "warming_up",
     }));
-    setPrepareMessage(null);
+    setWarmupMessage(null);
     send({
-      type: "prepare",
+      type: "warmup",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
       warmup: {
         player_1: playerId === "player_1",
         player_2: playerId === "player_2",
@@ -608,7 +610,6 @@ function App() {
     cpuStrategy: CPUStrategyType;
     rounds: number;
     recordReplay: boolean;
-    decisionIntervalTicks: number;
     concurrency: number;
     debug?: MatchDebugOptions;
   }) => {
@@ -629,7 +630,6 @@ function App() {
       cpuStrategy: input.cpuStrategy,
       rounds: input.rounds,
       recordReplay: input.recordReplay,
-      decisionIntervalTicks: input.decisionIntervalTicks,
       concurrency: input.concurrency,
       debug: input.debug,
     });
@@ -655,7 +655,7 @@ function App() {
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
-  const replayTickIntervalMs = activeReplayRecord?.metadata.tickIntervalMs ?? 500;
+  const replayTickIntervalMs = activeReplayRecord?.definition.tickIntervalMs ?? 500;
   const displayTickIntervalMs = mode === "replay"
     ? replayTickIntervalMs
     : frameBuffer.getLatestFrame()?.metadata.tickIntervalMs ?? 500;
@@ -668,7 +668,6 @@ function App() {
       replayFrameBuffer.ingest({
         kind: "keyframe",
         metadata: {
-          frameVersion: 1,
           frameSequence: index + 1,
           simulationTick: frame.tick,
           simulationTimeMs: frame.tick * replayTickIntervalMs,
@@ -709,8 +708,13 @@ function App() {
     && hasLiveMatchStarted
     && Boolean(player1PresetId)
     && Boolean(player2PresetId);
-  const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
-  const isPreparing = prepareStatuses.player_1 === "preparing" || prepareStatuses.player_2 === "preparing";
+  const canSaveLiveMatch = connected
+    && !isPlaying
+    && !startPending
+    && !benchmarkRunning
+    && recordingProfile !== "off"
+    && hasLiveMatchStarted;
+  const isWarmingUp = warmupStatuses.player_1 === "warming_up" || warmupStatuses.player_2 === "warming_up";
   const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
   const benchmarkTotalRounds = benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0;
   const benchmarkCurrentRound = benchmarkTotalRounds > 0
@@ -784,11 +788,11 @@ function App() {
                       </select>
                       <button
                         type="button"
-                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_1)}`}
-                        onClick={() => handlePrepare("player_1")}
-                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_1 === "preparing"}
+                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_1)}`}
+                        onClick={() => handleWarmup("player_1")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || warmupStatuses.player_1 === "warming_up"}
                       >
-                        {getPrepareButtonLabel(prepareStatuses.player_1)}
+                        {getWarmupButtonLabel(warmupStatuses.player_1)}
                       </button>
                     </div>
                   </div>
@@ -810,20 +814,33 @@ function App() {
                       </select>
                       <button
                         type="button"
-                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_2)}`}
-                        onClick={() => handlePrepare("player_2")}
-                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_2 === "preparing"}
+                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_2)}`}
+                        onClick={() => handleWarmup("player_2")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || warmupStatuses.player_2 === "warming_up"}
                       >
-                        {getPrepareButtonLabel(prepareStatuses.player_2)}
+                        {getWarmupButtonLabel(warmupStatuses.player_2)}
                       </button>
                     </div>
                   </div>
                   <label className="settings-field compact live-debug-toggle">
-                    <span>LLM Debug</span>
+                    <span>记录档位</span>
+                    <select
+                      className="settings-select"
+                      value={recordingProfile}
+                      onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
+                    >
+                      <option value="off">关闭</option>
+                      <option value="replay">回放</option>
+                      <option value="evaluation">评估</option>
+                    </select>
+                  </label>
+                  <label className="settings-field compact live-debug-toggle">
+                    <span>完整 transcript</span>
                     <input
                       type="checkbox"
-                      checked={recordLLMTranscript}
-                      onChange={(event) => setRecordLLMTranscript(event.target.checked)}
+                      checked={includeTranscript}
+                      onChange={(event) => setIncludeTranscript(event.target.checked)}
+                      disabled={recordingProfile !== "evaluation"}
                     />
                   </label>
                 </div>
@@ -856,10 +873,10 @@ function App() {
                 </button>
                 <button
                   onClick={isPlaying ? handleStop : handleStart}
-                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isPreparing || !canStartLiveMatch}
+                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isWarmingUp || !canStartLiveMatch}
                   className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                 >
-                  {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
+                  {isPlaying ? "停止对局" : startPending ? "启动中" : "启动对局"}
                 </button>
                 {benchmarkRunning && (
                   <button
@@ -892,10 +909,10 @@ function App() {
           </div>
         </header>
 
-        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || warmupMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
-            {prepareMessage && <span>{prepareMessage}</span>}
+            {warmupMessage && <span>{warmupMessage}</span>}
             {benchmarkStatusVisible && (
               <span>
                 Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 已完成 {benchmarkProgress?.completedRounds ?? 0} / {benchmarkTotalRounds} 局
@@ -1182,21 +1199,27 @@ function App() {
 
 export default App;
 
-function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
-  return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+function buildMatchDebugOptions(
+  recordingProfile: MatchRecordingProfile,
+  includeTranscript: boolean,
+): MatchDebugOptions {
+  return {
+    recordingProfile,
+    includeTranscript: recordingProfile === "evaluation" && includeTranscript,
+  };
 }
 
-function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
-  if (status === "preparing") {
-    return "准备中";
+function getWarmupButtonLabel(status: MatchWarmupState | undefined): string {
+  if (status === "warming_up") {
+    return "预热中";
   }
   if (status === "ready") {
-    return "已准备";
+    return "已预热";
   }
   if (status === "error") {
     return "重试";
   }
-  return "准备";
+  return "预热";
 }
 
 function formatRoundList(rounds: number[]): string {
@@ -1206,6 +1229,6 @@ function formatRoundList(rounds: number[]): string {
   return `第 ${rounds.join("、")} 局`;
 }
 
-function getPrepareStatusClass(status: MatchPrepareState | undefined): string {
-  return status ? `prepare-${status}` : "prepare-idle";
+function getWarmupStatusClass(status: MatchWarmupState | undefined): string {
+  return status ? `warmup-${status}` : "warmup-idle";
 }

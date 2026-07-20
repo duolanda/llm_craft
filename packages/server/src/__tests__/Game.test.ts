@@ -127,12 +127,12 @@ describe("Game", () => {
     expect(tiles.flat().filter((tile) => tile === TILE_TYPES.OBSTACLE)).toHaveLength(0);
   });
 
-  it("rolls back a failed tick and stops instead of snapshotting partial world changes", () => {
+  it("stops on an unexpected simulation crash without pretending the tick was rolled back", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const worker = game.getState().players[0].units[0];
     const before = game.getState();
     game.queueCommand({
-      id: "atomic-rollback-move",
+      id: "crash-before-stop-move",
       type: "move",
       playerId: "player_1",
       unitId: worker.id,
@@ -146,38 +146,16 @@ describe("Game", () => {
     game.tickUpdate();
 
     const afterFailure = game.getState();
-    expect(afterFailure.tick).toBe(before.tick);
-    expect(afterFailure.players.map((player) => player.resources)).toEqual(
-      before.players.map((player) => player.resources),
-    );
-    expect(afterFailure.players.flatMap((player) => player.units)).toEqual(
-      before.players.flatMap((player) => player.units),
-    );
+    expect(afterFailure.tick).toBe(before.tick + 1);
     expect(afterFailure.logs.at(-2)?.type).toBe(LOG_TYPES.TICK_ERROR);
     expect(afterFailure.logs.at(-1)?.type).toBe(LOG_TYPES.GAME_STOPPED);
     expect(game.isGameRunning()).toBe(false);
-    expect(game.getLatestSnapshot()?.tick).toBe(before.tick);
-
-    game.start();
-    game.tickUpdate();
-    expect(game.getTick()).toBe(1);
+    expect(game.getLatestSnapshot()?.tick).toBe(before.tick + 1);
     expect(game.getUnitManager().getUnit(worker.id)?.pathTarget).toMatchObject({
       x: worker.x + 5,
       y: worker.y,
     });
     consoleError.mockRestore();
-  });
-
-  it("includes deterministic RNG state in simulation checkpoints", () => {
-    const initial = game.createSimulationCheckpoint();
-    const changed = structuredClone(initial);
-    changed.rng.state = 123456;
-
-    game.restoreSimulationCheckpoint(changed);
-    expect(game.getDeterministicRngState()).toEqual(changed.rng);
-
-    game.restoreSimulationCheckpoint(initial);
-    expect(game.getDeterministicRngState()).toEqual(initial.rng);
   });
 
   it("keeps mineral fields out of the central attack corridor", () => {

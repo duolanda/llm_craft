@@ -37,14 +37,12 @@ import {
   isUnitType,
   unitCanAttack,
 } from "@llmcraft/shared";
-import { createHash } from "node:crypto";
 import { AgentReadState, Game } from "../Game";
-import { PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
-import { MissionRuntime } from "./MissionRuntime";
+import { PlanToolContext, PlanToolHandlers } from "../agent/AgentPlanRuntime";
+import { MissionRuntime } from "../agent/MissionRuntime";
 import type { AgentToolExecutionContext } from "../LLMProvider";
-import { ObservationProjection } from "./ObservationProjection";
-import { AgentPolicy } from "./AgentPolicy";
-import { resolveCommandBudgetPolicy } from "../CommandBudget";
+import { ObservationProjection } from "../agent/ObservationProjection";
+import { AgentPolicy } from "../agent/AgentPolicy";
 
 type ToolEffect = "read" | "action" | "plan";
 type GroupFormation = "line" | "column" | "wedge" | "dispersed" | "battle_line";
@@ -54,24 +52,11 @@ export interface ExecutedToolResult {
   result: unknown;
 }
 
-export interface GameAgentBridgeOptions {
+export interface GameplayControllerOptions {
   submitCommands?: (
     commands: readonly Command[],
     options?: { clientRequestId?: string },
   ) => void | { duplicate: boolean };
-}
-
-interface BridgeMutableState {
-  issuedCommands: Command[];
-  runPlanRecords: AgentPlanRecord[];
-  commandCounter: number;
-  lastReadTick: number | null;
-  missionRuntime: ReturnType<MissionRuntime["captureState"]>;
-  commandProvenance: CommandProvenance | null;
-  targetMemory: Map<string, CachedEnemyTarget>;
-  attackOrders: Map<string, { unitId: string; targetId: string }>;
-  pendingGroupMoves: Map<string, Command>;
-  consumedMissionFailureKeys: Set<string>;
 }
 
 interface SuggestedBuildSite extends Position {
@@ -116,7 +101,14 @@ type AttackOrderResolution =
 
 const isBuildingComplete = (building: Building): boolean => building.exists && !building.constructionProgress;
 
-export class GameAgentBridge {
+/**
+ * The shared gameplay control plane used by LLM, CLI, and built-in CPU adapters.
+ *
+ * It translates observations and tool-shaped actions into game commands. Match
+ * lifecycle control (warmup/start/stop/observe) belongs to MatchRuntime and
+ * MatchRegistry, not to this class.
+ */
+export class GameplayController {
   private issuedCommands: Command[] = [];
   private runPlanRecords: AgentPlanRecord[] = [];
   private commandCounter = 0;
@@ -126,15 +118,10 @@ export class GameAgentBridge {
   private missionRuntime: MissionRuntime;
   private commandProvenance: CommandProvenance | null = null;
   private readonly planToolHandlers: PlanToolHandlers;
-  private targetMemory = new Map<string, CachedEnemyTarget>();
+  private targetCache = new Map<string, CachedEnemyTarget>();
   private attackOrders = new Map<string, { unitId: string; targetId: string }>();
-  private pendingGroupMoves = new Map<string, Command>();
   private consumedMissionFailureKeys = new Set<string>();
-  private readonly submitCommands: NonNullable<GameAgentBridgeOptions["submitCommands"]>;
-  private readonly plannedPathCommandShare: number;
-  private commandBatchBuffer: Command[] | null = null;
-  private commandBatchIdPrefix: string | null = null;
-  private commandBatchIndex = 0;
+  private readonly submitCommands: NonNullable<GameplayControllerOptions["submitCommands"]>;
   private readonly completedCommandBatches = new Map<string, {
     fingerprint: string;
     value: unknown;
@@ -143,7 +130,7 @@ export class GameAgentBridge {
   constructor(
     private readonly game: Game,
     private readonly playerId: PlayerId,
-    options: GameAgentBridgeOptions = {},
+    options: GameplayControllerOptions = {},
   ) {
     this.submitCommands = options.submitCommands ?? ((commands) => {
       for (const command of commands) this.game.queueCommand(command);
@@ -152,10 +139,6 @@ export class GameAgentBridge {
     this.planToolHandlers = this.createPlanToolHandlers();
     this.missionRuntime = new MissionRuntime(this.planToolHandlers);
     this.observationProjection = new ObservationProjection(game);
-    this.plannedPathCommandShare = Math.max(
-      1,
-      Math.floor(resolveCommandBudgetPolicy(game.getDefinition()).maxPathCommandsPerTick / 2),
-    );
   }
 
   beginRun(provenance?: CommandProvenance): void {
@@ -183,13 +166,10 @@ export class GameAgentBridge {
     };
   }
 
-  runCommandBatch<T>(
+  runIdempotentBatch<T>(
     options: { clientRequestId?: string; fingerprint?: string },
-    execute: () => { commit: boolean; value: T },
+    execute: () => T,
   ): { value: T; duplicate: boolean } {
-    if (this.commandBatchBuffer) {
-      throw new Error("Nested command batches are not supported.");
-    }
     const completed = options.clientRequestId
       ? this.completedCommandBatches.get(options.clientRequestId)
       : undefined;
@@ -199,41 +179,14 @@ export class GameAgentBridge {
       }
       return { value: structuredClone(completed.value) as T, duplicate: true };
     }
-    const snapshot = this.captureMutableState();
-    this.commandBatchBuffer = [];
-    this.commandBatchIdPrefix = options.clientRequestId
-      ? createHash("sha256").update(options.clientRequestId).digest("hex").slice(0, 20)
-      : null;
-    this.commandBatchIndex = 0;
-    try {
-      const decision = execute();
-      if (!decision.commit) {
-        this.restoreMutableState(snapshot);
-        return { value: decision.value, duplicate: false };
-      }
-      const commands = [...this.commandBatchBuffer];
-      if (commands.length === 0) {
-        throw new Error("A committed command batch must contain at least one command.");
-      }
-      this.commandBatchBuffer = null;
-      const submission = this.submitCommands(commands, options);
-      const duplicate = submission?.duplicate === true;
-      if (duplicate) this.restoreMutableState(snapshot);
-      if (!duplicate && options.clientRequestId) {
-        this.completedCommandBatches.set(options.clientRequestId, {
-          fingerprint: options.fingerprint ?? "",
-          value: structuredClone(decision.value),
-        });
-      }
-      return { value: decision.value, duplicate };
-    } catch (error) {
-      this.restoreMutableState(snapshot);
-      throw error;
-    } finally {
-      this.commandBatchBuffer = null;
-      this.commandBatchIdPrefix = null;
-      this.commandBatchIndex = 0;
+    const value = execute();
+    if (options.clientRequestId) {
+      this.completedCommandBatches.set(options.clientRequestId, {
+        fingerprint: options.fingerprint ?? "",
+        value: structuredClone(value),
+      });
     }
+    return { value, duplicate: false };
   }
 
   takeIssuedCommands(): Command[] {
@@ -248,12 +201,10 @@ export class GameAgentBridge {
     return plans;
   }
 
-  advancePlans(): Command[] {
+  handleCommittedTick(): Command[] {
     this.observationProjection.invalidate();
     this.consumeMissionCommandFailures();
-    const missionCommands = this.missionRuntime.advance(this.getPlanSnapshot(), {
-      maxPathCommands: this.plannedPathCommandShare,
-    });
+    const missionCommands = this.missionRuntime.advance(this.getPlanSnapshot());
     const previousProvenance = this.commandProvenance;
     this.commandProvenance = {
       controllerId: previousProvenance?.controllerId ?? `mission:${this.playerId}`,
@@ -263,14 +214,9 @@ export class GameAgentBridge {
         ? { parentControllerId: previousProvenance.parentControllerId }
         : {}),
     };
-    const missionPathCommands = missionCommands.filter((command) => this.isPathCommand(command)).length;
-    const pathBudgetAfterMissions = Math.max(0, this.plannedPathCommandShare - missionPathCommands);
-    const groupCommands = this.advancePendingGroupMoves(pathBudgetAfterMissions);
-    const tacticalCommands = this.advanceAttackOrders(
-      Math.max(0, pathBudgetAfterMissions - groupCommands.length),
-    );
+    const tacticalCommands = this.advanceAttackOrders();
     this.commandProvenance = previousProvenance;
-    return [...missionCommands, ...groupCommands, ...tacticalCommands];
+    return [...missionCommands, ...tacticalCommands];
   }
 
   getActivePlans(): AgentPlanRecord[] {
@@ -855,7 +801,6 @@ export class GameAgentBridge {
       .map((unit) => ({
         ...unit,
         hasActivePlan: plannedUnitIds.has(unit.id),
-        hasPendingGroupMove: this.pendingGroupMoves.has(unit.id),
       }));
     const groupMap = new Map<string, AgentUnitGroup & { xSum: number; ySum: number }>();
     for (const unit of units) {
@@ -897,10 +842,6 @@ export class GameAgentBridge {
       effect: "read",
       result: {
         tick: state.tick,
-        pendingGroupMoves: {
-          count: this.pendingGroupMoves.size,
-          unitIds: [...this.pendingGroupMoves.keys()],
-        },
         groups,
         units,
       },
@@ -1018,7 +959,6 @@ export class GameAgentBridge {
 
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    this.pendingGroupMoves.delete(unitId);
     const command = this.enqueue(this.createCommand("move", { unitId, position }));
     return {
       effect: "action",
@@ -1066,7 +1006,6 @@ export class GameAgentBridge {
     const priority = targetPriority && targetPriority.length > 0 ? targetPriority : getDefaultAttackMovePriority(unit.type);
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    this.pendingGroupMoves.delete(unitId);
     const command = this.enqueue(this.createCommand("attack_move", { unitId, position, targetPriority: priority }));
     return {
       effect: "action",
@@ -1106,7 +1045,6 @@ export class GameAgentBridge {
     }
 
     this.missionRuntime.interruptUnit(unitId);
-    this.pendingGroupMoves.delete(unitId);
     if (resolution.completedAfterCommand) {
       this.attackOrders.delete(unitId);
     } else {
@@ -1292,7 +1230,6 @@ export class GameAgentBridge {
 
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    this.pendingGroupMoves.delete(unitId);
     const command = this.enqueue(this.createCommand("build", { unitId, buildingType, position }));
     return {
       effect: "action",
@@ -1340,7 +1277,6 @@ export class GameAgentBridge {
 
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    this.pendingGroupMoves.delete(unitId);
     const command = this.enqueue(this.createCommand("harvest_loop", { unitId, position }));
     return {
       effect: "action",
@@ -1363,7 +1299,6 @@ export class GameAgentBridge {
 
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    this.pendingGroupMoves.delete(unitId);
     const command = this.enqueue(this.createCommand("hold", { unitId }));
     return {
       effect: "action",
@@ -1394,7 +1329,6 @@ export class GameAgentBridge {
       for (const unitId of normalizedInput.unitIds) {
         this.missionRuntime.interruptUnit(unitId);
         this.attackOrders.delete(unitId);
-        this.pendingGroupMoves.delete(unitId);
       }
     }
     const record = this.missionRuntime.register(normalizedInput, this.commandProvenance ?? undefined);
@@ -1414,41 +1348,8 @@ export class GameAgentBridge {
 
   private enqueue(command: Command): Command {
     this.issuedCommands.push(command);
-    if (this.commandBatchBuffer) {
-      this.commandBatchBuffer.push(command);
-    } else {
-      this.submitCommands([command]);
-    }
+    this.submitCommands([command]);
     return command;
-  }
-
-  private captureMutableState(): BridgeMutableState {
-    return {
-      issuedCommands: structuredClone(this.issuedCommands),
-      runPlanRecords: structuredClone(this.runPlanRecords),
-      commandCounter: this.commandCounter,
-      lastReadTick: this.lastReadTick,
-      missionRuntime: this.missionRuntime.captureState(),
-      commandProvenance: structuredClone(this.commandProvenance),
-      targetMemory: structuredClone(this.targetMemory),
-      attackOrders: structuredClone(this.attackOrders),
-      pendingGroupMoves: structuredClone(this.pendingGroupMoves),
-      consumedMissionFailureKeys: structuredClone(this.consumedMissionFailureKeys),
-    };
-  }
-
-  private restoreMutableState(snapshot: BridgeMutableState): void {
-    this.issuedCommands = structuredClone(snapshot.issuedCommands);
-    this.runPlanRecords = structuredClone(snapshot.runPlanRecords);
-    this.commandCounter = snapshot.commandCounter;
-    this.lastReadTick = snapshot.lastReadTick;
-    this.observationProjection.invalidate();
-    this.missionRuntime.restoreState(snapshot.missionRuntime);
-    this.commandProvenance = structuredClone(snapshot.commandProvenance);
-    this.targetMemory = structuredClone(snapshot.targetMemory);
-    this.attackOrders = structuredClone(snapshot.attackOrders);
-    this.pendingGroupMoves = structuredClone(snapshot.pendingGroupMoves);
-    this.consumedMissionFailureKeys = structuredClone(snapshot.consumedMissionFailureKeys);
   }
 
   private consumeMissionCommandFailures(): void {
@@ -1498,9 +1399,7 @@ export class GameAgentBridge {
 
   private createCommand(type: string, payload: Partial<Command>): Command {
     return {
-      id: this.commandBatchIdPrefix
-        ? `agent_cmd_${this.playerId}_${this.commandBatchIdPrefix}_${++this.commandBatchIndex}`
-        : `agent_cmd_${this.playerId}_${++this.commandCounter}`,
+      id: `agent_cmd_${this.playerId}_${++this.commandCounter}`,
       type,
       playerId: this.playerId,
       ...(this.commandProvenance ? { provenance: structuredClone(this.commandProvenance) } : {}),
@@ -1542,12 +1441,12 @@ export class GameAgentBridge {
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       const unit = player.units.find((candidate) => candidate.id === targetId && candidate.exists);
       if (unit) {
-        this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
+        this.targetCache.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
         return unit;
       }
       const building = player.buildings.find((candidate) => candidate.id === targetId && candidate.exists);
       if (building) {
-        this.targetMemory.set(building.id, {
+        this.targetCache.set(building.id, {
           id: building.id,
           type: building.type,
           x: building.x,
@@ -1563,8 +1462,8 @@ export class GameAgentBridge {
   attackMoveGroup(unitIds: string[], position: Position, formation: GroupFormation = "line"): ExecutedToolResult {
     const state = this.getReadState();
     const uniqueUnitIds = [...new Set(unitIds.map(String))];
-    if (uniqueUnitIds.length === 0 || uniqueUnitIds.length > 100) {
-      return this.actionResult({ ok: false, error: "invalid_group", hint: "Choose between 1 and 100 friendly combat units." });
+    if (uniqueUnitIds.length === 0) {
+      return this.actionResult({ ok: false, error: "invalid_group", hint: "Choose at least one friendly combat unit." });
     }
     if (
       !Number.isInteger(position.x) || !Number.isInteger(position.y) ||
@@ -1581,23 +1480,16 @@ export class GameAgentBridge {
 
     const assignments = this.createFormationAssignments(uniqueUnitIds, position, formation, state.tiles[0]?.length ?? 1, state.tiles.length);
     const commandIds: string[] = [];
-    let queuedNow = 0;
     for (const assignment of assignments) {
       const unit = this.getFriendlyUnit(assignment.unitId)!;
       this.missionRuntime.interruptUnit(unit.id);
       this.attackOrders.delete(unit.id);
-      this.pendingGroupMoves.delete(unit.id);
       const command = this.createCommand("attack_move", {
         unitId: unit.id,
         position: assignment.position,
         targetPriority: getDefaultAttackMovePriority(unit.type),
       });
-      if (queuedNow < this.plannedPathCommandShare) {
-        this.enqueue(command);
-        queuedNow++;
-      } else {
-        this.pendingGroupMoves.set(unit.id, command);
-      }
+      this.enqueue(command);
       commandIds.push(command.id);
     }
     return {
@@ -1607,11 +1499,7 @@ export class GameAgentBridge {
         commandIds,
         formation,
         assignments,
-        queuedNow,
-        scheduled: commandIds.length - queuedNow,
-        hint: commandIds.length > queuedNow
-          ? `${commandIds.length - queuedNow} assignments are accepted and scheduled across later ticks by the path budget. They may still look idle briefly; do not reissue individual move commands because that cancels their pending group assignments.`
-          : "All formation assignments were queued immediately.",
+        hint: "All formation assignments were queued immediately.",
       }),
     };
   }
@@ -1680,10 +1568,10 @@ export class GameAgentBridge {
   private rememberEnemyTargets(state: AgentReadState): void {
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       for (const unit of player.units.filter((candidate) => candidate.exists)) {
-        this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
+        this.targetCache.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
       }
       for (const building of player.buildings.filter((candidate) => candidate.exists)) {
-        this.targetMemory.set(building.id, {
+        this.targetCache.set(building.id, {
           id: building.id,
           type: building.type,
           x: building.x,
@@ -1694,25 +1582,8 @@ export class GameAgentBridge {
     }
   }
 
-  private advancePendingGroupMoves(maxPathCommands: number): Command[] {
+  private advanceAttackOrders(): Command[] {
     const commands: Command[] = [];
-    for (const [unitId, command] of this.pendingGroupMoves) {
-      if (commands.length >= maxPathCommands) {
-        break;
-      }
-      const unit = this.getFriendlyUnit(unitId);
-      this.pendingGroupMoves.delete(unitId);
-      if (!unit || !unitCanAttack(unit.type)) {
-        continue;
-      }
-      commands.push(command);
-    }
-    return commands;
-  }
-
-  private advanceAttackOrders(maxPathCommands: number): Command[] {
-    const commands: Command[] = [];
-    let pathCommands = 0;
     for (const [unitId, order] of this.attackOrders) {
       const unit = this.getFriendlyUnit(unitId);
       if (!unit || !unitCanAttack(unit.type)) {
@@ -1731,12 +1602,8 @@ export class GameAgentBridge {
       if (resolution.mode === "attack" && this.isAttackReloading(unit)) {
         continue;
       }
-      if (this.isPathCommand(resolution.command) && pathCommands >= maxPathCommands) {
-        continue;
-      }
 
       commands.push(resolution.command);
-      if (this.isPathCommand(resolution.command)) pathCommands++;
       if (resolution.completedAfterCommand) {
         this.attackOrders.delete(unitId);
       }
@@ -1762,7 +1629,7 @@ export class GameAgentBridge {
           command: this.createCommand("attack", { unitId, targetId }),
           mode: "attack",
           // The simulation owns the persistent attack intent and will fire again
-          // after reload. The bridge only needs to keep orders that are still
+          // after reload. The gameplay controller only needs to keep orders that are still
           // moving toward a target.
           completedAfterCommand: true,
         };
@@ -1776,7 +1643,7 @@ export class GameAgentBridge {
       };
     }
 
-    const lastSeen = this.targetMemory.get(targetId);
+    const lastSeen = this.targetCache.get(targetId);
     if (!lastSeen) {
       return {
         ok: false,
@@ -1808,10 +1675,6 @@ export class GameAgentBridge {
       }
     }
     return largest;
-  }
-
-  private isPathCommand(command: Command): boolean {
-    return command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
   }
 
   private getPlanSnapshot() {

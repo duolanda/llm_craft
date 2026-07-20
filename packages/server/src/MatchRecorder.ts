@@ -1,131 +1,112 @@
-import type { GameState, TraceReplayMetadataV1 } from "@llmcraft/shared";
-import type { MatchJournalCut } from "./MatchJournal";
+import {
+  type MatchRecord,
+  type MatchRecordingOptions,
+  type PlayerId,
+  type SavedAITurnRecord,
+} from "@llmcraft/shared";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { MatchRuntime } from "./MatchRuntime";
 
 export interface MatchRecordContext {
   startedAt: string;
-  aiIntervalTicks: number;
-  aiContextWindowTurns?: number;
+  recording: MatchRecordingOptions;
   systemPrompt: string;
-  players: TraceReplayMetadataV1["players"];
-}
-
-interface CapturedRecordCut {
-  state: GameState;
-  initialState: GameState;
-  journalCut: MatchJournalCut;
-  status: TraceReplayMetadataV1["status"];
-  signature: string;
-  savedAt: string;
+  players: Array<{
+    playerId: PlayerId;
+    model: string;
+    baseURL?: string;
+  }>;
+  aiTurns: SavedAITurnRecord[];
 }
 
 /**
- * Owns stable record cuts and write serialization for every MatchRuntime user.
- * Controllers provide metadata only; they do not implement their own record path.
+ * Writes one terminal Match Record. Runtime state remains in memory while the
+ * match is active; recording does not rewrite an in-progress large file.
  */
 export class MatchRecorder {
-  private readonly journal;
-  private readonly game;
-  private writeChain: Promise<void> = Promise.resolve();
-  private pendingSaves = new Map<string, Promise<string>>();
-  private lastSavedSignature: string | null = null;
-  private lastSavedPath: string | null = null;
+  private savedPath: string | null = null;
+  private savePromise: Promise<string> | null = null;
 
-  constructor(private readonly runtime: MatchRuntime) {
-    this.journal = runtime.getJournal();
-    this.game = runtime.getGame();
-  }
+  constructor(
+    private readonly runtime: MatchRuntime,
+    private readonly recordDir: string,
+  ) {}
 
   async save(context: MatchRecordContext): Promise<string> {
-    const captured = this.captureCut();
-    if (captured.signature === this.lastSavedSignature && this.lastSavedPath) {
-      if (captured.status !== "running") {
-        const cleanup = await this.journal.seal(this.lastSavedPath);
-        if (!cleanup.cleaned) {
-          console.warn(`Trace 已保存，但临时 journal 重试清理失败（${cleanup.directory}）: ${cleanup.error}`);
-        }
-      }
-      return this.lastSavedPath;
+    if (context.recording.profile === "off") {
+      throw new Error("MATCH_RECORDING_DISABLED");
     }
-    const pending = this.pendingSaves.get(captured.signature);
-    if (pending) return pending;
+    if (this.runtime.getGame().isGameRunning()) {
+      throw new Error("MATCH_STILL_RUNNING");
+    }
+    if (this.savedPath) return this.savedPath;
+    if (this.savePromise) return this.savePromise;
 
-    const savePromise = this.writeChain.then(() => this.finalize(captured, context));
-    this.writeChain = savePromise.then(() => undefined, () => undefined);
-    this.pendingSaves.set(captured.signature, savePromise);
+    this.savePromise = this.write(context);
     try {
-      return await savePromise;
+      this.savedPath = await this.savePromise;
+      return this.savedPath;
     } finally {
-      if (this.pendingSaves.get(captured.signature) === savePromise) {
-        this.pendingSaves.delete(captured.signature);
-      }
+      this.savePromise = null;
     }
   }
 
-  private captureCut(): CapturedRecordCut {
-    const state = this.game.getState();
-    const journalCut = this.journal.captureCut();
-    const status = this.game.getWinner()
-      ? "finished"
-      : this.game.isGameRunning()
-        ? "running"
-        : "stopped";
+  private async write(context: MatchRecordContext): Promise<string> {
+    const game = this.runtime.getGame();
+    const finalState = game.getState();
+    const savedAt = new Date().toISOString();
+    const initialState = game.getInitialSnapshot()?.state ?? finalState;
+    const profile = context.recording.profile;
+    if (profile === "off") throw new Error("MATCH_RECORDING_DISABLED");
+    const record: MatchRecord = {
+      recordFormat: "match-record",
+      matchId: this.runtime.getMatchId(),
+      definition: this.runtime.getDefinition(),
+      metadata: {
+        startedAt: context.startedAt,
+        savedAt,
+        endedAt: savedAt,
+        status: this.runtime.getStatus() === "failed"
+          ? "failed"
+          : finalState.winner
+            ? "finished"
+            : "stopped",
+        winner: finalState.winner,
+        recordingProfile: profile,
+        includeTranscript: context.recording.includeTranscript,
+        ...(context.recording.includeTranscript ? { systemPrompt: context.systemPrompt } : {}),
+        players: structuredClone(context.players),
+      },
+      initialState,
+      finalState,
+      tickDeltas: game.getTickDeltas(),
+      ...(profile === "evaluation"
+        ? {
+            commandResults: game.getCommandResults(),
+            aiTurns: context.aiTurns.map((turn) => this.projectTurn(turn, context.recording.includeTranscript)),
+          }
+        : {}),
+    };
+
+    await fs.mkdir(this.recordDir, { recursive: true });
+    const fileName = `${this.runtime.getMatchId()}.match.json`;
+    const finalPath = path.join(this.recordDir, fileName);
+    const tempPath = `${finalPath}.tmp-${process.pid}`;
+    await fs.writeFile(tempPath, JSON.stringify(record));
+    await fs.rename(tempPath, finalPath);
+    return finalPath;
+  }
+
+  private projectTurn(turn: SavedAITurnRecord, includeTranscript: boolean): SavedAITurnRecord {
+    if (includeTranscript) return structuredClone(turn);
     return {
-      state,
-      initialState: this.game.getInitialSnapshot()?.state ?? state,
-      journalCut,
-      status,
-      savedAt: new Date().toISOString(),
-      signature: JSON.stringify({
-        tick: state.tick,
-        winner: this.game.getWinner(),
-        status,
-        journalCut,
-      }),
-    };
-  }
-
-  private async finalize(captured: CapturedRecordCut, context: MatchRecordContext): Promise<string> {
-    const definition = this.runtime.getDefinition();
-    const metadata: TraceReplayMetadataV1 = {
-      startedAt: context.startedAt,
-      savedAt: captured.savedAt,
-      endedAt: captured.status === "running" ? undefined : captured.savedAt,
-      status: captured.status,
-      winner: captured.state.winner,
-      aiIntervalTicks: context.aiIntervalTicks,
-      aiContextWindowTurns: context.aiContextWindowTurns ?? this.journal.aiTurnCount,
-      tickIntervalMs: definition.tickIntervalMs,
-      rulesetId: definition.rulesetId,
-      map: {
-        width: definition.map.width,
-        height: definition.map.height,
+      ...structuredClone(turn),
+      assistantMessages: [],
+      metrics: {
+        ...structuredClone(turn.metrics),
+        modelRequestRecords: turn.metrics.modelRequestRecords?.map(({ messages: _messages, ...record }) => record),
       },
-      systemPrompt: context.systemPrompt,
-      players: structuredClone(context.players),
     };
-    const manifest = this.runtime.getTraceManifest();
-    manifest.status = captured.status;
-    manifest.updatedAt = captured.savedAt;
-    const filePath = await this.journal.finalizeTraceV3({
-      manifest,
-      initialKeyframe: captured.initialState,
-      finalKeyframe: captured.state,
-      cut: captured.journalCut,
-      replayProjection: {
-        metadata,
-        tickDeltas: this.journal.readReplayDeltas(captured.journalCut.replayDeltas),
-        commandResults: this.journal.readProjectedCommandResults(captured.journalCut.domainEvents),
-      },
-    });
-    if (captured.status !== "running") {
-      const cleanup = await this.journal.seal(filePath);
-      if (!cleanup.cleaned) {
-        console.warn(`Trace 已保存，但临时 journal 清理失败（${cleanup.directory}）: ${cleanup.error}`);
-      }
-    }
-    this.lastSavedSignature = captured.signature;
-    this.lastSavedPath = filePath;
-    return filePath;
   }
 }

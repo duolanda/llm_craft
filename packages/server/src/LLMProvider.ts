@@ -1,7 +1,7 @@
 import {
   AgentPlanRecord,
   AgentModelRequestRecord,
-  AgentMemoryPolicyRecord,
+  ContextWindowLimitRecord,
   AgentRunInput,
   AgentRunMetrics,
   AgentToolCallRecord,
@@ -52,7 +52,7 @@ export interface SubAgentParentContext {
 export interface RunAgentOptions {
   tools: AgentToolDefinition[];
   executeTool: (name: string, args: unknown, context?: AgentToolExecutionContext) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
-  traceContext?: {
+  runContext?: {
     turnId: string;
     controllerId: string;
     parentControllerId?: string;
@@ -99,7 +99,7 @@ export interface WarmupAgentResult {
   metrics: {
     modelRequests: number;
     modelRequestRecords?: AgentModelRequestRecord[];
-    memory?: AgentMemoryPolicyRecord;
+    contextWindow?: ContextWindowLimitRecord;
   };
 }
 
@@ -107,7 +107,7 @@ export interface LLMConnectionTestResult {
   responseText: string;
 }
 
-/** Stateful conversation, memory and tool-loop boundary owned by one controller. */
+/** Stateful provider conversation and tool-loop boundary owned by one controller. */
 export interface AgentSession {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
   runSubAgentTask(input: RunSubAgentTaskInput): Promise<string>;
@@ -116,7 +116,7 @@ export interface AgentSession {
   getBaseURL(): string | undefined;
 }
 
-/** Legacy compatibility surface for connection-test callers during P3A migration. */
+/** Agent session surface used by the preset connection-test endpoint. */
 export interface LLMProvider extends AgentSession {
   testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
 }

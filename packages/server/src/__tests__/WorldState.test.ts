@@ -32,7 +32,7 @@ describe("WorldState", () => {
     });
   });
 
-  it("resolves cross-type entity identity and rejects duplicate IDs", () => {
+  it("resolves cross-type entity identity", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const projectedUnit = world.players[0].units[0];
     const projectedBuilding = world.players[0].buildings[0];
@@ -45,9 +45,6 @@ describe("WorldState", () => {
     unit.exists = false;
     expect(world.entities.resolve(unit.id)).toBeUndefined();
     expect(world.entities.resolve(unit.id, { includeDestroyed: true })).toEqual({ kind: "unit", entity: unit });
-
-    unit.id = building.id;
-    expect(() => world.assertInvariants()).toThrow(/Duplicate or empty entity id/);
   });
 
   it("uses one destroyed-entity lifecycle across units and buildings", () => {
@@ -61,19 +58,6 @@ describe("WorldState", () => {
       hp: 0,
     });
     expect(world.destroyEntity(unit.id)).toBe(false);
-  });
-
-  it("owns a seeded random stream that can be transactionally restored", () => {
-    const definition = createDefaultMatchDefinition();
-    definition.seed = 1234;
-    const world = new WorldState(definition);
-    const checkpoint = world.rng.createCheckpoint();
-    const expected = [world.rng.nextUint32(), world.rng.nextUint32()];
-
-    world.rng.nextUint32();
-    world.rng.restoreCheckpoint(checkpoint);
-
-    expect([world.rng.nextUint32(), world.rng.nextUint32()]).toEqual(expected);
   });
 
   it("rejects unknown ownership before mutating an entity store", () => {

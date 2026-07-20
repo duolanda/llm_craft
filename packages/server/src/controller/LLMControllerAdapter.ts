@@ -9,35 +9,30 @@ import {
   type AgentRuntimeCallbacks,
   type AgentRuntimeResult,
 } from "../agent/AgentRuntime";
-import type { GameAgentBridge } from "../agent/GameAgentBridge";
-import type { Controller, ControllerDescriptor, ControllerKind } from "./Controller";
+import type { GameplayController } from "./GameplayController";
+import type { DecisionController, DecisionControllerDescriptor } from "./DecisionController";
 
-/**
- * Compatibility boundary for the current provider-backed AgentRuntime.
- * Provider/session separation happens behind this adapter in the next P3A
- * slice instead of leaking back into GameOrchestrator.
- */
-export class LLMControllerAdapter implements Controller {
+/** Connects the AgentRuntime harness to the tick-scheduled decision interface. */
+export class LLMControllerAdapter implements DecisionController {
   private readonly runtime: AgentRuntime;
-  private readonly descriptor: ControllerDescriptor;
+  private readonly descriptor: DecisionControllerDescriptor;
 
   constructor(
     playerId: PlayerId,
     private readonly session: AgentSession,
-    bridge: GameAgentBridge,
-    kind: ControllerKind = "llm",
+    gameplayController: GameplayController,
   ) {
-    this.runtime = new AgentRuntime(session, bridge);
+    this.runtime = new AgentRuntime(session, gameplayController);
     this.descriptor = {
-      controllerId: `${kind}:${playerId}`,
-      kind,
+      controllerId: `llm:${playerId}`,
+      kind: "llm",
       playerId,
       model: session.getModel(),
       baseURL: session.getBaseURL(),
     };
   }
 
-  getDescriptor(): ControllerDescriptor {
+  getDescriptor(): DecisionControllerDescriptor {
     return { ...this.descriptor };
   }
 
@@ -55,14 +50,6 @@ export class LLMControllerAdapter implements Controller {
     signal?: AbortSignal,
   ): Promise<AgentRuntimeResult> {
     return this.runtime.run(input, callbacks, signal);
-  }
-
-  advancePlans() {
-    return this.runtime.advancePlans();
-  }
-
-  getActivePlans() {
-    return this.runtime.getActivePlans();
   }
 
   runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {

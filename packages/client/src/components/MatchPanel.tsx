@@ -17,7 +17,7 @@ const KIND_LABELS: Record<MatchRegistrySummary["kind"], string> = {
 };
 
 const STATUS_LABELS: Record<MatchRegistrySummary["status"], string> = {
-  preparing: "准备中",
+  warming_up: "模型预热",
   waiting_for_players: "等待玩家",
   running: "运行中",
   stopped: "已停止",

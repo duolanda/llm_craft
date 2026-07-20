@@ -55,25 +55,6 @@ import {
 import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
 import { VictorySystem } from "./simulation/VictorySystem";
 import { CombatSystem } from "./simulation/CombatSystem";
-import type { DeterministicRngState } from "./DeterministicRng";
-import { allocateFairPathBudgets, resolveCommandBudgetPolicy, type CommandBudgetPolicy } from "./CommandBudget";
-
-interface GameSimulationCheckpoint {
-  tick: number;
-  revision: number;
-  units: ReturnType<UnitManager["createCheckpoint"]>;
-  buildings: ReturnType<BuildingManager["createCheckpoint"]>;
-  resourceRemaining: Array<[string, number]>;
-  playerCredits: Array<[PlayerId, number]>;
-  logs: GameLog[];
-  pendingSnapshotLogs: GameLog[];
-  commandQueue: Command[];
-  projectiles: ActiveProjectile[];
-  projectileCounter: number;
-  rng: DeterministicRngState;
-  winner: PlayerId | null;
-  isRunning: boolean;
-}
 
 export interface AgentReadState {
   tick: number;
@@ -92,13 +73,6 @@ export interface CommandExecutionOutcome {
   success: boolean;
 }
 
-export interface CommandBatchExecutionResult {
-  committed: boolean;
-  outcomes: CommandExecutionOutcome[];
-  failureReason?: "command_failed" | "command_budget_exceeded" | "path_budget_exceeded";
-  failedCommandId?: string;
-}
-
 export interface GameCommandBatch {
   actorId: string;
   commands: readonly Command[];
@@ -106,14 +80,12 @@ export interface GameCommandBatch {
 
 export interface GameTickResult {
   commandOutcomes: CommandExecutionOutcome[];
-  commandBatchResults: CommandBatchExecutionResult[];
   simulation: SimulationStepResult;
 }
 
 const TICK_DELTA_CHUNK_SIZE = 100;
 export class Game {
   private readonly definition: MatchDefinition;
-  private readonly commandBudgetPolicy: CommandBudgetPolicy;
   private readonly world: WorldState;
   private readonly simulationCore = new SimulationCore();
   private readonly harvestOrderSystem = new HarvestOrderSystem();
@@ -133,7 +105,6 @@ export class Game {
   constructor(definition: MatchDefinition = createDefaultMatchDefinition()) {
     validateMatchDefinition(definition);
     this.definition = structuredClone(definition);
-    this.commandBudgetPolicy = resolveCommandBudgetPolicy(this.definition);
     this.world = new WorldState(this.definition);
     this.addLog(LOG_TYPES.GAME_INIT, "Game initialized successfully");
     this.saveSnapshot();
@@ -154,10 +125,6 @@ export class Game {
     return structuredClone(this.definition);
   }
 
-  getDeterministicRngState(): DeterministicRngState {
-    return this.world.rng.createCheckpoint();
-  }
-
   getAgentReadState(): AgentReadState {
     return {
       tick: this.world.tick,
@@ -173,42 +140,30 @@ export class Game {
   }
 
   processCommands(): CommandExecutionOutcome[] {
-    return this.processQueuedCommands(this.commandBudgetPolicy.maxPathCommandsPerTick).outcomes;
+    return this.processQueuedCommands();
   }
 
-  private processQueuedCommands(pathBudget: number): {
-    outcomes: CommandExecutionOutcome[];
-    remainingPathBudget: number;
-  } {
+  private processQueuedCommands(): CommandExecutionOutcome[] {
     if (this.activeCommandOutcomes) {
       throw new Error("Command processing is already active.");
     }
     const outcomes: CommandExecutionOutcome[] = [];
     this.activeCommandOutcomes = outcomes;
     try {
-      return {
-        outcomes,
-        remainingPathBudget: this.processPendingCommands(pathBudget, true),
-      };
+      this.processPendingCommands();
+      return outcomes;
     } finally {
       this.activeCommandOutcomes = null;
     }
   }
 
-  private processPendingCommands(pathBudget: number, deferExcessPathCommands: boolean): number {
+  private processPendingCommands(): void {
     const pendingCommands = this.commandQueue;
     this.commandQueue = [];
     if (pendingCommands.length > 0) {
       this.world.markChanged();
     }
-    let remainingPathCommands = pathBudget;
     for (const command of pendingCommands) {
-      const requiresPath = command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop";
-      if (requiresPath && remainingPathCommands <= 0) {
-        if (deferExcessPathCommands) this.commandQueue.push(command);
-        continue;
-      }
-      if (requiresPath) remainingPathCommands -= 1;
       const outcomeCountBefore = this.activeCommandOutcomes?.length ?? 0;
       try {
         this.processCommand(command);
@@ -239,98 +194,11 @@ export class Game {
         });
       }
     }
-    return remainingPathCommands;
   }
 
-  private executeCommandBatch(
-    commands: readonly Command[],
-    pathBudget: number,
-    commandBudget: number,
-  ): {
-    result: CommandBatchExecutionResult;
-    consumedCommands: number;
-    consumedPathCommands: number;
-  } {
-    const pathCommandCount = commands.filter((command) => (
-      command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop"
-    )).length;
-    if (commands.length > commandBudget) {
-      return {
-        result: this.recordRolledBackBatch(commands, "command_budget_exceeded"),
-        consumedCommands: 0,
-        consumedPathCommands: 0,
-      };
-    }
-    if (pathCommandCount > pathBudget) {
-      return {
-        result: this.recordRolledBackBatch(commands, "path_budget_exceeded"),
-        consumedCommands: 0,
-        consumedPathCommands: 0,
-      };
-    }
-
-    const checkpoint = this.createSimulationCheckpoint();
+  private executeCommandBatch(commands: readonly Command[]): CommandExecutionOutcome[] {
     for (const command of commands) this.queueCommand(command);
-    const processed = this.processQueuedCommands(pathBudget);
-    const failed = processed.outcomes.find((outcome) => !outcome.success);
-    if (!failed) {
-      return {
-        result: { committed: true, outcomes: processed.outcomes },
-        consumedCommands: commands.length,
-        consumedPathCommands: pathCommandCount,
-      };
-    }
-
-    this.restoreSimulationCheckpoint(checkpoint);
-    return {
-      result: this.recordRolledBackBatch(commands, "command_failed", failed),
-      consumedCommands: commands.length,
-      consumedPathCommands: pathCommandCount,
-    };
-  }
-
-  private recordRolledBackBatch(
-    commands: readonly Command[],
-    failureReason: CommandBatchExecutionResult["failureReason"],
-    failedOutcome?: CommandExecutionOutcome,
-  ): CommandBatchExecutionResult {
-    const outcomes: CommandExecutionOutcome[] = [];
-    if (this.activeCommandOutcomes) {
-      throw new Error("Cannot record a rolled-back batch while command processing is active.");
-    }
-    this.activeCommandOutcomes = outcomes;
-    try {
-      for (const command of commands) {
-        this.addLog(LOG_TYPES.COMMAND_RESULT, `Command batch rolled back for ${command.type}`, {
-          command,
-          result_code: RESULT_CODES.ERR_INVALID_TARGET,
-          type: RESULT_TYPES.COMMAND_INVALID,
-          result_data: {
-            hint: failureReason === "path_budget_exceeded"
-              ? "The complete command envelope exceeded this actor's fair path-command budget for the tick and was rolled back."
-              : failureReason === "command_budget_exceeded"
-                ? "The complete command envelope exceeded this actor's remaining command budget for the tick and was rolled back."
-                : "At least one command failed, so the complete command envelope was rolled back.",
-            reason: failureReason,
-            failedCommandId: failedOutcome?.command.id,
-            failedResultCode: failedOutcome?.resultCode,
-            failedResultType: failedOutcome?.resultType,
-          },
-        }, {
-          owner: command.playerId,
-          feedbackTarget: command.playerId,
-          level: LOG_LEVELS.WARNING,
-        });
-      }
-    } finally {
-      this.activeCommandOutcomes = null;
-    }
-    return {
-      committed: false,
-      outcomes,
-      failureReason,
-      ...(failedOutcome ? { failedCommandId: failedOutcome.command.id } : {}),
-    };
+    return this.processQueuedCommands();
   }
 
   private processCommand(command: Command): void {
@@ -1196,44 +1064,6 @@ export class Game {
     return true;
   }
 
-  createSimulationCheckpoint(): GameSimulationCheckpoint {
-    return {
-      tick: this.world.tick,
-      revision: this.world.revision,
-      units: this.world.units.createCheckpoint(),
-      buildings: this.world.buildings.createCheckpoint(),
-      resourceRemaining: Array.from(this.world.resourceRemaining.entries()),
-      playerCredits: this.world.getPlayerCredits(),
-      logs: [...this.logs],
-      pendingSnapshotLogs: [...this.pendingSnapshotLogs],
-      commandQueue: structuredClone(this.commandQueue),
-      projectiles: structuredClone(this.world.projectiles),
-      projectileCounter: this.world.projectileCounter,
-      rng: this.world.rng.createCheckpoint(),
-      winner: this.world.winner,
-      isRunning: this.isRunning,
-    };
-  }
-
-  restoreSimulationCheckpoint(checkpointValue: unknown): void {
-    const checkpoint = checkpointValue as GameSimulationCheckpoint;
-    this.world.tick = checkpoint.tick;
-    this.world.revision = checkpoint.revision;
-    this.world.units.restoreCheckpoint(checkpoint.units);
-    this.world.buildings.restoreCheckpoint(checkpoint.buildings);
-    this.world.resourceRemaining = new Map(checkpoint.resourceRemaining);
-    this.world.rebuildMapProjection();
-    this.world.restorePlayerCredits(checkpoint.playerCredits);
-    this.logs = [...checkpoint.logs];
-    this.pendingSnapshotLogs = [...checkpoint.pendingSnapshotLogs];
-    this.commandQueue = structuredClone(checkpoint.commandQueue);
-    this.world.projectiles = structuredClone(checkpoint.projectiles);
-    this.world.projectileCounter = checkpoint.projectileCounter;
-    this.world.rng.restoreCheckpoint(checkpoint.rng);
-    this.world.winner = checkpoint.winner;
-    this.isRunning = checkpoint.isRunning;
-  }
-
   beginSimulationTick(): void {
     this.world.tick++;
     this.world.markChanged();
@@ -1274,7 +1104,7 @@ export class Game {
           });
           break;
         case "building_cancelled":
-          // Legacy Game never exposed this outcome; the versioned event journal will.
+          // Legacy Game never exposed this outcome; an event consumer can handle it directly.
           break;
         case "unit_spawned":
           this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${event.unitType} spawned for ${event.playerId}`, {
@@ -1316,64 +1146,28 @@ export class Game {
     }
   }
 
-  /** Compatibility transaction boundary used by MatchRuntime and legacy tickUpdate. */
+  /** Applies every submitted command independently, then advances simulation once. */
   advanceSimulationTick(commandBatches: readonly GameCommandBatch[] = []): GameTickResult | null {
     if (!this.isRunning) return null;
 
-    const checkpoint = this.createSimulationCheckpoint();
-    try {
-      this.beginSimulationTick();
-      const queued = this.processQueuedCommands(this.commandBudgetPolicy.maxPathCommandsPerTick);
-      const deferredLegacyCommands = structuredClone(this.commandQueue);
-      this.commandQueue = [];
-      const pathDemandByActor = new Map<string, number>();
-      for (const batch of commandBatches) {
-        const pathDemand = batch.commands.filter((command) => (
-          command.type === "move" || command.type === "attack_move" || command.type === "harvest_loop"
-        )).length;
-        pathDemandByActor.set(batch.actorId, (pathDemandByActor.get(batch.actorId) ?? 0) + pathDemand);
-      }
-      const remainingPathBudgetByActor = allocateFairPathBudgets(
-        pathDemandByActor,
-        queued.remainingPathBudget,
-        this.world.tick,
-      );
-      const remainingCommandBudgetByActor = new Map<string, number>();
-      const commandBatchResults: CommandBatchExecutionResult[] = [];
-      for (const batch of commandBatches) {
-        const commandBudget = remainingCommandBudgetByActor.get(batch.actorId)
-          ?? this.commandBudgetPolicy.maxCommandsPerActorPerTick;
-        const pathBudget = remainingPathBudgetByActor.get(batch.actorId) ?? 0;
-        const executed = this.executeCommandBatch(batch.commands, pathBudget, commandBudget);
-        commandBatchResults.push(executed.result);
-        remainingCommandBudgetByActor.set(batch.actorId, commandBudget - executed.consumedCommands);
-        remainingPathBudgetByActor.set(batch.actorId, pathBudget - executed.consumedPathCommands);
-      }
-      this.commandQueue.push(...deferredLegacyCommands);
-      const simulation = this.simulationCore.step(this.world);
-      this.applySimulationEvents(simulation.events);
-      return {
-        commandOutcomes: [
-          ...queued.outcomes,
-          ...commandBatchResults.flatMap((batch) => batch.outcomes),
-        ],
-        commandBatchResults,
-        simulation,
-      };
-    } catch (error) {
-      this.restoreSimulationCheckpoint(checkpoint);
-      throw error;
-    }
+    this.beginSimulationTick();
+    const queued = this.processQueuedCommands();
+    const submittedCommandOutcomes = commandBatches.flatMap(
+      (batch) => this.executeCommandBatch(batch.commands),
+    );
+    const simulation = this.simulationCore.step(this.world);
+    this.applySimulationEvents(simulation.events);
+    return {
+      commandOutcomes: [
+        ...queued,
+        ...submittedCommandOutcomes,
+      ],
+      simulation,
+    };
   }
 
   captureSimulationSnapshot(): TickDeltaRecord | null {
     return this.saveSnapshot();
-  }
-
-  /** MatchRuntime persists deltas in MatchJournal and releases this compatibility cache every tick. */
-  discardRecordedTickDeltas(): void {
-    this.tickDeltaBuffer = [];
-    this.tickDeltaChunks = [];
   }
 
   start(): void {
@@ -1384,6 +1178,7 @@ export class Game {
   }
 
   stop(): void {
+    if (!this.isRunning) return;
     this.isRunning = false;
     this.addLog(LOG_TYPES.GAME_STOPPED, "Game stopped");
   }

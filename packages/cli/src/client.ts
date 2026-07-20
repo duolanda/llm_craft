@@ -100,29 +100,6 @@ export class ControlClient {
     ));
   }
 
-  async inspectStorageRetention(): Promise<unknown> {
-    return requestJson(fetch(`${this.baseUrl}/api/control/storage/retention`));
-  }
-
-  async cleanupStorage(apply = false): Promise<unknown> {
-    return requestJson(fetch(`${this.baseUrl}/api/control/storage/cleanup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apply }),
-    }));
-  }
-
-  async inspectJournals(): Promise<unknown> {
-    return requestJson(fetch(`${this.baseUrl}/api/control/storage/journals`));
-  }
-
-  async recoverJournals(apply = false): Promise<unknown> {
-    return requestJson(fetch(`${this.baseUrl}/api/control/storage/recover-journals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ apply }),
-    }));
-  }
 }
 
 async function requestJson(request: Promise<Response>): Promise<unknown> {

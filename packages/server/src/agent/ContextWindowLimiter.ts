@@ -1,14 +1,14 @@
-import type { AgentMemoryPolicyRecord } from "@llmcraft/shared";
+import type { ContextWindowLimitRecord } from "@llmcraft/shared";
 
-export interface AgentMemoryPolicyOptions {
+export interface ContextWindowLimiterOptions {
   maxMessages?: number;
   maxBytes?: number;
   maxMessageBytes?: number;
 }
 
-export interface AgentMemoryPolicyResult {
+export interface ContextWindowLimiterResult {
   history: unknown[];
-  record: AgentMemoryPolicyRecord;
+  record: ContextWindowLimitRecord;
 }
 
 const DEFAULT_MAX_MESSAGES = 80;
@@ -43,28 +43,34 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return value.slice(0, end);
 }
 
-/** Deterministic, model-free history compaction at AgentSession turn boundaries. */
-export class AgentMemoryPolicy {
+/**
+ * Temporary hard size limiter for provider messages.
+ *
+ * This is not durable agent memory and not a real semantic compactor. Replace
+ * it with a compactor that produces an explicit, model-readable context summary
+ * once the required summary contract is designed.
+ */
+export class ContextWindowLimiter {
   private readonly maxMessages: number;
   private readonly maxBytes: number;
   private readonly maxMessageBytes: number;
 
-  constructor(options: AgentMemoryPolicyOptions = {}) {
+  constructor(options: ContextWindowLimiterOptions = {}) {
     this.maxMessages = options.maxMessages ?? DEFAULT_MAX_MESSAGES;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
     this.maxMessageBytes = options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     if (!Number.isSafeInteger(this.maxMessages) || this.maxMessages < 2) {
-      throw new Error("Agent memory maxMessages must be an integer of at least 2.");
+      throw new Error("Context window maxMessages must be an integer of at least 2.");
     }
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes < 1024) {
-      throw new Error("Agent memory maxBytes must be an integer of at least 1024.");
+      throw new Error("Context window maxBytes must be an integer of at least 1024.");
     }
     if (!Number.isSafeInteger(this.maxMessageBytes) || this.maxMessageBytes < 256) {
-      throw new Error("Agent memory maxMessageBytes must be an integer of at least 256.");
+      throw new Error("Context window maxMessageBytes must be an integer of at least 256.");
     }
   }
 
-  compact(history: readonly unknown[]): AgentMemoryPolicyResult {
+  limit(history: readonly unknown[]): ContextWindowLimiterResult {
     const bytesBefore = historyBytes(history);
     let truncatedMessages = 0;
     const normalized = history.map((message) => {
@@ -76,7 +82,7 @@ export class AgentMemoryPolicy {
     const retained: unknown[][] = [];
     let retainedMessages = 0;
     let retainedBytes = 0;
-    let replacementSummary = false;
+    let replacementNotice = false;
 
     for (let index = groups.length - 1; index >= 0; index -= 1) {
       const group = groups[index]!;
@@ -85,10 +91,10 @@ export class AgentMemoryPolicy {
         && retainedBytes + groupBytes <= this.maxBytes;
       if (!fits && retained.length > 0) break;
       if (!fits) {
-        retained.push([this.createSummaryMessage(history.length, bytesBefore, "latest_group_exceeded_budget")]);
+        retained.push([this.createOmissionNotice(history.length, bytesBefore, "latest_group_exceeded_limit")]);
         retainedMessages = 1;
         retainedBytes = historyBytes(retained[0]!);
-        replacementSummary = true;
+        replacementNotice = true;
         break;
       }
       retained.unshift(group);
@@ -96,49 +102,48 @@ export class AgentMemoryPolicy {
       retainedBytes += groupBytes;
     }
 
-    let compacted = retained.flat();
-    const droppedMessagesBeforeSummary = Math.max(0, history.length - compacted.length);
-    let hasCompactionSummary = replacementSummary;
-    if (droppedMessagesBeforeSummary > 0 && !replacementSummary) {
-      compacted.unshift(this.createSummaryMessage(
-        droppedMessagesBeforeSummary,
-        Math.max(0, bytesBefore - historyBytes(compacted)),
-        "older_history_compacted",
+    let limitedHistory = retained.flat();
+    const droppedMessagesBeforeNotice = Math.max(0, history.length - limitedHistory.length);
+    let hasOmissionNotice = replacementNotice;
+    if (droppedMessagesBeforeNotice > 0 && !replacementNotice) {
+      limitedHistory.unshift(this.createOmissionNotice(
+        droppedMessagesBeforeNotice,
+        Math.max(0, bytesBefore - historyBytes(limitedHistory)),
+        "older_history_omitted",
       ));
-      hasCompactionSummary = true;
+      hasOmissionNotice = true;
     }
 
     while (
-      compacted.length > 1
-      && (compacted.length > this.maxMessages || historyBytes(compacted) > this.maxBytes)
+      limitedHistory.length > 1
+      && (limitedHistory.length > this.maxMessages || historyBytes(limitedHistory) > this.maxBytes)
     ) {
-      const nextUserIndex = compacted.findIndex((message, index) => index > 1 && getRole(message) === "user");
+      const nextUserIndex = limitedHistory.findIndex((message, index) => index > 1 && getRole(message) === "user");
       if (nextUserIndex <= 0) break;
-      compacted.splice(1, nextUserIndex - 1);
+      limitedHistory.splice(1, nextUserIndex - 1);
     }
 
     if (
-      hasCompactionSummary
-      && (compacted.length > this.maxMessages || historyBytes(compacted) > this.maxBytes)
+      hasOmissionNotice
+      && (limitedHistory.length > this.maxMessages || historyBytes(limitedHistory) > this.maxBytes)
     ) {
-      compacted.shift();
-      hasCompactionSummary = false;
+      limitedHistory.shift();
+      hasOmissionNotice = false;
     }
 
-    const bytesAfter = historyBytes(compacted);
+    const bytesAfter = historyBytes(limitedHistory);
     return {
-      history: compacted,
+      history: limitedHistory,
       record: {
-        policyVersion: 1,
         maxMessages: this.maxMessages,
         maxBytes: this.maxBytes,
         messagesBefore: history.length,
-        messagesAfter: compacted.length,
+        messagesAfter: limitedHistory.length,
         bytesBefore,
         bytesAfter,
         droppedMessages: Math.max(
           0,
-          history.length - (compacted.length - (hasCompactionSummary ? 1 : 0)),
+          history.length - (limitedHistory.length - (hasOmissionNotice ? 1 : 0)),
         ),
         truncatedMessages,
       },
@@ -151,13 +156,18 @@ export class AgentMemoryPolicy {
     }
     if (!isRecord(message)) {
       return {
-        message: { role: "user", content: "[memory-policy: oversized non-object message omitted]" },
+        message: { role: "user", content: "[context-window-limiter: oversized non-object message omitted]" },
         truncated: true,
       };
     }
 
     const role = getRole(message);
     const originalBytes = messageBytes(message);
+    if (role === "assistant" && Array.isArray(message.tool_calls)) {
+      // Tool results must keep their matching assistant tool-call declaration.
+      // The enclosing user segment will be omitted as a unit if it cannot fit.
+      return { message: structuredClone(message), truncated: false };
+    }
     if (role === "tool") {
       let observedTick: number | null = null;
       if (typeof message.content === "string") {
@@ -173,7 +183,7 @@ export class AgentMemoryPolicy {
           ...message,
           content: JSON.stringify({
             expired: true,
-            reason: "memory_policy_oversize",
+            reason: "context_window_oversize",
             originalBytes,
             observedTick,
             message: "This old oversized tool result was omitted. Read current state again before acting.",
@@ -184,7 +194,7 @@ export class AgentMemoryPolicy {
     }
 
     if (typeof message.content === "string") {
-      const suffix = `\n[memory-policy: truncated oversized ${role} message; originalBytes=${originalBytes}]`;
+      const suffix = `\n[context-window-limiter: truncated oversized ${role} message; originalBytes=${originalBytes}]`;
       return {
         message: {
           ...message,
@@ -197,7 +207,7 @@ export class AgentMemoryPolicy {
     return {
       message: {
         role,
-        content: `[memory-policy: oversized ${role} message omitted; originalBytes=${originalBytes}]`,
+        content: `[context-window-limiter: oversized ${role} message omitted; originalBytes=${originalBytes}]`,
       },
       truncated: true,
     };
@@ -215,15 +225,14 @@ export class AgentMemoryPolicy {
     return groups;
   }
 
-  private createSummaryMessage(droppedMessages: number, droppedBytes: number, reason: string): unknown {
+  private createOmissionNotice(droppedMessages: number, droppedBytes: number, reason: string): unknown {
     return {
       role: "user",
       content: JSON.stringify({
-        memorySummaryVersion: 1,
         reason,
         droppedMessages,
         droppedBytes,
-        instruction: "Earlier conversation details were compacted. Re-read current game state before relying on old observations.",
+        instruction: "Earlier messages were omitted to fit the context window. Re-read current game state before relying on old observations.",
       }),
     };
   }

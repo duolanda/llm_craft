@@ -9,6 +9,13 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
   if (!me || !enemy) {
     throw new Error(`Cannot generate system prompt for unknown player ${playerId}.`);
   }
+  const myStart = definition.map.playerStarts.find((start) => start.playerId === me.id);
+  const enemyStart = definition.map.playerStarts.find((start) => start.playerId === enemy.id);
+  const myHQ = myStart?.buildings.find((building) => building.type === "hq")?.position;
+  const enemyHQ = enemyStart?.buildings.find((building) => building.type === "hq")?.position;
+  if (!myHQ || !enemyHQ) {
+    throw new Error("Map definition must contain one starting HQ for each player.");
+  }
   const resourcePoints = definition.map.resources.map(formatPoint).join("、");
   const northLane = Math.round(definition.map.height * 0.21);
   const middleLane = Math.round(definition.map.height * 0.5);
@@ -37,7 +44,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - worker 回到己方 HQ 周围 1 格内会自动交付 credits
 - soldier 的 attackRange 为 1，rifleman 为 6，rocket_soldier 为 6，light_tank 为 5，按 8 邻域计算射程；武器有 reload 和 projectile 飞行时间，ok=true 表示开火/下令成功，不代表伤害已立即结算
 - 当前采用 ${definition.map.width}x${definition.map.height} 三战线大战场：北线 y≈${northLane}、中线 y≈${middleLane}、南线 y≈${southLane}；rifleman 擅长清 infantry 和保护火箭兵，rocket_soldier 主要反 vehicle 且装填慢，light_tank 是高 HP 前排主力
-- 我方 HQ 在 ${formatPoint(me.hq)}，敌方 HQ 在 ${formatPoint(enemy.hq)}；所有开局与推进建议都按当前阵营方向生成
+- 我方 HQ 在 ${formatPoint(myHQ)}，敌方 HQ 在 ${formatPoint(enemyHQ)}；所有开局与推进建议都按当前阵营方向生成
 - 资源点固定在 ${resourcePoints}，每个矿藏都有有限储量；家门口矿用于开局，侧翼和中央矿用于扩张
 
 ## 工具使用规则
@@ -62,8 +69,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - move_unit：让单位去某个目标点；主要用于 worker 或精确换位；combat unit 如果已有敌方目标 ID，通常应使用 attack 而不是 move_unit
 - attack：默认战斗命令。让一个可攻击单位攻击一个敌方目标 ID；即使目标很远，系统也会让单位移动到射程内并持续攻击。攻击 HQ、barracks、war_factory、refinery 或明确敌军时优先用 attack
 - attack_move_unit：无目标推进命令。战斗单位向目标点推进，并按角色自动攻击到达前路上遇到的目标：rifleman 优先清火箭/步兵，rocket_soldier 优先打 light_tank，light_tank 优先打敌方装甲/反装甲支援，其后才拆建筑；到达目标点后该命令结束，不会持续警戒清场；只在没有明确 targetId、需要穿越危险区域或试探接敌时使用
-- attack_move_group：一次控制 1-100 个战斗单位，以 line / column / wedge / dispersed / battle_line 编队向不同落点推进；battle_line 会把 light_tank 放前排、rifleman/soldier 居中掩护、rocket_soldier 放后排；大军团推进时优先使用，避免逐单位工具调用
-- attack_move_group 返回的 scheduled 表示已接受但会按寻路预算在后续 tick 下发；这些单位短暂显示 idle 是正常的。先读 get_my_units.pendingGroupMoves，禁止马上用逐个 attack_move_unit / move_unit 覆盖它们
+- attack_move_group：一次控制一组战斗单位，以 line / column / wedge / dispersed / battle_line 编队向不同落点推进；battle_line 会把 light_tank 放前排、rifleman/soldier 居中掩护、rocket_soldier 放后排；大军团推进时优先使用，避免逐单位工具调用
 - 多个单位同 tick 去同一个格子时，系统会把其他单位已预约的 pathTarget 视为占用并自动选择附近可达格；但你仍应尽量用 attack 直接点目标 ID，或用稍微分散的 attack_move 目标减少拥堵
 - spawn_unit：必须由合法建筑发出
 - build_structure：允许建造 barracks / war_factory / refinery；war_factory 需要已完成 barracks；worker 必须先在完整 footprint 相邻 1 格内；建筑拥有真实多格占地，完整 footprint 都必须为空并与 HQ 留出一圈道路；施工期间建筑占地但不能生产，worker 会被占用
@@ -72,7 +78,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 
 - 如果一次 orchestrate_plan 返回 invalid_plan，本次 run 不要继续反复试错，立即回退到即时命令
 - 注册计划后，计划会在后续 tick 自动推进，直到完成、失败或被新命令打断
-- get_active_plans 会解释 active plan 当前 step、waitingReason 和 lastAttempt；waiting for budget / waiting for when 通常表示计划正常等待，不要马上重复注册同类计划
+- get_active_plans 会解释 active plan 当前 step、waitingReason 和 lastAttempt；waiting for credits / waiting for when 通常表示计划正常等待，不要马上重复注册同类计划
 - plan 里的 spawn_unit / build_structure 会在当前 credits 不足时自动等待，不会发出必然失败的生产/建造命令；仍应优先读取 productionQueues 避免重复排同一建筑
 - plan 里的 spawn_unit 只会在对应生产建筑队列为空时再发下一单；不要另注册一个重复生产 plan 或用即时 spawn_unit 把同一队列塞满
 - 多个 active plan 同一 tick 推进时共享预算；较早的生产/建造 step 会预留 credits，后面的付费 step 余额不够就等待，不要依赖并行 plan 同时花同一笔钱
@@ -81,7 +87,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 推荐的反制计划写法：如果 get_map_state 或 get_my_state.techStatus.enemy 显示敌方 light_tank / war_factory，注册或即时执行：
   {"unitIds":["worker_1"],"loop":-1,"replaceExisting":false,"steps":[{"call":"spawn_unit","args":{"buildingId":"$barracks","unitType":"rocket_soldier"},"scope":"global","when":{"condition":"enemy_unit_count_at_least","unitType":"light_tank","count":1},"until":{"condition":"unit_count_at_least","unitType":"rocket_soldier","count":2},"retry":true}]}
 - 推荐的 HQ 强攻计划写法：第一波约 6 个战斗单位成形后，不等待 war_factory；先读取 get_map_state 找到 enemy HQ 的 targetId，然后注册：
-  {"unitIds":["rifleman_1","rifleman_2","rifleman_3","rifleman_4","rifleman_5","rifleman_6"],"loop":1,"steps":[{"call":"attack_move_unit","args":{"unitId":"$unitId","x":${enemy.hq.x},"y":${enemy.hq.y}},"until":{"condition":"hq_in_range"},"maxTicks":180},{"call":"attack","args":{"unitId":"$unitId","targetId":"enemy_hq_id"},"until":{"condition":"target_destroyed","targetId":"enemy_hq_id"},"retry":true}]}
+  {"unitIds":["rifleman_1","rifleman_2","rifleman_3","rifleman_4","rifleman_5","rifleman_6"],"loop":1,"steps":[{"call":"attack_move_unit","args":{"unitId":"$unitId","x":${enemyHQ.x},"y":${enemyHQ.y}},"until":{"condition":"hq_in_range"},"maxTicks":180},{"call":"attack","args":{"unitId":"$unitId","targetId":"enemy_hq_id"},"until":{"condition":"target_destroyed","targetId":"enemy_hq_id"},"retry":true}]}
 - HQ 摧毁后立即重新读取 get_map_state，对仍存在的 barracks / war_factory / refinery 使用 attack；胜利条件是敌方建筑全部清空
 
 ## 经济与生产纪律

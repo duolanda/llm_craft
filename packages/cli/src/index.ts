@@ -90,11 +90,7 @@ function printHelp(): void {
     "  matches list       List registered live/control/benchmark matches",
     "  matches observe    Select the match shown by Web UI (--game <matchId>)",
     "  matches stop       Quiesce, stop, and save one match without affecting others",
-    "  record save        Save a Trace v3 record (--game <matchId>)",
-    "  storage inspect    Preview retention decisions without deleting files",
-    "  storage cleanup    Preview cleanup; add --apply to delete reported artifacts",
-    "  storage journals   Inspect active, crashed, and legacy journal owners",
-    "  storage recover    Preview orphan recovery; add --apply to quarantine them",
+    "  record save        Save a Match Record (--game <matchId>)",
     "  state              Read full game state (map + player)",
     "  map                Show ASCII battlefield map",
     "  me                 Show my economy, HQ, and production",
@@ -161,8 +157,6 @@ function printHelp(): void {
     "  llmcraft matches list",
     "  llmcraft matches observe --game match_xxx",
     "  llmcraft record save --game match_xxx",
-    "  llmcraft storage cleanup",
-    "  llmcraft storage cleanup --apply",
     "  llmcraft state --compact",
     "  llmcraft units --type worker --idle",
     "  llmcraft enemies --type hq",
@@ -407,31 +401,6 @@ async function main(): Promise<void> {
     try {
       printJson(await new ControlClient(globalBaseUrl).saveMatchRecord(matchId));
       return;
-    } catch (error) {
-      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  if (parsed.command === "storage") {
-    const client = new ControlClient(globalBaseUrl);
-    try {
-      if (parsed.subcommand === "inspect") {
-        printJson(await client.inspectStorageRetention());
-        return;
-      }
-      if (parsed.subcommand === "cleanup") {
-        printJson(await client.cleanupStorage(parsed.flags.has("apply")));
-        return;
-      }
-      if (parsed.subcommand === "journals") {
-        printJson(await client.inspectJournals());
-        return;
-      }
-      if (parsed.subcommand === "recover") {
-        printJson(await client.recoverJournals(parsed.flags.has("apply")));
-        return;
-      }
-      exit(ExitCode.ArgError, `Unknown storage subcommand: ${parsed.subcommand || "(none)"}`);
     } catch (error) {
       exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
     }

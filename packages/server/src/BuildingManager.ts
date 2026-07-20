@@ -19,20 +19,6 @@ export class BuildingManager {
   private buildings: Map<string, Building> = new Map();
   private idCounter = 0;
 
-  createCheckpoint(): { buildings: Building[]; idCounter: number } {
-    return {
-      buildings: structuredClone(Array.from(this.buildings.values())),
-      idCounter: this.idCounter,
-    };
-  }
-
-  restoreCheckpoint(checkpoint: { buildings: Building[]; idCounter: number }): void {
-    this.buildings = new Map(
-      structuredClone(checkpoint.buildings).map((building) => [building.id, building]),
-    );
-    this.idCounter = checkpoint.idCounter;
-  }
-
   /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createBuilding(
     type: BuildingType,

@@ -274,7 +274,7 @@ select {
   background: var(--delta);
 }
 
-.tv-badge.trace {
+.tv-badge.record {
   color: #315c71;
   background: #dcecf4;
 }

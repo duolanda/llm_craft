@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
-import { GameAgentBridge } from "../agent/GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
+import { getAgentToolDefinitions } from "../agent/AgentTools";
 import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint } from "@llmcraft/shared";
 
-describe("GameAgentBridge", () => {
+describe("GameplayController", () => {
   const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
 
   function moveWorkerAdjacentToBuildSite(
@@ -24,20 +25,28 @@ describe("GameAgentBridge", () => {
     }
   }
 
+  it("does not cap attack_move_group at 100 units in the tool schema", () => {
+    const tool = getAgentToolDefinitions().find((candidate) => candidate.name === "attack_move_group")!;
+    const unitIds = (tool.parameters.properties as Record<string, Record<string, unknown>>).unitIds;
+
+    expect(unitIds.minItems).toBe(1);
+    expect(unitIds).not.toHaveProperty("maxItems");
+  });
+
   it("queues action commands into the game immediately", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = bridge.moveUnit(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
+    const result = gameplayController.moveUnit(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
 
     expect(result.result).toMatchObject({ ok: true });
     expect(result.result).toMatchObject({
       tick: expect.any(Number),
       warning: expect.objectContaining({ type: "no_recent_read" }),
     });
-    expect(bridge.takeIssuedCommands()).toHaveLength(1);
+    expect(gameplayController.takeIssuedCommands()).toHaveLength(1);
 
     game.tickUpdate();
 
@@ -48,30 +57,30 @@ describe("GameAgentBridge", () => {
 
   it("returns immediate validation errors for stale unit ids before queueing actions", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
 
-    const result = bridge.moveUnit("missing_unit", DEFAULT_MAP_LAYOUT.resources[0]);
+    const result = gameplayController.moveUnit("missing_unit", DEFAULT_MAP_LAYOUT.resources[0]);
 
     expect(result.result).toMatchObject({
       tick: 0,
       ok: false,
       error: "invalid_unit",
     });
-    expect(bridge.takeIssuedCommands()).toHaveLength(0);
+    expect(gameplayController.takeIssuedCommands()).toHaveLength(0);
   });
 
   it("adds a stale-read warning to actions when the last read is old", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    bridge.getMyUnits();
+    gameplayController.getMyUnits();
     for (let i = 0; i < 11; i++) {
       game.tickUpdate();
     }
 
-    const result = bridge.moveUnit(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
+    const result = gameplayController.moveUnit(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
     game.stop();
 
     expect(result.result).toMatchObject({
@@ -89,10 +98,10 @@ describe("GameAgentBridge", () => {
 
   it("returns an immediate validation error for barracks positions adjacent to HQ", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_2");
+    const gameplayController = new GameplayController(game, "player_2");
     const worker = game.getState().players[1].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
-    const result = bridge.buildStructure(worker.id, "barracks", {
+    const result = gameplayController.buildStructure(worker.id, "barracks", {
       x: DEFAULT_MAP_LAYOUT.player2Hq.x,
       y: DEFAULT_MAP_LAYOUT.player2Hq.y - 1,
     });
@@ -102,15 +111,15 @@ describe("GameAgentBridge", () => {
       error: "invalid_build_position",
     });
     expect((result.result as { hint: string }).hint).toContain("building footprint");
-    expect(bridge.takeIssuedCommands()).toHaveLength(0);
+    expect(gameplayController.takeIssuedCommands()).toHaveLength(0);
   });
 
   it("rejects old non-call orchestrate_plan steps instead of registering a stuck plan", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_2");
+    const gameplayController = new GameplayController(game, "player_2");
     const worker = game.getState().players[1].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [{ type: "move_to_resource" }] as any,
     });
@@ -120,17 +129,17 @@ describe("GameAgentBridge", () => {
       error: "invalid_plan",
     });
     expect((result.result as { hint: string }).hint).toContain("{ call: existing_tool");
-    expect(bridge.getActivePlans()).toHaveLength(0);
+    expect(gameplayController.getActivePlans()).toHaveLength(0);
   });
 
   it("registers call-step plans that attack-move near a target and then attack it", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const soldier = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 10, "player_1");
     const enemyHQ = game.getState().players[1].buildings.find((building) => building.type === "hq")!;
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [soldier.id],
       steps: [
         {
@@ -149,7 +158,7 @@ describe("GameAgentBridge", () => {
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "attack_move",
         unitId: soldier.id,
@@ -159,7 +168,7 @@ describe("GameAgentBridge", () => {
 
     soldier.x = enemyHQ.x - 1;
     soldier.y = enemyHQ.y;
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "attack",
         unitId: soldier.id,
@@ -172,10 +181,10 @@ describe("GameAgentBridge", () => {
   it("runs mixed-scope opening plans for harvesting, building, and production", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker1.id, worker2.id],
       steps: [
         { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
@@ -199,13 +208,13 @@ describe("GameAgentBridge", () => {
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({ type: "harvest_loop", unitId: worker1.id }),
       expect.objectContaining({ type: "harvest_loop", unitId: worker2.id }),
     ]);
 
     moveWorkerAdjacentToBuildSite(game, worker1.id, BUILDING_TYPES.BARRACKS);
-    const buildCommands = bridge.advancePlans();
+    const buildCommands = gameplayController.handleCommittedTick();
     expect(buildCommands).toEqual([
       expect.objectContaining({
         type: "build",
@@ -220,7 +229,7 @@ describe("GameAgentBridge", () => {
     game.tickUpdate();
     advanceTicks(game, getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS) - 1);
 
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "spawn",
         unitType: "soldier",
@@ -232,12 +241,12 @@ describe("GameAgentBridge", () => {
   it("fails a mission after the engine rejects a deterministic command instead of retrying forever", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
     const invalidSite = { ...DEFAULT_MAP_LAYOUT.resources[0] };
     moveWorkerAdjacentToBuildSite(game, worker.id, BUILDING_TYPES.BARRACKS, invalidSite);
 
-    expect(bridge.orchestratePlan({
+    expect(gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [{
         call: "build_structure",
@@ -252,20 +261,20 @@ describe("GameAgentBridge", () => {
       }],
     }).result).toMatchObject({ ok: true });
 
-    const [command] = bridge.advancePlans();
+    const [command] = gameplayController.handleCommittedTick();
     expect(command).toMatchObject({ type: "build", provenance: { missionId: "plan_1" } });
     game.queueCommand(command);
     game.tickUpdate();
 
-    expect(bridge.advancePlans()).toEqual([]);
-    expect(bridge.getActivePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
+    expect(gameplayController.getActivePlans()).toEqual([]);
     game.stop();
   });
 
   it("advances a global unit step when its named worker reaches the requested position", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
     const footprint = getBuildingFootprint(BUILDING_TYPES.BARRACKS);
     const workerSite = {
@@ -273,7 +282,7 @@ describe("GameAgentBridge", () => {
       y: player1BuildSite.y,
     };
 
-    expect(bridge.orchestratePlan({
+    expect(gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [
         {
@@ -293,14 +302,14 @@ describe("GameAgentBridge", () => {
       ],
     }).result).toMatchObject({ ok: true });
 
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({ type: "move", unitId: worker.id, position: workerSite }),
     ]);
     const runtimeWorker = game.getUnitManager().getUnit(worker.id)!;
     runtimeWorker.x = workerSite.x;
     runtimeWorker.y = workerSite.y;
 
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "build",
         unitId: worker.id,
@@ -311,31 +320,27 @@ describe("GameAgentBridge", () => {
     game.stop();
   });
 
-  it("spreads path-heavy per-unit plans across fair per-actor tick shares", () => {
+  it("releases every ready per-unit plan command on the committed tick", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const workers = [
       ...game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER),
       game.getUnitManager().createUnit(UNIT_TYPES.WORKER, 8, 8, "player_1"),
       game.getUnitManager().createUnit(UNIT_TYPES.WORKER, 9, 8, "player_1"),
     ].slice(0, 4);
 
-    expect(bridge.orchestratePlan({
+    expect(gameplayController.orchestratePlan({
       unitIds: workers.map((worker) => worker.id),
       steps: [
         { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
       ],
     }).result).toMatchObject({ ok: true });
 
-    const firstTick = bridge.advancePlans();
-    expect(firstTick).toHaveLength(2);
+    const firstTick = gameplayController.handleCommittedTick();
+    expect(firstTick).toHaveLength(4);
     expect(firstTick.every((command) => command.type === "harvest_loop")).toBe(true);
-
-    game.tickUpdate();
-    const secondTick = bridge.advancePlans();
-    expect(secondTick).toHaveLength(2);
-    expect(new Set([...firstTick, ...secondTick].map((command) => command.unitId))).toEqual(
+    expect(new Set(firstTick.map((command) => command.unitId))).toEqual(
       new Set(workers.map((worker) => worker.id)),
     );
     game.stop();
@@ -344,13 +349,13 @@ describe("GameAgentBridge", () => {
   it("supports war factory and light tank production in orchestration plans", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
     const factorySite = { x: player1BuildSite.x + 8, y: player1BuildSite.y };
     moveWorkerAdjacentToBuildSite(game, worker1.id, BUILDING_TYPES.WAR_FACTORY, factorySite);
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker1.id, worker2.id],
       steps: [
         {
@@ -373,7 +378,7 @@ describe("GameAgentBridge", () => {
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    const buildCommands = bridge.advancePlans();
+    const buildCommands = gameplayController.handleCommittedTick();
     expect(buildCommands).toEqual([
       expect.objectContaining({
         type: "build",
@@ -396,7 +401,7 @@ describe("GameAgentBridge", () => {
     runtimeWorker2.carryingCredits = 20;
     game.tickUpdate();
 
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "spawn",
         unitType: "light_tank",
@@ -408,7 +413,7 @@ describe("GameAgentBridge", () => {
   it("waits instead of queueing unaffordable production from orchestration plans", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const [worker] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const hq = game.getState().players[0].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
 
@@ -424,7 +429,7 @@ describe("GameAgentBridge", () => {
     game.processCommands();
     game.getBuildingManager().createBuilding(BUILDING_TYPES.WAR_FACTORY, player1BuildSite.x, player1BuildSite.y, "player_1");
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [
         {
@@ -440,18 +445,18 @@ describe("GameAgentBridge", () => {
 
     expect(result.result).toMatchObject({ ok: true });
     expect(game.getState().players[0].resources.credits).toBe(200);
-    expect(bridge.advancePlans()).toEqual([]);
-    expect(bridge.getActivePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
+    expect(gameplayController.getActivePlans()).toEqual([
       expect.objectContaining({
         currentStep: expect.objectContaining({
           call: "spawn_unit",
           args: { buildingId: "$war_factory", unitType: "light_tank" },
         }),
-        waitingReason: "waiting for budget: need 240 credits, available 200",
+        waitingReason: "waiting for credits: need 240 credits, available 200",
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for budget: need 240 credits, available 200",
+          detail: "waiting for credits: need 240 credits, available 200",
         }),
       }),
     ]);
@@ -461,7 +466,7 @@ describe("GameAgentBridge", () => {
   it("does not flood a production queue while a retrying spawn plan waits for completed units", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const barracks = game.getBuildingManager().createBuilding(
       BUILDING_TYPES.BARRACKS,
       player1BuildSite.x,
@@ -470,7 +475,7 @@ describe("GameAgentBridge", () => {
     );
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
-    expect(bridge.orchestratePlan({
+    expect(gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [{
         call: "spawn_unit",
@@ -481,19 +486,19 @@ describe("GameAgentBridge", () => {
       }],
     }).result).toMatchObject({ ok: true });
 
-    const first = bridge.advancePlans();
+    const first = gameplayController.handleCommittedTick();
     expect(first).toHaveLength(1);
     game.queueCommand(first[0]);
     game.tickUpdate();
     expect(game.getBuildingManager().getBuilding(barracks.id)?.productionQueue).toHaveLength(1);
-    expect(bridge.advancePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
   });
 
-  it("reserves same-tick budget across active orchestration plans", () => {
+  it("reserves same-tick credits across active orchestration plans", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const [worker1, worker2] = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const hq = game.getState().players[0].buildings.find((building) => building.type === BUILDING_TYPES.HQ)!;
 
@@ -510,7 +515,7 @@ describe("GameAgentBridge", () => {
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y - 1, "player_1");
     game.getBuildingManager().createBuilding(BUILDING_TYPES.WAR_FACTORY, player1BuildSite.x, player1BuildSite.y + 1, "player_1");
 
-    bridge.orchestratePlan({
+    gameplayController.orchestratePlan({
       unitIds: [worker1.id],
       steps: [
         {
@@ -523,7 +528,7 @@ describe("GameAgentBridge", () => {
         },
       ],
     });
-    bridge.orchestratePlan({
+    gameplayController.orchestratePlan({
       unitIds: [worker2.id],
       steps: [
         {
@@ -538,13 +543,13 @@ describe("GameAgentBridge", () => {
     });
 
     expect(game.getState().players[0].resources.credits).toBe(300);
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "spawn",
         unitType: "light_tank",
       }),
     ]);
-    expect(bridge.getActivePlans()).toEqual([
+    expect(gameplayController.getActivePlans()).toEqual([
       expect.objectContaining({
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
@@ -553,11 +558,11 @@ describe("GameAgentBridge", () => {
         }),
       }),
       expect.objectContaining({
-        waitingReason: "waiting for budget: need 110 credits, available 60",
+        waitingReason: "waiting for credits: need 110 credits, available 60",
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for budget: need 110 credits, available 60",
+          detail: "waiting for credits: need 110 credits, available 60",
         }),
       }),
     ]);
@@ -567,7 +572,7 @@ describe("GameAgentBridge", () => {
   it("summarizes tech status and recommends counters from get_my_state", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
 
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
     game.getBuildingManager().createBuilding(
@@ -583,7 +588,7 @@ describe("GameAgentBridge", () => {
       "player_2"
     );
 
-    const result = bridge.getMyState().result as {
+    const result = gameplayController.getMyState().result as {
       techStatus: {
         own: Record<string, number>;
         enemy: Record<string, unknown>;
@@ -610,9 +615,9 @@ describe("GameAgentBridge", () => {
   it("pairs recommended building centers with valid worker approach positions", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
-    const state = bridge.getMyState().result as {
+    const state = gameplayController.getMyState().result as {
       techStatus: {
         recommendedStructures: Array<{
           workerId: string;
@@ -631,7 +636,7 @@ describe("GameAgentBridge", () => {
       getBuildingFootprint(BUILDING_TYPES.BARRACKS).width,
     ).toBeGreaterThan(1);
 
-    const result = bridge.buildStructure(worker.id, BUILDING_TYPES.BARRACKS, { x: site.x, y: site.y }).result as {
+    const result = gameplayController.buildStructure(worker.id, BUILDING_TYPES.BARRACKS, { x: site.x, y: site.y }).result as {
       ok: boolean;
       error: string;
       hint: string;
@@ -656,7 +661,7 @@ describe("GameAgentBridge", () => {
   it("stops recommending isolated tanks into massed enemy rocket soldiers", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     game.getBuildingManager().createBuilding(
       BUILDING_TYPES.BARRACKS,
       player1BuildSite.x,
@@ -678,7 +683,7 @@ describe("GameAgentBridge", () => {
       );
     }
 
-    const state = bridge.getMyState().result as {
+    const state = gameplayController.getMyState().result as {
       techStatus: {
         enemy: { rocketSoldiers: number };
         productionWarnings: Array<Record<string, unknown>>;
@@ -704,14 +709,14 @@ describe("GameAgentBridge", () => {
   it("summarizes economy status and resource assignments from get_my_state", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const workers = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
 
-    bridge.startHarvestLoop(workers[0].id);
-    bridge.startHarvestLoop(workers[1].id);
+    gameplayController.startHarvestLoop(workers[0].id);
+    gameplayController.startHarvestLoop(workers[1].id);
     game.processCommands();
 
-    const result = bridge.getMyState().result as {
+    const result = gameplayController.getMyState().result as {
       economyStatus: {
         workers: number;
         activeHarvesters: number;
@@ -753,7 +758,7 @@ describe("GameAgentBridge", () => {
   it("uses enemy tech conditions to trigger counter-production plans", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
 
     game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, player1BuildSite.x, player1BuildSite.y, "player_1");
@@ -764,7 +769,7 @@ describe("GameAgentBridge", () => {
       "player_2"
     );
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: [worker.id],
       steps: [
         {
@@ -779,7 +784,7 @@ describe("GameAgentBridge", () => {
     });
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "spawn",
         unitType: "rocket_soldier",
@@ -789,9 +794,9 @@ describe("GameAgentBridge", () => {
   });
 
   it("rejects unsupported call-step plan tools", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const gameplayController = new GameplayController(new Game(), "player_2");
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: ["unit_3"],
       steps: [
         {
@@ -805,13 +810,13 @@ describe("GameAgentBridge", () => {
       ok: false,
       error: "invalid_plan",
     });
-    expect(bridge.getActivePlans()).toHaveLength(0);
+    expect(gameplayController.getActivePlans()).toHaveLength(0);
   });
 
   it("rejects plans that target buildings instead of units", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const gameplayController = new GameplayController(new Game(), "player_2");
 
-    const result = bridge.orchestratePlan({
+    const result = gameplayController.orchestratePlan({
       unitIds: ["building_2"],
       steps: [{ call: "hold_unit", args: { unitId: "$unitId" } }],
     });
@@ -821,13 +826,13 @@ describe("GameAgentBridge", () => {
       error: "invalid_plan",
     });
     expect((result.result as { hint: string }).hint).toContain("friendly units");
-    expect(bridge.getActivePlans()).toHaveLength(0);
+    expect(gameplayController.getActivePlans()).toHaveLength(0);
   });
 
   it("returns a slim battlefield view from get_map_state by default", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const gameplayController = new GameplayController(new Game(), "player_2");
 
-    const result = bridge.getMapState();
+    const result = gameplayController.getMapState();
     const mapState = result.result as {
       tick: number;
       units: Array<Record<string, unknown>>;
@@ -884,21 +889,19 @@ describe("GameAgentBridge", () => {
   it("groups controllable units by role and intent in get_my_units", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const tank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 30, 48, "player_1");
     const rocket = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 31, 49, "player_1");
 
-    bridge.holdUnit(tank.id);
-    bridge.holdUnit(rocket.id);
+    gameplayController.holdUnit(tank.id);
+    gameplayController.holdUnit(rocket.id);
     game.processCommands();
 
-    const result = bridge.getMyUnits().result as {
-      pendingGroupMoves: { count: number; unitIds: string[] };
+    const result = gameplayController.getMyUnits().result as {
       groups: Array<Record<string, unknown>>;
       units: Array<Record<string, unknown>>;
     };
 
-    expect(result.pendingGroupMoves).toEqual({ count: 0, unitIds: [] });
     expect(result.groups).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -925,7 +928,7 @@ describe("GameAgentBridge", () => {
 
   it("reveals enemy units and buildings across the full battlefield", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const enemyScout = game.getUnitManager().createUnit(
       UNIT_TYPES.RIFLEMAN,
       DEFAULT_MAP_LAYOUT.player1Hq.x + 7,
@@ -939,7 +942,7 @@ describe("GameAgentBridge", () => {
       "player_2"
     );
 
-    const mapState = bridge.getMapState().result as {
+    const mapState = gameplayController.getMapState().result as {
       units: Array<Record<string, unknown>>;
       buildings: Array<Record<string, unknown>>;
     };
@@ -956,16 +959,16 @@ describe("GameAgentBridge", () => {
   it("queues attack-move commands with role-aware target priority by default", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const soldier = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const lightTank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 5, 6, "player_1");
 
-    const soldierResult = bridge.attackMoveUnit(soldier.id, DEFAULT_MAP_LAYOUT.player2Hq);
-    const tankResult = bridge.attackMoveUnit(lightTank.id, DEFAULT_MAP_LAYOUT.player2Hq);
+    const soldierResult = gameplayController.attackMoveUnit(soldier.id, DEFAULT_MAP_LAYOUT.player2Hq);
+    const tankResult = gameplayController.attackMoveUnit(lightTank.id, DEFAULT_MAP_LAYOUT.player2Hq);
 
     expect(soldierResult.result).toMatchObject({ ok: true });
     expect(tankResult.result).toMatchObject({ ok: true });
-    expect(bridge.takeIssuedCommands()).toEqual([
+    expect(gameplayController.takeIssuedCommands()).toEqual([
       expect.objectContaining({
         type: "attack_move",
         unitId: soldier.id,
@@ -982,52 +985,39 @@ describe("GameAgentBridge", () => {
     game.stop();
   });
 
-  it("assigns distinct formation destinations and schedules a 100-unit army across tick shares", () => {
+  it("assigns distinct formation destinations and queues a 100-unit army immediately", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const unitIds = Array.from({ length: 100 }, (_, index) =>
       game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20 + (index % 10), 12 + Math.floor(index / 10), "player_1").id
     );
 
-    const result = bridge.attackMoveGroup(unitIds, { x: 108, y: 48 }, "line");
+    const result = gameplayController.attackMoveGroup(unitIds, { x: 108, y: 48 }, "line");
     const payload = result.result as {
       ok: boolean;
       assignments: Array<{ position: { x: number; y: number } }>;
-      queuedNow: number;
-      scheduled: number;
       hint: string;
     };
 
     expect(payload.ok).toBe(true);
     expect(payload.assignments).toHaveLength(100);
-    expect(payload).toMatchObject({ queuedNow: 2, scheduled: 98 });
-    expect(payload.hint).toContain("do not reissue individual move commands");
-    expect(bridge.getMyUnits().result).toMatchObject({
-      pendingGroupMoves: {
-        count: 98,
-        unitIds: expect.arrayContaining(unitIds.slice(2)),
-      },
-    });
+    expect(payload.hint).toContain("queued immediately");
     expect(new Set(payload.assignments.map((assignment) => `${assignment.position.x},${assignment.position.y}`)).size).toBe(100);
-    const commands = [...bridge.takeIssuedCommands()];
-    expect(commands).toHaveLength(2);
-    for (let tick = 0; tick < 49; tick++) {
-      commands.push(...bridge.advancePlans());
-    }
+    const commands = gameplayController.takeIssuedCommands();
     expect(commands).toHaveLength(100);
     expect(new Set(commands.map((command) => command.unitId))).toEqual(new Set(unitIds));
   });
 
   it("summarizes army readiness and recommends battle_line for tank groups", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 11, 10, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 12, 10, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 13, 10, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 20, 10, "player_2");
 
-    const summary = bridge.getArmySummary().result as {
+    const summary = gameplayController.getArmySummary().result as {
       myCounts: Record<string, number>;
       enemyCounts: Record<string, number>;
       recommendedFormation: string;
@@ -1044,7 +1034,7 @@ describe("GameAgentBridge", () => {
 
   it("recommends immediate HQ pressure once the first six-unit wave is ready", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     for (let index = 0; index < 6; index++) {
       game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10 + index, 10, "player_1");
     }
@@ -1052,7 +1042,7 @@ describe("GameAgentBridge", () => {
       (building) => building.type === BUILDING_TYPES.HQ,
     )!;
 
-    const summary = bridge.getArmySummary().result as {
+    const summary = gameplayController.getArmySummary().result as {
       recommendations: Array<{ action: string; targetId?: string; unitIds?: string[] }>;
     };
     expect(summary.recommendations).toEqual(expect.arrayContaining([
@@ -1066,12 +1056,12 @@ describe("GameAgentBridge", () => {
 
   it("recommends regrouping instead of counting six units spread across the map as an attack wave", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     for (let index = 0; index < 6; index++) {
       game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10 + index * 20, 10, "player_1");
     }
 
-    const summary = bridge.getArmySummary().result as {
+    const summary = gameplayController.getArmySummary().result as {
       groupedCombatUnits: number;
       assemblyPoint: { x: number; y: number } | null;
       recommendations: Array<{ action: string }>;
@@ -1088,12 +1078,12 @@ describe("GameAgentBridge", () => {
 
   it("assigns battle_line formation with tanks ahead of rockets", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const tank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
     const rifleman = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10, 11, "player_1");
     const rocket = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 10, 12, "player_1");
 
-    const result = bridge.attackMoveGroup([rocket.id, tank.id, rifleman.id], { x: 60, y: 48 }, "battle_line").result as {
+    const result = gameplayController.attackMoveGroup([rocket.id, tank.id, rifleman.id], { x: 60, y: 48 }, "battle_line").result as {
       assignments: Array<{ unitId: string; position: { x: number; y: number } }>;
     };
     const byUnit = new Map(result.assignments.map((assignment) => [assignment.unitId, assignment.position]));
@@ -1106,15 +1096,15 @@ describe("GameAgentBridge", () => {
   it("queues high-level attack as movement until the target is in range", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
 
-    bridge.getMapState();
-    const result = bridge.attackTarget(attacker.id, target.id);
+    gameplayController.getMapState();
+    const result = gameplayController.attackTarget(attacker.id, target.id);
 
     expect(result.result).toMatchObject({ ok: true, mode: "move_to_target" });
-    expect(bridge.takeIssuedCommands()).toEqual([
+    expect(gameplayController.takeIssuedCommands()).toEqual([
       expect.objectContaining({
         type: "move",
         unitId: attacker.id,
@@ -1124,7 +1114,7 @@ describe("GameAgentBridge", () => {
 
     attacker.x = 7;
     attacker.y = 5;
-    expect(bridge.advancePlans()).toEqual([
+    expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "attack",
         unitId: attacker.id,
@@ -1137,7 +1127,7 @@ describe("GameAgentBridge", () => {
   it("measures building attack range from the footprint instead of its center", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
       .find((building) => building.type === BUILDING_TYPES.HQ)!;
     const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
@@ -1148,11 +1138,11 @@ describe("GameAgentBridge", () => {
       "player_1",
     );
 
-    expect(bridge.attackTarget(attacker.id, enemyHq.id).result).toMatchObject({
+    expect(gameplayController.attackTarget(attacker.id, enemyHq.id).result).toMatchObject({
       ok: true,
       mode: "attack",
     });
-    expect(bridge.takeIssuedCommands()).toEqual([
+    expect(gameplayController.takeIssuedCommands()).toEqual([
       expect.objectContaining({
         type: "attack",
         unitId: attacker.id,
@@ -1165,13 +1155,13 @@ describe("GameAgentBridge", () => {
   it("does not replace an in-flight path every tick for a persistent attack order", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20, 5, "player_2");
 
-    bridge.getMapState();
-    bridge.attackTarget(attacker.id, target.id);
-    const [move] = bridge.takeIssuedCommands();
+    gameplayController.getMapState();
+    gameplayController.attackTarget(attacker.id, target.id);
+    const [move] = gameplayController.takeIssuedCommands();
     game.queueCommand(move);
     game.tickUpdate();
 
@@ -1179,63 +1169,63 @@ describe("GameAgentBridge", () => {
       state: "moving",
       intent: { type: "move" },
     });
-    expect(bridge.advancePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
   });
 
   it("keeps a persistent attack order without reissuing it during weapon reload", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
 
-    expect(bridge.attackTarget(attacker.id, target.id).result).toMatchObject({
+    expect(gameplayController.attackTarget(attacker.id, target.id).result).toMatchObject({
       ok: true,
       mode: "attack",
     });
-    const [attack] = bridge.takeIssuedCommands();
+    const [attack] = gameplayController.takeIssuedCommands();
     game.queueCommand(attack);
     game.tickUpdate();
 
     expect(attacker.nextAttackTick).toBeGreaterThan(game.getTick());
-    expect(bridge.advancePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
 
     while (attacker.nextAttackTick !== undefined && game.getTick() < attacker.nextAttackTick) {
       game.tickUpdate();
     }
-    expect(bridge.advancePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
   });
 
   it("moves to a remembered target position when the attack target has died", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
 
-    bridge.getMapState();
+    gameplayController.getMapState();
     game.getUnitManager().removeUnit(target.id);
 
-    const result = bridge.attackTarget(attacker.id, target.id);
+    const result = gameplayController.attackTarget(attacker.id, target.id);
 
     expect(result.result).toMatchObject({ ok: true, mode: "move_to_last_seen" });
-    expect(bridge.takeIssuedCommands()).toEqual([
+    expect(gameplayController.takeIssuedCommands()).toEqual([
       expect.objectContaining({
         type: "move",
         unitId: attacker.id,
         position: { x: 8, y: 5 },
       }),
     ]);
-    expect(bridge.advancePlans()).toEqual([]);
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
   });
 
   it("returns detailed map cells only when requested", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_2");
+    const gameplayController = new GameplayController(new Game(), "player_2");
 
-    const result = bridge.getMapState({ includeCells: true });
+    const result = gameplayController.getMapState({ includeCells: true });
     const mapState = result.result as {
       cells: Array<Record<string, unknown>>;
     };
@@ -1262,13 +1252,13 @@ describe("GameAgentBridge", () => {
   it("queues built-in harvest loops for workers", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = bridge.startHarvestLoop(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
+    const result = gameplayController.startHarvestLoop(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
 
     expect(result.result).toMatchObject({ ok: true });
-    expect(bridge.takeIssuedCommands()).toEqual(
+    expect(gameplayController.takeIssuedCommands()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: "harvest_loop",
@@ -1290,9 +1280,9 @@ describe("GameAgentBridge", () => {
   });
 
   it("returns controllable units with the read tick", () => {
-    const bridge = new GameAgentBridge(new Game(), "player_1");
+    const gameplayController = new GameplayController(new Game(), "player_1");
 
-    const result = bridge.getMyUnits();
+    const result = gameplayController.getMyUnits();
     const myUnits = result.result as { tick: number; units: Array<Record<string, unknown>> };
 
     expect(myUnits.tick).toBe(0);
@@ -1302,15 +1292,15 @@ describe("GameAgentBridge", () => {
 
   it("shares one lightweight read state across same-tick read tools", () => {
     const game = new Game();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const readStateSpy = vi.spyOn(game, "getAgentReadState");
     const fullStateSpy = vi.spyOn(game, "getState");
 
-    bridge.getMapState();
-    bridge.getMyState();
-    bridge.getMyUnits();
-    bridge.getActivePlansTool();
-    bridge.getRecentEvents();
+    gameplayController.getMapState();
+    gameplayController.getMyState();
+    gameplayController.getMyUnits();
+    gameplayController.getActivePlansTool();
+    gameplayController.getRecentEvents();
 
     expect(readStateSpy).toHaveBeenCalledTimes(1);
     expect(fullStateSpy).not.toHaveBeenCalled();
@@ -1319,15 +1309,15 @@ describe("GameAgentBridge", () => {
   it("invalidates the lightweight read cache on the next tick", () => {
     const game = new Game();
     game.start();
-    const bridge = new GameAgentBridge(game, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
     const readStateSpy = vi.spyOn(game, "getAgentReadState");
 
-    bridge.getMyUnits();
-    bridge.getMyState();
+    gameplayController.getMyUnits();
+    gameplayController.getMyState();
     expect(readStateSpy).toHaveBeenCalledTimes(1);
 
     game.tickUpdate();
-    bridge.getMyUnits();
+    gameplayController.getMyUnits();
     game.stop();
 
     expect(readStateSpy).toHaveBeenCalledTimes(2);

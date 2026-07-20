@@ -157,8 +157,8 @@ export interface GameRuleset {
 }
 
 export const DEFAULT_RULESET = {
-  id: "mvp",
-  name: "LLMCraft MVP",
+  id: "standard",
+  name: "LLMCraft Standard",
   units: {
     [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
     [UNIT_TYPES.SOLDIER]: {
@@ -296,7 +296,7 @@ export const DEFAULT_RULESET = {
   economy: ECONOMY_RULES,
 } satisfies GameRuleset;
 
-// Compatibility exports for existing diagnostics, tests, and UI code.
+// Convenient views of the standard ruleset for diagnostics, tests, and UI code.
 export const UNIT_STATS: Record<UnitType, RulesetUnitDefinition> = DEFAULT_RULESET.units;
 
 export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition, "produces">> = {

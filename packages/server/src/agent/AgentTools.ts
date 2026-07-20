@@ -7,7 +7,7 @@ import {
   DEFAULT_MAP_LAYOUT,
   OrchestratePlanInput,
 } from "@llmcraft/shared";
-import { GameAgentBridge } from "./GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
 
 export interface AgentToolDefinition {
   name: string;
@@ -20,7 +20,7 @@ export interface AgentToolExecution {
   result: unknown;
 }
 
-type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
+type ToolExecutor = (gameplayController: GameplayController, args: any) => AgentToolExecution;
 
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
@@ -46,8 +46,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.getMapState({
+    execute: (gameplayController, args) =>
+      gameplayController.getMapState({
         includeCells: args?.includeCells === true,
         includeEmptyTiles: args?.includeEmptyTiles === true,
       }),
@@ -56,32 +56,32 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     name: "get_my_state",
     description: "Read my economy, HQ, buildings, production queues, and concrete build/production recommendations.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyState(),
+    execute: (gameplayController) => gameplayController.getMyState(),
   },
   {
     name: "get_my_units",
     description: "Read my controllable units plus role+intent groups, so idle/holding combat forces are visible without manually counting the unit list.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyUnits(),
+    execute: (gameplayController) => gameplayController.getMyUnits(),
   },
   {
     name: "get_army_summary",
     description:
       "Read a compact combat summary: own/enemy unit mix, ready vs reloading combat units, and non-binding recommendations for combined-arms production or group formation.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getArmySummary(),
+    execute: (gameplayController) => gameplayController.getArmySummary(),
   },
   {
     name: "get_active_plans",
     description: "Read active orchestration plans currently attached to my units, including currentStep, waitingReason, and lastAttempt diagnostics.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getActivePlansTool(),
+    execute: (gameplayController) => gameplayController.getActivePlansTool(),
   },
   {
     name: "get_recent_events",
     description: "Read recent AI-facing command feedback and important events.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getRecentEvents(),
+    execute: (gameplayController) => gameplayController.getRecentEvents(),
   },
   {
     name: "move_unit",
@@ -97,7 +97,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.moveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) => gameplayController.moveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }),
   },
   {
     name: "attack_move_unit",
@@ -117,25 +117,25 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
+    execute: (gameplayController, args) =>
+      gameplayController.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
   },
   {
     name: "attack_move_group",
     description:
-      "Order 1-100 friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies inside vision, close to weapon range, fight through reload cycles, and then resume the advance. Use battle_line for combined arms: tanks front, riflemen/soldiers screen, rockets behind.",
+      "Order one or more friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies inside vision, close to weapon range, fight through reload cycles, and then resume the advance. Use battle_line for combined arms: tanks front, riflemen/soldiers screen, rockets behind.",
     parameters: {
       type: "object",
       required: ["unitIds", "x", "y"],
       properties: {
-        unitIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string" } },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
         formation: { type: "string", enum: ["line", "column", "wedge", "dispersed", "battle_line"], default: "line" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.attackMoveGroup(
+    execute: (gameplayController, args) => gameplayController.attackMoveGroup(
       Array.isArray(args.unitIds) ? args.unitIds.map(String) : [],
       { x: Number(args.x), y: Number(args.y) },
       args.formation === "column" ||
@@ -159,7 +159,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.attackTarget(String(args.unitId), String(args.targetId)),
+    execute: (gameplayController, args) => gameplayController.attackTarget(String(args.unitId), String(args.targetId)),
   },
   {
     name: "spawn_unit",
@@ -173,7 +173,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.spawnUnit(String(args.buildingId), args.unitType),
+    execute: (gameplayController, args) => gameplayController.spawnUnit(String(args.buildingId), args.unitType),
   },
   {
     name: "build_structure",
@@ -189,8 +189,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.buildStructure(String(args.unitId), args.buildingType, { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) =>
+      gameplayController.buildStructure(String(args.unitId), args.buildingType, { x: Number(args.x), y: Number(args.y) }),
   },
   {
     name: "start_harvest_loop",
@@ -206,14 +206,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => {
+    execute: (gameplayController, args) => {
       const hasX = args?.x !== undefined;
       const hasY = args?.y !== undefined;
       const position = hasX && hasY ? { x: Number(args.x), y: Number(args.y) } : undefined;
       if (hasX !== hasY) {
-        return bridge.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
+        return gameplayController.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
       }
-      return bridge.startHarvestLoop(String(args.unitId), position);
+      return gameplayController.startHarvestLoop(String(args.unitId), position);
     },
   },
   {
@@ -227,7 +227,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.holdUnit(String(args.unitId)),
+    execute: (gameplayController, args) => gameplayController.holdUnit(String(args.unitId)),
   },
   {
     name: "spawn_agent",
@@ -300,7 +300,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- In global production args, buildingId can be \"$hq\", \"$barracks\", \"$war_factory\", or \"$refinery\" to resolve the current friendly building at execution time.",
       "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
       "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; build_structure also waits until the worker is adjacent to the requested footprint.",
-      "- Multiple active plans share the same tick budget. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining budget cannot cover them.",
+      "- Multiple active plans share the same-tick available credits. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
       "- Use get_active_plans to inspect currentStep, waitingReason, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
@@ -467,7 +467,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.orchestratePlan(args as OrchestratePlanInput),
+    execute: (gameplayController, args) => gameplayController.orchestratePlan(args as OrchestratePlanInput),
   },
 ];
 
@@ -494,10 +494,10 @@ export function getControlActionToolNames(): string[] {
   return getControlAgentToolNames().filter((name) => !readToolNames.has(name) && name !== "orchestrate_plan");
 }
 
-export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {
+export function executeAgentTool(gameplayController: GameplayController, name: string, args: unknown): AgentToolExecution {
   const tool = tools.find((candidate) => candidate.name === name);
   if (!tool) {
     throw new Error(`Unknown tool: ${name}`);
   }
-  return tool.execute(bridge, args);
+  return tool.execute(gameplayController, args);
 }

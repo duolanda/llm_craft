@@ -46,7 +46,7 @@ function cloneReplayFrameState(state: GameState): GameState {
         constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),
     })),
-    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in compact-v2.
+    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in 历史记录.
     // Sharing these immutable structures avoids duplicating the complete log history and map for every frame.
     logs: state.logs,
     tiles: state.tiles,
@@ -396,7 +396,7 @@ function buildReplayTurnEvents(turns: SavedAITurnRecord[]): AITerminalEvent[] {
 export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
-  const replayTurns = [...record.aiTurns].sort((a, b) => {
+  const replayTurns = [...(record.aiTurns ?? [])].sort((a, b) => {
     if (a.executeTick !== b.executeTick) {
       return a.executeTick - b.executeTick;
     }
@@ -409,7 +409,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   let replayTurnIndex = 0;
   clearTransientIntentState(currentState);
   const commandResultsByTick = new Map<number, GameLog[]>();
-  for (const result of record.commandResults) {
+  for (const result of record.commandResults ?? []) {
     if (result.type !== LOG_TYPES.COMMAND_RESULT) continue;
     const bucket = commandResultsByTick.get(result.tick) ?? [];
     bucket.push(result);

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AgentMemoryPolicy } from "../agent/AgentMemoryPolicy";
+import { ContextWindowLimiter } from "../agent/ContextWindowLimiter";
 
-describe("AgentMemoryPolicy", () => {
+describe("ContextWindowLimiter", () => {
   it("drops complete older user segments instead of leaving orphan tool results", () => {
-    const policy = new AgentMemoryPolicy({
+    const limiter = new ContextWindowLimiter({
       maxMessages: 5,
       maxBytes: 4096,
       maxMessageBytes: 512,
@@ -19,29 +19,29 @@ describe("AgentMemoryPolicy", () => {
       { role: "assistant", content: "latest done" },
     ];
 
-    const result = policy.compact(history);
-    const compacted = result.history as Array<Record<string, unknown>>;
+    const result = limiter.limit(history);
+    const limited = result.history as Array<Record<string, unknown>>;
 
-    expect(compacted).toHaveLength(5);
-    expect(JSON.stringify(compacted[0])).toContain("memorySummaryVersion");
-    expect(compacted.slice(1).map((message) => message.role)).toEqual([
+    expect(limited).toHaveLength(5);
+    expect(JSON.stringify(limited[0])).toContain("older_history_omitted");
+    expect(limited.slice(1).map((message) => message.role)).toEqual([
       "user",
       "assistant",
       "tool",
       "assistant",
     ]);
-    expect(JSON.stringify(compacted)).toContain("new-call");
-    expect(JSON.stringify(compacted)).not.toContain("old-call");
+    expect(JSON.stringify(limited)).toContain("new-call");
+    expect(JSON.stringify(limited)).not.toContain("old-call");
     expect(result.record.droppedMessages).toBe(4);
   });
 
   it("replaces oversized tool observations with a structured tombstone", () => {
-    const policy = new AgentMemoryPolicy({
+    const limiter = new ContextWindowLimiter({
       maxMessages: 10,
       maxBytes: 4096,
       maxMessageBytes: 512,
     });
-    const result = policy.compact([
+    const result = limiter.limit([
       { role: "user", content: "read" },
       { role: "assistant", content: null, tool_calls: [{ id: "call-1", function: { name: "get_map_state", arguments: "{}" } }] },
       {
@@ -57,26 +57,55 @@ describe("AgentMemoryPolicy", () => {
 
     expect(tombstone).toMatchObject({
       expired: true,
-      reason: "memory_policy_oversize",
+      reason: "context_window_oversize",
       observedTick: 42,
     });
     expect(result.record.truncatedMessages).toBe(1);
     expect(result.record.bytesAfter).toBeLessThanOrEqual(result.record.maxBytes);
   });
 
+  it("keeps assistant tool-call declarations paired with limited tool results", () => {
+    const limiter = new ContextWindowLimiter({
+      maxMessages: 6,
+      maxBytes: 4096,
+      maxMessageBytes: 512,
+    });
+    const result = limiter.limit([
+      { role: "user", content: "read" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call-large",
+          function: { name: "get_map_state", arguments: JSON.stringify({ query: "x".repeat(700) }) },
+        }],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call-large",
+        name: "get_map_state",
+        content: JSON.stringify({ tick: 42, cells: "x".repeat(4000) }),
+      },
+    ]) as { history: Array<Record<string, unknown>> };
+
+    expect(result.history[1]?.tool_calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "call-large" }),
+    ]));
+    expect(result.history[2]).toMatchObject({ role: "tool", tool_call_id: "call-large" });
+  });
+
   it("reports explicit bounded history metrics", () => {
-    const policy = new AgentMemoryPolicy({
+    const limiter = new ContextWindowLimiter({
       maxMessages: 4,
       maxBytes: 2048,
       maxMessageBytes: 256,
     });
-    const result = policy.compact(Array.from({ length: 20 }, (_, index) => ({
+    const result = limiter.limit(Array.from({ length: 20 }, (_, index) => ({
       role: index % 2 === 0 ? "user" : "assistant",
       content: `message-${index}-${"z".repeat(300)}`,
     })));
 
     expect(result.record).toMatchObject({
-      policyVersion: 1,
       maxMessages: 4,
       maxBytes: 2048,
       messagesBefore: 20,

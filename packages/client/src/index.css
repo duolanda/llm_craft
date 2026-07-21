@@ -105,16 +105,6 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
-.brand-badge {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--accent-amber);
-  border: 1px solid var(--accent-amber);
-  padding: 2px 6px;
-  border-radius: 2px;
-  letter-spacing: 1px;
-}
-
 .controls {
   display: flex;
   align-items: center;
@@ -372,6 +362,53 @@ body {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.match-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.match-options {
+  position: relative;
+}
+
+.match-options > summary {
+  list-style: none;
+  user-select: none;
+}
+
+.match-options > summary::-webkit-details-marker {
+  display: none;
+}
+
+.match-options > summary::after {
+  content: '▾';
+  margin-left: 6px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.match-options-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 220px;
+  padding: 14px;
+  background: rgba(13, 16, 20, 0.96);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.match-options-menu .hud-btn {
+  width: 100%;
 }
 
 .preset-select-row {
@@ -1287,6 +1324,32 @@ body {
   font-weight: 500;
   letter-spacing: 0.3px;
   white-space: nowrap;
+}
+
+/* Collapsible legend panel */
+.legend-collapsible > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.legend-collapsible > summary::-webkit-details-marker {
+  display: none;
+}
+
+.legend-collapsible:not([open]) > summary {
+  border-bottom-color: transparent;
+}
+
+.legend-summary::after {
+  content: '▸';
+  color: var(--text-muted);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.legend-collapsible[open] .legend-summary::after {
+  transform: rotate(90deg);
 }
 
 .settings-shell {

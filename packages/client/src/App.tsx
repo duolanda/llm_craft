@@ -747,7 +747,6 @@ function App() {
         <header className="app-header">
           <div className="brand">
             <h1>LLMCraft</h1>
-            <span className="brand-badge">{mode === "live" ? "LIVE OPS" : "REPLAY OPS"}</span>
           </div>
           <div className="controls">
             <div className="mode-switch">
@@ -822,88 +821,96 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <label className="settings-field compact live-debug-toggle">
-                    <span>记录档位</span>
-                    <select
-                      className="settings-select"
-                      value={recordingProfile}
-                      onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
-                    >
-                      <option value="off">关闭</option>
-                      <option value="replay">回放</option>
-                      <option value="evaluation">评估</option>
-                    </select>
-                  </label>
-                  <label className="settings-field compact live-debug-toggle">
-                    <span>完整 transcript</span>
-                    <input
-                      type="checkbox"
-                      checked={includeTranscript}
-                      onChange={(event) => setIncludeTranscript(event.target.checked)}
-                      disabled={recordingProfile !== "evaluation"}
-                    />
-                  </label>
                 </div>
-                <button
-                  type="button"
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => setMatchesOpen(true)}
-                  disabled={!connected}
-                >
-                  对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
-                </button>
-                <button
-                  type="button"
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => setSettingsOpen(true)}
-                  disabled={benchmarkRunning}
-                >
-                  设置
-                </button>
-                <button
-                  type="button"
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => {
-                    clearBenchmarkResult();
-                    setBenchmarkOpen(true);
-                  }}
-                  disabled={!connected || presets.length === 0 || benchmarkRunning}
-                >
-                  Benchmark
-                </button>
-                <button
-                  onClick={isPlaying ? handleStop : handleStart}
-                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isWarmingUp || !canStartLiveMatch}
-                  className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
-                >
-                  {isPlaying ? "停止对局" : startPending ? "启动中" : "启动对局"}
-                </button>
-                {benchmarkRunning && (
+                <div className="match-action-bar">
+                  <details className="match-options">
+                    <summary className="hud-btn hud-btn-ghost">录制</summary>
+                    <div className="match-options-menu">
+                      <label className="settings-field compact">
+                        <span>记录档位</span>
+                        <select
+                          className="settings-select"
+                          value={recordingProfile}
+                          onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
+                        >
+                          <option value="off">关闭</option>
+                          <option value="replay">回放</option>
+                          <option value="evaluation">评估</option>
+                        </select>
+                      </label>
+                      <label className="benchmark-inline-toggle-row">
+                        <input
+                          type="checkbox"
+                          checked={includeTranscript}
+                          onChange={(event) => setIncludeTranscript(event.target.checked)}
+                          disabled={recordingProfile !== "evaluation"}
+                        />
+                        完整 transcript
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleSaveRecord}
+                        disabled={!canSaveLiveMatch}
+                        className="hud-btn"
+                      >
+                        保存记录
+                      </button>
+                    </div>
+                  </details>
                   <button
                     type="button"
-                    className="hud-btn hud-btn-stop"
-                    onClick={handleStop}
-                    disabled={!canStopLiveMatch}
-                  >
-                    停止 Benchmark
-                  </button>
-                )}
-                {canRestartLiveMatch && (
-                  <button
-                    onClick={handleRestart}
-                    disabled={!canRestartLiveMatch}
                     className="hud-btn hud-btn-ghost"
+                    onClick={() => setMatchesOpen(true)}
+                    disabled={!connected}
                   >
-                    重置
+                    对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
                   </button>
-                )}
-                <button
-                  onClick={handleSaveRecord}
-                  disabled={!canSaveLiveMatch}
-                  className="hud-btn"
-                >
-                  保存记录
-                </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
+                    onClick={() => setSettingsOpen(true)}
+                    disabled={benchmarkRunning}
+                  >
+                    设置
+                  </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
+                    onClick={() => {
+                      clearBenchmarkResult();
+                      setBenchmarkOpen(true);
+                    }}
+                    disabled={!connected || presets.length === 0 || benchmarkRunning}
+                  >
+                    Benchmark
+                  </button>
+                  <button
+                    onClick={isPlaying ? handleStop : handleStart}
+                    disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isWarmingUp || !canStartLiveMatch}
+                    className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+                  >
+                    {isPlaying ? "停止对局" : startPending ? "启动中" : "启动对局"}
+                  </button>
+                  {benchmarkRunning && (
+                    <button
+                      type="button"
+                      className="hud-btn hud-btn-stop"
+                      onClick={handleStop}
+                      disabled={!canStopLiveMatch}
+                    >
+                      停止 Benchmark
+                    </button>
+                  )}
+                  {canRestartLiveMatch && (
+                    <button
+                      onClick={handleRestart}
+                      disabled={!canRestartLiveMatch}
+                      className="hud-btn hud-btn-ghost"
+                    >
+                      重置
+                    </button>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -1054,14 +1061,14 @@ function App() {
               <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
             </div>
 
-            <div className="hud-panel" style={{ marginTop: 12 }}>
+            <details className="hud-panel legend-collapsible" style={{ marginTop: 12 }}>
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
-              <div className="panel-header">
+              <summary className="panel-header legend-summary">
                 <span className="panel-header-accent accent-red">战术图例</span>
-              </div>
+              </summary>
               <LegendPanel />
-            </div>
+            </details>
           </div>
 
           <div className="tactical-col">

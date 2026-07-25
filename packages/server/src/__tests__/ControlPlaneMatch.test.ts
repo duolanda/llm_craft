@@ -30,7 +30,8 @@ describe("ControlPlaneMatch", () => {
     const recordPath = await match.saveRecord();
     const record = await readMatchRecordFile(recordPath);
 
-    expect(recordPath).toBe(path.join(recordDir, "match_external_control.match.json"));
+    expect(path.dirname(recordPath)).toBe(recordDir);
+    expect(path.basename(recordPath)).toMatch(/^match-\d{4}-\d{2}-\d{2}T.*-external\.match\.json$/);
     expect(record).toMatchObject({
       recordFormat: "match-record",
       matchId: "match_external_control",

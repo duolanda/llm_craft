@@ -151,7 +151,23 @@ envelope 可以有多条命令，因为一次编队操作或 CLI batch 可以同
 
 envelope 的结构/身份校验仍是整体接纳：如果整个请求越权或 ID 冲突，它不会入队。进入 `Game` 后，每条命令独立执行；一条非法命令不会撤销同批其他成功命令。
 
-### 4.3 Game
+### 4.3 Movement / Navigation
+
+移动明确分为两层：
+
+- `PathFinder` 的 A* 只处理地形和建筑等静态拓扑，产生全局路线；
+- `MovementSystem` 用 `UnitSpatialIndex` 处理动态单位，用固定数量的角度/距离候选局部避障；
+- movement profile 持有权威碰撞形状：worker/步兵为圆，轻坦为约 `2.96 × 1.96` 格的 OBB；建筑和障碍格提供静态 AABB；
+- A* 以碰撞形状的包围圆做保守静态净空；终点预约、生产出生、移动扫掠、局部避障和 separation 使用精确 Circle/OBB SAT；
+- 终点预约只参与目标选择，不作为 A* 沿途动态硬障碍；
+- 每单位每 tick 的移动子步有固定上界，动态阻塞不会在同一个 tick 内重跑 A*；
+- 静态拓扑变化最多重算一次路线并立刻让出本 tick。
+
+拥堵解叠最多进行 8 轮空间索引迭代；高避让优先级单位承担较少位移。若一侧被地形或建筑固定，另一侧吸收剩余修正量。迭代上限保证 tick 工作量有界。
+
+单位朝向是模拟层权威状态，移动与转向扫掠使用最短角度插值检查，Match Record 和前端投影沿用同一 heading；渲染层不能从移动 intent 反推坦克碰撞朝向。碰撞形状、避让优先级和 locomotion layer 由 movement profile 集中定义。未来坦克碾压步兵应扩展 profile 间的碰撞交互（阻挡、让行、位移、碾压），并由模拟事件修改权威状态；不能把碾压写成寻路器或前端表现的特例。
+
+### 4.4 Game
 
 `Game` 是游戏规则的门面和权威状态容器：
 
@@ -164,7 +180,7 @@ envelope 的结构/身份校验仍是整体接纳：如果整个请求越权或 
 
 可以把它理解成“这一局游戏本身”，而 `MatchRuntime` 是包住它的时钟和生命周期。
 
-### 4.4 SimulationCore
+### 4.5 SimulationCore
 
 `SimulationCore` 是确定性规则阶段编排器。每 tick 的顺序是：
 
@@ -287,14 +303,14 @@ GameOrchestrator
 大致流程：
 
 1. 网页选择双方 preset、记录档位和 transcript 开关；
-2. 可选 warmup；
+2. 可选 warmup，提前缓存第一次模型响应；
 3. 请求创建并注册 live match；
-4. `GameOrchestrator.start()` 订阅 committed tick；
-5. `MatchRuntime.start()` 启动 500ms 时钟；
+4. `GameOrchestrator.start()` 启动 500ms 时钟，并立即并行派发双方首次决策；
+5. 模型工具结果按正常 CommandGateway 边界进入后续 tick，首次响应耗时与后续响应耗时一样计入对局；
 6. WebSocket 持续投影 Registry 中 observed match；
 7. 终局或用户停止后 quiesce，并按配置保存 Match Record。
 
-`warmup` 的含义是：在 tick 0 前提前完成选中模型的首个真实请求，并把结果留给正式会话。它不推进 tick，也不创建“prepared match”这种第二种对局。
+`warmup` 的含义是：在 tick 0 前提前完成选中模型的首个真实请求，并把结果留给正式会话。它不推进 tick、不执行工具，也不创建“prepared match”这种第二种对局。它是用户显式选择的首请求优化；未选择时，首次供应商延迟会像后续延迟一样消耗游戏时间。
 
 ### 6.3 CLI 对局
 
@@ -340,7 +356,7 @@ batch 请求使用 `/sessions/:id/actions`：
 正式对局产物叫 `Match Record`，格式身份是 `match-record`，文件名是：
 
 ```text
-<matchId>.match.json
+match-<ISO timestamp>-<short match id>.match.json
 ```
 
 档位：
@@ -356,7 +372,7 @@ transcript 只是 Match Record 的可选内容，不是每次 record 都必须�
 
 ### 8.2 写入时机
 
-运行中的 delta 和 evaluation 数据暂存在内存。终局或显式 stop 后只写一次最终 JSON，使用临时文件加 rename 完成原子替换。
+运行中每个 tick 只向共享 worker thread 投递一个小 delta；worker 内每 100 条封块并做 JSON + gzip，压缩完成后主线程释放 raw chunk，因此分块边界没有整块 structured clone、JSON 或 zlib 峰值。worker 故障时保留 raw fallback。终局或显式保存时由 worker 解压解析，再只写一次最终 JSON，使用临时文件加 rename 完成原子替换。evaluation 数据仍暂存在内存。
 
 当前不会：
 

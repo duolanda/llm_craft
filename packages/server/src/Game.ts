@@ -43,7 +43,6 @@ import {
   ResultType,
 } from "@llmcraft/shared";
 import { buildTickDelta } from "./GameHistory";
-import { gzipSync, gunzipSync } from "node:zlib";
 import { UnitManager } from "./UnitManager";
 import { BuildingManager } from "./BuildingManager";
 import { createDefaultMatchDefinition, type MatchDefinition, validateMatchDefinition } from "./MatchDefinition";
@@ -55,6 +54,7 @@ import {
 import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
 import { VictorySystem } from "./simulation/VictorySystem";
 import { CombatSystem } from "./simulation/CombatSystem";
+import { BackgroundTickDeltaArchive } from "./BackgroundTickDeltaArchive";
 
 export interface AgentReadState {
   tick: number;
@@ -83,7 +83,6 @@ export interface GameTickResult {
   simulation: SimulationStepResult;
 }
 
-const TICK_DELTA_CHUNK_SIZE = 100;
 export class Game {
   private readonly definition: MatchDefinition;
   private readonly world: WorldState;
@@ -97,8 +96,8 @@ export class Game {
   private activeCommandOutcomes: CommandExecutionOutcome[] | null = null;
   private initialSnapshot: GameSnapshot | null = null;
   private latestSnapshot: GameSnapshot | null = null;
-  private tickDeltaBuffer: TickDeltaRecord[] = [];
-  private tickDeltaChunks: string[] = [];
+  private readonly tickDeltaArchive = new BackgroundTickDeltaArchive();
+  private commandResultHistory: GameLog[] = [];
   private aiOutputs: Record<string, string> = {};
   private isRunning = false;
 
@@ -997,6 +996,7 @@ export class Game {
                 workerId: unit.id,
                 remainingTicks: constructionTicks,
                 totalTicks: constructionTicks,
+                resumeWorkerOrder: command.resumeWorkerOrder,
               },
             }
           );
@@ -1219,6 +1219,9 @@ export class Game {
         success: result.result_code === RESULT_CODES.OK,
       });
     }
+    if (type === LOG_TYPES.COMMAND_RESULT) {
+      this.commandResultHistory.push(this.cloneValue(log));
+    }
     this.logs.push(log);
     this.pendingSnapshotLogs.push(log);
     // 限制日志数量，防止内存泄漏
@@ -1265,11 +1268,7 @@ export class Game {
     } else if (this.latestSnapshot) {
       if (snapshot.tick > this.latestSnapshot.tick) {
         delta = buildTickDelta(this.latestSnapshot, snapshot, [...this.pendingSnapshotLogs]);
-        this.tickDeltaBuffer.push(delta);
-      }
-      if (this.tickDeltaBuffer.length >= TICK_DELTA_CHUNK_SIZE) {
-        this.tickDeltaChunks.push(gzipSync(JSON.stringify(this.tickDeltaBuffer)).toString("base64"));
-        this.tickDeltaBuffer = [];
+        this.tickDeltaArchive.append(delta);
       }
     }
     this.latestSnapshot = snapshot;
@@ -1328,17 +1327,13 @@ export class Game {
     return Array.from(this.iterateTickDeltas(), (delta) => this.cloneValue(delta));
   }
 
+  async getTickDeltasAsync(): Promise<TickDeltaRecord[]> {
+    const archived = await this.tickDeltaArchive.getAll();
+    return archived.map((delta) => this.cloneValue(delta));
+  }
+
   *iterateTickDeltas(throughTick?: number): Generator<TickDeltaRecord> {
-    for (const chunk of this.tickDeltaChunks) {
-      const deltas = JSON.parse(
-        gunzipSync(Buffer.from(chunk, "base64")).toString("utf8"),
-      ) as TickDeltaRecord[];
-      for (const delta of deltas) {
-        if (throughTick !== undefined && delta.tick > throughTick) return;
-        yield delta;
-      }
-    }
-    for (const delta of this.tickDeltaBuffer) {
+    for (const delta of this.tickDeltaArchive.iterateSync()) {
       if (throughTick !== undefined && delta.tick > throughTick) return;
       yield delta;
     }
@@ -1353,15 +1348,7 @@ export class Game {
   }
 
   *iterateCommandResults(sinceTick?: number, throughTick?: number): Generator<GameLog> {
-    const recordedLogs = function* (game: Game): Generator<GameLog> {
-      yield* game.initialSnapshot?.state.logs ?? [];
-      for (const delta of game.iterateTickDeltas()) {
-        yield* delta.newLogs;
-      }
-      yield* game.pendingSnapshotLogs;
-    }(this);
-    for (const log of recordedLogs) {
-      if (log.type !== LOG_TYPES.COMMAND_RESULT) continue;
+    for (const log of this.commandResultHistory) {
       if (sinceTick !== undefined && log.tick <= sinceTick) continue;
       if (throughTick !== undefined && log.tick > throughTick) continue;
       yield log;

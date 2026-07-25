@@ -697,7 +697,7 @@ describe("server settings", () => {
     expect(state.activeBenchmark).toBe(benchmarkOrchestrator);
   });
 
-  it("builds live state payloads without hitting preset storage or duplicating snapshots", async () => {
+  it("builds live state payloads without hitting preset storage or duplicating full state", async () => {
     const presetStore = await createStore();
     const listSpy = vi.spyOn(presetStore, "list");
     const snapshots = Array.from({ length: 25 }, (_, index) => ({
@@ -745,8 +745,8 @@ describe("server settings", () => {
     expect(payload.liveEnabled).toBe(true);
     expect(payload.matchStatus).toBeNull();
     expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
-    expect(payload.snapshots).toHaveLength(1);
-    expect(payload.snapshots[0]?.tick).toBe(24);
+    expect(payload.state).toBeNull();
+    expect(payload.snapshots).toEqual([]);
     expect(payload.frame).toEqual(expect.objectContaining({
       kind: "keyframe",
       metadata: expect.objectContaining({

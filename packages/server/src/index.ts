@@ -266,7 +266,6 @@ export function buildStateMessagePayload(
 ): StateMessagePayload {
   const currentMatch = state.matchRegistry.getObserved();
   const game = currentMatch?.handle.getGame();
-  const latestSnapshot = game?.getLatestSnapshot?.();
   const currentState = game?.getState() ?? null;
   const aiOutputs = game?.getAIOutputs?.() ?? {};
   const frameSequence = options.frameSequence ?? 1;
@@ -298,10 +297,13 @@ export function buildStateMessagePayload(
 
   return {
     type: "state",
-    state: keyframe ? currentState : null,
+    // `frame` is the authoritative live projection. Keep the legacy fields in
+    // the wire shape, but do not duplicate the full state on every keyframe or
+    // attach a second full GameSnapshot on every tick.
+    state: null,
     frame,
     aiOutputs,
-    snapshots: latestSnapshot ? [latestSnapshot] : [],
+    snapshots: [],
     liveEnabled: Boolean(state.liveEnabled),
     matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
   };
@@ -834,6 +836,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
       const signature = buildMatchSignature(message);
       const activeLive = getActiveLiveMatch(state);
+      const observedLive = state.matchRegistry.list().find((match) => match.kind === "live" && match.observed) ?? null;
       if (activeLive?.status === "running") {
         state.matchRegistry.observe(activeLive.matchId);
         ws.send(JSON.stringify({
@@ -853,12 +856,16 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         state.matchRegistry.remove(activeLive.matchId, { stop: true });
       }
       const previousObservedId = state.matchRegistry.getObservedMatchId();
+      const resumableMatch = observedLive?.status === "stopped"
+        && state.matchRegistry.get(observedLive.matchId)?.signature === signature
+        ? getRegisteredOrchestrator(state, observedLive.matchId)
+        : null;
       const warmedMatch = state.warmupMatch?.signature === signature
         ? getRegisteredOrchestrator(state, state.warmupMatch.matchId)
         : activeLive?.status === "waiting_for_players"
           && state.matchRegistry.get(activeLive.matchId)?.signature === signature
           ? getRegisteredOrchestrator(state, activeLive.matchId)
-          : null;
+          : resumableMatch;
       const createdNew = !warmedMatch;
       const nextOrchestrator = warmedMatch ?? registerOrchestrator(
         state,
@@ -899,7 +906,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       state.activeBenchmark?.stop();
       state.activeBenchmark = null;
       const observedMatchId = state.matchRegistry.getObservedMatchId();
-      if (observedMatchId) await state.matchRegistry.stopAndSave(observedMatchId);
+      if (observedMatchId) state.matchRegistry.stop(observedMatchId);
       state.warmupMatch = null;
       return;
     }

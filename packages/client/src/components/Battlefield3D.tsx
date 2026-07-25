@@ -196,6 +196,9 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const STRUCTURE_VISUAL_SCALE = 1.16;
+const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
+const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
+const UNIT_INTERPOLATION_DEADZONE = 0.075;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -406,6 +409,9 @@ function getHeading(object: Unit): number {
 }
 
 function getBodyHeading(unit: Unit): number {
+  if (unit.type === "light_tank" && unit.heading !== undefined) {
+    return Math.PI - unit.heading;
+  }
   return getHeading(unit) + (unit.type === "light_tank" ? TANK_FORWARD_OFFSET : 0);
 }
 
@@ -1589,6 +1595,120 @@ function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDime
   );
 }
 
+function useInterpolatedUnits(units: Unit[]): Unit[] {
+  const sourceUnits = useRef(units);
+  const visualPositions = useRef(new Map<string, { x: number; y: number; heading?: number }>());
+  const transitions = useRef(new Map<string, {
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    fromHeading?: number;
+    toHeading?: number;
+    startedAtMs: number;
+  }>());
+  const [displayUnits, setDisplayUnits] = useState(units);
+
+  useEffect(() => {
+    const now = performance.now();
+    sourceUnits.current = units;
+    const liveIds = new Set(units.map((unit) => unit.id));
+    for (const [unitId] of visualPositions.current) {
+      if (!liveIds.has(unitId)) {
+        visualPositions.current.delete(unitId);
+        transitions.current.delete(unitId);
+      }
+    }
+
+    for (const unit of units) {
+      const existing = visualPositions.current.get(unit.id);
+      if (!existing) {
+        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y, heading: unit.heading });
+        continue;
+      }
+      const jumpDistance = Math.max(Math.abs(existing.x - unit.x), Math.abs(existing.y - unit.y));
+      if (jumpDistance > UNIT_INTERPOLATION_SNAP_DISTANCE) {
+        existing.x = unit.x;
+        existing.y = unit.y;
+        existing.heading = unit.heading;
+      }
+      const headingChanged = unit.heading !== undefined && existing.heading !== undefined
+        ? Math.abs(Math.atan2(
+            Math.sin(unit.heading - existing.heading),
+            Math.cos(unit.heading - existing.heading),
+          )) > 0.001
+        : unit.heading !== existing.heading;
+      if (
+        jumpDistance < UNIT_INTERPOLATION_DEADZONE
+        && !headingChanged
+        && unit.state !== "moving"
+      ) {
+        transitions.current.delete(unit.id);
+        continue;
+      }
+      transitions.current.set(unit.id, {
+        fromX: existing.x,
+        fromY: existing.y,
+        toX: unit.x,
+        toY: unit.y,
+        fromHeading: existing.heading,
+        toHeading: unit.heading,
+        startedAtMs: now,
+      });
+    }
+
+    setDisplayUnits(units.map((unit) => {
+      const visual = visualPositions.current.get(unit.id);
+      return visual ? { ...unit, x: visual.x, y: visual.y, heading: visual.heading } : unit;
+    }));
+  }, [units]);
+
+  useFrame(() => {
+    const now = performance.now();
+    let changed = false;
+    for (const [unitId, transition] of transitions.current) {
+      const visual = visualPositions.current.get(unitId);
+      if (!visual) {
+        transitions.current.delete(unitId);
+        continue;
+      }
+
+      const progress = Math.min(1, Math.max(0,
+        (now - transition.startedAtMs) / UNIT_INTERPOLATION_DURATION_MS,
+      ));
+      const easedProgress = progress * progress * (3 - 2 * progress);
+      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, easedProgress);
+      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, easedProgress);
+      const nextHeading = transition.fromHeading !== undefined && transition.toHeading !== undefined
+        ? transition.fromHeading + Math.atan2(
+            Math.sin(transition.toHeading - transition.fromHeading),
+            Math.cos(transition.toHeading - transition.fromHeading),
+          ) * easedProgress
+        : transition.toHeading;
+      if (
+        Math.abs(nextX - visual.x) > 0.001
+        || Math.abs(nextY - visual.y) > 0.001
+        || (nextHeading !== undefined && Math.abs(nextHeading - (visual.heading ?? nextHeading)) > 0.001)
+      ) {
+        changed = true;
+      }
+      visual.x = progress >= 1 ? transition.toX : nextX;
+      visual.y = progress >= 1 ? transition.toY : nextY;
+      visual.heading = progress >= 1 ? transition.toHeading : nextHeading;
+
+      if (progress >= 1) transitions.current.delete(unitId);
+    }
+
+    if (!changed) return;
+    setDisplayUnits(sourceUnits.current.map((unit) => {
+      const visual = visualPositions.current.get(unit.id);
+      return visual ? { ...unit, x: visual.x, y: visual.y, heading: visual.heading } : unit;
+    }));
+  });
+
+  return displayUnits;
+}
+
 const BattlefieldScene = memo(function BattlefieldScene({
   state,
   projectileFxMode = "game",
@@ -1629,7 +1749,8 @@ const BattlefieldScene = memo(function BattlefieldScene({
       buildings: state.players.flatMap((player) => player.buildings).filter((building) => building.exists),
     };
   }, [state]);
-  const displayUnits = units;
+  const interpolatedUnits = useInterpolatedUnits(units);
+  const displayUnits = frameBuffer ? units : interpolatedUnits;
   const resourceTransforms = useMemo(
     () => resourceTiles.flatMap((tile) => getResourceClusterTransforms(tile, dimensions)),
     [dimensions, resourceTiles],

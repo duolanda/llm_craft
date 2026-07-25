@@ -143,9 +143,11 @@ interface TestLLMPresetResponse {
 
 说明：
 
-- 如果同一组预设和记录选项已有预热 match，`start` 会复用它并开始 tick；已挂起的首个 assistant/tool calls 会在正式开局后继续执行。
-- 如果没有匹配的预热 match，`start` 会创建实时对局并立即开始 tick。
+- 如果同一组预设和记录选项已有预热 match，`start` 会复用它；已挂起的首个 assistant/tool calls 会在正式对局中继续执行。
+- 如果没有匹配的预热 match，`start` 会创建实时对局并立即启动 tick，同时派发双方首次决策。
 - 已有 live 正在运行时不会重复创建或启动。
+
+`start` 不设置 tick-0 决策屏障；首次以及后续模型响应耗时都会消耗对局时间。手动 warmup 是显式的可选优化，只缓存选中模型的第一次供应商响应，不执行工具，也不改变后续决策的实时计时规则。
 
 ### 0.7 WebSocket `reset`
 
@@ -191,7 +193,7 @@ interface ServerStateMessage {
 }
 ```
 
-`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。delta 帧中的 `state` 为 `null`，客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。`frame` 是实时投影的权威载体；兼容字段 `state` 始终为 `null`，`snapshots` 始终为空数组，不再通过 WebSocket 重复发送完整状态。客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
 
 客户端的有界 `SimulationFrameBuffer` 同时服务 Live 和 Replay；它按 simulation time 取前后帧，包到达时间只用于估算带缓冲延迟的当前模拟时间，不再决定单位移动速度。
 
@@ -574,16 +576,18 @@ interface CommandProvenance {
       assignedHarvesters: number;
       distanceToHq: number | null;
     }>;
-    recommendations: Array<{
-      action: string;
-      reason: string;
-      unitIds?: string[];
-      target?: number;
-    }>;
   };
   unitCosts: Record<UnitType, number>;
   buildingCosts: Partial<Record<BuildingType, number>>;
   buildingConstructionTicks: Partial<Record<BuildingType, number>>;
+  buildOptions: Array<{
+    buildingType: "barracks" | "war_factory" | "refinery";
+    cost: number;
+    constructionTicks: number;
+    prerequisiteMet: boolean;
+    affordable: boolean;
+    availableBuilderIds: string[];
+  }>;
   techStatus: {
     own: {
       workers: number;
@@ -599,46 +603,11 @@ interface CommandProvenance {
       lightTanks: number;
       rocketSoldiers: number;
     };
-    attackWindow: {
-      ready: boolean;
-      combatUnits: number;
-      groupedCombatUnits: number;
-      unitIds: string[];
-      targetId: string | null; // enemy HQ
-      assemblyPoint: Position | null;
-      reason: string;
-    };
-    productionWarnings: Array<{
-      type: "enemy_anti_armor_mass";
-      avoidUnitType: "light_tank";
-      preferredUnitType: "rifleman";
-      reason: string;
-    }>;
-    recommendedStructures: Array<{
-      workerId: string;
-      buildingType: "barracks" | "war_factory" | "refinery";
-      cost: number;
-      constructionTicks: number;
-      reason: string;
-      suggestedSites: Array<Position & {
-        workerPosition: Position;
-      }>;
-    }>;
-    recommendedProduction: Array<{
-      buildingId: string;
-      buildingType: "hq" | "barracks" | "war_factory";
-      unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank";
-      reason: string;
-    }>;
   };
 }
 ```
 
-`economyStatus` 是派生提示字段，用于减少 agent 每轮重复检查 worker 经济：`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量，`idleWorkers` 表示当前空闲 worker 数量，`resourceAssignments` 表示各资源点当前分配到的采矿 worker 数量。默认开局建议维持 3 个 harvester 并保留 1 个 builder；省略坐标调用 `start_harvest_loop` 时，系统会倾向选择较近且较少 worker 占用的资源点。
-
-`techStatus` 是派生提示字段，用于减少 agent 每轮重复推理科技链：没有已完成 `barracks` 时优先提示补兵营；约 6 个战斗单位形成第一波，或敌方出现 `light_tank` / `war_factory` 后，才提示补 `war_factory`；敌方装甲科技出现时提示从空闲兵营补 `rocket_soldier`。`attackWindow` 按 12 格内最大局部集群判断，不把分散在整张地图上的总兵力误算成可出击兵团；未成军时会给出 `assemblyPoint` 并明确禁止单兵添油。敌方至少有 3 个火箭兵且我方步枪兵屏障不足时，`productionWarnings` 会要求暂停推荐 `light_tank`、优先补 `rifleman`。`recommendedStructures` 和 `recommendedProduction` 会尽量携带可直接调用工具的 `workerId` / `buildingId`；每个 `suggestedSites` 项同时给出建筑中心和 footprint 外的 `workerPosition`，必须成对使用，不能让 worker 站在建筑中心。施工中的建筑会出现在 `buildings` 中并带 `constructionProgress`，但不会计入 `techStatus.own`、不会满足 `building_exists`，也不能生产。
-
-`build_structure` 在 `insufficient_credits`、`invalid_build_position` 或 `worker_too_far` 时还会返回同形状的 `suggestedPlacements`，并在 `hint` 中说明“先移动 workerPosition，再对建筑中心建造”。
+`economyStatus`、`techStatus` 和 `buildOptions` 只提供客观事实与合法选项，不推荐固定 worker 数量、兵种、科技路线、出兵规模或攻击时机。`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量；`resourceAssignments` 表示各资源点当前分配情况，不是矿点容量上限。`buildOptions` 只返回成本、前置条件和可用 worker，不预计算候选工地；`build_structure` 省略坐标时自动选址，显式坐标非法时才在失败结果中返回少量 `suggestedPlacements`。施工中的建筑会出现在 `buildings` 中并带 `constructionProgress`，但不会计入已完成科技，也不能生产。
 
 #### `get_my_units`
 
@@ -677,24 +646,11 @@ interface CommandProvenance {
   readyCombatUnits: number;
   reloadingCombatUnits: number;
   groupedCombatUnits: number;
-  assemblyPoint: Position | null;
-  recommendedFormation: "line" | "battle_line";
-  recommendations: Array<{
-    action: string;
-    reason: string;
-    formation?: "battle_line";
-    unitIds?: string[];
-    targetId?: string;
-    minimumGroupSize?: number;
-    avoidUnitType?: UnitType;
-  }>;
+  largestGroupUnitIds: string[];
 }
 ```
 
-说明：
-
-- 这是给 agent 的读工具，用于判断是否缺反坦克、缺步兵掩护、是否适合用 `attack_move_group` 组织军团推进；少于 6 个彼此靠近的战斗单位时会推荐在 `assemblyPoint` 重新集结
-- `recommendations` 是非强制提示，不会替 agent 自动造兵或自动分兵
+`groupedCombatUnits` 和 `largestGroupUnitIds` 只描述当前最大局部兵团，不产生集结、编队或进攻建议。
 
 #### `get_active_plans`
 
@@ -716,7 +672,14 @@ interface AgentPlanAttemptRecord {
   call: PlanCallToolName;
   status: "waiting" | "command_created" | "advanced" | "failed";
   detail?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   commandCount?: number;
+}
+
+interface AgentPlanWaitingDiagnostic {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
 }
 
 interface AgentPlanRecord {
@@ -729,6 +692,7 @@ interface AgentPlanRecord {
   status: "active" | "completed" | "interrupted" | "failed";
   currentStep?: PlanStep;
   waitingReason?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   lastAttempt?: AgentPlanAttemptRecord;
 }
 ```
@@ -736,7 +700,8 @@ interface AgentPlanRecord {
 说明：
 
 - `currentStep` 是当前正在等待或推进的 step
-- `waitingReason` 只在 active plan 当前没有生成命令时出现，例如等待 `when` 条件、等待 `until`、等待 credits 或等待命令前置条件
+- `waitingReason` 是兼容用的人类可读摘要；`waiting.code/message/details` 是权威结构化诊断，例如 `insufficient_credits`、`worker_not_adjacent`、`production_queue_busy`、`same_order_active`、`attack_reloading` 或 `target_missing`
+- `same_order_active`、`unit_moving`、`unit_moving_to_target` 和部分 `worker_not_adjacent` 诊断会明确说明计划仍在正常执行，不需要重新注册
 - `lastAttempt` 记录最近一次推进尝试；`command_created` 表示该 tick 已生成命令，`advanced` 表示 step 已推进，`failed` 表示计划失败
 
 #### `get_recent_events`
@@ -756,7 +721,7 @@ interface AgentPlanRecord {
 
 ```ts
 {
-  unitId: string;
+  unitIds: string[];
   x: number;
   y: number;
 }
@@ -764,14 +729,14 @@ interface AgentPlanRecord {
 
 说明：
 
-- 主要用于 worker 移动或 combat unit 精确换位
-- 如果已经知道敌方目标 ID，尤其是 HQ / barracks / war_factory / refinery / 关键敌军，应优先使用 `attack`，不要用 `move_unit` 代替进攻命令
+- 语义等同于 RTS 中框选一个或多个单位后下达同一移动命令
+- 目标格被占用时，寻路层会尽量分配附近可达格，并通过 `move_adjusted` 返回实际落点
 
 #### `attack_move_unit`
 
 ```ts
 {
-  unitId: string;
+  unitIds: string[];
   x: number;
   y: number;
   priority?: Array<"worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank" | "hq" | "barracks" | "war_factory" | "refinery">;
@@ -780,49 +745,29 @@ interface AgentPlanRecord {
 
 说明：
 
-- 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
+- 语义等同于框选多个战斗单位后下达同一无目标推进命令
 - 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：`rifleman` 默认优先清火箭/步兵，`rocket_soldier` 默认优先打 `light_tank`，`light_tank` 默认优先打敌方装甲和反装甲支援，其后才拆生产建筑/HQ/精炼厂
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
 - 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory、拆 refinery 应使用 `attack`
 - 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
 
-#### `attack_move_group`
-
-```ts
-{
-  unitIds: string[];
-  x: number;
-  y: number;
-  formation?: "line" | "column" | "wedge" | "dispersed" | "battle_line";
-}
-```
-
-说明：
-
-- 一次控制一个或多个己方战斗单位，给每个单位分配不同推进落点
-- `battle_line` 是角色化编队：`light_tank` 前排，`soldier/rifleman` 居中，`rocket_soldier` 后排
-- 编队只影响目的地分配和默认攻击优先级；它不会强制 AI 攒兵，也不会自动替 AI 选择战略路线
-- 大军团推进、正面压制、侧翼小队推进时优先使用本工具，避免逐单位反复调用 `attack_move_unit`
-- 工具会为所有合法成员立即生成 `attack_move` 命令；结果返回 `commandIds`、`formation` 和每个单位的 `assignments`，没有跨 tick 释放队列
-
 #### `attack`
 
 ```ts
 {
-  unitId: string;
+  unitIds: string[];
   targetId: string;
 }
 ```
 
 说明：
 
-- 只接受有攻击能力的己方单位：`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
+- 框选的所有合法战斗单位对同一 `targetId` 下达持续攻击命令
 - `targetId` 必须来自全图情报中的敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
-- 攻击敌方 HQ、barracks、war_factory、refinery 或关键敌军时，优先使用 `attack`，不要先用 `attack_move_unit` 或 `move_unit` 代替
-- 目标已经消失但曾被读取过时，系统会自动降级为移动到该目标最后记录的位置；调用方不需要也不能传坐标
-- 未知目标 ID 返回 `ok: false` 和 `hint`
+- 目标已死亡或不存在时返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`，无需为了恢复该失败再读取全图
+- `targetStatus` 在目标曾被当前控制器观察且后来消失时为 `destroyed`；友军 ID 为 `not_enemy`；其他未知 ID 为 `invalid_id`
 
 #### `spawn_unit`
 
@@ -839,8 +784,8 @@ interface AgentPlanRecord {
 {
   unitId: string;
   buildingType: "barracks" | "war_factory" | "refinery";
-  x: number;
-  y: number;
+  x?: number;
+  y?: number;
 }
 ```
 
@@ -848,11 +793,13 @@ interface AgentPlanRecord {
 
 - 当前允许建造 `barracks`、`war_factory` 和 `refinery`
 - `war_factory` 需要己方已有一个已完成的 `barracks`
-- worker 必须先移动到目标建筑完整 footprint 的相邻 1 格内，才能开始施工
+- 省略 `x/y` 时自动选择合法工地；普通建筑选择 HQ 方向的附近工地，`refinery` 按可缩短的矿点交付路线排序。显式传入时使用指定建筑中心
+- worker 不在 footprint 旁时，工具会注册持久建造任务，自动移动；只有工人实际与完整 footprint 相邻时才进入建造步骤
 - 建造成功会立即扣 credits 并创建施工中的建筑；施工中建筑占地、可被攻击，但不能生产，也不满足科技前置
-- 施工会占用该 worker，施工完成前不能移动、采矿或接收其他命令
+- 施工会占用该 worker；如果建造前处于 `harvest_loop`，完工后自动恢复原采矿循环
 - 默认施工时间：`barracks` 12 ticks，`war_factory` 18 ticks，`refinery` 16 ticks
-- `refinery` 是矿场/精炼厂，可建在前线矿附近，worker 采矿后会向最近的 HQ 或已完成 refinery 交付
+- `refinery` 是交付点，不改变 worker 每 tick 的采集速度；收益来自缩短矿点与交付点之间的反复路线，因此贴 HQ 建造通常收益很小
+- 自动选址成功时，结果中的 `estimatedRouteSaving` 和 `nearbyResources` 说明该工地对矿点路线的影响
 - 建筑必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
 - 如果位置不合法，失败返回的 `hint` 会直接给出附近可行位置示例
 
@@ -869,8 +816,10 @@ interface AgentPlanRecord {
 说明：
 
 - 只接受己方 `worker`
-- 让 worker 进入内建采矿循环，在资源点和己方 HQ 之间自动往返
-- 省略 `x/y` 时，游戏会自动选择最近资源点
+- 让 worker 进入内建采矿循环，在资源点和最近的己方已完成 HQ/refinery 之间自动往返
+- 省略 `x/y` 时，游戏按反复交付路程、worker 初始路程和当前分配数自动选择矿点；交付路程权重更高，避免近矿尚可用时仅为分散分配跑去远矿
+- 单个矿点最多保留 2 个 worker；超出后内建循环会自动改派到下一条高效路线，避免多个单位围住单格矿点
+- 显式传入 `x/y` 会尊重该矿点，只应在需要主动覆盖自动选择时使用
 - 常规采矿应优先使用这个工具，不要用 `orchestrate_plan` 手写 worker 往返路线
 - 已经处于 `harvest_loop` 的 worker 默认视为已有任务，除非被堵、资源选择错误或需要改派，不要每轮重复调用
 
@@ -882,7 +831,9 @@ interface AgentPlanRecord {
 }
 ```
 
-这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。
+这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。只要服务端已经掌握恢复所需事实，失败结果会直接附带紧凑候选，例如 `availableFriendlyUnits`、`availableAttackers`、`availableWorkers`、`availableProductionBuildings`、`availableEnemyTargets` 或 `nearbyResources`，hint 不再要求额外调用状态读取工具。
+
+批量 `move_unit` / `attack_move_unit` / `attack` 会把相同候选列表提升到批量结果顶层，不在每个单位的子结果中重复。候选默认有数量上限；敌方目标返回完整计数，并优先包含敌方建筑和距离攻击者最近的单位。
 
 成功和失败结果都会带当前 `tick`。如果本轮最后一次只读工具调用距离当前超过 10 ticks，或本轮还没有调用过只读工具，动作/计划工具会附带 `warning`，但不会仅因为 warning 拒绝入队：
 
@@ -953,6 +904,7 @@ type PlanStepCondition =
   | { condition: "enemy_in_range" }
   | { condition: "hq_in_range" }
   | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "worker_adjacent_to_build_footprint"; buildingType: BuildingType; x: number; y: number }
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
@@ -972,11 +924,11 @@ type PlanStepCondition =
 - `steps` 只接受 call step，把现有动作工具调用注册成持续计划
 - `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开；`scope = "global"` 只执行一次
 - `when` 是执行前置条件，未满足时等待；`until` 是完成条件，满足后推进到下一 step
-- global step 如果在 `args.unitId` 中指定具体单位，`when` / `until` 的 `arrived`、`near_position`、`enemy_in_range`、`hq_in_range` 和 `target_in_range` 会基于该单位判断
+- global step 如果在 `args.unitId` 中指定具体单位，`when` / `until` 的 `arrived`、`near_position`、`worker_adjacent_to_build_footprint`、`enemy_in_range`、`hq_in_range` 和 `target_in_range` 会基于该单位判断
 - `enemy_building_exists` / `enemy_unit_count_at_least` 用于表达反制触发，例如看到敌方 `war_factory` 或 `light_tank` 后补 `rocket_soldier`
 - `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
 - `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"`、`"$barracks"` 或 `"$war_factory"`，在执行时解析为当前友方建筑
-- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；`build_structure` 仍要求 worker 已经在 footprint 相邻 1 格内，因此常见计划应先用 `move_unit` 把 builder 移到工地旁；即时动作工具仍会返回 `insufficient_credits`
+- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；即时 `build_structure` 会自动选择或使用指定工地，并在 worker 距离较远时注册移动加施工的持久任务
 - 多个 active plan 在同一 tick 推进时按顺序检查实际可用 credits；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
@@ -1264,7 +1216,7 @@ Call an agent tool on behalf of the session's player. Control plane 只暴露可
 
 Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_army_summary`, `get_active_plans`, `get_recent_events`
 
-Action tools: `move_unit`, `attack_move_unit`, `attack_move_group`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
+Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
 
 Plan tool: `orchestrate_plan`
 
@@ -1285,7 +1237,7 @@ Response uses the standard `ControlResponse` envelope with `kind` set to `"state
 interface ControlActionBatchRequest {
   clientRequestId: string;
   actions: Array<{
-    tool: "move_unit" | "attack_move_unit" | "attack_move_group" | "attack" |
+    tool: "move_unit" | "attack_move_unit" | "attack" |
       "spawn_unit" | "build_structure" | "start_harvest_loop" | "hold_unit";
     args?: Record<string, unknown>;
   }>;
@@ -1329,6 +1281,8 @@ interface MatchRecord {
   aiTurns?: SavedAITurnRecord[];
 }
 ```
+
+`GameState` 中的 `Unit.heading?: number` 是模拟层权威车体朝向，单位为 XY 平面弧度，`0` 指向 `+X`。`TickDeltaRecord.players[].units[]` 在单位创建或朝向变化时携带同名字段；回放必须沿最短角度插值该值，不能根据客户端收到的 intent 重新推断坦克车体朝向。旧记录没有该字段时，读取端继续使用兼容默认朝向。
 
 记录档位：
 

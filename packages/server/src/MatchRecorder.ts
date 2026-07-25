@@ -26,6 +26,7 @@ export interface MatchRecordContext {
  */
 export class MatchRecorder {
   private savedPath: string | null = null;
+  private savedSignature: string | null = null;
   private savePromise: Promise<string> | null = null;
 
   constructor(
@@ -40,16 +41,29 @@ export class MatchRecorder {
     if (this.runtime.getGame().isGameRunning()) {
       throw new Error("MATCH_STILL_RUNNING");
     }
-    if (this.savedPath) return this.savedPath;
+    const signature = this.buildSignature(context);
+    if (this.savedPath && this.savedSignature === signature) return this.savedPath;
     if (this.savePromise) return this.savePromise;
 
     this.savePromise = this.write(context);
     try {
       this.savedPath = await this.savePromise;
+      this.savedSignature = signature;
       return this.savedPath;
     } finally {
       this.savePromise = null;
     }
+  }
+
+  private buildSignature(context: MatchRecordContext): string {
+    const game = this.runtime.getGame();
+    return JSON.stringify({
+      tick: game.getTick(),
+      winner: game.getWinner(),
+      status: this.runtime.getStatus(),
+      aiTurns: context.aiTurns.length,
+      commandResults: game.getCommandResults().length,
+    });
   }
 
   private async write(context: MatchRecordContext): Promise<string> {
@@ -80,7 +94,7 @@ export class MatchRecorder {
       },
       initialState,
       finalState,
-      tickDeltas: game.getTickDeltas(),
+      tickDeltas: await game.getTickDeltasAsync(),
       ...(profile === "evaluation"
         ? {
             commandResults: game.getCommandResults(),
@@ -90,7 +104,9 @@ export class MatchRecorder {
     };
 
     await fs.mkdir(this.recordDir, { recursive: true });
-    const fileName = `${this.runtime.getMatchId()}.match.json`;
+    const timestamp = savedAt.replace(/[:.]/g, "-");
+    const matchSuffix = this.runtime.getMatchId().replace(/^match_/, "").slice(0, 8);
+    const fileName = `match-${timestamp}-${matchSuffix}.match.json`;
     const finalPath = path.join(this.recordDir, fileName);
     const tempPath = `${finalPath}.tmp-${process.pid}`;
     await fs.writeFile(tempPath, JSON.stringify(record));

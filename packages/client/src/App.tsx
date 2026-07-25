@@ -889,7 +889,7 @@ function App() {
                     disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isWarmingUp || !canStartLiveMatch}
                     className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                   >
-                    {isPlaying ? "停止对局" : startPending ? "启动中" : "启动对局"}
+                    {isPlaying ? "暂停对局" : startPending ? "启动中" : hasLiveMatchStarted ? "继续对局" : "启动对局"}
                   </button>
                   {benchmarkRunning && (
                     <button
@@ -1085,7 +1085,7 @@ function App() {
               <div className="viewport">
                 <Battlefield3D
                   state={displayState}
-                  frameBuffer={mode === "replay" ? replayFrameBuffer : frameBuffer}
+                  frameBuffer={mode === "replay" ? replayFrameBuffer : undefined}
                   simulationTimeMs={mode === "replay" ? (replayFrame?.tick ?? 0) * replayTickIntervalMs : undefined}
                 />
               </div>

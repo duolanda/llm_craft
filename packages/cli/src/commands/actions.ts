@@ -1,9 +1,8 @@
 import type { ControlClient } from "../client.js";
-import { ALL_BUILDING_TYPES, ALL_UNIT_TYPES, BUILDING_TYPES } from "@llmcraft/shared";
+import { ALL_BUILDING_TYPES, ALL_UNIT_TYPES, BUILDING_TYPES, type ControlBatchAction } from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
-import { printBatchResult } from "./batch.js";
 
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
@@ -32,6 +31,17 @@ async function callAndPrint(
   if (!resp.ok) {
     process.exit(ExitCode.BackendFailure);
   }
+}
+
+async function callBatchAndPrint(
+  client: ControlClient,
+  sessionId: string,
+  actions: ControlBatchAction[],
+  requestId?: string,
+): Promise<void> {
+  const resp = await client.callActionBatch(sessionId, actions, requestId);
+  printJson(resp);
+  if (!resp.ok) process.exit(ExitCode.BackendFailure);
 }
 
 // --- move ---
@@ -65,16 +75,14 @@ export async function handleMove(
   }
   const to = parseCoord(toRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "move_unit", {
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "move_unit",
+    args: {
       unitId: item.id as string,
       x: to.x,
       y: to.y,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    },
+  })), flags.get("request-id"));
 }
 
 // --- attack ---
@@ -104,16 +112,11 @@ export async function handleAttack(
     if (pairs.length === 0) {
       exit(ExitCode.ArgError, "attack: stdin pairing has no pairs");
     }
-    const results: unknown[] = [];
-    for (const pair of pairs) {
+    const actions = pairs.map((pair): ControlBatchAction => {
       const enemy = pair.enemy as Record<string, unknown> | undefined;
-      const resp = await client.callTool(sessionId, "attack", {
-        unitId: pair.unitId as string,
-        targetId: enemy?.id as string,
-      });
-      results.push(resp);
-    }
-    printBatchResult(stdinInput.tick, results);
+      return { tool: "attack", args: { unitId: pair.unitId as string, targetId: enemy?.id as string } };
+    });
+    await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
     return;
   }
 
@@ -127,15 +130,10 @@ export async function handleAttack(
     exit(ExitCode.ArgError, "attack with stdin requires --target <id>");
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "attack", {
-      unitId: item.id as string,
-      targetId,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "attack",
+    args: { unitId: item.id as string, targetId },
+  })), flags.get("request-id"));
 }
 
 // --- attack-move ---
@@ -182,14 +180,12 @@ export async function handleAttackMove(
   }
   const to = parseCoord(toRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
+  const actions = items.map((item): ControlBatchAction => {
     const args: Record<string, unknown> = { unitId: item.id as string, x: to.x, y: to.y };
     if (priority) args.priority = priority;
-    const resp = await client.callTool(sessionId, "attack_move_unit", args);
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    return { tool: "attack_move_unit", args };
+  });
+  await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
 }
 
 // --- gather ---
@@ -225,15 +221,13 @@ export async function handleGather(
     if (pairs.length === 0) {
       exit(ExitCode.ArgError, "gather: stdin pairing has no pairs");
     }
-    const results: unknown[] = [];
-    for (const pair of pairs) {
+    const actions = pairs.map((pair): ControlBatchAction => {
       const rsrc = pair.resource as Record<string, number> | undefined;
       const args: Record<string, unknown> = { unitId: pair.unitId as string };
       if (rsrc) { args.x = rsrc.x; args.y = rsrc.y; }
-      const resp = await client.callTool(sessionId, "start_harvest_loop", args);
-      results.push(resp);
-    }
-    printBatchResult(stdinInput.tick, results);
+      return { tool: "start_harvest_loop", args };
+    });
+    await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
     return;
   }
 
@@ -244,14 +238,12 @@ export async function handleGather(
   }
 
   const resourcePos = resourceRaw ? parseCoord(resourceRaw) : undefined;
-  const results: unknown[] = [];
-  for (const item of items) {
+  const actions = items.map((item): ControlBatchAction => {
     const args: Record<string, unknown> = { unitId: item.id as string };
     if (resourcePos) { args.x = resourcePos.x; args.y = resourcePos.y; }
-    const resp = await client.callTool(sessionId, "start_harvest_loop", args);
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    return { tool: "start_harvest_loop", args };
+  });
+  await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
 }
 
 // --- build ---
@@ -297,17 +289,15 @@ export async function handleBuild(
   }
   const { x, y } = parseCoord(atRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "build_structure", {
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "build_structure",
+    args: {
       unitId: item.id as string,
       buildingType,
       x,
       y,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    },
+  })), flags.get("request-id"));
 }
 
 // --- train ---
@@ -343,15 +333,13 @@ export async function handleTrain(
     exit(ExitCode.ArgError, `train ${unitType}: stdin selection has no buildings`);
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "spawn_unit", {
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "spawn_unit",
+    args: {
       buildingId: item.id as string,
       unitType,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    },
+  })), flags.get("request-id"));
 }
 
 // --- hold ---
@@ -378,12 +366,8 @@ export async function handleHold(
     exit(ExitCode.ArgError, "hold: stdin selection has no units");
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "hold_unit", {
-      unitId: item.id as string,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "hold_unit",
+    args: { unitId: item.id as string },
+  })), flags.get("request-id"));
 }

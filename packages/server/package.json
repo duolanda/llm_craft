@@ -8,12 +8,13 @@
     "build": "tsc --build",
     "start": "node dist/index.js",
     "analyze:record": "node scripts/analyze-record.mjs",
-    "smoke:strategic": "tsx scripts/strategic-scale-smoke.ts",
+    "check:strategic": "tsx scripts/strategic-scale-check.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@llmcraft/shared": "*",
+    "@llmcraft/shared": "workspace:*",
+    "@llmcraft/record": "workspace:*",
     "openai": "^4.24.7",
     "ws": "^8.16.0",
     "dotenv": "^16.3.1"

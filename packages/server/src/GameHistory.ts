@@ -49,6 +49,7 @@ function diffUnits(
         attackRange: unit.attackRange,
         carryingCredits: unit.carryingCredits,
         carryCapacity: unit.carryCapacity,
+        heading: unit.heading,
         intent: unit.intent ?? null,
         constructingBuildingId: unit.constructingBuildingId ?? null,
       });
@@ -60,6 +61,7 @@ function diffUnits(
     const carryingChanged = previousUnit.carryingCredits !== unit.carryingCredits;
     const updated = previousUnit.state !== unit.state
       || carryingChanged
+      || previousUnit.heading !== unit.heading
       || previousUnit.constructingBuildingId !== unit.constructingBuildingId
       || JSON.stringify(previousUnit.intent ?? null) !== JSON.stringify(unit.intent ?? null);
 
@@ -76,6 +78,7 @@ function diffUnits(
         attackRange: unit.attackRange,
         carryingCredits: unit.carryingCredits,
         carryCapacity: unit.carryCapacity,
+        heading: unit.heading,
         intent: unit.intent ?? null,
         constructingBuildingId: unit.constructingBuildingId ?? null,
       });

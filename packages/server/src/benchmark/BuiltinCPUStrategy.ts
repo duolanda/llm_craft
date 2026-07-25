@@ -1,14 +1,16 @@
 import {
   BUILDING_TYPES,
+  BuildingType,
   CPUStrategyType,
   DEFAULT_MAP_LAYOUT,
   UNIT_TYPES,
   getBuildingCost,
+  getBuildingFootprintCells,
   getCombatUnitTypes,
   getUnitCost,
 } from "@llmcraft/shared";
 
-const ARMY_MASSING_THRESHOLD = 24;
+const ARMY_MASSING_THRESHOLD = 20;
 
 function chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
@@ -73,6 +75,57 @@ function findForwardRefinerySite(hq: { x: number; y: number }, mapWidth: number)
   return hq.x < mapWidth / 2 ? { x: 44, y: 18 } : { x: 99, y: 18 };
 }
 
+function isAdjacentToBuildSite(
+  worker: { x: number; y: number },
+  buildingType: BuildingType,
+  site: { x: number; y: number },
+): boolean {
+  return getBuildingFootprintCells(buildingType, site.x, site.y).some((cell) =>
+    Math.max(Math.abs(worker.x - cell.x), Math.abs(worker.y - cell.y)) <= 1
+  );
+}
+
+function findBuildApproach(
+  worker: { x: number; y: number },
+  buildingType: BuildingType,
+  site: { x: number; y: number },
+  mapWidth: number,
+  mapHeight: number,
+  units: Array<{ x: number; y: number }>,
+): { x: number; y: number } {
+  const footprint = getBuildingFootprintCells(buildingType, site.x, site.y);
+  const footprintKeys = new Set(footprint.map((cell) => `${cell.x},${cell.y}`));
+  const occupiedUnitKeys = new Set(
+    units
+      .filter((unit) => unit !== worker)
+      .map((unit) => `${Math.round(unit.x)},${Math.round(unit.y)}`),
+  );
+  const minX = Math.min(...footprint.map((cell) => cell.x));
+  const maxX = Math.max(...footprint.map((cell) => cell.x));
+  const minY = Math.min(...footprint.map((cell) => cell.y));
+  const maxY = Math.max(...footprint.map((cell) => cell.y));
+  const candidates: Array<{ x: number; y: number }> = [];
+
+  for (let x = minX - 1; x <= maxX + 1; x++) {
+    candidates.push({ x, y: minY - 1 }, { x, y: maxY + 1 });
+  }
+  for (let y = minY; y <= maxY; y++) {
+    candidates.push({ x: minX - 1, y }, { x: maxX + 1, y });
+  }
+
+  return candidates
+    .filter((candidate) =>
+      candidate.x >= 0 &&
+      candidate.x < mapWidth &&
+      candidate.y >= 0 &&
+      candidate.y < mapHeight &&
+      !footprintKeys.has(`${candidate.x},${candidate.y}`) &&
+      !occupiedUnitKeys.has(`${candidate.x},${candidate.y}`)
+    )
+    .sort((a, b) => chebyshevDistance(worker, a) - chebyshevDistance(worker, b))[0]
+    ?? { x: minX - 1, y: site.y };
+}
+
 export interface BuiltinCPURuntimeState {
   myState?: unknown;
   myUnits?: unknown;
@@ -101,16 +154,26 @@ export async function runBuiltinCPUStrategy(options: {
   const credits = typeof myState?.credits === "number" ? myState.credits : 0;
   const hq = myState?.hq ?? null;
   const buildings = Array.isArray(myState?.buildings) ? myState.buildings : [];
-  const barracksBuildings = buildings.filter((building: any) => building.type === "barracks");
-  const warFactoryBuildings = buildings.filter((building: any) => building.type === "war_factory");
+  const startedBarracksBuildings = buildings.filter((building: any) => building.type === BUILDING_TYPES.BARRACKS);
+  const startedWarFactoryBuildings = buildings.filter((building: any) => building.type === BUILDING_TYPES.WAR_FACTORY);
+  const startedRefineryBuildings = buildings.filter((building: any) => building.type === BUILDING_TYPES.REFINERY);
+  const barracksBuildings = startedBarracksBuildings.filter((building: any) => !building.constructionProgress);
+  const warFactoryBuildings = startedWarFactoryBuildings.filter((building: any) => !building.constructionProgress);
   const hasBarracks = barracksBuildings.length > 0;
   const hasWarFactory = warFactoryBuildings.length > 0;
-  const refineryBuildings = buildings.filter((building: any) => building.type === BUILDING_TYPES.REFINERY);
+  const refineryBuildings = startedRefineryBuildings.filter((building: any) => !building.constructionProgress);
+  const hasStartedBarracks = startedBarracksBuildings.length > 0;
+  const hasStartedWarFactory = startedWarFactoryBuildings.length > 0;
+  const hasStartedRefinery = startedRefineryBuildings.length > 0;
   const hasRefinery = refineryBuildings.length > 0;
   const workers = myUnits.filter((unit: any) => unit.type === "worker");
+  const availableWorkers = workers.filter((worker: any) => !worker.constructingBuildingId);
   const combatUnitTypes = new Set(getCombatUnitTypes());
   const combatUnits = myUnits.filter((unit: any) => combatUnitTypes.has(unit.type));
   const mapCells = Array.isArray(mapState?.cells) ? mapState.cells : [];
+  const mapResources = Array.isArray(mapState?.resources)
+    ? mapState.resources.filter((resource: any) => typeof resource?.remaining !== "number" || resource.remaining > 0)
+    : [];
   const mapBuildings = Array.isArray(mapState?.buildings)
     ? mapState.buildings
     : mapCells.filter((cell: any) => cell?.building).map((cell: any) => ({ x: cell.x, y: cell.y, ...cell.building }));
@@ -138,8 +201,46 @@ export async function runBuiltinCPUStrategy(options: {
     : canSpawnRifleman
       ? UNIT_TYPES.RIFLEMAN
       : UNIT_TYPES.SOLDIER;
+  const rushInfrastructureReserve = !hasStartedBarracks
+    ? getBuildingCost(BUILDING_TYPES.BARRACKS)
+    : hasBarracks && !hasStartedRefinery
+      ? getBuildingCost(BUILDING_TYPES.REFINERY)
+      : hasBarracks && !hasStartedWarFactory
+        ? getBuildingCost(BUILDING_TYPES.WAR_FACTORY)
+        : 0;
+  const rushProductionCredits = Math.max(0, credits - rushInfrastructureReserve);
+  const rushBarracksUnit = enemyHasVehicles && rushProductionCredits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)
+    ? UNIT_TYPES.ROCKET_SOLDIER
+    : rushProductionCredits >= getUnitCost(UNIT_TYPES.RIFLEMAN)
+      ? UNIT_TYPES.RIFLEMAN
+      : rushProductionCredits >= getUnitCost(UNIT_TYPES.SOLDIER)
+        ? UNIT_TYPES.SOLDIER
+        : null;
 
   const callTool = options.callTool;
+  const reservedWorkerIds = new Set<string>();
+  let buildActionIssued = false;
+  const prepareBuild = async (
+    worker: any,
+    buildingType: BuildingType,
+    site: { x: number; y: number },
+  ): Promise<boolean> => {
+    reservedWorkerIds.add(worker.id);
+    buildActionIssued = true;
+    if (isAdjacentToBuildSite(worker, buildingType, site)) {
+      return true;
+    }
+    const approach = findBuildApproach(
+      worker,
+      buildingType,
+      site,
+      mapState?.width ?? 144,
+      mapState?.height ?? 96,
+      myUnits,
+    );
+    await callTool("move_unit", { unitId: worker.id, x: approach.x, y: approach.y });
+    return false;
+  };
   const issueMultiFrontAdvance = async (): Promise<boolean> => {
     if (!enemyBase || combatUnits.length < ARMY_MASSING_THRESHOLD) {
       return false;
@@ -155,11 +256,10 @@ export async function runBuiltinCPUStrategy(options: {
     for (let front = 0; front < frontY.length; front++) {
       const unitIds = awaitingOrders.filter((_: any, index: number) => index % 3 === front).map((unit: any) => unit.id);
       if (unitIds.length > 0) {
-        await callTool("attack_move_group", {
+        await callTool("attack_move_unit", {
           unitIds,
           x: stagingX,
           y: frontY[front],
-          formation: front === 1 ? "wedge" : "line",
         });
       }
     }
@@ -167,9 +267,19 @@ export async function runBuiltinCPUStrategy(options: {
   };
   const issueWorkerEconomy = async () => {
     for (const [index, worker] of workers.entries()) {
-      const forwardResource = hq?.x < (mapState?.width ?? 144) / 2
-        ? DEFAULT_MAP_LAYOUT.resources[6]
-        : DEFAULT_MAP_LAYOUT.resources[10];
+      if (worker.constructingBuildingId || reservedWorkerIds.has(worker.id)) {
+        continue;
+      }
+      const forwardResources = refineryBuildings.length > 0
+        ? [...mapResources].sort((a: any, b: any) => {
+            const distanceA = Math.min(...refineryBuildings.map((refinery: any) => chebyshevDistance(refinery, a)));
+            const distanceB = Math.min(...refineryBuildings.map((refinery: any) => chebyshevDistance(refinery, b)));
+            return distanceA - distanceB;
+          })
+        : [];
+      const forwardResource = forwardResources.length > 0
+        ? forwardResources[(index - 2) % Math.min(2, forwardResources.length)]
+        : undefined;
       const needsForwardAssignment = hasRefinery && index >= 2 && forwardResource && (
         worker.intent?.type !== "harvest_loop" ||
         worker.intent?.targetX !== forwardResource.x ||
@@ -189,23 +299,26 @@ export async function runBuiltinCPUStrategy(options: {
   if (options.strategy === "random") {
     if (workers.length === 0 && canSpawnWorker && hq) {
       await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
-    } else if (!hasBarracks && canBuildBarracks && workers[0] && hq) {
+    } else if (!hasStartedBarracks && canBuildBarracks && availableWorkers[0] && hq) {
       const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
-      await callTool("build_structure", {
-        unitId: workers[0].id,
-        buildingType: "barracks",
-        x: site.x,
-        y: site.y,
-      });
+      const worker = availableWorkers[0];
+      if (await prepareBuild(worker, BUILDING_TYPES.BARRACKS, site)) {
+        await callTool("build_structure", {
+          unitId: worker.id,
+          buildingType: BUILDING_TYPES.BARRACKS,
+          x: site.x,
+          y: site.y,
+        });
+      }
     } else {
       const candidatePlans: Array<"mine" | "spawn-worker" | "build-refinery" | "build-war-factory" | "spawn-infantry" | "spawn-tank" | "attack"> = ["mine"];
       if (canSpawnWorker && workers.length < 4 && hq) {
         candidatePlans.push("spawn-worker");
       }
-      if (hasBarracks && !hasWarFactory && canBuildWarFactory && workers[0]) {
+      if (hasBarracks && !hasStartedWarFactory && canBuildWarFactory && availableWorkers[0]) {
         candidatePlans.push("build-war-factory");
       }
-      if (hasBarracks && !hasRefinery && canBuildRefinery && workers[0] && hq) {
+      if (hasBarracks && !hasStartedRefinery && canBuildRefinery && availableWorkers[0] && hq) {
         candidatePlans.push("build-refinery");
       }
       if (hasBarracks && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
@@ -223,17 +336,23 @@ export async function runBuiltinCPUStrategy(options: {
 
       if (selectedPlan === "spawn-worker" && hq) {
         await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
-      } else if (selectedPlan === "build-refinery" && workers[0] && hq) {
+      } else if (selectedPlan === "build-refinery" && availableWorkers[0] && hq) {
         const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
-        await callTool("build_structure", { unitId: workers[0].id, buildingType: BUILDING_TYPES.REFINERY, x: site.x, y: site.y });
-      } else if (selectedPlan === "build-war-factory" && workers[0] && hq) {
+        const worker = availableWorkers[0];
+        if (await prepareBuild(worker, BUILDING_TYPES.REFINERY, site)) {
+          await callTool("build_structure", { unitId: worker.id, buildingType: BUILDING_TYPES.REFINERY, x: site.x, y: site.y });
+        }
+      } else if (selectedPlan === "build-war-factory" && availableWorkers[0] && hq) {
         const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
-        await callTool("build_structure", {
-          unitId: workers[0].id,
-          buildingType: "war_factory",
-          x: site.x,
-          y: site.y,
-        });
+        const worker = availableWorkers[0];
+        if (await prepareBuild(worker, BUILDING_TYPES.WAR_FACTORY, site)) {
+          await callTool("build_structure", {
+            unitId: worker.id,
+            buildingType: BUILDING_TYPES.WAR_FACTORY,
+            x: site.x,
+            y: site.y,
+          });
+        }
       } else if (selectedPlan === "spawn-infantry") {
         for (const barracks of barracksBuildings) {
           await callTool("spawn_unit", { buildingId: barracks.id, unitType: preferredBarracksUnit });
@@ -274,40 +393,49 @@ export async function runBuiltinCPUStrategy(options: {
     await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
   }
 
-  if (!hasBarracks && canBuildBarracks && workers[0] && hq) {
+  if (!hasStartedBarracks && canBuildBarracks && availableWorkers[0] && hq) {
     const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
-    await callTool("build_structure", {
-      unitId: workers[0].id,
-      buildingType: "barracks",
-      x: site.x,
-      y: site.y,
-    });
-  }
-
-  if (hasBarracks && !hasRefinery && canBuildRefinery && workers[0] && hq) {
-    const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
-    await callTool("build_structure", {
-      unitId: workers[0].id,
-      buildingType: BUILDING_TYPES.REFINERY,
-      x: site.x,
-      y: site.y,
-    });
-  }
-
-  if (hasBarracks && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
-    for (const barracks of barracksBuildings) {
-      await callTool("spawn_unit", { buildingId: barracks.id, unitType: preferredBarracksUnit });
+    const worker = availableWorkers[0];
+    if (await prepareBuild(worker, BUILDING_TYPES.BARRACKS, site)) {
+      await callTool("build_structure", {
+        unitId: worker.id,
+        buildingType: BUILDING_TYPES.BARRACKS,
+        x: site.x,
+        y: site.y,
+      });
     }
   }
 
-  if (hasBarracks && !hasWarFactory && canBuildWarFactory && workers[0] && hq) {
+  if (!buildActionIssued && hasBarracks && !hasStartedRefinery && canBuildRefinery && availableWorkers[0] && hq) {
+    const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
+    const worker = availableWorkers[0];
+    if (await prepareBuild(worker, BUILDING_TYPES.REFINERY, site)) {
+      await callTool("build_structure", {
+        unitId: worker.id,
+        buildingType: BUILDING_TYPES.REFINERY,
+        x: site.x,
+        y: site.y,
+      });
+    }
+  }
+
+  if (!buildActionIssued && hasBarracks && !hasStartedWarFactory && canBuildWarFactory && availableWorkers[0] && hq) {
     const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
-    await callTool("build_structure", {
-      unitId: workers[0].id,
-      buildingType: "war_factory",
-      x: site.x,
-      y: site.y,
-    });
+    const worker = availableWorkers[0];
+    if (await prepareBuild(worker, BUILDING_TYPES.WAR_FACTORY, site)) {
+      await callTool("build_structure", {
+        unitId: worker.id,
+        buildingType: BUILDING_TYPES.WAR_FACTORY,
+        x: site.x,
+        y: site.y,
+      });
+    }
+  }
+
+  if (hasBarracks && rushBarracksUnit) {
+    for (const barracks of barracksBuildings) {
+      await callTool("spawn_unit", { buildingId: barracks.id, unitType: rushBarracksUnit });
+    }
   }
 
   if (hasWarFactory && canSpawnLightTank) {
@@ -319,19 +447,23 @@ export async function runBuiltinCPUStrategy(options: {
   await issueWorkerEconomy();
 
   if (
-    barracksBuildings.length < 2 &&
+    startedBarracksBuildings.length < 2 &&
     hasRefinery &&
     hasWarFactory &&
     credits >= getBuildingCost(BUILDING_TYPES.BARRACKS) + getUnitCost(UNIT_TYPES.RIFLEMAN) &&
-    workers[0] && hq
+    availableWorkers[0] && hq &&
+    !buildActionIssued
   ) {
     const site = findBuildSite(hq, mapState?.width ?? 144, buildings, myUnits);
-    await callTool("build_structure", {
-      unitId: workers[0].id,
-      buildingType: BUILDING_TYPES.BARRACKS,
-      x: site.x,
-      y: site.y,
-    });
+    const worker = availableWorkers[0];
+    if (await prepareBuild(worker, BUILDING_TYPES.BARRACKS, site)) {
+      await callTool("build_structure", {
+        unitId: worker.id,
+        buildingType: BUILDING_TYPES.BARRACKS,
+        x: site.x,
+        y: site.y,
+      });
+    }
   }
 
   if (!isHQUnderPressure && combatUnits.length < ARMY_MASSING_THRESHOLD) {

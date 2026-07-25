@@ -1,9 +1,16 @@
 import type { ControlClient } from "../client.js";
-import { BUILDING_TYPES, UNIT_TYPES, getBuildingCost, getCombatUnitTypes, getUnitCost } from "@llmcraft/shared";
+import {
+  BUILDING_TYPES,
+  UNIT_TYPES,
+  getBuildingCost,
+  getBuildingFootprint,
+  getCombatUnitTypes,
+  getUnitCost,
+  type BuildingType,
+} from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
-import { printBatchResult } from "./batch.js";
 import fs from "node:fs";
 
 // --- plan ---
@@ -67,6 +74,54 @@ export async function handlePlan(
     return !q || q.queue.length === 0;
   });
   const credits = typeof stateData.credits === "number" ? stateData.credits : 0;
+  const hqX = typeof hqBuilding?.x === "number" ? hqBuilding.x : 0;
+  const hqY = typeof hqBuilding?.y === "number" ? hqBuilding.y : 0;
+  const buildDirection = hqBuilding?.playerId === "player_2" ? -1 : 1;
+  const techStatus = stateData.techStatus as {
+    recommendedStructures?: Array<{
+      buildingType?: BuildingType;
+      suggestedSites?: Array<{ x?: number; y?: number }>;
+    }>;
+  } | undefined;
+
+  const getBuildSite = (buildingType: BuildingType, yOffset = 0) => {
+    const suggestion = techStatus?.recommendedStructures
+      ?.find((entry) => entry.buildingType === buildingType)
+      ?.suggestedSites?.find((site) => Number.isInteger(site.x) && Number.isInteger(site.y));
+    if (suggestion) {
+      return { x: Number(suggestion.x), y: Number(suggestion.y) };
+    }
+    const hqFootprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const buildingFootprint = getBuildingFootprint(buildingType);
+    const centerDistance = Math.floor(hqFootprint.width / 2) + Math.floor(buildingFootprint.width / 2) + 2;
+    return {
+      x: hqX + buildDirection * centerDistance,
+      y: hqY + yOffset,
+    };
+  };
+  const createBuildSteps = (
+    workerId: string,
+    buildingType: BuildingType,
+    site: { x: number; y: number },
+  ): Array<Record<string, unknown>> => {
+    const footprint = getBuildingFootprint(buildingType);
+    const stagingX = site.x - buildDirection * (Math.floor(footprint.width / 2) + 1);
+    return [
+      {
+        call: "move_unit",
+        args: { unitId: workerId, x: stagingX, y: site.y },
+        scope: "global",
+      },
+      {
+        call: "build_structure",
+        args: { unitId: workerId, buildingType, x: site.x, y: site.y },
+        scope: "global",
+        when: { condition: "credits_at_least", amount: getBuildingCost(buildingType) },
+        until: { condition: "building_exists", buildingType },
+        retry: true,
+      },
+    ];
+  };
 
   let plan: Record<string, unknown>;
 
@@ -85,25 +140,19 @@ export async function handlePlan(
 
     // Step 2: build barracks if we have credits and no barracks
     if (barracksBuildings.length === 0 && idleWorkers.length > 0) {
-      steps.push({
-        call: "build_structure",
-        args: { unitId: idleWorkers[0].id as string, buildingType: "barracks", x: 6, y: 6 },
-        scope: "global",
-        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.BARRACKS) },
-        until: { condition: "building_exists", buildingType: "barracks" },
-        retry: true,
-      });
+      steps.push(...createBuildSteps(
+        idleWorkers[0].id as string,
+        BUILDING_TYPES.BARRACKS,
+        getBuildSite(BUILDING_TYPES.BARRACKS),
+      ));
     }
 
     if (barracksBuildings.length > 0 && warFactoryBuildings.length === 0 && idleWorkers.length > 0) {
-      steps.push({
-        call: "build_structure",
-        args: { unitId: idleWorkers[0].id as string, buildingType: "war_factory", x: 6, y: 8 },
-        scope: "global",
-        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.WAR_FACTORY) },
-        until: { condition: "building_exists", buildingType: "war_factory" },
-        retry: true,
-      });
+      steps.push(...createBuildSteps(
+        idleWorkers[0].id as string,
+        BUILDING_TYPES.WAR_FACTORY,
+        getBuildSite(BUILDING_TYPES.WAR_FACTORY, 8),
+      ));
     }
 
     // Step 3: train workers from HQ when queue is empty
@@ -128,11 +177,8 @@ export async function handlePlan(
       exit(ExitCode.BackendFailure, "No idle workers available for tech plan.");
     }
 
-    const hqX = typeof hqBuilding?.x === "number" ? hqBuilding.x : 2;
-    const hqY = typeof hqBuilding?.y === "number" ? hqBuilding.y : 10;
-    const side = hqX < 10 ? 1 : -1;
-    const barracksSite = { x: hqX + side * 2, y: hqY };
-    const factorySite = { x: hqX + side * 2, y: hqY + 2 };
+    const barracksSite = getBuildSite(BUILDING_TYPES.BARRACKS);
+    const factorySite = getBuildSite(BUILDING_TYPES.WAR_FACTORY, 8);
     const steps: Array<Record<string, unknown>> = [
       {
         call: "start_harvest_loop",
@@ -142,14 +188,7 @@ export async function handlePlan(
     ];
 
     if (barracksBuildings.length === 0) {
-      steps.push({
-        call: "build_structure",
-        args: { unitId: unitIds[0], buildingType: "barracks", x: barracksSite.x, y: barracksSite.y },
-        scope: "global",
-        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.BARRACKS) },
-        until: { condition: "building_exists", buildingType: "barracks" },
-        retry: true,
-      });
+      steps.push(...createBuildSteps(unitIds[0], BUILDING_TYPES.BARRACKS, barracksSite));
     }
 
     steps.push({
@@ -162,14 +201,7 @@ export async function handlePlan(
     });
 
     if (warFactoryBuildings.length === 0) {
-      steps.push({
-        call: "build_structure",
-        args: { unitId: unitIds[0], buildingType: "war_factory", x: factorySite.x, y: factorySite.y },
-        scope: "global",
-        when: { condition: "credits_at_least", amount: getBuildingCost(BUILDING_TYPES.WAR_FACTORY) },
-        until: { condition: "building_exists", buildingType: "war_factory" },
-        retry: true,
-      });
+      steps.push(...createBuildSteps(unitIds[0], BUILDING_TYPES.WAR_FACTORY, factorySite));
     }
 
     steps.push(
@@ -253,8 +285,8 @@ export async function handlePlan(
           call: "attack_move_unit",
           args: { unitId: "$unitId", x: enemyHQ.x as number, y: enemyHQ.y as number },
           scope: "per_unit",
-          until: { condition: "near_position", x: enemyHQ.x as number, y: enemyHQ.y as number, distance: 2 },
-          maxTicks: 60,
+          until: { condition: "hq_in_range" },
+          maxTicks: 180,
         },
         {
           call: "attack",
@@ -338,11 +370,13 @@ export async function handleOrchestrate(
     return;
   }
 
-  const results: unknown[] = [];
-  for (const action of toExecute) {
-    const resp = await client.callTool(sessionId, action.tool, action.args);
-    results.push(resp);
+  const response = await client.callActionBatch(
+    sessionId,
+    toExecute,
+    flags.get("request-id"),
+  );
+  printJson(response);
+  if (!response.ok) {
+    process.exit(ExitCode.BackendFailure);
   }
-
-  printBatchResult(stdinInput.tick, results);
 }

@@ -14,6 +14,15 @@ import type WebSocket from "ws";
 import { GameOrchestrator, GameOrchestratorConfig } from "../GameOrchestrator";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import type { MatchRegistry } from "../MatchRegistry";
+import {
+  BenchmarkRunner,
+  createPairedBenchmarkTrials,
+  percentile,
+  wilsonInterval,
+} from "./BenchmarkRunner";
+import { createDefaultMatchDefinition } from "../MatchDefinition";
 
 type SendOnlyWebSocket = Pick<WebSocket, "send">;
 
@@ -32,7 +41,6 @@ const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..", "..");
 const BENCHMARK_RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-records");
-const BENCHMARK_LLM_DEBUG_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "benchmark-llm-debug");
 
 export interface BenchmarkConfig {
   presetId: string;
@@ -40,7 +48,6 @@ export interface BenchmarkConfig {
   cpuStrategy: CPUStrategyType;
   rounds: number;
   recordReplay: boolean;
-  decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
 }
@@ -53,11 +60,13 @@ export class BenchmarkOrchestrator {
   private currentRun: Promise<void> | null = null;
   private stopRequested = false;
   private ws: SendOnlyWebSocket | null;
+  private readonly benchmarkId = `benchmark_${randomUUID()}`;
 
   constructor(
     private readonly config: BenchmarkConfig,
     ws: SendOnlyWebSocket | null,
-    private readonly createGameOrchestrator: BenchmarkGameFactory = (matchConfig) => new GameOrchestrator(matchConfig)
+    private readonly createGameOrchestrator: BenchmarkGameFactory = (matchConfig) => new GameOrchestrator(matchConfig),
+    private readonly matchRegistry?: MatchRegistry,
   ) {
     this.ws = ws;
   }
@@ -118,25 +127,18 @@ export class BenchmarkOrchestrator {
   }
 
   private async run(): Promise<void> {
-    let nextRoundIndex = 0;
-    const concurrency = Math.min(this.config.rounds, this.config.concurrency ?? 1);
-    const workers = Array.from({ length: concurrency }, async () => {
-      while (!this.stopRequested) {
-        const index = nextRoundIndex++;
-        if (index >= this.config.rounds) {
-          return;
-        }
-        await this.runRound(index);
-      }
-    });
-
-    await Promise.all(workers);
+    const trials = createPairedBenchmarkTrials(this.config.rounds);
+    await new BenchmarkRunner(
+      trials,
+      Math.min(this.config.rounds, this.config.concurrency ?? 1),
+      (trial) => this.runRound(trial.round, trial.llmSide),
+      () => this.stopRequested,
+    ).run();
 
     this.send(this.buildCompleteMessage());
   }
 
-  private async runRound(index: number): Promise<void> {
-    const llmSide = index % 2 === 0 ? "player_1" : "player_2";
+  private async runRound(roundNumber: number, llmSide: "player_1" | "player_2"): Promise<ServerBenchmarkRoundResult | null> {
     const cpuSide = llmSide === "player_1" ? "player_2" : "player_1";
     const cpuConfig: BuiltinCPURuntimeConfig = {
       providerType: "builtin-cpu",
@@ -145,19 +147,24 @@ export class BenchmarkOrchestrator {
     const matchConfig: GameOrchestratorConfig = {
       player1: llmSide === "player_1" ? this.config.llmConfig : cpuConfig,
       player2: cpuSide === "player_2" ? cpuConfig : this.config.llmConfig,
-      debug: this.config.debug,
+      debug: {
+        recordingProfile: this.config.recordReplay ? "evaluation" : "off",
+        includeTranscript: this.config.debug?.includeTranscript ?? false,
+      },
       runtime: {
-        aiIntervalTicksByPlayer: {
-          [llmSide]: 5,
-          [cpuSide]: this.config.decisionIntervalTicks ?? 5,
-        },
+        matchDefinition: createDefaultMatchDefinition(),
         recordDir: BENCHMARK_RECORDS_DIR,
-        transcriptDir: BENCHMARK_LLM_DEBUG_DIR,
       },
     };
 
-    const roundNumber = index + 1;
     const orchestrator = this.createGameOrchestrator(matchConfig);
+    this.matchRegistry?.register(orchestrator, {
+      kind: "benchmark",
+      parentId: this.benchmarkId,
+      label: `Benchmark round ${roundNumber}`,
+      observe: this.viewedRound === null,
+      terminalPolicy: this.config.recordReplay ? "save" : "none",
+    });
     this.activeRounds.set(roundNumber, { orchestrator, llmSide });
     if (this.viewedRound === null) {
       this.setViewedRound(roundNumber);
@@ -166,22 +173,23 @@ export class BenchmarkOrchestrator {
     let completed = false;
     try {
       await orchestrator.start();
-      await this.waitForRoundEnd(orchestrator);
+      await orchestrator.waitForEnd();
 
       if (this.stopRequested) {
-        return;
+        return null;
       }
 
       const game = orchestrator.getGame();
       const winner = game.getWinner();
       const durationTicks = game.getState().tick;
+      if (typeof orchestrator.quiesce === "function") await orchestrator.quiesce();
+      else orchestrator.stop();
       let recordPath: string | undefined;
       if (this.config.recordReplay) {
         recordPath = await orchestrator.saveRecord();
       }
 
-      const transcriptPath = orchestrator.getTranscriptFilePath() ?? undefined;
-      this.rounds.push({
+      const roundResult: ServerBenchmarkRoundResult = {
         round: roundNumber,
         llmSide,
         winner:
@@ -192,9 +200,10 @@ export class BenchmarkOrchestrator {
               : "cpu",
         durationTicks,
         recordPath,
-        transcriptPath,
-      });
+      };
+      this.rounds.push(roundResult);
       completed = true;
+      return roundResult;
     } finally {
       this.activeRounds.delete(roundNumber);
       if (this.viewedRound === roundNumber) {
@@ -204,6 +213,7 @@ export class BenchmarkOrchestrator {
         this.sendProgress();
       }
     }
+    return null;
   }
 
   private sendProgress(): void {
@@ -225,6 +235,9 @@ export class BenchmarkOrchestrator {
     this.currentOrchestrator = roundNumber === null
       ? null
       : this.activeRounds.get(roundNumber)?.orchestrator ?? null;
+    if (this.currentOrchestrator && this.matchRegistry?.get(this.currentOrchestrator.getMatchId())) {
+      this.matchRegistry.observe(this.currentOrchestrator.getMatchId());
+    }
   }
 
   private getNextActiveRoundNumber(): number | null {
@@ -242,20 +255,6 @@ export class BenchmarkOrchestrator {
       }));
   }
 
-  private async waitForRoundEnd(orchestrator: GameOrchestrator): Promise<void> {
-    await new Promise<void>((resolve) => {
-      const poll = () => {
-        const game = orchestrator.getGame();
-        if (this.stopRequested || game.getWinner() || !game.isGameRunning()) {
-          resolve();
-          return;
-        }
-        setTimeout(poll, 100);
-      };
-      poll();
-    });
-  }
-
   private buildCompleteMessage(): ServerBenchmarkCompleteMessage {
     const llmWins = this.rounds.filter((round) => round.winner === "llm").length;
     const cpuWins = this.rounds.filter((round) => round.winner === "cpu").length;
@@ -263,6 +262,11 @@ export class BenchmarkOrchestrator {
     const averageDurationTicks = this.rounds.length === 0
       ? 0
       : Math.round(this.rounds.reduce((sum, round) => sum + round.durationTicks, 0) / this.rounds.length);
+    const durations = this.rounds.map((round) => round.durationTicks);
+    const p1Rounds = this.rounds.filter((round) => round.llmSide === "player_1");
+    const p2Rounds = this.rounds.filter((round) => round.llmSide === "player_2");
+    const p1WinRate = p1Rounds.length === 0 ? 0 : p1Rounds.filter((round) => round.winner === "llm").length / p1Rounds.length;
+    const p2WinRate = p2Rounds.length === 0 ? 0 : p2Rounds.filter((round) => round.winner === "llm").length / p2Rounds.length;
 
     return {
       type: "benchmark_complete",
@@ -275,6 +279,10 @@ export class BenchmarkOrchestrator {
       draws,
       llmWinRate: this.rounds.length === 0 ? 0 : Number(((llmWins / this.rounds.length) * 100).toFixed(1)),
       averageDurationTicks,
+      medianDurationTicks: percentile(durations, 0.5),
+      p90DurationTicks: percentile(durations, 0.9),
+      llmWinRateConfidence95: wilsonInterval(llmWins, this.rounds.length),
+      positionBias: p1Rounds.length === 0 || p2Rounds.length === 0 ? 0 : p1WinRate - p2WinRate,
       stopped: this.stopRequested && this.rounds.length < this.config.rounds,
       rounds: [...this.rounds].sort((a, b) => a.round - b.round),
     };

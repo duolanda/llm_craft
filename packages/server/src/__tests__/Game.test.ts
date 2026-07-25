@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { MapGenerator } from "../MapGenerator";
+import { ConstructionSystem } from "../simulation/ConstructionSystem";
+import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { PathFinder } from "../PathFinder";
+import { getCollisionManifold } from "../navigation/CollisionShape";
+import { getUnitCollisionShape } from "../navigation/UnitCollision";
 import {
   BUILDING_TYPES,
   MAP_HEIGHT,
@@ -81,7 +85,7 @@ describe("Game", () => {
   });
 
   it("keeps north, center and south fronts connected through cross-lane gaps", () => {
-    const tiles = MapGenerator.generate();
+    const tiles = MapGenerator.generate(createDefaultMatchDefinition().map);
     expect(PathFinder.findPath(20, 20, 123, 20, tiles).length).toBeGreaterThan(0);
     expect(PathFinder.findPath(20, 48, 123, 48, tiles).length).toBeGreaterThan(0);
     expect(PathFinder.findPath(20, 76, 123, 76, tiles).length).toBeGreaterThan(0);
@@ -121,8 +125,39 @@ describe("Game", () => {
   });
 
   it("keeps default battlefield free of obstacle rocks", () => {
-    const tiles = MapGenerator.generate();
+    const tiles = MapGenerator.generate(createDefaultMatchDefinition().map);
     expect(tiles.flat().filter((tile) => tile === TILE_TYPES.OBSTACLE)).toHaveLength(0);
+  });
+
+  it("stops on an unexpected simulation crash without pretending the tick was rolled back", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const worker = game.getState().players[0].units[0];
+    const before = game.getState();
+    game.queueCommand({
+      id: "crash-before-stop-move",
+      type: "move",
+      playerId: "player_1",
+      unitId: worker.id,
+      position: { x: worker.x + 5, y: worker.y },
+    });
+    vi.spyOn(ConstructionSystem.prototype, "step").mockImplementationOnce(() => {
+      throw new Error("injected tick failure");
+    });
+
+    game.start();
+    game.tickUpdate();
+
+    const afterFailure = game.getState();
+    expect(afterFailure.tick).toBe(before.tick + 1);
+    expect(afterFailure.logs.at(-2)?.type).toBe(LOG_TYPES.TICK_ERROR);
+    expect(afterFailure.logs.at(-1)?.type).toBe(LOG_TYPES.GAME_STOPPED);
+    expect(game.isGameRunning()).toBe(false);
+    expect(game.getLatestSnapshot()?.tick).toBe(before.tick + 1);
+    expect(game.getUnitManager().getUnit(worker.id)?.pathTarget).toMatchObject({
+      x: worker.x + 5,
+      y: worker.y,
+    });
+    consoleError.mockRestore();
   });
 
   it("keeps mineral fields out of the central attack corridor", () => {
@@ -517,7 +552,7 @@ describe("Game", () => {
 
     const tank = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK);
     expect(tank).toBeDefined();
-    expect(game.getBuildingManager().getDistanceToBuilding(warFactory, tank!.x, tank!.y)).toBe(1);
+    expect(game.getBuildingManager().getDistanceToBuilding(warFactory, tank!.x, tank!.y)).toBe(2);
   });
 
   it("keeps worker unable to attack and applies large-map OpenRA-lite combat ranges", () => {
@@ -693,7 +728,7 @@ describe("Game", () => {
 
     expect(defender.hp).toBe(defender.maxHp - expectedDamage);
     expect(attacker.hp).toBe(attacker.maxHp - expectedDamage);
-    expect(defender.intent).toMatchObject({ type: "attack", targetId: attacker.id });
+    expect(defender.order).toMatchObject({ type: "attack", targetId: attacker.id });
   });
 
   it("does not retaliate with units that have no attack", () => {
@@ -742,7 +777,7 @@ describe("Game", () => {
 
     expect(defender.hp).toBe(defender.maxHp - UNIT_STATS.soldier.attack);
     expect(attacker.hp).toBe(attacker.maxHp);
-    expect(defender.intent).toMatchObject({ type: "move", targetX: 8, targetY: 5 });
+    expect(defender.order).toMatchObject({ type: "move", targetX: 8, targetY: 5 });
   });
 
   it("keeps re-evaluating attack_in_range on later ticks", () => {
@@ -912,12 +947,12 @@ describe("Game", () => {
 
     game.start();
     game.tickUpdate();
-    expect(attacker.intent?.type).toBe("attack_move");
+    expect(attacker.order?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);
     expect(target.hp).toBe(target.maxHp);
 
     game.tickUpdate();
-    expect(attacker.intent?.type).toBe("attack_move");
+    expect(attacker.order?.type).toBe("attack_move");
     expect(attacker.x).toBe(6);
     expect(target.hp).toBe(target.maxHp - UNIT_STATS.soldier.attack);
 
@@ -930,7 +965,7 @@ describe("Game", () => {
     game.tickUpdate();
     game.stop();
 
-    expect(attacker.intent?.type).not.toBe("attack_move");
+    expect(attacker.order?.type).not.toBe("attack_move");
   });
 
   it("attack_move detects enemies in vision, closes to range, and preserves the army destination", () => {
@@ -949,13 +984,13 @@ describe("Game", () => {
 
     game.start();
     game.tickUpdate();
-    expect(attacker.intent).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5, targetId: target.id });
+    expect(attacker.order).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5, targetId: target.id });
     expect(target.hp).toBe(target.maxHp);
     for (let tick = 0; tick < 4; tick++) game.tickUpdate();
     game.stop();
 
     expect(target.hp).toBeLessThan(target.maxHp);
-    expect(attacker.intent).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5 });
+    expect(attacker.order).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5 });
   });
 
   it("attack_move stops auto-attacking after reaching its destination", () => {
@@ -978,7 +1013,7 @@ describe("Game", () => {
     game.stop();
 
     expect(attacker.x).toBe(6);
-    expect(attacker.intent?.type).toBe("hold");
+    expect(attacker.order?.type).toBe("hold");
     expect(target.hp).toBe(target.maxHp);
   });
 
@@ -1002,8 +1037,8 @@ describe("Game", () => {
 
     expect(attacker.x).toBe(enemyHq.x - 4);
     expect(attacker.y).toBe(enemyHq.y);
-    expect(attacker.intent?.type).toBe("hold");
-    expect(attacker.intent).not.toMatchObject({
+    expect(attacker.order?.type).toBe("hold");
+    expect(attacker.order).not.toMatchObject({
       type: "attack_move",
       targetX: enemyHq.x,
       targetY: enemyHq.y,
@@ -1070,8 +1105,7 @@ describe("Game", () => {
 
     advanceTicks(1);
 
-    const distance = Math.hypot(tank1.x - tank2.x, tank1.y - tank2.y);
-    expect(distance).toBeGreaterThan(1);
+    expect(getCollisionManifold(getUnitCollisionShape(tank1), getUnitCollisionShape(tank2))).toBeNull();
     expect(Number.isInteger(tank1.x) && Number.isInteger(tank1.y) && Number.isInteger(tank2.x) && Number.isInteger(tank2.y)).toBe(false);
   });
 
@@ -1100,8 +1134,8 @@ describe("Game", () => {
     expect(unit1.pathTarget).toBeDefined();
     expect(unit2.pathTarget).toBeDefined();
     expect(unit1.pathTarget).not.toEqual(unit2.pathTarget);
-    expect(unit1.intent?.type).toBe("attack_move");
-    expect(unit2.intent?.type).toBe("attack_move");
+    expect(unit1.order?.type).toBe("attack_move");
+    expect(unit2.order?.type).toBe("attack_move");
   });
 
   it("records command results for saved game records", () => {
@@ -1166,7 +1200,7 @@ describe("Game", () => {
     });
     game.processCommands();
 
-    expect(runtimeWorker.intent).toMatchObject({ type: "move", targetX: worker.x + 1, targetY: worker.y });
+    expect(runtimeWorker.order).toMatchObject({ type: "move", targetX: worker.x + 1, targetY: worker.y });
 
     game.start();
     game.tickUpdate();
@@ -1175,7 +1209,7 @@ describe("Game", () => {
     expect(runtimeWorker.x).toBe(worker.x + 1);
     expect(runtimeWorker.y).toBe(worker.y);
     expect(runtimeWorker.state).toBe("idle");
-    expect(runtimeWorker.intent).toBeUndefined();
+    expect(runtimeWorker.order).toBeUndefined();
     expect(runtimeWorker.path).toBeUndefined();
     expect(runtimeWorker.pathTarget).toBeUndefined();
   });
@@ -1199,7 +1233,7 @@ describe("Game", () => {
     });
     game.processCommands();
 
-    expect(runtimeWorker.intent?.type).toBe("harvest_loop");
+    expect(runtimeWorker.order?.type).toBe("harvest_loop");
 
     game.start();
     for (let i = 0; i < 40 && game.getState().players[0].resources.credits === 800; i++) {
@@ -1209,8 +1243,8 @@ describe("Game", () => {
 
     expect(game.getState().players[0].resources.credits).toBe(900);
     expect(runtimeWorker.carryingCredits).toBe(0);
-    expect(runtimeWorker.intent?.type).toBe("harvest_loop");
-    expect(runtimeWorker.intent).toMatchObject({
+    expect(runtimeWorker.order?.type).toBe("harvest_loop");
+    expect(runtimeWorker.order).toMatchObject({
       targetX: DEFAULT_MAP_LAYOUT.resources[0].x,
       targetY: DEFAULT_MAP_LAYOUT.resources[0].y,
     });
@@ -1234,7 +1268,7 @@ describe("Game", () => {
     });
     game.processCommands();
 
-    expect(runtimeWorker.intent).toMatchObject({
+    expect(runtimeWorker.order).toMatchObject({
       type: "harvest_loop",
       targetX: DEFAULT_MAP_LAYOUT.resources[0].x,
       targetY: DEFAULT_MAP_LAYOUT.resources[0].y,
@@ -1290,8 +1324,8 @@ describe("Game", () => {
     game.processCommands();
 
     const assignedTargets = new Set([
-      `${runtimeWorker1.intent?.targetX},${runtimeWorker1.intent?.targetY}`,
-      `${runtimeWorker2.intent?.targetX},${runtimeWorker2.intent?.targetY}`,
+      `${runtimeWorker1.order?.targetX},${runtimeWorker1.order?.targetY}`,
+      `${runtimeWorker2.order?.targetX},${runtimeWorker2.order?.targetY}`,
     ]);
 
     expect(assignedTargets.size).toBe(2);
@@ -1305,7 +1339,9 @@ describe("Game", () => {
     const worker = game.getUnitManager().getUnitsByPlayer("player_1")[0];
     worker.x = resource.x;
     worker.y = resource.y;
-    (game as unknown as { resourceRemaining: Map<string, number> }).resourceRemaining.set(`${resource.x},${resource.y}`, 10);
+    (game as unknown as {
+      world: { setResourceRemaining(x: number, y: number, remaining: number): void };
+    }).world.setResourceRemaining(resource.x, resource.y, 10);
 
     game.start();
     game.tickUpdate();

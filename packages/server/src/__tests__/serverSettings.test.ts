@@ -315,7 +315,7 @@ describe("server settings", () => {
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("必须为红蓝双方选择预设"));
   });
 
-  it("creates a fresh orchestrator from the selected presets for each player", async () => {
+  it("creates one live orchestrator and rejects a duplicate start", async () => {
     const presetStore = await createStore();
     const player1Preset = await presetStore.create({
       name: "Red",
@@ -340,6 +340,8 @@ describe("server settings", () => {
       getSnapshots: () => [],
     }));
     const createOrchestrator = vi.fn((config) => ({
+      getMatchId: () => "match_started",
+      getMatchStatus: () => start.mock.calls.length > 0 ? "running" as const : "waiting_for_players" as const,
       start,
       stop,
       saveRecord,
@@ -348,13 +350,23 @@ describe("server settings", () => {
     }));
     const state = createServerState(presetStore, createOrchestrator);
 
+    const ws = { send: vi.fn() };
     await handleClientMessage({
       data: JSON.stringify({
         type: "start",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
       }),
-      ws: { send: vi.fn() } as any,
+      ws: ws as any,
+      state,
+    });
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+      }),
+      ws: ws as any,
       state,
     });
 
@@ -375,7 +387,8 @@ describe("server settings", () => {
       debug: undefined,
     });
     expect(start).toHaveBeenCalledTimes(1);
-    expect(state.orchestrator).not.toBeNull();
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("不会重复启动"));
+    expect(state.matchRegistry.getObservedMatchId()).toBe("match_started");
   });
 
   it("keeps the previous orchestrator if starting the next one fails", async () => {
@@ -396,6 +409,7 @@ describe("server settings", () => {
     });
 
     const previousOrchestrator = {
+      getMatchId: () => "match_previous",
       start: vi.fn<[], Promise<void>>(async () => undefined),
       stop: vi.fn<[], void>(() => undefined),
       saveRecord: vi.fn<[], Promise<string>>(async () => "logs/records/old.json"),
@@ -405,6 +419,7 @@ describe("server settings", () => {
       })),
     };
     const failedOrchestrator = {
+      getMatchId: () => "match_failed",
       start: vi.fn<[], Promise<void>>(async () => {
         throw new Error("start failed");
       }),
@@ -416,7 +431,7 @@ describe("server settings", () => {
       })),
     };
     const state = createServerState(presetStore, vi.fn(() => failedOrchestrator as any));
-    state.orchestrator = previousOrchestrator;
+    state.matchRegistry.register(previousOrchestrator as any, { kind: "live", observe: true });
     const ws = { send: vi.fn() };
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -433,7 +448,7 @@ describe("server settings", () => {
     expect(failedOrchestrator.start).toHaveBeenCalledTimes(1);
     expect(failedOrchestrator.stop).toHaveBeenCalledTimes(1);
     expect(previousOrchestrator.stop).not.toHaveBeenCalled();
-    expect(state.orchestrator).toBe(previousOrchestrator);
+    expect(state.matchRegistry.getObserved()?.handle).toBe(previousOrchestrator);
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("处理客户端消息失败"));
   });
 
@@ -513,7 +528,7 @@ describe("server settings", () => {
         type: "start",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       }),
       ws: { send: vi.fn() } as any,
       state,
@@ -521,12 +536,12 @@ describe("server settings", () => {
 
     expect(createOrchestrator).toHaveBeenCalledWith(
       expect.objectContaining({
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       })
     );
   });
 
-  it("prepares selected players before start and reports status", async () => {
+  it("warms up selected players before start and reports status", async () => {
     const presetStore = await createStore();
     const player1Preset = await presetStore.create({
       name: "Red",
@@ -542,9 +557,9 @@ describe("server settings", () => {
       model: "model-two",
       apiKey: "token-two",
     });
-    const prepare = vi.fn(async () => undefined);
+    const warmupHandler = vi.fn(async () => undefined);
     const createOrchestrator = vi.fn(() => ({
-      prepare,
+      warmup: warmupHandler,
       start: vi.fn(async () => undefined),
       stop: vi.fn(() => undefined),
       saveRecord: vi.fn(async () => "logs/records/mock.json"),
@@ -558,7 +573,7 @@ describe("server settings", () => {
 
     await handleClientMessage({
       data: JSON.stringify({
-        type: "prepare",
+        type: "warmup",
         player1PresetId: player1Preset.id,
         player2PresetId: player2Preset.id,
         warmup: { player_1: true, player_2: false },
@@ -573,8 +588,8 @@ describe("server settings", () => {
         player2: expect.objectContaining({ model: "model-two" }),
       })
     );
-    expect(prepare).toHaveBeenCalledWith({ player_1: true, player_2: false });
-    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"prepare_status"'));
+    expect(warmupHandler).toHaveBeenCalledWith({ player_1: true, player_2: false });
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"type":"warmup_status"'));
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"player_1":"ready"'));
   });
 
@@ -626,6 +641,7 @@ describe("server settings", () => {
     });
 
     const previousOrchestrator = {
+      getMatchId: () => "match_live",
       start: vi.fn(async () => undefined),
       stop: vi.fn(() => undefined),
       saveRecord: vi.fn(async () => "logs/records/live.json"),
@@ -645,7 +661,7 @@ describe("server settings", () => {
     };
     const createBenchmarkOrchestrator = vi.fn(() => benchmarkOrchestrator as any);
     const state = createServerState(presetStore, undefined, createBenchmarkOrchestrator);
-    state.orchestrator = previousOrchestrator as any;
+    state.matchRegistry.register(previousOrchestrator as any, { kind: "live", observe: true });
 
     await handleClientMessage({
       data: JSON.stringify({
@@ -654,14 +670,13 @@ describe("server settings", () => {
         cpuStrategy: "random",
         rounds: 12,
         recordReplay: true,
-        decisionIntervalTicks: 7,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       }),
       ws: { send: vi.fn() } as any,
       state,
     });
 
-    expect(previousOrchestrator.stop).toHaveBeenCalledTimes(1);
+    expect(previousOrchestrator.stop).not.toHaveBeenCalled();
     expect(createBenchmarkOrchestrator).toHaveBeenCalledWith(
       {
         presetId: preset.id,
@@ -674,16 +689,15 @@ describe("server settings", () => {
         cpuStrategy: "random",
         rounds: 12,
         recordReplay: true,
-        decisionIntervalTicks: 7,
-        debug: { recordLLMTranscript: true },
+        debug: { recordingProfile: "evaluation", includeTranscript: true },
       },
       expect.any(Object)
     );
     expect(benchmarkOrchestrator.start).toHaveBeenCalledTimes(1);
-    expect(state.orchestrator).toBe(benchmarkOrchestrator);
+    expect(state.activeBenchmark).toBe(benchmarkOrchestrator);
   });
 
-  it("builds live state payloads without hitting preset storage or duplicating snapshots", async () => {
+  it("builds live state payloads without hitting preset storage or duplicating full state", async () => {
     const presetStore = await createStore();
     const listSpy = vi.spyOn(presetStore, "list");
     const snapshots = Array.from({ length: 25 }, (_, index) => ({
@@ -706,7 +720,7 @@ describe("server settings", () => {
       }))
     );
     state.liveEnabled = true;
-    state.orchestrator = state.createOrchestrator({
+    const observedOrchestrator = state.createOrchestrator({
       player1: {
         providerType: "openai-compatible",
         apiKey: "token-one",
@@ -720,13 +734,25 @@ describe("server settings", () => {
         model: "model-two",
       },
     }) as any;
+    state.matchRegistry.register({
+      ...observedOrchestrator,
+      getMatchId: () => "match_payload",
+    }, { kind: "live", observe: true });
 
     const payload = buildStateMessagePayload(state);
 
     expect(listSpy).not.toHaveBeenCalled();
     expect(payload.liveEnabled).toBe(true);
+    expect(payload.matchStatus).toBeNull();
     expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
-    expect(payload.snapshots).toHaveLength(1);
-    expect(payload.snapshots[0]?.tick).toBe(24);
+    expect(payload.state).toBeNull();
+    expect(payload.snapshots).toEqual([]);
+    expect(payload.frame).toEqual(expect.objectContaining({
+      kind: "keyframe",
+      metadata: expect.objectContaining({
+        frameSequence: 1,
+        simulationTick: 24,
+      }),
+    }));
   });
 });

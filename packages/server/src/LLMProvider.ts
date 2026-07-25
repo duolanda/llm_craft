@@ -1,5 +1,7 @@
 import {
   AgentPlanRecord,
+  AgentModelRequestRecord,
+  ContextWindowLimitRecord,
   AgentRunInput,
   AgentRunMetrics,
   AgentToolCallRecord,
@@ -20,6 +22,14 @@ export interface AgentToolExecutionResult {
   result: unknown;
 }
 
+export interface AgentToolExecutionContext {
+  toolCallId: string;
+  controllerId?: string;
+  parentControllerId?: string;
+  turnId?: string;
+  source?: "macro_tool" | "subagent";
+}
+
 export interface AgentRuntimeState {
   mapState: unknown;
   myState: unknown;
@@ -30,19 +40,27 @@ export interface AgentRuntimeState {
 
 export interface SubAgentParentContext {
   playerId: string;
+  controllerId?: string;
+  turnId?: string;
   input: AgentRunInput;
   messages: unknown[];
   runtimeState: AgentRuntimeState;
   tools: AgentToolDefinition[];
-  executeTool: (name: string, args: unknown) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
+  executeTool: (name: string, args: unknown, context?: AgentToolExecutionContext) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
 }
 
 export interface RunAgentOptions {
   tools: AgentToolDefinition[];
-  executeTool: (name: string, args: unknown) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
+  executeTool: (name: string, args: unknown, context?: AgentToolExecutionContext) => Promise<AgentToolExecutionResult> | AgentToolExecutionResult;
+  runContext?: {
+    turnId: string;
+    controllerId: string;
+    parentControllerId?: string;
+  };
   getRuntimeState: () => AgentRuntimeState;
   onAssistantMessage?: (message: string) => void;
   onToolCall?: (record: AgentToolCallRecord) => void;
+  onModelRequest?: (record: AgentModelRequestRecord) => void;
   onPerformanceWarning?: (warning: {
     phase: string;
     elapsedMs?: number;
@@ -80,6 +98,8 @@ export interface WarmupAgentResult {
   hasPendingToolCalls: boolean;
   metrics: {
     modelRequests: number;
+    modelRequestRecords?: AgentModelRequestRecord[];
+    contextWindow?: ContextWindowLimitRecord;
   };
 }
 
@@ -87,11 +107,16 @@ export interface LLMConnectionTestResult {
   responseText: string;
 }
 
-export interface LLMProvider {
+/** Stateful provider conversation and tool-loop boundary owned by one controller. */
+export interface AgentSession {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
   runSubAgentTask(input: RunSubAgentTaskInput): Promise<string>;
   warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult>;
-  testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
   getModel(): string;
   getBaseURL(): string | undefined;
+}
+
+/** Agent session surface used by the preset connection-test endpoint. */
+export interface LLMProvider extends AgentSession {
+  testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult>;
 }

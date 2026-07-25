@@ -4,10 +4,9 @@ import {
   BUILDING_TYPES,
   CONTROL_PROVIDER_ONLY_TOOL_NAMES,
   CONTROL_READ_TOOL_NAMES,
-  DEFAULT_MAP_LAYOUT,
   OrchestratePlanInput,
 } from "@llmcraft/shared";
-import { GameAgentBridge } from "./GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
 
 export interface AgentToolDefinition {
   name: string;
@@ -20,17 +19,63 @@ export interface AgentToolExecution {
   result: unknown;
 }
 
-type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
+type ToolExecutor = (gameplayController: GameplayController, args: any) => AgentToolExecution;
 
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
-const OPENING_BARRACKS_SITE = {
-  x: DEFAULT_MAP_LAYOUT.player1Hq.x + 12,
-  y: DEFAULT_MAP_LAYOUT.player1Hq.y,
+const BATCH_SHARED_RECOVERY_KEYS = [
+  "availableFriendlyUnits",
+  "availableAttackers",
+  "availableWorkers",
+  "availableEnemyTargets",
+  "availableEnemyTargetCount",
+] as const;
+const getUnitIds = (args: Record<string, unknown>): string[] => {
+  const ids = Array.isArray(args.unitIds)
+    ? args.unitIds.filter((value): value is string => typeof value === "string")
+    : typeof args.unitId === "string"
+      ? [args.unitId]
+      : [];
+  return [...new Set(ids)];
 };
-const OPENING_BARRACKS_WORKER_SITE = {
-  x: OPENING_BARRACKS_SITE.x - 3,
-  y: OPENING_BARRACKS_SITE.y,
+
+const executeUnitBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+  execute: (unitId: string) => AgentToolExecution,
+): AgentToolExecution => {
+  const unitIds = getUnitIds(args);
+  if (unitIds.length === 0) {
+    return {
+      effect: "action",
+      result: { ok: false, error: "missing_units", hint: "Pass one or more friendly unit IDs in unitIds." },
+    };
+  }
+  const results: Array<{ unitId: string; ok?: unknown; [key: string]: unknown }> = unitIds.map((unitId) => {
+    const execution = execute(unitId);
+    const result = execution.result && typeof execution.result === "object"
+      ? execution.result as Record<string, unknown>
+      : { value: execution.result };
+    return { unitId, ...result };
+  });
+  const recoveryContext: Record<string, unknown> = {};
+  for (const result of results) {
+    for (const key of BATCH_SHARED_RECOVERY_KEYS) {
+      if (recoveryContext[key] === undefined && result[key] !== undefined) {
+        recoveryContext[key] = result[key];
+      }
+      delete result[key];
+    }
+  }
+  return {
+    effect: "action",
+    result: {
+      tick: results.find((result) => typeof result.tick === "number")?.tick,
+      ok: results.every((result) => result.ok !== false),
+      results,
+      ...recoveryContext,
+    },
+  };
 };
 
 const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
@@ -46,68 +91,72 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.getMapState({
+    execute: (gameplayController, args) =>
+      gameplayController.getMapState({
         includeCells: args?.includeCells === true,
         includeEmptyTiles: args?.includeEmptyTiles === true,
       }),
   },
   {
     name: "get_my_state",
-    description: "Read my economy, HQ, buildings, production queues, and concrete build/production recommendations.",
+    description: "Read my economy, HQ, buildings, production queues, technology facts, costs, and legal build-site options.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyState(),
+    execute: (gameplayController) => gameplayController.getMyState(),
   },
   {
     name: "get_my_units",
     description: "Read my controllable units plus role+intent groups, so idle/holding combat forces are visible without manually counting the unit list.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyUnits(),
+    execute: (gameplayController) => gameplayController.getMyUnits(),
   },
   {
     name: "get_army_summary",
     description:
-      "Read a compact combat summary: own/enemy unit mix, ready vs reloading combat units, and non-binding recommendations for combined-arms production or group formation.",
+      "Read a compact factual combat summary: own/enemy unit mix, ready vs reloading combat units, and the largest nearby group.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getArmySummary(),
+    execute: (gameplayController) => gameplayController.getArmySummary(),
   },
   {
     name: "get_active_plans",
-    description: "Read active orchestration plans currently attached to my units, including currentStep, waitingReason, and lastAttempt diagnostics.",
+    description: "Read active orchestration plans currently attached to my units, including currentStep, structured waiting diagnostics, and lastAttempt.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getActivePlansTool(),
+    execute: (gameplayController) => gameplayController.getActivePlansTool(),
   },
   {
     name: "get_recent_events",
     description: "Read recent AI-facing command feedback and important events.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getRecentEvents(),
+    execute: (gameplayController) => gameplayController.getRecentEvents(),
   },
   {
     name: "move_unit",
     description:
-      "Queue a move command for one unit. Use this for workers or precise repositioning. For combat units, use attack when you know a target id; use attack_move_unit only when you need to cross dangerous ground without a specific target.",
+      "Queue the same move destination for one or more selected units. Blocked destinations are resolved to nearby reachable tiles when possible.",
     parameters: {
       type: "object",
-      required: ["unitId", "x", "y"],
+      required: ["unitIds", "x", "y"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.moveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.moveUnit(unitId, { x: Number(args.x), y: Number(args.y) }),
+    ),
   },
   {
     name: "attack_move_unit",
     description:
-      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking role-appropriate enemy targets encountered before arrival. Defaults are role-aware: riflemen screen infantry, rocket soldiers prefer vehicles, and light tanks prefer enemy armor/support before structures. Once the unit reaches the destination, this order ends. If a specific visible target id matters, prefer attack instead.",
+      "Queue the same targetless combat advance for one or more selected combat units. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing.",
     parameters: {
       type: "object",
-      required: ["unitId", "x", "y"],
+      required: ["unitIds", "x", "y"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
         priority: {
@@ -117,49 +166,30 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
-  },
-  {
-    name: "attack_move_group",
-    description:
-      "Order 1-100 friendly combat units to advance as a formation. Units receive distinct destinations, acquire enemies inside vision, close to weapon range, fight through reload cycles, and then resume the advance. Use battle_line for combined arms: tanks front, riflemen/soldiers screen, rockets behind.",
-    parameters: {
-      type: "object",
-      required: ["unitIds", "x", "y"],
-      properties: {
-        unitIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string" } },
-        x: { type: "integer" },
-        y: { type: "integer" },
-        formation: { type: "string", enum: ["line", "column", "wedge", "dispersed", "battle_line"], default: "line" },
-      },
-      additionalProperties: false,
-    },
-    execute: (bridge, args) => bridge.attackMoveGroup(
-      Array.isArray(args.unitIds) ? args.unitIds.map(String) : [],
-      { x: Number(args.x), y: Number(args.y) },
-      args.formation === "column" ||
-        args.formation === "wedge" ||
-        args.formation === "dispersed" ||
-        args.formation === "battle_line"
-        ? args.formation
-        : "line",
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.attackMoveUnit(unitId, { x: Number(args.x), y: Number(args.y) }, args.priority),
     ),
   },
   {
     name: "attack",
     description:
-      "Order one combat unit to attack one enemy target id. This is the default combat command whenever a visible target id exists, including far-away HQ or barracks targets: the unit will move toward the target until in range and then keep attacking. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
+      "Order one or more selected combat units to attack one enemy target ID. Units move into range and keep attacking while the target exists. A missing target result includes compact current alternatives.",
     parameters: {
       type: "object",
-      required: ["unitId", "targetId"],
+      required: ["unitIds", "targetId"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         targetId: { type: "string" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.attackTarget(String(args.unitId), String(args.targetId)),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.attackTarget(unitId, String(args.targetId)),
+    ),
   },
   {
     name: "spawn_unit",
@@ -173,14 +203,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.spawnUnit(String(args.buildingId), args.unitType),
+    execute: (gameplayController, args) => gameplayController.spawnUnit(String(args.buildingId), args.unitType),
   },
   {
     name: "build_structure",
-    description: "Start construction with one worker. The worker must already be adjacent to the full building footprint and is occupied until construction completes. War factories require a completed barracks first. Barracks, war factories, and refineries use multi-tile footprints that must remain clear and leave one empty ring around HQ. Refineries are buildable mining drop-off structures.",
+    description: "Assign one worker to construct a building. Omit x/y to select a legal site automatically; refinery auto-placement favors sites that shorten resource delivery routes. If the worker is not adjacent to the full footprint, it moves there and starts construction when ready. A worker that was harvesting resumes that loop after construction. War factories require a completed barracks first.",
     parameters: {
       type: "object",
-      required: ["unitId", "buildingType", "x", "y"],
+      required: ["unitId", "buildingType"],
       properties: {
         unitId: { type: "string" },
         buildingType: { type: "string", enum: BUILDABLE_BUILDING_TYPES },
@@ -189,13 +219,17 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.buildStructure(String(args.unitId), args.buildingType, { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) =>
+      gameplayController.buildStructure(
+        String(args.unitId),
+        args.buildingType,
+        args.x === undefined || args.y === undefined ? undefined : { x: Number(args.x), y: Number(args.y) },
+      ),
   },
   {
     name: "start_harvest_loop",
     description:
-      "Assign one friendly worker to the built-in mining loop. The worker delivers to the nearest HQ or refinery. Omit x/y for nearby mining, or specify a forward finite deposit after constructing a refinery. Do not repeatedly reissue unless the worker is idle, blocked, or needs reassignment.",
+      "Assign one friendly worker to the built-in mining loop. The worker delivers to the nearest completed HQ or refinery. Omit x/y to auto-select a deposit using recurring delivery distance, initial travel, and current assignments; specify x/y only when intentionally overriding that choice. Multiple workers may share one deposit. Do not repeatedly reissue unless the worker is idle, blocked, or needs reassignment.",
     parameters: {
       type: "object",
       required: ["unitId"],
@@ -206,14 +240,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => {
+    execute: (gameplayController, args) => {
       const hasX = args?.x !== undefined;
       const hasY = args?.y !== undefined;
       const position = hasX && hasY ? { x: Number(args.x), y: Number(args.y) } : undefined;
       if (hasX !== hasY) {
-        return bridge.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
+        return gameplayController.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
       }
-      return bridge.startHarvestLoop(String(args.unitId), position);
+      return gameplayController.startHarvestLoop(String(args.unitId), position);
     },
   },
   {
@@ -227,7 +261,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.holdUnit(String(args.unitId)),
+    execute: (gameplayController, args) => gameplayController.holdUnit(String(args.unitId)),
   },
   {
     name: "spawn_agent",
@@ -298,64 +332,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for production/building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
       "- In global production args, buildingId can be \"$hq\", \"$barracks\", \"$war_factory\", or \"$refinery\" to resolve the current friendly building at execution time.",
-      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
+      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, worker_adjacent_to_build_footprint, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
       "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; build_structure also waits until the worker is adjacent to the requested footprint.",
-      "- Multiple active plans share the same tick budget. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining budget cannot cover them.",
-      "- Use get_active_plans to inspect currentStep, waitingReason, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
+      "- Multiple active plans share the same-tick available credits. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
+      "- Use get_active_plans to inspect currentStep, waiting.code/message/details, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, move a builder beside the barracks footprint, build barracks, then train riflemen:",
-      JSON.stringify({
-        unitIds: ["worker_1", "worker_2"],
-        loop: 1,
-        steps: [
-          { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
-          {
-            call: "move_unit",
-            args: { unitId: "worker_1", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y },
-            scope: "global",
-            until: { condition: "near_position", x: OPENING_BARRACKS_WORKER_SITE.x, y: OPENING_BARRACKS_WORKER_SITE.y, distance: 1 },
-            retry: true,
-          },
-          {
-            call: "build_structure",
-            args: { unitId: "worker_1", buildingType: "barracks", x: OPENING_BARRACKS_SITE.x, y: OPENING_BARRACKS_SITE.y },
-            scope: "global",
-            when: { condition: "credits_at_least", amount: 120 },
-            until: { condition: "building_exists", buildingType: "barracks" },
-            retry: true,
-          },
-          {
-            call: "spawn_unit",
-            args: { buildingId: "$barracks", unitType: "rifleman" },
-            scope: "global",
-            when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "rifleman", count: 4 },
-            retry: true,
-          },
-        ],
-      }),
-      "Combat assault example: move-attack a squad near the enemy HQ, then focus the HQ:",
-      JSON.stringify({
-        unitIds: ["soldier_1", "soldier_2"],
-        loop: 1,
-        steps: [
-          {
-            call: "attack_move_unit",
-            args: { unitId: "$unitId", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y },
-            until: { condition: "near_position", x: DEFAULT_MAP_LAYOUT.player2Hq.x, y: DEFAULT_MAP_LAYOUT.player2Hq.y, distance: 2 },
-            maxTicks: 80,
-          },
-          {
-            call: "attack",
-            args: { unitId: "$unitId", targetId: "building_enemy_hq" },
-            until: { condition: "target_destroyed", targetId: "building_enemy_hq" },
-            retry: true,
-          },
-        ],
-      }),
     ].join("\n"),
     parameters: {
       type: "object",
@@ -404,6 +388,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "enemy_in_range",
                       "hq_in_range",
                       "near_position",
+                      "worker_adjacent_to_build_footprint",
                       "target_in_range",
                       "target_destroyed",
                       "credits_at_least",
@@ -437,6 +422,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "enemy_in_range",
                       "hq_in_range",
                       "near_position",
+                      "worker_adjacent_to_build_footprint",
                       "target_in_range",
                       "target_destroyed",
                       "credits_at_least",
@@ -468,7 +454,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.orchestratePlan(args as OrchestratePlanInput),
+    execute: (gameplayController, args) => gameplayController.orchestratePlan(args as OrchestratePlanInput),
   },
 ];
 
@@ -491,10 +477,14 @@ export function getControlReadToolNames(): string[] {
   return getControlAgentToolNames().filter((name) => readToolNames.has(name));
 }
 
-export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {
+export function getControlActionToolNames(): string[] {
+  return getControlAgentToolNames().filter((name) => !readToolNames.has(name) && name !== "orchestrate_plan");
+}
+
+export function executeAgentTool(gameplayController: GameplayController, name: string, args: unknown): AgentToolExecution {
   const tool = tools.find((candidate) => candidate.name === name);
   if (!tool) {
     throw new Error(`Unknown tool: ${name}`);
   }
-  return tool.execute(bridge, args);
+  return tool.execute(gameplayController, args);
 }

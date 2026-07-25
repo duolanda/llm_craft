@@ -14,6 +14,7 @@ export interface SpawnAgentStarted {
   taskId: string;
   status: "running";
   description: string;
+  controllerId: string;
 }
 
 export interface SpawnAgentFailedToStart {
@@ -36,6 +37,8 @@ interface ActiveTask {
   playerId: PlayerId;
   description: string;
   controller: AbortController;
+  assignedUnits: string[];
+  assignedBuildings: string[];
 }
 
 export class SubAgentTaskRegistry {
@@ -43,7 +46,31 @@ export class SubAgentTaskRegistry {
   private activeTasks = new Map<string, ActiveTask>();
   private notificationQueues: PendingNotification[] = [];
 
+  constructor(private readonly maxConcurrentPerPlayer = 2) {}
+
   spawn(input: SpawnAgentInput, playerId: PlayerId, runner: SubAgentRunner): SpawnAgentResult {
+    const assignedUnits = [...new Set(input.assignedUnits ?? [])];
+    const assignedBuildings = [...new Set(input.assignedBuildings ?? [])];
+    const activeForPlayer = [...this.activeTasks.values()].filter((task) => task.playerId === playerId);
+    if (activeForPlayer.length >= this.maxConcurrentPerPlayer) {
+      return {
+        ok: false,
+        error: "subagent_concurrency_limit",
+        hint: `At most ${this.maxConcurrentPerPlayer} sub-agents may run concurrently for one player.`,
+      };
+    }
+    const leasedUnits = new Set(activeForPlayer.flatMap((task) => task.assignedUnits));
+    const leasedBuildings = new Set(activeForPlayer.flatMap((task) => task.assignedBuildings));
+    const overlappingUnit = assignedUnits.find((unitId) => leasedUnits.has(unitId));
+    const overlappingBuilding = assignedBuildings.find((buildingId) => leasedBuildings.has(buildingId));
+    if (overlappingUnit || overlappingBuilding) {
+      const resource = overlappingUnit ?? overlappingBuilding;
+      return {
+        ok: false,
+        error: "resource_already_leased",
+        hint: `${resource} is already leased by another active sub-agent.`,
+      };
+    }
     const taskId = `subtask_${++this.taskCounter}`;
     const controller = new AbortController();
     const task: ActiveTask = {
@@ -51,6 +78,8 @@ export class SubAgentTaskRegistry {
       playerId,
       description: input.description,
       controller,
+      assignedUnits,
+      assignedBuildings,
     };
     this.activeTasks.set(taskId, task);
 
@@ -58,7 +87,7 @@ export class SubAgentTaskRegistry {
       .then((notification) => {
         if (this.activeTasks.has(taskId)) {
           this.notificationQueues.push({ playerId, content: notification });
-          this.activeTasks.delete(taskId);
+          this.release(taskId);
         }
       })
       .catch((error) => {
@@ -67,7 +96,7 @@ export class SubAgentTaskRegistry {
             playerId,
             content: this.formatFailureNotification(taskId, input, error),
           });
-          this.activeTasks.delete(taskId);
+          this.release(taskId);
         }
       });
 
@@ -76,6 +105,7 @@ export class SubAgentTaskRegistry {
       taskId,
       status: "running",
       description: input.description,
+      controllerId: `subagent:${taskId}`,
     };
   }
 
@@ -95,7 +125,7 @@ export class SubAgentTaskRegistry {
     this.activeTasks.forEach((task, taskId) => {
       if (task.playerId === playerId) {
         task.controller.abort();
-        this.activeTasks.delete(taskId);
+        this.release(taskId);
       }
     });
     this.notificationQueues = this.notificationQueues.filter(
@@ -123,5 +153,9 @@ export class SubAgentTaskRegistry {
       message,
       "</sub-agent-result>",
     ].join("\n");
+  }
+
+  private release(taskId: string): void {
+    this.activeTasks.delete(taskId);
   }
 }

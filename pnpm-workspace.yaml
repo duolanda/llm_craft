@@ -1,4 +1,10 @@
 packages:
   - 'packages/*'
+packageExtensions:
+  tunnel-rat@0.1.2:
+    peerDependencies:
+      react: '*'
 allowBuilds:
   esbuild: true
+  sharp: true
+  workerd: true

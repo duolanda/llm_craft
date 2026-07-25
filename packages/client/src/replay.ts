@@ -46,7 +46,7 @@ function cloneReplayFrameState(state: GameState): GameState {
         constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),
     })),
-    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in compact-v2.
+    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in 历史记录.
     // Sharing these immutable structures avoids duplicating the complete log history and map for every frame.
     logs: state.logs,
     tiles: state.tiles,
@@ -82,12 +82,12 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
       state: change.state ?? "idle",
-      my: false,
       playerId: player.id,
       exists: true,
       attackRange: change.attackRange ?? 0,
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
+      heading: change.heading,
       intent: change.intent ?? undefined,
       constructingBuildingId: change.constructingBuildingId ?? undefined,
     };
@@ -107,6 +107,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     attackRange: change.attackRange ?? current.attackRange,
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
+    heading: change.heading ?? current.heading,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
     constructingBuildingId: "constructingBuildingId" in change
       ? change.constructingBuildingId ?? undefined
@@ -132,7 +133,6 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       y: change.y ?? 0,
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
-      my: false,
       playerId: player.id,
       exists: true,
       productionQueue: change.productionQueue ?? [],
@@ -398,7 +398,7 @@ function buildReplayTurnEvents(turns: SavedAITurnRecord[]): AITerminalEvent[] {
 export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
-  const replayTurns = [...record.aiTurns].sort((a, b) => {
+  const replayTurns = [...(record.aiTurns ?? [])].sort((a, b) => {
     if (a.executeTick !== b.executeTick) {
       return a.executeTick - b.executeTick;
     }
@@ -411,7 +411,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   let replayTurnIndex = 0;
   clearTransientIntentState(currentState);
   const commandResultsByTick = new Map<number, GameLog[]>();
-  for (const result of record.commandResults) {
+  for (const result of record.commandResults ?? []) {
     if (result.type !== LOG_TYPES.COMMAND_RESULT) continue;
     const bucket = commandResultsByTick.get(result.tick) ?? [];
     bucket.push(result);
@@ -486,8 +486,8 @@ export function buildReplaySnapshots(frames: ReplayFrame[]): GameSnapshot[] {
   }));
 }
 
-export function formatTickTime(tick: number) {
-  const totalSeconds = Math.floor((tick * 500) / 1000);
+export function formatTickTime(tick: number, tickIntervalMs = 500) {
+  const totalSeconds = Math.floor((tick * tickIntervalMs) / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;

@@ -92,6 +92,7 @@ export const RESULT_TYPES = {
   // 通用错误
   INVALID_UNIT: "invalid_unit",
   COMMAND_CRASHED: "command_crashed",
+  COMMAND_INVALID: "command_invalid",
 } as const;
 
 export type ResultType = typeof RESULT_TYPES[keyof typeof RESULT_TYPES];
@@ -188,6 +189,13 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.COMMAND_CRASHED]: {
     error: string;
+  };
+  [RESULT_TYPES.COMMAND_INVALID]: {
+    hint: string;
+    reason?: "command_failed";
+    failedCommandId?: string;
+    failedResultCode?: ResultCode;
+    failedResultType?: ResultType;
   };
 }
 
@@ -289,7 +297,12 @@ export interface GameLogDataMap {
   [LOG_TYPES.COMMAND_RESULT]: CommandResultData;
   [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
   [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;
-  [LOG_TYPES.TICK_ERROR]: { error: string };
+  [LOG_TYPES.TICK_ERROR]: {
+    error: string;
+    attemptedTick?: number;
+    committedTick?: number;
+    committed?: boolean;
+  };
   [LOG_TYPES.PERF_WARNING]: PerfWarningData;
 }
 

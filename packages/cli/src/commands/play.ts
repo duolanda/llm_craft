@@ -40,10 +40,22 @@ export async function handlePlay(
   if (!startResult.ok) {
     exit(ExitCode.BackendFailure, getErrorMessage(startResult, "Failed to start game"));
   }
+  const startData = startResult.data as { matchId?: string; reused?: boolean; status?: string };
+  if (startData.reused) {
+    printJson({
+      ok: true,
+      reused: true,
+      message: "已有 control 对局正在进行；未创建新对局或 control session。",
+      matchId: startData.matchId,
+      status: startData.status,
+      serverUrl: client.getBaseUrl(),
+    });
+    return;
+  }
 
   let sessionResponse;
   try {
-    sessionResponse = await client.createSession("player_1");
+    sessionResponse = await client.createSession("player_1", startData.matchId);
   } catch (err) {
     exit(
       ExitCode.ConnectionFailure,
@@ -107,13 +119,25 @@ async function startPvpGame(client: ControlClient): Promise<void> {
   if (!startResult.ok) {
     exit(ExitCode.BackendFailure, getErrorMessage(startResult, "Failed to start game"));
   }
+  const startData = startResult.data as { matchId?: string; reused?: boolean; status?: string };
+  if (startData.reused) {
+    printJson({
+      ok: true,
+      reused: true,
+      message: "已有 control 对局正在进行；未创建新对局。",
+      matchId: startData.matchId,
+      status: startData.status,
+      serverUrl: client.getBaseUrl(),
+    });
+    return;
+  }
 
   printJson({
     ok: true,
     message: "PVP 对局已创建，等待 player_1 和 player_2 创建 control session。",
     mode: "pvp",
     serverUrl: client.getBaseUrl(),
-    status: (startResult.data as Record<string, unknown>)?.status ?? "waiting_for_players",
+    status: startData.status ?? "waiting_for_players",
     instructions: [
       "Agent 1: llmcraft session use --player player_1 --base-url " + client.getBaseUrl(),
       "Agent 2: llmcraft session use --player player_2 --base-url " + client.getBaseUrl(),

@@ -21,7 +21,7 @@ import {
 } from "@llmcraft/shared";
 
 describe("default ruleset", () => {
-  it("keeps compatibility stats aligned with ruleset unit definitions", () => {
+  it("keeps convenience stats aligned with ruleset unit definitions", () => {
     expect(getUnitStats(UNIT_TYPES.WORKER)).toEqual(UNIT_STATS.worker);
     expect(getUnitStats(UNIT_TYPES.SOLDIER)).toEqual(UNIT_STATS.soldier);
     expect(getUnitStats(UNIT_TYPES.RIFLEMAN)).toEqual(UNIT_STATS.rifleman);
@@ -92,7 +92,7 @@ describe("default ruleset", () => {
     ]);
   });
 
-  it("keeps compatibility stats aligned with ruleset building definitions", () => {
+  it("keeps convenience stats aligned with ruleset building definitions", () => {
     expect(getBuildingStats(BUILDING_TYPES.HQ)).toMatchObject(BUILDING_STATS.hq);
     expect(getBuildingStats(BUILDING_TYPES.BARRACKS)).toMatchObject(BUILDING_STATS.barracks);
     expect(getBuildingStats(BUILDING_TYPES.WAR_FACTORY)).toMatchObject(BUILDING_STATS.war_factory);

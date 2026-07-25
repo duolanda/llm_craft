@@ -14,10 +14,10 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: 3100,
     proxy: {
       '/ws': {
-        target: 'ws://localhost:3001',
+        target: 'ws://localhost:3101',
         ws: true,
       },
     },

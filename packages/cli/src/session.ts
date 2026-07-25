@@ -47,5 +47,5 @@ export function resolveServerUrl(explicitUrl?: string): string {
     return process.env.LLMCRAFT_SERVER;
   }
   const saved = loadSession();
-  return saved?.serverUrl ?? "http://localhost:3001";
+  return saved?.serverUrl ?? "http://localhost:3101";
 }

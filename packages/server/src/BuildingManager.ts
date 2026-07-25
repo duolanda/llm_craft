@@ -19,6 +19,7 @@ export class BuildingManager {
   private buildings: Map<string, Building> = new Map();
   private idCounter = 0;
 
+  /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createBuilding(
     type: BuildingType,
     x: number,
@@ -34,7 +35,6 @@ export class BuildingManager {
       y,
       hp: stats.hp,
       maxHp: stats.hp,
-      my: true,
       playerId,
       exists: true,
       productionQueue: [],
@@ -56,6 +56,18 @@ export class BuildingManager {
 
   getAllBuildings(): Building[] {
     return Array.from(this.buildings.values()).filter((b) => b.exists);
+  }
+
+  iterateStoredBuildings(): IterableIterator<Building> {
+    return this.buildings.values();
+  }
+
+  /** @internal Authoritative runtime destruction goes through EntityRegistry/WorldState. */
+  removeBuilding(id: string): boolean {
+    const building = this.buildings.get(id);
+    if (!building) return false;
+    building.exists = false;
+    return true;
   }
 
   hasBuildingAt(x: number, y: number, excludeBuildingId?: string): boolean {
@@ -105,7 +117,6 @@ export class BuildingManager {
 
     if (building.hp <= 0) {
       building.hp = 0;
-      building.exists = false;
       return true; // Building destroyed
     }
 

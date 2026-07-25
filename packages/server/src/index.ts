@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   AITerminalEvent,
@@ -13,28 +14,40 @@ import {
   GameState,
   MatchDebugOptions,
   MatchLLMConfig,
-  MatchPrepareState,
+  MatchWarmupState,
   MatchWarmupOptions,
   OpenAICompatibleRuntimeConfig,
   PlayerId,
   PLAYER_IDS,
   GameLogDataMap,
   LOG_TYPES,
-  ServerPrepareStatusMessage,
+  ServerWarmupStatusMessage,
   ServerMessage,
+  StateProjectionFrame,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
   UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
+import { applyStateProjectionDelta, createStateProjectionDelta } from "@llmcraft/record";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
 import { PresetStore } from "./PresetStore";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager } from "./ControlHandler";
-import { ControlPlaneMatch } from "./control/ControlPlaneMatch";
 import { handleControlHttpRequest } from "./control/ControlRoutes";
+import {
+  MatchRegistry,
+  type MatchRegistration,
+  type RegisteredMatchHandle,
+  type RegisteredMatchStatus,
+} from "./MatchRegistry";
+import { isSupportedRecordFileName, readRecordJsonText, recordFileEncoding } from "./RecordFile";
+import {
+  MAX_WEBSOCKET_BUFFERED_BYTES,
+  shouldDeferLatestProjection,
+} from "./WebSocketBackpressure";
 
 dotenv.config();
 
@@ -43,13 +56,13 @@ const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..");
 const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
-const PORT = parseInt(process.env.PORT || "3001", 10);
+const PORT = parseInt(process.env.PORT || "3101", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const BROADCAST_TOTAL_WARNING_MS = 250;
 const BROADCAST_PHASE_WARNING_MS = 150;
-const BROADCAST_BUFFERED_WARNING_BYTES = 1_000_000;
+const BROADCAST_BUFFERED_WARNING_BYTES = MAX_WEBSOCKET_BUFFERED_BYTES;
 const BROADCAST_PERF_WARNING_THROTTLE_MS = 2000;
 
 export function getDefaultPresetPaths() {
@@ -62,9 +75,12 @@ const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
 const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
 
 interface OrchestratorLike {
-  prepare?(warmup: MatchWarmupOptions): Promise<void>;
+  getMatchId?(): string;
+  getMatchStatus?(): RegisteredMatchStatus;
+  warmup?(warmup: MatchWarmupOptions): Promise<void>;
   start(): Promise<void>;
   stop(): void;
+  quiesce?: () => Promise<void>;
   saveRecord(): Promise<string>;
   getAITerminalFeed?: (sinceSequence?: number) => {
     sessionId: string;
@@ -82,6 +98,7 @@ interface OrchestratorLike {
     getTick?: () => number;
     getAIOutputs?: () => Record<string, string>;
     getLatestSnapshot?: () => GameSnapshot | null;
+    getDefinition?: () => { tickIntervalMs: number };
     addLog?: (
       type: typeof LOG_TYPES.PERF_WARNING,
       message: string,
@@ -90,14 +107,19 @@ interface OrchestratorLike {
   };
 }
 
+interface BenchmarkCoordinatorLike {
+  start(): Promise<void>;
+  stop(): void;
+}
+
 export interface ServerState {
   presetStore: PresetStore;
-  orchestrator: OrchestratorLike | null;
-  controlMatch: ControlPlaneMatch | null;
-  pendingMatch: {
+  matchRegistry: MatchRegistry;
+  warmupMatch: {
     signature: string;
-    orchestrator: OrchestratorLike;
+    matchId: string;
   } | null;
+  activeBenchmark: BenchmarkCoordinatorLike | null;
   controlSessions: ControlSessionManager;
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
@@ -107,12 +129,11 @@ export interface ServerState {
       cpuStrategy: ClientStartBenchmarkMessage["cpuStrategy"];
       rounds: number;
       recordReplay: boolean;
-      decisionIntervalTicks?: number;
       concurrency?: number;
       debug?: ClientStartBenchmarkMessage["debug"];
     },
     ws: Pick<WebSocket, "send"> | null
-  ) => OrchestratorLike;
+  ) => BenchmarkCoordinatorLike;
   liveEnabled: boolean | null;
 }
 
@@ -131,28 +152,93 @@ export function createPresetStore(options?: {
 
 export function createServerState(
   presetStore: PresetStore,
-  createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike = (config) => new GameOrchestrator(config),
-  createBenchmarkOrchestrator: ServerState["createBenchmarkOrchestrator"] = (config, ws) =>
-    new BenchmarkOrchestrator(config, ws)
+  createOrchestrator?: (config: GameOrchestratorConfig) => OrchestratorLike,
+  createBenchmarkOrchestrator?: ServerState["createBenchmarkOrchestrator"],
 ): ServerState {
+  const matchRegistry = new MatchRegistry();
+  const orchestratorFactory = createOrchestrator ?? ((config: GameOrchestratorConfig) => new GameOrchestrator(config));
   return {
     presetStore,
-    orchestrator: null,
-    controlMatch: null,
-    pendingMatch: null,
+    matchRegistry,
+    warmupMatch: null,
+    activeBenchmark: null,
     controlSessions: new ControlSessionManager(),
-    createOrchestrator,
-    createBenchmarkOrchestrator,
+    createOrchestrator: orchestratorFactory,
+    createBenchmarkOrchestrator: createBenchmarkOrchestrator
+      ?? ((config, ws) => new BenchmarkOrchestrator(
+        config,
+        ws,
+        undefined,
+        matchRegistry,
+      )),
     liveEnabled: null,
   };
+}
+
+const orchestratorAdapters = new WeakMap<object, OrchestratorLike & RegisteredMatchHandle>();
+
+function asRegisteredMatchHandle(orchestrator: OrchestratorLike): OrchestratorLike & RegisteredMatchHandle {
+  if (orchestrator.getMatchId) {
+    return orchestrator as OrchestratorLike & RegisteredMatchHandle;
+  }
+  const existing = orchestratorAdapters.get(orchestrator);
+  if (existing) return existing;
+  const matchId = `match_${randomUUID()}`;
+  const adapter: OrchestratorLike & RegisteredMatchHandle = {
+    getMatchId: () => matchId,
+    getMatchStatus: orchestrator.getMatchStatus
+      ? () => orchestrator.getMatchStatus!()
+      : undefined,
+    warmup: orchestrator.warmup ? (options) => orchestrator.warmup!(options) : undefined,
+    start: () => orchestrator.start(),
+    stop: () => orchestrator.stop(),
+    quiesce: orchestrator.quiesce ? () => orchestrator.quiesce!() : undefined,
+    saveRecord: () => orchestrator.saveRecord(),
+    getGame: () => orchestrator.getGame(),
+    getAITerminalFeed: orchestrator.getAITerminalFeed
+      ? (sinceSequence) => orchestrator.getAITerminalFeed!(sinceSequence)
+      : undefined,
+    getTerminalHistory: orchestrator.getTerminalHistory
+      ? (beforeSequence, limit) => orchestrator.getTerminalHistory!(beforeSequence, limit)
+      : undefined,
+  };
+  orchestratorAdapters.set(orchestrator, adapter);
+  return adapter;
+}
+
+function registerOrchestrator(
+  state: ServerState,
+  orchestrator: OrchestratorLike,
+  registration: MatchRegistration,
+): OrchestratorLike & RegisteredMatchHandle {
+  const handle = asRegisteredMatchHandle(orchestrator);
+  state.matchRegistry.register(handle, registration);
+  return handle;
+}
+
+function getRegisteredOrchestrator(state: ServerState, matchId: string): OrchestratorLike | null {
+  const entry = state.matchRegistry.get(matchId);
+  return entry ? entry.handle as OrchestratorLike : null;
+}
+
+function getActiveLiveMatch(state: ServerState) {
+  return state.matchRegistry.list()
+    .find((match) => (
+      match.kind === "live"
+      && (match.status === "warming_up"
+        || match.status === "waiting_for_players"
+        || match.status === "running")
+    )) ?? null;
 }
 
 type StateMessagePayload = {
   type: "state";
   state: GameState | null;
+  frame: StateProjectionFrame | null;
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  matchStatus: RegisteredMatchStatus | null;
 };
 
 type AITerminalMessagePayload = {
@@ -169,17 +255,57 @@ async function refreshLiveEnabled(state: ServerState): Promise<boolean> {
   return state.liveEnabled;
 }
 
-export function buildStateMessagePayload(state: ServerState): StateMessagePayload {
-  const currentOrchestrator = state.orchestrator;
-  const game = currentOrchestrator?.getGame();
-  const latestSnapshot = game?.getLatestSnapshot?.();
+export function buildStateMessagePayload(
+  state: ServerState,
+  options: {
+    frameSequence?: number;
+    baseFrameSequence?: number;
+    previousState?: GameState | null;
+    forceKeyframe?: boolean;
+  } = {},
+): StateMessagePayload {
+  const currentMatch = state.matchRegistry.getObserved();
+  const game = currentMatch?.handle.getGame();
+  const currentState = game?.getState() ?? null;
+  const aiOutputs = game?.getAIOutputs?.() ?? {};
+  const frameSequence = options.frameSequence ?? 1;
+  const tickIntervalMs = game?.getDefinition?.().tickIntervalMs ?? 500;
+  const metadata = currentState ? {
+    frameSequence,
+    simulationTick: currentState.tick,
+    simulationTimeMs: currentState.tick * tickIntervalMs,
+    tickIntervalMs,
+    serverTimeMs: Date.now(),
+  } : null;
+  const keyframe = Boolean(currentState) && (
+    options.forceKeyframe === true
+    || !options.previousState
+    || options.baseFrameSequence === undefined
+    || frameSequence % 20 === 1
+  );
+  const frame: StateProjectionFrame | null = !currentState || !metadata
+    ? null
+    : keyframe
+      ? { kind: "keyframe", metadata, state: currentState, aiOutputs }
+      : {
+          kind: "delta",
+          metadata,
+          baseFrameSequence: options.baseFrameSequence!,
+          delta: createStateProjectionDelta(options.previousState!, currentState),
+          aiOutputs,
+        };
 
   return {
     type: "state",
-    state: game?.getState() ?? null,
-    aiOutputs: game?.getAIOutputs?.() ?? {},
-    snapshots: latestSnapshot ? [latestSnapshot] : [],
+    // `frame` is the authoritative live projection. Keep the legacy fields in
+    // the wire shape, but do not duplicate the full state on every keyframe or
+    // attach a second full GameSnapshot on every tick.
+    state: null,
+    frame,
+    aiOutputs,
+    snapshots: [],
     liveEnabled: Boolean(state.liveEnabled),
+    matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
   };
 }
 
@@ -210,16 +336,20 @@ function buildMatchSignature(input: {
   });
 }
 
-function sendPrepareStatus(
+function liveTerminalPolicy(debug?: MatchDebugOptions): "save" | "none" {
+  return debug?.recordingProfile === "off" ? "none" : "save";
+}
+
+function sendWarmupStatus(
   ws: Pick<WebSocket, "send">,
-  statuses: Partial<Record<PlayerId, MatchPrepareState>>,
+  statuses: Partial<Record<PlayerId, MatchWarmupState>>,
   message?: string
 ): void {
   ws.send(JSON.stringify({
-    type: "prepare_status",
+    type: "warmup_status",
     statuses,
     message,
-  } satisfies ServerPrepareStatusMessage));
+  } satisfies ServerWarmupStatusMessage));
 }
 
 function normalizeWarmupOptions(warmup?: MatchWarmupOptions): MatchWarmupOptions {
@@ -416,7 +546,7 @@ async function listRecordEntries() {
     const entries = await fs.readdir(RECORDS_DIR, { withFileTypes: true });
     const files = await Promise.all(
       entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+        .filter((entry) => entry.isFile() && isSupportedRecordFileName(entry.name))
         .map(async (entry) => {
           const fullPath = path.join(RECORDS_DIR, entry.name);
           const stat = await fs.stat(fullPath);
@@ -425,6 +555,7 @@ async function listRecordEntries() {
             fullPath,
             size: stat.size,
             modifiedAt: stat.mtime.toISOString(),
+            encoding: recordFileEncoding(entry.name),
           };
         })
     );
@@ -466,14 +597,14 @@ export async function handleHttpRequest(
     if (req.method === "GET" && url.pathname.startsWith("/api/replay/records/")) {
       const requestedFile = decodeURIComponent(url.pathname.replace("/api/replay/records/", ""));
       const safeFileName = path.basename(requestedFile);
-      if (!safeFileName.endsWith(".json") || safeFileName !== requestedFile) {
+      if (!isSupportedRecordFileName(safeFileName) || safeFileName !== requestedFile) {
         sendJson(res, 400, { error: "记录文件名无效。" });
         return;
       }
 
       const fullPath = path.join(RECORDS_DIR, safeFileName);
       try {
-        const content = await fs.readFile(fullPath, "utf8");
+        const content = await readRecordJsonText(fullPath);
         setCorsHeaders(res);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(content);
@@ -604,11 +735,11 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
     const message: ClientMessage = parsed;
 
-    if (message.type === "prepare") {
+    if (message.type === "warmup") {
       if (!message.player1PresetId || !message.player2PresetId) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "准备对局前必须为红蓝双方选择预设。",
+        message: "预热模型前必须为红蓝双方选择预设。",
         } satisfies ServerMessage));
         return;
       }
@@ -618,51 +749,78 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       if (warmupPlayers.length === 0) {
         ws.send(JSON.stringify({
           type: "error",
-          message: "至少选择一方进行准备。",
+          message: "至少选择一方进行模型预热。",
         } satisfies ServerMessage));
         return;
       }
 
       const signature = buildMatchSignature(message);
+      const activeLive = getActiveLiveMatch(state);
+      if (activeLive?.status === "running") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "已有实时对局正在运行。请先停止或重置当前对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (
+        state.warmupMatch
+        && state.warmupMatch.signature !== signature
+      ) {
+        state.matchRegistry.remove(state.warmupMatch.matchId, { stop: true });
+        state.warmupMatch = null;
+      }
+      if (
+        activeLive?.status === "waiting_for_players"
+        && state.matchRegistry.get(activeLive.matchId)?.signature !== signature
+      ) {
+        state.matchRegistry.remove(activeLive.matchId, { stop: true });
+      }
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
-      let orchestrator = state.pendingMatch?.signature === signature
-        ? state.pendingMatch.orchestrator
-        : null;
+      let orchestrator = state.warmupMatch?.signature === signature
+        ? getRegisteredOrchestrator(state, state.warmupMatch.matchId)
+        : getActiveLiveMatch(state)?.status === "waiting_for_players"
+          ? getRegisteredOrchestrator(state, getActiveLiveMatch(state)!.matchId)
+          : null;
 
       if (!orchestrator) {
-        const previousOrchestrator = state.orchestrator;
-        orchestrator = state.createOrchestrator({
+        orchestrator = registerOrchestrator(state, state.createOrchestrator({
           player1,
           player2,
           debug: message.debug,
+        }), {
+          kind: "live",
+          signature,
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
         });
-        state.orchestrator = orchestrator;
-        state.pendingMatch = { signature, orchestrator };
-        previousOrchestrator?.stop();
+        state.warmupMatch = { signature, matchId: orchestrator.getMatchId!() };
+      } else {
+        state.matchRegistry.observe(orchestrator.getMatchId!());
       }
 
-      sendPrepareStatus(
+      sendWarmupStatus(
         ws,
-        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "preparing"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-        "模型准备中。"
+        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "warming_up"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+        "模型预热中。"
       );
 
       try {
-        await orchestrator.prepare?.(warmup);
+        await orchestrator.warmup?.(warmup);
       } catch (error) {
-        sendPrepareStatus(
+        sendWarmupStatus(
           ws,
-          Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "error"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-          error instanceof Error && error.message.startsWith("模型准备失败") ? error.message : "模型准备失败。"
+          Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "error"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+          error instanceof Error && error.message.startsWith("模型预热失败") ? error.message : "模型预热失败。"
         );
         throw error;
       }
 
-      sendPrepareStatus(
+      sendWarmupStatus(
         ws,
-        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "ready"])) as Partial<Record<PlayerId, MatchPrepareState>>,
-        "模型已准备，可以启动模拟。"
+        Object.fromEntries(warmupPlayers.map((playerId) => [playerId, "ready"])) as Partial<Record<PlayerId, MatchWarmupState>>,
+        "模型预热完成，可以启动模拟。"
       );
       return;
     }
@@ -677,21 +835,62 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       const signature = buildMatchSignature(message);
-      const preparedMatch = state.pendingMatch?.signature === signature ? state.pendingMatch : null;
-      const previousOrchestrator = preparedMatch ? null : state.orchestrator;
-      const nextOrchestrator = preparedMatch?.orchestrator ?? state.createOrchestrator({
-        player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
-        player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
-        debug: message.debug,
-      });
-      state.orchestrator = nextOrchestrator;
+      const activeLive = getActiveLiveMatch(state);
+      const observedLive = state.matchRegistry.list().find((match) => match.kind === "live" && match.observed) ?? null;
+      if (activeLive?.status === "running") {
+        state.matchRegistry.observe(activeLive.matchId);
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "已有实时对局正在运行，不会重复启动。请先停止或重置当前对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (state.warmupMatch && state.warmupMatch.signature !== signature) {
+        state.matchRegistry.remove(state.warmupMatch.matchId, { stop: true });
+        state.warmupMatch = null;
+      }
+      if (
+        activeLive?.status === "waiting_for_players"
+        && state.matchRegistry.get(activeLive.matchId)?.signature !== signature
+      ) {
+        state.matchRegistry.remove(activeLive.matchId, { stop: true });
+      }
+      const previousObservedId = state.matchRegistry.getObservedMatchId();
+      const resumableMatch = observedLive?.status === "stopped"
+        && state.matchRegistry.get(observedLive.matchId)?.signature === signature
+        ? getRegisteredOrchestrator(state, observedLive.matchId)
+        : null;
+      const warmedMatch = state.warmupMatch?.signature === signature
+        ? getRegisteredOrchestrator(state, state.warmupMatch.matchId)
+        : activeLive?.status === "waiting_for_players"
+          && state.matchRegistry.get(activeLive.matchId)?.signature === signature
+          ? getRegisteredOrchestrator(state, activeLive.matchId)
+          : resumableMatch;
+      const createdNew = !warmedMatch;
+      const nextOrchestrator = warmedMatch ?? registerOrchestrator(
+        state,
+        state.createOrchestrator({
+          player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
+          player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
+          debug: message.debug,
+        }),
+        {
+          kind: "live",
+          signature,
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
+        },
+      );
+      const nextMatchId = nextOrchestrator.getMatchId!();
+      state.matchRegistry.observe(nextMatchId);
 
       try {
         await nextOrchestrator.start();
       } catch (error) {
-        nextOrchestrator.stop();
-        if (state.orchestrator === nextOrchestrator) {
-          state.orchestrator = previousOrchestrator;
+        await state.matchRegistry.stopAndSave(nextMatchId);
+        if (createdNew) state.matchRegistry.remove(nextMatchId);
+        if (previousObservedId && state.matchRegistry.get(previousObservedId)) {
+          state.matchRegistry.observe(previousObservedId);
         }
         if (error instanceof Error && error.message === MATCH_START_ABORTED) {
           return;
@@ -699,19 +898,21 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         throw error;
       }
 
-      state.pendingMatch = null;
-      previousOrchestrator?.stop();
+      state.warmupMatch = null;
       return;
     }
 
     if (message.type === "stop") {
-      state.orchestrator?.stop();
-      state.pendingMatch = null;
+      state.activeBenchmark?.stop();
+      state.activeBenchmark = null;
+      const observedMatchId = state.matchRegistry.getObservedMatchId();
+      if (observedMatchId) state.matchRegistry.stop(observedMatchId);
+      state.warmupMatch = null;
       return;
     }
 
     if (message.type === "load_terminal_history") {
-      const orchestrator = state.orchestrator;
+      const orchestrator = state.matchRegistry.getObserved()?.handle;
       if (!orchestrator?.getTerminalHistory || !orchestrator.getAITerminalFeed) {
         return;
       }
@@ -736,17 +937,28 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
-      const previousOrchestrator = state.orchestrator;
-      const nextOrchestrator = state.createOrchestrator({ player1, player2, debug: message.debug });
-
-      state.orchestrator = nextOrchestrator;
-      state.pendingMatch = null;
-      previousOrchestrator?.stop();
+      const previousMatchId = state.matchRegistry.getObservedMatchId();
+      const nextOrchestrator = registerOrchestrator(
+        state,
+        state.createOrchestrator({ player1, player2, debug: message.debug }),
+        {
+          kind: "live",
+          signature: buildMatchSignature(message),
+          observe: true,
+          terminalPolicy: liveTerminalPolicy(message.debug),
+        },
+      );
+      state.warmupMatch = null;
+      if (previousMatchId && previousMatchId !== nextOrchestrator.getMatchId!()) {
+        await state.matchRegistry.stopAndSave(previousMatchId);
+        state.matchRegistry.remove(previousMatchId);
+      }
       return;
     }
 
     if (message.type === "save_record") {
-      if (!state.orchestrator) {
+      const currentMatch = state.matchRegistry.getObserved();
+      if (!currentMatch) {
         ws.send(JSON.stringify({
           type: "error",
           message: "当前没有可保存的实时对局。",
@@ -754,7 +966,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
-      const filePath = await state.orchestrator.saveRecord();
+      const filePath = await state.matchRegistry.save(currentMatch.matchId);
       ws.send(JSON.stringify({
         type: "record_saved",
         filePath,
@@ -795,7 +1007,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         throw new Error("BENCHMARK_PRESET_INVALID");
       }
 
-      const previousOrchestrator = state.orchestrator;
+      const previousObservedId = state.matchRegistry.getObservedMatchId();
+      state.activeBenchmark?.stop();
       const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
         {
           presetId: message.presetId,
@@ -803,22 +1016,23 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           cpuStrategy: message.cpuStrategy,
           rounds: message.rounds,
           recordReplay: message.recordReplay ?? true,
-          decisionIntervalTicks: message.decisionIntervalTicks,
           concurrency: message.concurrency,
           debug: message.debug,
         },
         ws
       );
 
-      state.orchestrator = benchmarkOrchestrator;
-      state.pendingMatch = null;
-      previousOrchestrator?.stop();
+      state.activeBenchmark = benchmarkOrchestrator;
+      state.warmupMatch = null;
 
       try {
         await benchmarkOrchestrator.start();
       } catch (error) {
         benchmarkOrchestrator.stop();
-        state.orchestrator = previousOrchestrator;
+        state.activeBenchmark = null;
+        if (previousObservedId && state.matchRegistry.get(previousObservedId)) {
+          state.matchRegistry.observe(previousObservedId);
+        }
         throw error;
       }
 
@@ -835,7 +1049,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
             : error.message === "BENCHMARK_PRESET_INVALID"
               ? "Benchmark 只能使用 OpenAI-compatible 预设。"
-              : error.message.startsWith("模型准备失败")
+              : error.message.startsWith("模型预热失败")
                 ? error.message
                 : "处理客户端消息失败。"
         : "处理客户端消息失败。",
@@ -849,6 +1063,22 @@ function createServer(state: ServerState) {
   });
 
   const wss = new WebSocketServer({ server });
+  let terminalSweepRunning = false;
+  const terminalSweep = setInterval(() => {
+    if (terminalSweepRunning) return;
+    terminalSweepRunning = true;
+    void state.matchRegistry.finalizeTerminalMatches()
+      .then((results) => {
+        for (const result of results) {
+          if (!result.ok) console.error(`对局 ${result.matchId} 自动收尾失败: ${result.error}`);
+        }
+      })
+      .finally(() => {
+        terminalSweepRunning = false;
+      });
+  }, 1_000);
+  terminalSweep.unref();
+  server.once("close", () => clearInterval(terminalSweep));
 
   wss.on("connection", (ws) => {
     console.log("客户端已连接");
@@ -856,10 +1086,12 @@ function createServer(state: ServerState) {
     let lastAITerminalSessionId: string | null = null;
     let lastAITerminalEventSequence = 0;
     let lastStateTick: number | null | undefined;
-    let lastStateOrchestrator: OrchestratorLike | null = null;
+    let lastStateOrchestrator: RegisteredMatchHandle | null = null;
     let lastStateLiveEnabled: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
+    let lastProjectedState: GameState | null = null;
+    let lastFrameSequence = 0;
 
     const logBroadcastPerfWarning = (
       phase: "state" | "ai_terminal",
@@ -880,7 +1112,7 @@ function createServer(state: ServerState) {
         return lastWarningAtMs;
       }
 
-      const game = state.orchestrator?.getGame();
+      const game = state.matchRegistry.getObserved()?.handle.getGame();
       const tick = typeof details.tick === "number" ? details.tick : game?.getState()?.tick;
       game?.addLog?.(LOG_TYPES.PERF_WARNING, `${phase} broadcast took ${Math.round(elapsedMs)}ms`, {
         scope: "state_broadcast",
@@ -897,10 +1129,14 @@ function createServer(state: ServerState) {
     };
 
     const sendState = async (force = false) => {
-      if (isSendingState) {
+      if (
+        isSendingState
+        || ws.readyState !== WebSocket.OPEN
+        || shouldDeferLatestProjection(ws.bufferedAmount)
+      ) {
         return;
       }
-      const currentOrchestrator = state.orchestrator;
+      const currentOrchestrator = state.matchRegistry.getObserved()?.handle ?? null;
       const currentTick = currentOrchestrator?.getGame().getTick?.();
       if (
         !force
@@ -917,13 +1153,31 @@ function createServer(state: ServerState) {
         }
         const startedAt = performance.now();
         const buildStartedAt = performance.now();
-        const payload = buildStateMessagePayload(state);
+        const matchChanged = currentOrchestrator !== lastStateOrchestrator;
+        if (matchChanged) {
+          lastProjectedState = null;
+          lastFrameSequence = 0;
+        }
+        const nextFrameSequence = lastFrameSequence + 1;
+        const payload = buildStateMessagePayload(state, {
+          frameSequence: nextFrameSequence,
+          baseFrameSequence: lastFrameSequence || undefined,
+          previousState: lastProjectedState,
+          forceKeyframe: force || matchChanged,
+        });
         const buildMs = performance.now() - buildStartedAt;
         const stringifyStartedAt = performance.now();
         const serialized = JSON.stringify(payload);
         const stringifyMs = performance.now() - stringifyStartedAt;
         const sendStartedAt = performance.now();
         ws.send(serialized);
+        const sentState = payload.frame?.kind === "keyframe"
+          ? payload.frame.state
+          : payload.frame?.kind === "delta" && lastProjectedState
+            ? applyStateProjectionDelta(lastProjectedState, payload.frame.delta)
+            : null;
+        lastProjectedState = sentState ? structuredClone(sentState) : null;
+        lastFrameSequence = payload.frame?.metadata.frameSequence ?? lastFrameSequence;
         lastStateOrchestrator = currentOrchestrator;
         lastStateTick = currentTick;
         lastStateLiveEnabled = state.liveEnabled;
@@ -947,13 +1201,20 @@ function createServer(state: ServerState) {
     };
 
     const sendAITerminalEvents = () => {
-      let feed = state.orchestrator?.getAITerminalFeed?.(lastAITerminalEventSequence) ?? null;
+      const observedHandle = state.matchRegistry.getObserved()?.handle;
+      let feed = observedHandle?.getAITerminalFeed?.(lastAITerminalEventSequence) ?? null;
       if (feed && feed.sessionId !== lastAITerminalSessionId) {
-        feed = state.orchestrator?.getAITerminalFeed?.() ?? feed;
+        feed = observedHandle?.getAITerminalFeed?.() ?? feed;
       }
       const sessionId = feed?.sessionId ?? null;
       const events = feed?.events ?? [];
       const sendPayload = (reset: boolean, nextEvents: AITerminalEvent[]) => {
+        if (
+          ws.readyState !== WebSocket.OPEN
+          || shouldDeferLatestProjection(ws.bufferedAmount)
+        ) {
+          return false;
+        }
         const startedAt = performance.now();
         const buildStartedAt = performance.now();
         const payload = buildAITerminalMessagePayload(sessionId, reset, nextEvents, feed?.hasMore ?? false);
@@ -978,18 +1239,21 @@ function createServer(state: ServerState) {
           },
           lastAITerminalBroadcastWarningAtMs
         );
+        return true;
       };
 
       if (sessionId !== lastAITerminalSessionId) {
-        lastAITerminalSessionId = sessionId;
-        lastAITerminalEventSequence = feed?.latestSequence ?? 0;
-        sendPayload(true, events);
+        if (sendPayload(true, events)) {
+          lastAITerminalSessionId = sessionId;
+          lastAITerminalEventSequence = feed?.latestSequence ?? 0;
+        }
         return;
       }
 
       if (events.length > 0) {
-        lastAITerminalEventSequence = feed?.latestSequence ?? lastAITerminalEventSequence;
-        sendPayload(Boolean(feed?.reset), events);
+        if (sendPayload(Boolean(feed?.reset), events)) {
+          lastAITerminalEventSequence = feed?.latestSequence ?? lastAITerminalEventSequence;
+        }
       }
     };
 
@@ -1020,14 +1284,33 @@ export function startServer() {
   console.log("启动 LLMCraft 服务器...");
   console.log(`HTTP/WebSocket 服务器运行在端口 ${PORT}`);
 
-  process.on("SIGINT", () => {
-    console.log("\n关闭服务器...");
-    state.orchestrator?.stop();
-    state.controlMatch?.stop();
-    server.close();
-    wss.close();
-    process.exit(0);
-  });
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n收到 ${signal}，正在保存并关闭服务器...`);
+    const forcedExit = setTimeout(() => {
+      console.error("服务器优雅关闭超时。");
+      process.exit(1);
+    }, 10_000);
+    forcedExit.unref();
+
+    state.activeBenchmark?.stop();
+    const results = await state.matchRegistry.stopAndSaveAll();
+    for (const result of results) {
+      if (!result.ok) console.error(`对局 ${result.matchId} 关闭保存失败: ${result.error}`);
+    }
+    for (const client of wss.clients) client.close();
+    await Promise.all([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => wss.close(() => resolve())),
+    ]);
+    clearTimeout(forcedExit);
+    process.exit(results.every((result) => result.ok) ? 0 : 1);
+  };
+
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
   server.listen(PORT);
   return { server, wss, state };

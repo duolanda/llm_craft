@@ -4,6 +4,7 @@ import {
   AgentMapStateCell,
   AgentMapStateResource,
   AgentMapStateUnit,
+  AgentPlanWaitingDiagnostic,
   AgentUnitGroup,
   AgentPlanRecord,
   AttackTargetType,
@@ -11,15 +12,21 @@ import {
   Building,
   BuildingType,
   Command,
+  CommandProvenance,
+  ECONOMY_RULES,
   OrchestratePlanInput,
   PlanCallToolName,
   PlanStep,
   PlanStepScope,
   PlayerId,
   Position,
+  LOG_TYPES,
+  RESULT_TYPES,
   TILE_TYPES,
   UNIT_TYPES,
+  Unit,
   UnitType,
+  UnitIntent,
   canBuildingProduce,
   getDefaultAttackMovePriority,
   getBuildingCost,
@@ -35,17 +42,43 @@ import {
   unitCanAttack,
 } from "@llmcraft/shared";
 import { AgentReadState, Game } from "../Game";
-import { AgentPlanRuntime, PlanToolContext, PlanToolHandlers } from "./AgentPlanRuntime";
+import { PlanToolContext, PlanToolHandlers } from "../agent/AgentPlanRuntime";
+import { MissionRuntime } from "../agent/MissionRuntime";
+import type { AgentToolExecutionContext } from "../LLMProvider";
+import { ObservationProjection } from "../agent/ObservationProjection";
+import { AgentPolicy } from "../agent/AgentPolicy";
 
 type ToolEffect = "read" | "action" | "plan";
-type GroupFormation = "line" | "column" | "wedge" | "dispersed" | "battle_line";
-
 export interface ExecutedToolResult {
   effect: ToolEffect;
   result: unknown;
 }
 
-const STALE_READ_WARNING_TICKS = 10;
+export interface GameplayControllerOptions {
+  submitCommands?: (
+    commands: readonly Command[],
+    options?: { clientRequestId?: string },
+  ) => void | { duplicate: boolean };
+}
+
+interface SuggestedBuildSite extends Position {
+  workerPosition: Position;
+  estimatedRouteSaving?: number;
+  nearbyResources?: Array<{
+    x: number;
+    y: number;
+    remaining: number;
+    assignedHarvesters: number;
+    currentDeliveryDistance: number;
+    newDeliveryDistance: number;
+  }>;
+}
+
+interface BuildOccupancyIndex {
+  unitIdsByCell: Map<string, string[]>;
+  buildingCells: Set<string>;
+}
+
 const PLAN_CALL_TOOL_NAMES = [
   "move_unit",
   "attack_move_unit",
@@ -60,6 +93,7 @@ const PLAN_UNTIL_CONDITIONS = [
   "enemy_in_range",
   "hq_in_range",
   "near_position",
+  "worker_adjacent_to_build_footprint",
   "target_in_range",
   "target_destroyed",
   "credits_at_least",
@@ -70,47 +104,99 @@ const PLAN_UNTIL_CONDITIONS = [
   "production_queue_empty",
 ] as const;
 
-type CachedEnemyTarget = {
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  tick: number;
-};
-
 type AttackOrderResolution =
-  | { ok: true; command: Command; mode: "attack" | "move_to_target" | "move_to_last_seen"; completedAfterCommand: boolean }
+  | { ok: true; command: Command; mode: "attack" | "move_to_target"; completedAfterCommand: boolean }
   | { ok: false; error: string; hint: string };
 
 const isBuildingComplete = (building: Building): boolean => building.exists && !building.constructionProgress;
 
-export class GameAgentBridge {
+/**
+ * The shared gameplay control plane used by LLM, CLI, and built-in CPU adapters.
+ *
+ * It translates observations and tool-shaped actions into game commands. Match
+ * lifecycle control (warmup/start/stop/observe) belongs to MatchRuntime and
+ * MatchRegistry, not to this class.
+ */
+export class GameplayController {
   private issuedCommands: Command[] = [];
   private runPlanRecords: AgentPlanRecord[] = [];
   private commandCounter = 0;
   private lastReadTick: number | null = null;
-  private planRuntime: AgentPlanRuntime;
+  private readonly observationProjection: ObservationProjection;
+  private readonly policy = new AgentPolicy();
+  private missionRuntime: MissionRuntime;
+  private commandProvenance: CommandProvenance | null = null;
   private readonly planToolHandlers: PlanToolHandlers;
-  private targetMemory = new Map<string, CachedEnemyTarget>();
   private attackOrders = new Map<string, { unitId: string; targetId: string }>();
-  private readStateCache: AgentReadState | null = null;
+  private consumedMissionFailureKeys = new Set<string>();
+  private readonly submitCommands: NonNullable<GameplayControllerOptions["submitCommands"]>;
+  private readonly completedCommandBatches = new Map<string, {
+    fingerprint: string;
+    value: unknown;
+  }>();
+  private readonly pendingBuildResumeOrders = new Map<string, UnitIntent>();
+  private readonly knownEnemyTargetIds = new Set<string>();
 
-  constructor(private readonly game: Game, private readonly playerId: PlayerId) {
+  constructor(
+    private readonly game: Game,
+    private readonly playerId: PlayerId,
+    options: GameplayControllerOptions = {},
+  ) {
+    this.submitCommands = options.submitCommands ?? ((commands) => {
+      for (const command of commands) this.game.queueCommand(command);
+      return { duplicate: false };
+    });
     this.planToolHandlers = this.createPlanToolHandlers();
-    this.planRuntime = new AgentPlanRuntime(this.planToolHandlers);
+    this.missionRuntime = new MissionRuntime(this.planToolHandlers);
+    this.observationProjection = new ObservationProjection(game);
   }
 
-  beginRun(): void {
+  beginRun(provenance?: CommandProvenance): void {
     this.issuedCommands = [];
     this.runPlanRecords = [];
     this.lastReadTick = null;
-    this.readStateCache = null;
+    this.observationProjection.invalidate();
+    this.commandProvenance = provenance ? structuredClone(provenance) : null;
   }
 
-  beginToolCall(): void {
+  beginToolCall(provenance?: CommandProvenance): void {
     this.issuedCommands = [];
     this.runPlanRecords = [];
-    this.readStateCache = null;
+    this.observationProjection.invalidate();
+    this.commandProvenance = provenance ? structuredClone(provenance) : null;
+  }
+
+  setCommandProvenance(context: AgentToolExecutionContext): void {
+    this.commandProvenance = {
+      controllerId: context.controllerId ?? `llm:${this.playerId}`,
+      source: context.source ?? "macro_tool",
+      ...(context.turnId ? { turnId: context.turnId } : {}),
+      ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+      ...(context.parentControllerId ? { parentControllerId: context.parentControllerId } : {}),
+    };
+  }
+
+  runIdempotentBatch<T>(
+    options: { clientRequestId?: string; fingerprint?: string },
+    execute: () => T,
+  ): { value: T; duplicate: boolean } {
+    const completed = options.clientRequestId
+      ? this.completedCommandBatches.get(options.clientRequestId)
+      : undefined;
+    if (completed) {
+      if (completed.fingerprint !== (options.fingerprint ?? "")) {
+        throw new Error(`clientRequestId ${options.clientRequestId} was already used for a different action batch.`);
+      }
+      return { value: structuredClone(completed.value) as T, duplicate: true };
+    }
+    const value = execute();
+    if (options.clientRequestId) {
+      this.completedCommandBatches.set(options.clientRequestId, {
+        fingerprint: options.fingerprint ?? "",
+        value: structuredClone(value),
+      });
+    }
+    return { value, duplicate: false };
   }
 
   takeIssuedCommands(): Command[] {
@@ -125,26 +211,42 @@ export class GameAgentBridge {
     return plans;
   }
 
-  advancePlans(): Command[] {
-    return [...this.planRuntime.advance(this.getPlanSnapshot()), ...this.advanceAttackOrders()];
+  handleCommittedTick(): Command[] {
+    this.observationProjection.invalidate();
+    this.consumeMissionCommandFailures();
+    const missionCommands = this.missionRuntime.advance(this.getPlanSnapshot());
+    const previousProvenance = this.commandProvenance;
+    this.commandProvenance = {
+      controllerId: previousProvenance?.controllerId ?? `mission:${this.playerId}`,
+      source: "tactical",
+      ...(previousProvenance?.turnId ? { turnId: previousProvenance.turnId } : {}),
+      ...(previousProvenance?.parentControllerId
+        ? { parentControllerId: previousProvenance.parentControllerId }
+        : {}),
+    };
+    const tacticalCommands = this.advanceAttackOrders();
+    this.commandProvenance = previousProvenance;
+    return [...missionCommands, ...tacticalCommands];
   }
 
   getActivePlans(): AgentPlanRecord[] {
-    return this.planRuntime.getActivePlans();
+    return this.missionRuntime.getActivePlans();
   }
 
   private getReadState(): AgentReadState {
-    const tick = this.game.getTick();
-    if (!this.readStateCache || this.readStateCache.tick !== tick) {
-      this.readStateCache = this.game.getAgentReadState();
+    const state = this.observationProjection.read();
+    for (const player of state.players) {
+      if (player.id === this.playerId) continue;
+      for (const candidate of [...player.units, ...player.buildings]) {
+        if (candidate.exists) this.knownEnemyTargetIds.add(candidate.id);
+      }
     }
-    return this.readStateCache;
+    return state;
   }
 
   getMapState(args?: { includeCells?: boolean; includeEmptyTiles?: boolean; trackRead?: boolean }): ExecutedToolResult {
     const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
-    this.rememberEnemyTargets(state);
     const includeCells = args?.includeCells === true || args?.includeEmptyTiles === true;
     const includeEmptyTiles = args?.includeEmptyTiles === true;
     const cells = new Map<string, AgentMapStateCell>();
@@ -254,10 +356,14 @@ export class GameAgentBridge {
         validateArgs: (args) => this.hasOptionalPlanUnitId(args) && Number.isInteger(args.x) && Number.isInteger(args.y),
         createCommand: (context) => {
           const unitId = this.resolvePlanUnitId(context);
+          if (context.unit?.state === "moving" && context.unit.intent?.type === "move") {
+            return null;
+          }
           return unitId && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
             ? this.createCommand("move", { unitId, position: { x: Number(context.args.x), y: Number(context.args.y) } })
             : null;
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("move_unit", context),
       },
       attack_move_unit: {
         defaultScope: "per_unit",
@@ -268,12 +374,16 @@ export class GameAgentBridge {
           if (!unitId || !Number.isInteger(context.args.x) || !Number.isInteger(context.args.y)) {
             return null;
           }
+          if (context.unit?.intent?.type === "attack_move") {
+            return null;
+          }
           return this.createCommand("attack_move", {
             unitId,
             position: { x: Number(context.args.x), y: Number(context.args.y) },
             targetPriority: this.resolveTargetPriority(context.args.priority),
           });
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("attack_move_unit", context),
       },
       attack: {
         defaultScope: "per_unit",
@@ -284,9 +394,22 @@ export class GameAgentBridge {
           if (!unitId || typeof context.args.targetId !== "string") {
             return null;
           }
+          if (
+            context.unit?.intent?.type === "attack"
+            && context.unit.intent.targetId === context.args.targetId
+          ) {
+            return null;
+          }
+          if (context.unit?.state === "moving" && context.unit.intent?.type === "move") {
+            return null;
+          }
           const resolution = this.resolveAttackOrderCommand(unitId, context.args.targetId);
+          if (resolution.ok && resolution.mode === "attack" && this.isAttackReloading(context.unit)) {
+            return null;
+          }
           return resolution.ok ? resolution.command : null;
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("attack", context),
       },
       spawn_unit: {
         defaultScope: "global",
@@ -309,8 +432,13 @@ export class GameAgentBridge {
             return null;
           }
           const buildingId = this.resolvePlanBuildingId(context, fallbackType);
-          return buildingId ? this.createCommand("spawn", { buildingId, unitType }) : null;
+          const building = context.snapshot.myBuildings.find((candidate) => candidate.id === buildingId);
+          if (!building || building.productionQueue.length > 0) {
+            return null;
+          }
+          return this.createCommand("spawn", { buildingId: building.id, unitType });
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("spawn_unit", context),
       },
       build_structure: {
         defaultScope: "global",
@@ -344,9 +472,11 @@ export class GameAgentBridge {
                 unitId,
                 buildingType: context.args.buildingType,
                 position,
+                resumeWorkerOrder: this.pendingBuildResumeOrders.get(unitId),
               })
             : null;
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("build_structure", context),
       },
       start_harvest_loop: {
         defaultScope: "per_unit",
@@ -364,6 +494,7 @@ export class GameAgentBridge {
             position: hasPosition ? { x: Number(context.args.x), y: Number(context.args.y) } : undefined,
           });
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("start_harvest_loop", context),
       },
       hold_unit: {
         defaultScope: "per_unit",
@@ -372,7 +503,146 @@ export class GameAgentBridge {
           const unitId = this.resolvePlanUnitId(context);
           return unitId ? this.createCommand("hold", { unitId }) : null;
         },
+        diagnoseWait: (context) => this.diagnosePlanWait("hold_unit", context),
       },
+    };
+  }
+
+  private diagnosePlanWait(call: PlanCallToolName, context: PlanToolContext): AgentPlanWaitingDiagnostic {
+    const unitId = this.resolvePlanUnitId(context);
+    const unit = unitId
+      ? context.snapshot.myUnits.find((candidate) => candidate.id === unitId && candidate.exists)
+      : undefined;
+    const unitDetails = unitId ? { unitId } : undefined;
+
+    if (["move_unit", "attack_move_unit", "attack", "start_harvest_loop", "hold_unit"].includes(call) && !unit) {
+      return {
+        code: "assigned_unit_missing",
+        message: `Assigned unit ${unitId ?? "(unresolved)"} is not alive or does not exist.`,
+        details: unitDetails,
+      };
+    }
+
+    if (call === "move_unit") {
+      if (unit?.state === "moving" && unit.intent?.type === "move") {
+        return {
+          code: "unit_moving",
+          message: `Unit ${unit.id} is already moving; the plan is active and does not need replacement.`,
+          details: { unitId: unit.id, intent: unit.intent },
+        };
+      }
+    }
+
+    if (call === "attack_move_unit" && unit?.intent?.type === "attack_move") {
+      return {
+        code: "same_order_active",
+        message: `Unit ${unit.id} is already executing an attack-move order; the plan is active and does not need replacement.`,
+        details: { unitId: unit.id, intent: unit.intent },
+      };
+    }
+
+    if (call === "attack") {
+      const targetId = typeof context.args.targetId === "string" ? context.args.targetId : undefined;
+      if (unit?.intent?.type === "attack" && unit.intent.targetId === targetId) {
+        return {
+          code: "same_order_active",
+          message: `Unit ${unit.id} is already attacking ${targetId}; the plan is active and does not need replacement.`,
+          details: { unitId: unit.id, targetId },
+        };
+      }
+      if (unit?.state === "moving" && unit.intent?.type === "move") {
+        return {
+          code: "unit_moving_to_target",
+          message: `Unit ${unit.id} is moving into range of ${targetId}; the plan is active and does not need replacement.`,
+          details: { unitId: unit.id, targetId, intent: unit.intent },
+        };
+      }
+      const targetExists = [...context.snapshot.visibleUnits, ...context.snapshot.visibleBuildings]
+        .some((candidate) => candidate.relation === "enemy" && candidate.id === targetId);
+      if (!targetExists) {
+        return {
+          code: "target_missing",
+          message: `No living enemy target matches ${targetId ?? "the requested target ID"}.`,
+          details: { targetId },
+        };
+      }
+      if (unit && this.isAttackReloading(unit)) {
+        return {
+          code: "attack_reloading",
+          message: `Unit ${unit.id} is reloading and can attack again at tick ${unit.nextAttackTick}.`,
+          details: { unitId: unit.id, readyTick: unit.nextAttackTick },
+        };
+      }
+    }
+
+    if (call === "spawn_unit") {
+      const unitType = context.args.unitType;
+      const fallbackType = isUnitType(unitType) ? getProducerBuildingType(unitType) : null;
+      const buildingId = fallbackType ? this.resolvePlanBuildingId(context, fallbackType) : null;
+      const building = context.snapshot.myBuildings.find((candidate) => candidate.id === buildingId);
+      if (!building) {
+        return {
+          code: "producer_missing",
+          message: `No completed production building is available for ${String(unitType)}.`,
+          details: { unitType, requiredBuildingType: fallbackType },
+        };
+      }
+      if (building.productionQueue.length > 0) {
+        return {
+          code: "production_queue_busy",
+          message: `Production building ${building.id} is busy.`,
+          details: { buildingId: building.id, productionQueue: building.productionQueue },
+        };
+      }
+    }
+
+    if (call === "build_structure") {
+      const worker = unitId
+        ? context.snapshot.myUnits.find((candidate) => candidate.id === unitId && candidate.exists && candidate.type === UNIT_TYPES.WORKER)
+        : undefined;
+      const buildingType = context.args.buildingType;
+      const position = { x: Number(context.args.x), y: Number(context.args.y) };
+      if (!worker) {
+        return {
+          code: "builder_missing",
+          message: `Assigned builder ${unitId ?? "(unresolved)"} is not a living worker.`,
+          details: unitDetails,
+        };
+      }
+      if (worker.constructingBuildingId) {
+        return {
+          code: "worker_busy",
+          message: `Worker ${worker.id} is already constructing ${worker.constructingBuildingId}.`,
+          details: { workerId: worker.id, constructingBuildingId: worker.constructingBuildingId },
+        };
+      }
+      if (
+        buildingType === BUILDING_TYPES.WAR_FACTORY &&
+        !context.snapshot.myBuildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))
+      ) {
+        return {
+          code: "missing_prerequisite",
+          message: "A completed barracks is required before building a war factory.",
+          details: { buildingType, requiredBuildingType: BUILDING_TYPES.BARRACKS },
+        };
+      }
+      if (isBuildableBuildingType(buildingType) && !this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
+        return {
+          code: "worker_not_adjacent",
+          message: `Worker ${worker.id} has not reached the ${buildingType} footprint yet; the plan is active and does not need replacement.`,
+          details: {
+            workerId: worker.id,
+            workerPosition: { x: worker.x, y: worker.y },
+            buildingPosition: position,
+          },
+        };
+      }
+    }
+
+    return {
+      code: "command_unavailable",
+      message: `The ${call} command cannot be created from the current state and arguments.`,
+      details: { ...unitDetails, args: context.args },
     };
   }
 
@@ -438,17 +708,11 @@ export class GameAgentBridge {
     const hq = completedMyBuildings.find((building) => building.type === BUILDING_TYPES.HQ) ?? null;
     const countUnits = (unitType: UnitType) => myUnits.filter((unit) => unit.type === unitType).length;
     const countBuildings = (buildingType: BuildingType) => completedMyBuildings.filter((building) => building.type === buildingType).length;
-    const countStartedBuildings = (buildingType: BuildingType) => myBuildings.filter((building) => building.type === buildingType).length;
     const hasBarracks = countBuildings(BUILDING_TYPES.BARRACKS) > 0;
-    const hasWarFactory = countBuildings(BUILDING_TYPES.WAR_FACTORY) > 0;
-    const hasRefinery = countBuildings(BUILDING_TYPES.REFINERY) > 0;
     const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY);
     const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
-    const preferredBarracksUnit = enemyVehicleCount > 0 || enemyHasWarFactory
-      ? UNIT_TYPES.ROCKET_SOLDIER
-      : UNIT_TYPES.RIFLEMAN;
+    const enemyRocketCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.ROCKET_SOLDIER).length;
     const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
-    const builderWorker = workers.find((unit) => unit.state === "idle" && !unit.constructingBuildingId) ?? workers.find((unit) => !unit.constructingBuildingId) ?? null;
     const activeHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
     const idleWorkers = workers.filter((unit) => unit.state === "idle" && unit.intent?.type !== "harvest_loop");
     const resourceAssignments = state.tiles
@@ -479,96 +743,23 @@ export class GameAgentBridge {
         }
         return a.y - b.y || a.x - b.x;
       });
-    const economyRecommendations: Array<Record<string, unknown>> = [];
-    if (idleWorkers.length > 0) {
-      economyRecommendations.push({
-        action: "start_harvest_loop",
-        reason: "Idle workers should usually be assigned to automatic harvesting before adding more production.",
-        unitIds: idleWorkers.map((unit) => unit.id),
-      });
-    }
-    if (activeHarvesters.length < Math.min(2, workers.length)) {
-      economyRecommendations.push({
-        action: "keep_two_harvesters",
-        reason: "The opening economy expects both starting workers to be on harvest_loop.",
-      });
-    }
-    const recommendedStructures: Array<Record<string, unknown>> = [];
-    if (countStartedBuildings(BUILDING_TYPES.BARRACKS) === 0 && builderWorker) {
-      recommendedStructures.push({
-        workerId: builderWorker.id,
-        buildingType: BUILDING_TYPES.BARRACKS,
-        cost: getBuildingCost(BUILDING_TYPES.BARRACKS),
-        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
-        reason: "Unlock infantry production before floating credits.",
-        suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.BARRACKS),
-      });
-    } else if (countStartedBuildings(BUILDING_TYPES.REFINERY) === 0 && me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY) && builderWorker) {
-      recommendedStructures.push({
-        workerId: builderWorker.id,
-        buildingType: BUILDING_TYPES.REFINERY,
-        cost: getBuildingCost(BUILDING_TYPES.REFINERY),
-        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.REFINERY),
-        reason: "Expand toward a flank deposit so additional workers can sustain multiple production buildings.",
-        suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.REFINERY),
-      });
-    } else if (hasBarracks && countStartedBuildings(BUILDING_TYPES.WAR_FACTORY) === 0 && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY) && builderWorker) {
-      recommendedStructures.push({
-        workerId: builderWorker.id,
-        buildingType: BUILDING_TYPES.WAR_FACTORY,
-        cost: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
-        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
-        reason: "Tech to light_tank once barracks exists and credits can pay for the factory.",
-        suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.WAR_FACTORY),
-      });
-    } else if (hasBarracks && hasWarFactory && countBuildings(BUILDING_TYPES.BARRACKS) < 2 && me.resources.credits >= 800 && builderWorker) {
-      recommendedStructures.push({
-        workerId: builderWorker.id,
-        buildingType: BUILDING_TYPES.BARRACKS,
-        cost: getBuildingCost(BUILDING_TYPES.BARRACKS),
-        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
-        reason: "Credits are floating; add a second barracks so infantry production can spend income faster.",
-        suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.BARRACKS),
-      });
-    } else if (hasWarFactory && countBuildings(BUILDING_TYPES.WAR_FACTORY) < 2 && me.resources.credits >= 1200 && builderWorker) {
-      recommendedStructures.push({
-        workerId: builderWorker.id,
-        buildingType: BUILDING_TYPES.WAR_FACTORY,
-        cost: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
-        constructionTicks: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
-        reason: "Credits are floating; add a second war_factory so tank production can spend income faster.",
-        suggestedSites: this.getSuggestedBuildSites(state, BUILDING_TYPES.WAR_FACTORY),
-      });
-    }
-    const recommendedProduction: Array<Record<string, unknown>> = [];
-    for (const building of completedMyBuildings) {
-      if (building.productionQueue.length > 0) {
-        continue;
-      }
-      const unitType =
-        building.type === BUILDING_TYPES.BARRACKS
-          ? preferredBarracksUnit
-          : building.type === BUILDING_TYPES.WAR_FACTORY
-            ? UNIT_TYPES.LIGHT_TANK
-            : building.type === BUILDING_TYPES.HQ && workers.length < 4
-              ? UNIT_TYPES.WORKER
-              : null;
-      if (!unitType || !canBuildingProduce(building.type, unitType) || me.resources.credits < getUnitCost(unitType)) {
-        continue;
-      }
-      recommendedProduction.push({
-        buildingId: building.id,
-        buildingType: building.type,
-        unitType,
-        reason: building.type === BUILDING_TYPES.BARRACKS && (enemyVehicleCount > 0 || enemyHasWarFactory)
-          ? "This barracks is idle and enemy vehicle tech is visible; train rocket_soldier."
-          : building.type === BUILDING_TYPES.BARRACKS
-            ? "This barracks is idle; train rifleman to keep infantry production running."
-            : building.type === BUILDING_TYPES.WAR_FACTORY
-              ? "This war_factory is idle; train light_tank to convert credits into frontline power."
-              : "HQ is idle and worker count is still below the opening economy target.",
-      });
-    }
+    const availableBuilders = workers.filter((worker) => !worker.constructingBuildingId);
+    const buildOptions = [
+      BUILDING_TYPES.BARRACKS,
+      BUILDING_TYPES.WAR_FACTORY,
+      BUILDING_TYPES.REFINERY,
+    ].map((buildingType) => {
+      const prerequisiteMet = buildingType !== BUILDING_TYPES.WAR_FACTORY || hasBarracks;
+      const cost = getBuildingCost(buildingType);
+      return {
+        buildingType,
+        cost,
+        constructionTicks: getBuildingConstructionTicks(buildingType),
+        prerequisiteMet,
+        affordable: me.resources.credits >= cost,
+        availableBuilderIds: availableBuilders.map((worker) => worker.id),
+      };
+    });
     return {
       effect: "read",
       result: {
@@ -592,7 +783,6 @@ export class GameAgentBridge {
           idleWorkers: idleWorkers.length,
           carryingCredits: workers.reduce((sum, unit) => sum + unit.carryingCredits, 0),
           resourceAssignments,
-          recommendations: economyRecommendations,
         },
         unitCosts: {
           [UNIT_TYPES.WORKER]: getUnitCost(UNIT_TYPES.WORKER),
@@ -611,6 +801,7 @@ export class GameAgentBridge {
           [BUILDING_TYPES.WAR_FACTORY]: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
           [BUILDING_TYPES.REFINERY]: getBuildingConstructionTicks(BUILDING_TYPES.REFINERY),
         },
+        buildOptions,
         techStatus: {
           own: {
             workers: countUnits(UNIT_TYPES.WORKER),
@@ -629,9 +820,8 @@ export class GameAgentBridge {
           enemy: {
             hasWarFactory: enemyHasWarFactory,
             lightTanks: enemyVehicleCount,
+            rocketSoldiers: enemyRocketCount,
           },
-          recommendedStructures,
-          recommendedProduction,
         },
       },
     };
@@ -641,7 +831,7 @@ export class GameAgentBridge {
     const state = this.getReadState();
     this.trackRead(state.tick, args?.trackRead);
     const me = state.players.find((player) => player.id === this.playerId)!;
-    const plannedUnitIds = new Set(this.planRuntime.getActivePlans().flatMap((plan) => plan.unitIds));
+    const plannedUnitIds = new Set(this.missionRuntime.getActivePlans().flatMap((plan) => plan.unitIds));
     const units = me.units
       .filter((unit) => unit.exists)
       .map((unit) => ({
@@ -731,9 +921,7 @@ export class GameAgentBridge {
     const reloadingCombatUnits = combatUnits.filter((unit) => unit.nextAttackTick !== undefined && unit.nextAttackTick > state.tick);
     const myCounts = countByType(myUnits);
     const enemyCounts = countByType(enemyUnits);
-    const lacksAntiArmor = myCounts[UNIT_TYPES.ROCKET_SOLDIER] < Math.ceil(myCounts[UNIT_TYPES.LIGHT_TANK] / 3);
-    const lacksInfantryScreen = myCounts[UNIT_TYPES.RIFLEMAN] + myCounts[UNIT_TYPES.SOLDIER] < myCounts[UNIT_TYPES.ROCKET_SOLDIER];
-
+    const attackGroup = this.getLargestUnitCluster(combatUnits);
     return {
       effect: "read",
       result: {
@@ -743,12 +931,8 @@ export class GameAgentBridge {
         combatUnits: combatUnits.length,
         readyCombatUnits: readyCombatUnits.length,
         reloadingCombatUnits: reloadingCombatUnits.length,
-        recommendedFormation: combatUnits.length >= 8 || myCounts[UNIT_TYPES.LIGHT_TANK] >= 4 ? "battle_line" : "line",
-        recommendations: [
-          ...(lacksAntiArmor ? [{ action: "train_rocket_soldier", reason: "Your tank group lacks enough anti-armor support." }] : []),
-          ...(lacksInfantryScreen ? [{ action: "train_rifleman", reason: "Rocket soldiers need rifleman/soldier screening against infantry." }] : []),
-          ...(myCounts[UNIT_TYPES.LIGHT_TANK] >= 4 ? [{ action: "attack_move_group", formation: "battle_line", reason: "Use tanks in front with infantry and rockets behind instead of single-file attacks." }] : []),
-        ],
+        groupedCombatUnits: attackGroup.length,
+        largestGroupUnitIds: attackGroup.map((unit) => unit.id),
       },
     };
   }
@@ -766,16 +950,32 @@ export class GameAgentBridge {
   }
 
   moveUnit(unitId: string, position: Position): ExecutedToolResult {
+    const state = this.getReadState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit) {
       return this.actionResult({
         ok: false,
         error: "invalid_unit",
-        hint: "Choose an existing friendly unit from get_my_units.",
+        hint: "No living friendly unit matches this unitId; use one of availableFriendlyUnits.",
+        availableFriendlyUnits: this.getFriendlyUnitOptions(state),
+      });
+    }
+    if (
+      !Number.isInteger(position.x) ||
+      !Number.isInteger(position.y) ||
+      position.y < 0 ||
+      position.y >= state.tiles.length ||
+      position.x < 0 ||
+      position.x >= (state.tiles[position.y]?.length ?? 0)
+    ) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_position",
+        hint: "Choose a target tile inside the map bounds.",
       });
     }
 
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("move", { unitId, position }));
     return {
@@ -794,7 +994,8 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_unit",
-        hint: "Choose an existing friendly unit from get_my_units.",
+        hint: "No living friendly unit matches this unitId; use one of availableAttackers.",
+        availableAttackers: this.getFriendlyUnitOptions(state, (candidate) => unitCanAttack(candidate.type)),
       });
     }
 
@@ -802,7 +1003,8 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier, rifleman, rocket_soldier, or light_tank.",
+        hint: "This unit cannot attack; use one of availableAttackers.",
+        availableAttackers: this.getFriendlyUnitOptions(state, (candidate) => unitCanAttack(candidate.type)),
       });
     }
 
@@ -822,7 +1024,7 @@ export class GameAgentBridge {
     }
 
     const priority = targetPriority && targetPriority.length > 0 ? targetPriority : getDefaultAttackMovePriority(unit.type);
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("attack_move", { unitId, position, targetPriority: priority }));
     return {
@@ -835,37 +1037,55 @@ export class GameAgentBridge {
   }
 
   attackTarget(unitId: string, targetId: string): ExecutedToolResult {
+    this.observationProjection.invalidate();
     const attacker = this.getFriendlyUnit(unitId);
     if (!attacker) {
+      const state = this.getReadState();
       return this.actionResult({
         ok: false,
         error: "invalid_unit",
-        hint: "Choose an existing friendly attacker from get_my_units.",
+        hint: "No living friendly attacker matches this unitId; use one of availableAttackers.",
+        availableAttackers: this.getFriendlyUnitOptions(state, (candidate) => unitCanAttack(candidate.type)),
       });
     }
 
     if (!unitCanAttack(attacker.type)) {
+      const state = this.getReadState();
       return this.actionResult({
         ok: false,
         error: "invalid_attacker",
-        hint: "Choose a friendly unit with attack capability, such as a soldier, rifleman, rocket_soldier, or light_tank.",
+        hint: "This unit cannot attack; use one of availableAttackers.",
+        availableAttackers: this.getFriendlyUnitOptions(state, (candidate) => unitCanAttack(candidate.type)),
       });
     }
 
     const resolution = this.resolveAttackOrderCommand(unitId, targetId);
     if (!resolution.ok) {
+      const recovery = resolution.error === "target_missing"
+        ? this.getEnemyTargetRecovery(attacker, targetId)
+        : {};
       return this.actionResult({
         ok: false,
         error: resolution.error,
         hint: resolution.hint,
+        ...recovery,
       });
     }
 
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     if (resolution.completedAfterCommand) {
       this.attackOrders.delete(unitId);
     } else {
       this.attackOrders.set(unitId, { unitId, targetId });
+    }
+    if (resolution.mode === "attack" && this.isAttackReloading(attacker)) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: true,
+          mode: "wait_for_reload",
+        }),
+      };
     }
     const command = this.enqueue(resolution.command);
     return {
@@ -888,7 +1108,10 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_building",
-          hint: "Choose a building from get_my_state.buildings.",
+          hint: "No living friendly building matches this buildingId; use one of availableProductionBuildings.",
+          availableProductionBuildings: me.buildings
+            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && canBuildingProduce(candidate.type, unitType))
+            .map((candidate) => ({ id: candidate.id, type: candidate.type, x: candidate.x, y: candidate.y })),
         }),
       };
     }
@@ -923,6 +1146,10 @@ export class GameAgentBridge {
           ok: false,
           error: "invalid_spawn_request",
           hint: `${building.type} can produce: ${getProductionOptions(building.type).join(", ")}.`,
+          validUnitTypes: getProductionOptions(building.type),
+          compatibleProductionBuildings: me.buildings
+            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && canBuildingProduce(candidate.type, unitType))
+            .map((candidate) => ({ id: candidate.id, type: candidate.type, x: candidate.x, y: candidate.y })),
         }),
       };
     }
@@ -949,7 +1176,7 @@ export class GameAgentBridge {
     };
   }
 
-  buildStructure(unitId: string, buildingType: BuildingType, position: Position): ExecutedToolResult {
+  buildStructure(unitId: string, buildingType: BuildingType, requestedPosition?: Position): ExecutedToolResult {
     const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const worker = me.units.find((candidate) => candidate.id === unitId && candidate.exists);
@@ -959,7 +1186,8 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_unit",
-          hint: "Choose a friendly worker from get_my_units.",
+          hint: "No living friendly worker matches this unitId; use one of availableWorkers.",
+          availableWorkers: this.getFriendlyUnitOptions(state, (candidate) => candidate.type === UNIT_TYPES.WORKER),
         }),
       };
     }
@@ -1004,42 +1232,117 @@ export class GameAgentBridge {
         result: this.withActionMetadata({
           ok: false,
           error: "insufficient_credits",
-          hint: this.buildPlacementHint(`Need ${cost} credits before building ${buildingType}.`, state, buildingType),
+          hint: `Need ${cost} credits before building ${buildingType}.`,
         }),
       };
     }
 
-    const validation = this.validateBuildPosition(position, buildingType, state);
-    if (!validation.ok) {
+    const occupancy = this.createBuildOccupancyIndex(state);
+    let selectedPlacement: SuggestedBuildSite | undefined;
+    if (requestedPosition) {
+      const validation = this.validateBuildPosition(requestedPosition, buildingType, state, occupancy);
+      if (!validation.ok) {
+        const suggestedPlacements = this.getSuggestedBuildSites(state, buildingType, 3, worker, undefined, occupancy);
+        return {
+          effect: "action",
+          result: this.withActionMetadata({
+            ok: false,
+            error: "invalid_build_position",
+            hint: this.buildPlacementHint(validation.hint, suggestedPlacements),
+            suggestedPlacements,
+          }),
+        };
+      }
+      const workerPosition = this.getWorkerApproachPosition(state, buildingType, requestedPosition, worker, occupancy);
+      if (workerPosition) selectedPlacement = { ...requestedPosition, workerPosition };
+    } else {
+      selectedPlacement = this.getSuggestedBuildSites(state, buildingType, 3, worker, undefined, occupancy)[0];
+    }
+    if (!selectedPlacement?.workerPosition) {
+      const suggestedPlacements = requestedPosition
+        ? this.getSuggestedBuildSites(state, buildingType, 3, worker, undefined, occupancy)
+        : [];
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
-          error: "invalid_build_position",
-          hint: this.buildPlacementHint(validation.hint, state, buildingType),
+          error: "no_build_site",
+          hint: "No reachable legal site is currently available for this worker.",
+          suggestedPlacements,
         }),
       };
     }
+    const position = { x: selectedPlacement.x, y: selectedPlacement.y };
 
-    if (!this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
-      return {
-        effect: "action",
-        result: this.withActionMetadata({
-          ok: false,
-          error: "worker_too_far",
-          hint: this.buildPlacementHint("Move the worker to a tile adjacent to the full building footprint before building.", state, buildingType),
-        }),
-      };
+    if (worker.intent?.type === "harvest_loop") {
+      this.pendingBuildResumeOrders.set(unitId, structuredClone(worker.intent));
+    } else {
+      this.pendingBuildResumeOrders.delete(unitId);
     }
 
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    const command = this.enqueue(this.createCommand("build", { unitId, buildingType, position }));
+    if (!this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
+      const plan = this.orchestratePlan({
+        unitIds: [unitId],
+        loop: 1,
+        replaceExisting: true,
+        steps: [
+          {
+            call: "move_unit",
+            args: { unitId, x: selectedPlacement.workerPosition.x, y: selectedPlacement.workerPosition.y },
+            scope: "global",
+            until: {
+              condition: "worker_adjacent_to_build_footprint",
+              buildingType,
+              x: position.x,
+              y: position.y,
+            },
+            retry: true,
+          },
+          {
+            call: "build_structure",
+            args: { unitId, buildingType, x: position.x, y: position.y },
+            scope: "global",
+            retry: true,
+          },
+        ],
+      });
+      return {
+        effect: "plan",
+        result: {
+          ...(plan.result as Record<string, unknown>),
+          buildingType,
+          position,
+          workerPosition: selectedPlacement.workerPosition,
+          ...(selectedPlacement.estimatedRouteSaving !== undefined
+            ? {
+              estimatedRouteSaving: selectedPlacement.estimatedRouteSaving,
+              nearbyResources: selectedPlacement.nearbyResources,
+            }
+            : {}),
+        },
+      };
+    }
+    const command = this.enqueue(this.createCommand("build", {
+      unitId,
+      buildingType,
+      position,
+      resumeWorkerOrder: this.pendingBuildResumeOrders.get(unitId),
+    }));
     return {
       effect: "action",
       result: this.withActionMetadata({
         ok: true,
         commandId: command.id,
+        buildingType,
+        position,
+        ...(selectedPlacement.estimatedRouteSaving !== undefined
+          ? {
+            estimatedRouteSaving: selectedPlacement.estimatedRouteSaving,
+            nearbyResources: selectedPlacement.nearbyResources,
+          }
+          : {}),
       }),
     };
   }
@@ -1051,7 +1354,8 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_unit",
-        hint: "Choose an existing friendly worker from get_my_units.",
+        hint: "No living friendly worker matches this unitId; use one of availableWorkers.",
+        availableWorkers: this.getFriendlyUnitOptions(state, (candidate) => candidate.type === UNIT_TYPES.WORKER),
       });
     }
 
@@ -1067,7 +1371,8 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_resource_target",
-        hint: "Choose a resource tile inside the map bounds, or omit x/y to auto-pick the nearest resource.",
+        hint: "The requested coordinates are not a valid resource tile; omit x/y for automatic selection or use nearbyResources.",
+        nearbyResources: this.getNearbyResourceOptions(state, unit),
       });
     }
 
@@ -1075,11 +1380,12 @@ export class GameAgentBridge {
       return this.actionResult({
         ok: false,
         error: "invalid_resource_target",
-        hint: "Choose a resource tile, or omit x/y to auto-pick the nearest resource.",
+        hint: "The requested tile is not a resource tile; omit x/y for automatic selection or use nearbyResources.",
+        nearbyResources: this.getNearbyResourceOptions(state, unit),
       });
     }
 
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("harvest_loop", { unitId, position }));
     return {
@@ -1092,16 +1398,18 @@ export class GameAgentBridge {
   }
 
   holdUnit(unitId: string): ExecutedToolResult {
+    const state = this.getReadState();
     const unit = this.getFriendlyUnit(unitId);
     if (!unit) {
       return this.actionResult({
         ok: false,
         error: "invalid_unit",
-        hint: "Choose an existing friendly unit from get_my_units.",
+        hint: "No living friendly unit matches this unitId; use one of availableFriendlyUnits.",
+        availableFriendlyUnits: this.getFriendlyUnitOptions(state),
       });
     }
 
-    this.planRuntime.interruptUnit(unitId);
+    this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
     const command = this.enqueue(this.createCommand("hold", { unitId }));
     return {
@@ -1131,15 +1439,17 @@ export class GameAgentBridge {
     const normalizedInput = validated.value;
     if (normalizedInput.replaceExisting !== false) {
       for (const unitId of normalizedInput.unitIds) {
-        this.planRuntime.interruptUnit(unitId);
+        this.missionRuntime.interruptUnit(unitId);
+        this.attackOrders.delete(unitId);
       }
     }
-    const record = this.planRuntime.register(normalizedInput);
+    const record = this.missionRuntime.register(normalizedInput, this.commandProvenance ?? undefined);
     this.runPlanRecords.push(record);
     return {
       effect: "plan",
       result: this.withActionMetadata({
         ok: true,
+        missionId: record.missionId ?? record.planId,
         planId: record.planId,
         unitIds: record.unitIds,
         loop: record.loop,
@@ -1150,8 +1460,53 @@ export class GameAgentBridge {
 
   private enqueue(command: Command): Command {
     this.issuedCommands.push(command);
-    this.game.queueCommand(command);
+    this.submitCommands([command]);
     return command;
+  }
+
+  private consumeMissionCommandFailures(): void {
+    const deterministicFailures = new Set<string>([
+      RESULT_TYPES.BUILD_INVALID_POSITION,
+      RESULT_TYPES.BUILD_INVALID_BUILDING,
+      RESULT_TYPES.SPAWN_INVALID_BUILDING,
+      RESULT_TYPES.INVALID_UNIT,
+      RESULT_TYPES.ATTACK_INVALID_TARGET,
+      RESULT_TYPES.COMMAND_CRASHED,
+    ]);
+
+    for (const log of this.game.getAIFeedback(this.playerId)) {
+      if (log.type !== LOG_TYPES.COMMAND_RESULT || log.data.result_code >= 0) {
+        continue;
+      }
+      const { command } = log.data;
+      const missionId = command.provenance?.missionId;
+      if (!missionId) {
+        continue;
+      }
+
+      const failedType = log.data.type === RESULT_TYPES.COMMAND_INVALID
+        ? log.data.result_data.failedResultType
+        : log.data.type;
+      const isFailedCommand = log.data.type !== RESULT_TYPES.COMMAND_INVALID
+        || (
+          log.data.result_data.reason === "command_failed" &&
+          log.data.result_data.failedCommandId === command.id
+        );
+      if (!failedType || !isFailedCommand || !deterministicFailures.has(failedType)) {
+        continue;
+      }
+
+      const feedbackKey = `${log.tick}:${command.id}:${failedType}`;
+      if (this.consumedMissionFailureKeys.has(feedbackKey)) {
+        continue;
+      }
+      this.consumedMissionFailureKeys.add(feedbackKey);
+      this.missionRuntime.failMission(
+        missionId,
+        log.tick,
+        `engine rejected ${command.type}: ${failedType}`,
+      );
+    }
   }
 
   private createCommand(type: string, payload: Partial<Command>): Command {
@@ -1159,6 +1514,7 @@ export class GameAgentBridge {
       id: `agent_cmd_${this.playerId}_${++this.commandCounter}`,
       type,
       playerId: this.playerId,
+      ...(this.commandProvenance ? { provenance: structuredClone(this.commandProvenance) } : {}),
       ...payload,
     };
   }
@@ -1178,7 +1534,7 @@ export class GameAgentBridge {
 
   private withActionMetadata<T extends Record<string, unknown>>(result: T): T & Record<string, unknown> {
     const currentTick = this.game.getTick();
-    const staleWarning = this.getStaleReadWarning(currentTick);
+    const staleWarning = this.policy.getStaleReadWarning(this.lastReadTick, currentTick);
     return {
       tick: currentTick,
       ...result,
@@ -1186,29 +1542,95 @@ export class GameAgentBridge {
     };
   }
 
-  private getStaleReadWarning(currentTick: number): Record<string, unknown> | null {
-    if (this.lastReadTick === null) {
-      return {
-        type: "no_recent_read",
-        message: "No read tool has been called in this run. Read the current situation before issuing more actions.",
-        currentTick,
-        staleAfterTicks: STALE_READ_WARNING_TICKS,
-      };
-    }
+  private getFriendlyUnitOptions(
+    state: AgentReadState,
+    predicate: (unit: Unit) => boolean = () => true,
+    limit = 12,
+  ) {
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    return me.units
+      .filter((unit) => unit.exists && predicate(unit))
+      .slice(0, limit)
+      .map((unit) => ({
+        id: unit.id,
+        type: unit.type,
+        x: unit.x,
+        y: unit.y,
+        hp: unit.hp,
+        state: unit.state,
+      }));
+  }
 
-    const ageTicks = currentTick - this.lastReadTick;
-    if (ageTicks <= STALE_READ_WARNING_TICKS) {
-      return null;
-    }
-
+  private getEnemyTargetRecovery(attacker: Unit, targetId: string) {
+    const state = this.getReadState();
+    const enemies = state.players.filter((player) => player.id !== this.playerId);
+    const historicalTarget = enemies.flatMap((player) => [...player.units, ...player.buildings])
+      .find((candidate) => candidate.id === targetId);
+    const friendlyId = state.players
+      .find((player) => player.id === this.playerId)
+      ?.units.some((candidate) => candidate.id === targetId) || state.players
+        .find((player) => player.id === this.playerId)
+        ?.buildings.some((candidate) => candidate.id === targetId);
+    const targetStatus = (historicalTarget && !historicalTarget.exists) || this.knownEnemyTargetIds.has(targetId)
+      ? "destroyed"
+      : friendlyId
+        ? "not_enemy"
+        : "invalid_id";
+    const buildings = enemies
+      .flatMap((player) => player.buildings)
+      .filter((building) => building.exists)
+      .sort((a, b) => {
+        const aDistance = getDistanceToBuildingFootprint(a.type, a.x, a.y, attacker.x, attacker.y);
+        const bDistance = getDistanceToBuildingFootprint(b.type, b.x, b.y, attacker.x, attacker.y);
+        return aDistance - bDistance;
+      })
+      .map((building) => ({
+        id: building.id,
+        type: building.type,
+        x: building.x,
+        y: building.y,
+        hp: building.hp,
+      }));
+    const units = enemies
+      .flatMap((player) => player.units)
+      .filter((unit) => unit.exists)
+      .sort((a, b) => {
+        const aDistance = Math.max(Math.abs(a.x - attacker.x), Math.abs(a.y - attacker.y));
+        const bDistance = Math.max(Math.abs(b.x - attacker.x), Math.abs(b.y - attacker.y));
+        return aDistance - bDistance;
+      })
+      .map((unit) => ({
+        id: unit.id,
+        type: unit.type,
+        x: unit.x,
+        y: unit.y,
+        hp: unit.hp,
+      }));
+    const targetLimit = 12;
+    const includedBuildings = buildings.slice(0, targetLimit);
+    const availableEnemyTargets = [
+      ...includedBuildings,
+      ...units.slice(0, targetLimit - includedBuildings.length),
+    ];
     return {
-      type: "state_stale",
-      message: `Last read was ${ageTicks} ticks ago. Read the current situation before issuing more actions.`,
-      lastReadTick: this.lastReadTick,
-      currentTick,
-      ageTicks,
-      staleAfterTicks: STALE_READ_WARNING_TICKS,
+      targetId,
+      targetStatus,
+      availableEnemyTargetCount: buildings.length + units.length,
+      availableEnemyTargets,
     };
+  }
+
+  private getNearbyResourceOptions(state: AgentReadState, worker: Unit, limit = 8) {
+    return state.tiles
+      .flat()
+      .filter((tile) => tile.type === TILE_TYPES.RESOURCE && (tile.resourceRemaining ?? 0) > 0)
+      .sort((a, b) => {
+        const aDistance = Math.max(Math.abs(a.x - worker.x), Math.abs(a.y - worker.y));
+        const bDistance = Math.max(Math.abs(b.x - worker.x), Math.abs(b.y - worker.y));
+        return aDistance - bDistance;
+      })
+      .slice(0, limit)
+      .map((tile) => ({ x: tile.x, y: tile.y, remaining: tile.resourceRemaining ?? 0 }));
   }
 
   private getFriendlyUnit(unitId: string) {
@@ -1222,138 +1644,14 @@ export class GameAgentBridge {
     for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
       const unit = player.units.find((candidate) => candidate.id === targetId && candidate.exists);
       if (unit) {
-        this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
         return unit;
       }
       const building = player.buildings.find((candidate) => candidate.id === targetId && candidate.exists);
       if (building) {
-        this.targetMemory.set(building.id, {
-          id: building.id,
-          type: building.type,
-          x: building.x,
-          y: building.y,
-          tick: state.tick,
-        });
         return building;
       }
     }
     return null;
-  }
-
-  attackMoveGroup(unitIds: string[], position: Position, formation: GroupFormation = "line"): ExecutedToolResult {
-    const state = this.getReadState();
-    const uniqueUnitIds = [...new Set(unitIds.map(String))];
-    if (uniqueUnitIds.length === 0 || uniqueUnitIds.length > 100) {
-      return this.actionResult({ ok: false, error: "invalid_group", hint: "Choose between 1 and 100 friendly combat units." });
-    }
-    if (
-      !Number.isInteger(position.x) || !Number.isInteger(position.y) ||
-      position.y < 0 || position.y >= state.tiles.length ||
-      position.x < 0 || position.x >= (state.tiles[position.y]?.length ?? 0)
-    ) {
-      return this.actionResult({ ok: false, error: "invalid_position", hint: "Choose a formation center inside the map bounds." });
-    }
-
-    const units = uniqueUnitIds.map((unitId) => this.getFriendlyUnit(unitId));
-    if (units.some((unit) => !unit || !unitCanAttack(unit.type))) {
-      return this.actionResult({ ok: false, error: "invalid_group_unit", hint: "Every group member must be an existing friendly combat unit." });
-    }
-
-    const assignments = this.createFormationAssignments(uniqueUnitIds, position, formation, state.tiles[0]?.length ?? 1, state.tiles.length);
-    const commandIds: string[] = [];
-    for (const assignment of assignments) {
-      const unit = this.getFriendlyUnit(assignment.unitId)!;
-      this.planRuntime.interruptUnit(unit.id);
-      this.attackOrders.delete(unit.id);
-      const command = this.enqueue(this.createCommand("attack_move", {
-        unitId: unit.id,
-        position: assignment.position,
-        targetPriority: getDefaultAttackMovePriority(unit.type),
-      }));
-      commandIds.push(command.id);
-    }
-    return {
-      effect: "action",
-      result: this.withActionMetadata({ ok: true, commandIds, formation, assignments }),
-    };
-  }
-
-  private createFormationAssignments(
-    unitIds: string[],
-    center: Position,
-    formation: GroupFormation,
-    mapWidth: number,
-    mapHeight: number,
-  ): Array<{ unitId: string; position: Position }> {
-    const backward = this.playerId === "player_1" ? -1 : 1;
-    const clamp = (value: number, max: number) => Math.max(0, Math.min(max - 1, value));
-    return unitIds.map((unitId, index) => {
-      let offsetX = 0;
-      let offsetY = 0;
-      if (formation === "column") {
-        offsetX = backward * Math.floor(index / 3) * 3;
-        offsetY = (index % 3 - 1) * 3;
-      } else if (formation === "battle_line") {
-        const ordered = [...unitIds].sort((leftId, rightId) => {
-          const left = this.getFriendlyUnit(leftId);
-          const right = this.getFriendlyUnit(rightId);
-          const roleRank = (unitType: UnitType | undefined) =>
-            unitType === UNIT_TYPES.LIGHT_TANK ? 0 :
-              unitType === UNIT_TYPES.SOLDIER || unitType === UNIT_TYPES.RIFLEMAN ? 1 :
-                unitType === UNIT_TYPES.ROCKET_SOLDIER ? 2 : 3;
-          return roleRank(left?.type) - roleRank(right?.type) || leftId.localeCompare(rightId);
-        });
-        const orderedIndex = Math.max(0, ordered.indexOf(unitId));
-        const unit = this.getFriendlyUnit(unitId);
-        const rank = unit?.type === UNIT_TYPES.LIGHT_TANK ? 0 :
-          unit?.type === UNIT_TYPES.SOLDIER || unit?.type === UNIT_TYPES.RIFLEMAN ? 1 :
-            unit?.type === UNIT_TYPES.ROCKET_SOLDIER ? 2 : Math.floor(orderedIndex / 8);
-        const rankPeers = ordered.filter((candidateId) => {
-          const candidate = this.getFriendlyUnit(candidateId);
-          return (candidate?.type === UNIT_TYPES.LIGHT_TANK ? 0 :
-            candidate?.type === UNIT_TYPES.SOLDIER || candidate?.type === UNIT_TYPES.RIFLEMAN ? 1 :
-              candidate?.type === UNIT_TYPES.ROCKET_SOLDIER ? 2 : 3) === rank;
-        });
-        const peerIndex = Math.max(0, rankPeers.indexOf(unitId));
-        const peerWidth = Math.min(12, Math.max(1, rankPeers.length));
-        offsetX = backward * rank * 4;
-        offsetY = (peerIndex % peerWidth - (peerWidth - 1) / 2) * 3;
-      } else if (formation === "wedge") {
-        const rank = Math.floor(Math.sqrt(index));
-        const rankStart = rank * rank;
-        offsetX = backward * rank * 3;
-        offsetY = (index - rankStart - rank) * 3;
-      } else if (formation === "dispersed") {
-        const columns = Math.ceil(Math.sqrt(unitIds.length));
-        offsetX = backward * Math.floor(index / columns) * 3;
-        offsetY = (index % columns - (columns - 1) / 2) * 3;
-      } else {
-        const frontWidth = Math.min(12, unitIds.length);
-        offsetX = backward * Math.floor(index / frontWidth) * 3;
-        offsetY = (index % frontWidth - (frontWidth - 1) / 2) * 3;
-      }
-      return {
-        unitId,
-        position: { x: clamp(Math.round(center.x + offsetX), mapWidth), y: clamp(Math.round(center.y + offsetY), mapHeight) },
-      };
-    });
-  }
-
-  private rememberEnemyTargets(state: AgentReadState): void {
-    for (const player of state.players.filter((candidate) => candidate.id !== this.playerId)) {
-      for (const unit of player.units.filter((candidate) => candidate.exists)) {
-        this.targetMemory.set(unit.id, { id: unit.id, type: unit.type, x: unit.x, y: unit.y, tick: state.tick });
-      }
-      for (const building of player.buildings.filter((candidate) => candidate.exists)) {
-        this.targetMemory.set(building.id, {
-          id: building.id,
-          type: building.type,
-          x: building.x,
-          y: building.y,
-          tick: state.tick,
-        });
-      }
-    }
   }
 
   private advanceAttackOrders(): Command[] {
@@ -1364,10 +1662,16 @@ export class GameAgentBridge {
         this.attackOrders.delete(unitId);
         continue;
       }
+      if (unit.state === "moving" && unit.intent?.type === "move") {
+        continue;
+      }
 
       const resolution = this.resolveAttackOrderCommand(order.unitId, order.targetId);
       if (!resolution.ok) {
         this.attackOrders.delete(unitId);
+        continue;
+      }
+      if (resolution.mode === "attack" && this.isAttackReloading(unit)) {
         continue;
       }
 
@@ -1382,44 +1686,69 @@ export class GameAgentBridge {
   private resolveAttackOrderCommand(unitId: string, targetId: string): AttackOrderResolution {
     const attacker = this.getFriendlyUnit(unitId);
     if (!attacker) {
-      return { ok: false, error: "invalid_unit", hint: "Choose an existing friendly attacker from get_my_units." };
+      return { ok: false, error: "invalid_unit", hint: "The assigned attacker no longer exists." };
     }
 
     const target = this.getEnemyTarget(targetId);
     if (target) {
-      const inRange = Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y)) <= attacker.attackRange;
+      const distance = isBuildingType(target.type)
+        ? getDistanceToBuildingFootprint(target.type, target.x, target.y, attacker.x, attacker.y)
+        : Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
+      const inRange = distance <= attacker.attackRange;
       if (inRange) {
         return {
           ok: true,
           command: this.createCommand("attack", { unitId, targetId }),
           mode: "attack",
-          completedAfterCommand: false,
+          // The simulation owns the persistent attack intent and will fire again
+          // after reload. The gameplay controller only needs to keep orders that are still
+          // moving toward a target.
+          completedAfterCommand: true,
         };
       }
 
       return {
         ok: true,
-        command: this.createCommand("move", { unitId, position: { x: target.x, y: target.y } }),
+        command: this.createCommand("move", {
+          unitId,
+          position: this.toGridPosition(target, this.getReadState()),
+        }),
         mode: "move_to_target",
         completedAfterCommand: false,
       };
     }
 
-    const lastSeen = this.targetMemory.get(targetId);
-    if (!lastSeen) {
-      return {
-        ok: false,
-        error: "unknown_target",
-        hint: "Target is not currently visible and has no remembered position. Read get_map_state before attacking it.",
-      };
-    }
-
     return {
-      ok: true,
-      command: this.createCommand("move", { unitId, position: { x: lastSeen.x, y: lastSeen.y } }),
-      mode: "move_to_last_seen",
-      completedAfterCommand: true,
+      ok: false,
+      error: "target_missing",
+      hint: "No living enemy unit or building matches this targetId; use one of availableEnemyTargets.",
     };
+  }
+
+  private isAttackReloading(unit: { nextAttackTick?: number } | undefined): boolean {
+    return unit?.nextAttackTick !== undefined && this.game.getTick() < unit.nextAttackTick;
+  }
+
+  private toGridPosition(position: Position, state: AgentReadState): Position {
+    const height = state.tiles.length;
+    const width = state.tiles[0]?.length ?? 0;
+    return {
+      x: Math.max(0, Math.min(width - 1, Math.round(position.x))),
+      y: Math.max(0, Math.min(height - 1, Math.round(position.y))),
+    };
+  }
+
+  private getLargestUnitCluster<T extends { x: number; y: number }>(units: T[], radius = 12): T[] {
+    let largest: T[] = [];
+    for (const anchor of units) {
+      const cluster = units.filter((unit) =>
+        Math.max(Math.abs(unit.x - anchor.x), Math.abs(unit.y - anchor.y)) <= radius
+      );
+      if (cluster.length > largest.length) {
+        largest = cluster;
+      }
+    }
+    return largest;
   }
 
   private getPlanSnapshot() {
@@ -1449,11 +1778,48 @@ export class GameAgentBridge {
     };
   }
 
-  private getSuggestedBuildSites(state = this.getReadState(), buildingType: BuildingType = BUILDING_TYPES.WAR_FACTORY, limit = 3): Position[] {
+  private getSuggestedBuildSites(
+    state = this.getReadState(),
+    buildingType: BuildingType = BUILDING_TYPES.WAR_FACTORY,
+    limit = 3,
+    worker?: { id: string; x: number; y: number },
+    candidateSites?: Position[],
+    occupancy?: BuildOccupancyIndex,
+  ): SuggestedBuildSite[] {
+    const buildOccupancy = occupancy ?? this.createBuildOccupancyIndex(state);
+    return (candidateSites ?? this.getSuggestedBuildSiteCandidates(state, buildingType, limit, buildOccupancy, worker))
+      .map((site) => {
+        const refineryEconomics = buildingType === BUILDING_TYPES.REFINERY
+          ? this.getRefinerySiteEconomics(state, site)
+          : undefined;
+        return {
+          ...site,
+          workerPosition: this.getWorkerApproachPosition(state, buildingType, site, worker, buildOccupancy),
+          ...(refineryEconomics ? {
+            estimatedRouteSaving: refineryEconomics.estimatedRouteSaving,
+            nearbyResources: refineryEconomics.nearbyResources,
+          } : {}),
+        };
+      })
+      .filter((site): site is SuggestedBuildSite => site.workerPosition !== null)
+      .slice(0, limit);
+  }
+
+  private getSuggestedBuildSiteCandidates(
+    state: AgentReadState,
+    buildingType: BuildingType,
+    limit: number,
+    occupancy: BuildOccupancyIndex,
+    worker?: { id: string; x: number; y: number },
+  ): Position[] {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     if (!hq) {
       return [];
+    }
+
+    if (buildingType === BUILDING_TYPES.REFINERY) {
+      return this.getRefineryBuildSiteCandidates(state, limit, occupancy, worker);
     }
 
     const preferredX = hq.x + (hq.x < state.tiles[0]?.length / 2 ? 12 : -12);
@@ -1462,13 +1828,13 @@ export class GameAgentBridge {
       for (let dy = -radius; dy <= radius; dy++) {
         for (const dx of [-radius, radius]) {
           const position = { x: hq.x + dx, y: hq.y + dy };
-          if (this.validateBuildPosition(position, buildingType, state).ok) candidates.push(position);
+          if (this.validateBuildPosition(position, buildingType, state, occupancy).ok) candidates.push(position);
         }
       }
       for (let dx = -radius + 1; dx < radius && candidates.length < limit * 4; dx++) {
         for (const dy of [-radius, radius]) {
           const position = { x: hq.x + dx, y: hq.y + dy };
-          if (this.validateBuildPosition(position, buildingType, state).ok) candidates.push(position);
+          if (this.validateBuildPosition(position, buildingType, state, occupancy).ok) candidates.push(position);
         }
       }
     }
@@ -1481,21 +1847,205 @@ export class GameAgentBridge {
           return aScore - bScore;
         }
         return Math.abs(a.x - hq.x) + Math.abs(a.y - hq.y) - (Math.abs(b.x - hq.x) + Math.abs(b.y - hq.y));
-      })
-      .slice(0, limit);
+      });
   }
 
-  private buildPlacementHint(baseHint: string, state = this.getReadState(), buildingType: BuildingType = BUILDING_TYPES.WAR_FACTORY): string {
-    const suggestions = this.getSuggestedBuildSites(state, buildingType)
-      .map((site) => `(${site.x}, ${site.y})`)
+  private getRefineryBuildSiteCandidates(
+    state: AgentReadState,
+    limit: number,
+    occupancy: BuildOccupancyIndex,
+    worker?: { x: number; y: number },
+  ): Position[] {
+    const resources = this.getEconomicallyRelevantResources(state);
+    const candidateMap = new Map<string, Position>();
+    for (const resource of resources) {
+      for (let radius = 4; radius <= 9; radius++) {
+        for (let offset = -radius; offset <= radius; offset++) {
+          for (const position of [
+            { x: resource.x - radius, y: resource.y + offset },
+            { x: resource.x + radius, y: resource.y + offset },
+            { x: resource.x + offset, y: resource.y - radius },
+            { x: resource.x + offset, y: resource.y + radius },
+          ]) {
+            const key = `${position.x},${position.y}`;
+            if (
+              !candidateMap.has(key) &&
+              this.validateBuildPosition(position, BUILDING_TYPES.REFINERY, state, occupancy).ok
+            ) {
+              candidateMap.set(key, position);
+            }
+          }
+        }
+      }
+    }
+
+    return [...candidateMap.values()]
+      .map((position) => {
+        const economics = this.getRefinerySiteEconomics(state, position);
+        const workerDistance = worker
+          ? Math.max(Math.abs(worker.x - position.x), Math.abs(worker.y - position.y))
+          : 0;
+        return { position, economics, workerDistance };
+      })
+      .filter((candidate) => candidate.economics.estimatedRouteSaving > 0)
+      .sort((a, b) =>
+        b.economics.estimatedRouteSaving - a.economics.estimatedRouteSaving ||
+        a.workerDistance - b.workerDistance ||
+        a.position.y - b.position.y ||
+        a.position.x - b.position.x
+      )
+      .slice(0, Math.max(limit * 4, limit))
+      .map((candidate) => candidate.position);
+  }
+
+  private getEconomicallyRelevantResources(state: AgentReadState) {
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+    const enemyHqs = state.players
+      .filter((player) => player.id !== this.playerId)
+      .flatMap((player) => player.buildings)
+      .filter((building) => building.type === BUILDING_TYPES.HQ && building.exists);
+    return state.tiles
+      .flat()
+      .filter((tile) => tile.type === TILE_TYPES.RESOURCE && (tile.resourceRemaining ?? 0) > 0)
+      .filter((tile) => {
+        if (!hq || enemyHqs.length === 0) return true;
+        const ownDistance = Math.max(Math.abs(tile.x - hq.x), Math.abs(tile.y - hq.y));
+        const enemyDistance = Math.min(...enemyHqs.map((enemyHq) =>
+          Math.max(Math.abs(tile.x - enemyHq.x), Math.abs(tile.y - enemyHq.y))
+        ));
+        return ownDistance <= enemyDistance;
+      });
+  }
+
+  private getRefinerySiteEconomics(state: AgentReadState, site: Position) {
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const deliveryBuildings = me.buildings.filter((building) =>
+      building.exists &&
+      !building.constructionProgress &&
+      (building.type === BUILDING_TYPES.HQ || building.type === BUILDING_TYPES.REFINERY)
+    );
+    const activeHarvesters = me.units.filter((unit) => unit.exists && unit.intent?.type === "harvest_loop");
+    const resourceDetails = this.getEconomicallyRelevantResources(state).map((resource) => {
+      const assignedHarvesters = activeHarvesters.filter((unit) =>
+        unit.intent?.type === "harvest_loop" &&
+        unit.intent.targetX === resource.x &&
+        unit.intent.targetY === resource.y
+      ).length;
+      const currentDeliveryDistance = deliveryBuildings.length > 0
+        ? Math.min(...deliveryBuildings.map((building) =>
+          this.getResourceDeliveryDistance(building.type, building, resource)
+        ))
+        : Number.POSITIVE_INFINITY;
+      const newDeliveryDistance = this.getResourceDeliveryDistance(BUILDING_TYPES.REFINERY, site, resource);
+      const routeSaving = Number.isFinite(currentDeliveryDistance)
+        ? Math.max(0, currentDeliveryDistance - newDeliveryDistance)
+        : 0;
+      return {
+        x: resource.x,
+        y: resource.y,
+        remaining: resource.resourceRemaining ?? 0,
+        assignedHarvesters,
+        currentDeliveryDistance,
+        newDeliveryDistance,
+        routeSaving,
+      };
+    });
+    return {
+      estimatedRouteSaving: resourceDetails.reduce(
+        (sum, resource) => sum + resource.routeSaving * Math.max(1, resource.assignedHarvesters),
+        0,
+      ),
+      nearbyResources: resourceDetails
+        .sort((a, b) =>
+          a.newDeliveryDistance - b.newDeliveryDistance ||
+          b.routeSaving - a.routeSaving ||
+          a.y - b.y ||
+          a.x - b.x
+        )
+        .slice(0, 4)
+        .map(({ routeSaving: _routeSaving, ...resource }) => resource),
+    };
+  }
+
+  private getResourceDeliveryDistance(
+    buildingType: BuildingType,
+    buildingPosition: Position,
+    resourcePosition: Position,
+  ): number {
+    const deliveryRange = buildingType === BUILDING_TYPES.REFINERY
+      ? ECONOMY_RULES.REFINERY_DELIVERY_RANGE
+      : ECONOMY_RULES.HQ_DELIVERY_RANGE;
+    return Math.max(
+      0,
+      getDistanceToBuildingFootprint(
+        buildingType,
+        buildingPosition.x,
+        buildingPosition.y,
+        resourcePosition.x,
+        resourcePosition.y,
+      ) - deliveryRange,
+    );
+  }
+
+  private getWorkerApproachPosition(
+    state: AgentReadState,
+    buildingType: BuildingType,
+    site: Position,
+    worker?: { id: string; x: number; y: number },
+    occupancy = this.createBuildOccupancyIndex(state),
+  ): Position | null {
+    const footprint = getBuildingFootprintCells(buildingType, site.x, site.y);
+    const footprintKeys = new Set(footprint.map((cell) => `${cell.x},${cell.y}`));
+    const candidates = new Map<string, Position>();
+    for (const cell of footprint) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const candidate = { x: cell.x + dx, y: cell.y + dy };
+          const key = `${candidate.x},${candidate.y}`;
+          if (!footprintKeys.has(key)) {
+            candidates.set(key, candidate);
+          }
+        }
+      }
+    }
+
+    const isOpen = (candidate: Position): boolean => {
+      if (state.tiles[candidate.y]?.[candidate.x]?.type !== TILE_TYPES.EMPTY) {
+        return false;
+      }
+      const occupyingUnitIds = occupancy.unitIdsByCell.get(`${candidate.x},${candidate.y}`) ?? [];
+      if (occupyingUnitIds.some((unitId) => unitId !== worker?.id)) {
+        return false;
+      }
+      return !occupancy.buildingCells.has(`${candidate.x},${candidate.y}`);
+    };
+
+    return [...candidates.values()]
+      .filter(isOpen)
+      .sort((a, b) => {
+        const aDistance = worker ? Math.max(Math.abs(a.x - worker.x), Math.abs(a.y - worker.y)) : 0;
+        const bDistance = worker ? Math.max(Math.abs(b.x - worker.x), Math.abs(b.y - worker.y)) : 0;
+        return aDistance - bDistance || a.y - b.y || a.x - b.x;
+      })[0] ?? null;
+  }
+
+  private buildPlacementHint(baseHint: string, suggestedPlacements: SuggestedBuildSite[]): string {
+    const suggestions = suggestedPlacements
+      .map((site) => `move worker to (${site.workerPosition.x}, ${site.workerPosition.y}), then build at (${site.x}, ${site.y})`)
       .join(", ");
     if (!suggestions) {
       return `${baseHint} Structures must be on an empty tile and leave one empty ring around HQ.`;
     }
-    return `${baseHint} Try an empty tile that leaves one empty ring around HQ, for example: ${suggestions}.`;
+    return `${baseHint} Do not move the worker onto the building center or footprint. Valid sequences: ${suggestions}.`;
   }
 
-  private validateBuildPosition(position: Position, buildingType: BuildingType, state = this.getReadState()): { ok: true } | { ok: false; hint: string } {
+  private validateBuildPosition(
+    position: Position,
+    buildingType: BuildingType,
+    state = this.getReadState(),
+    occupancy = this.createBuildOccupancyIndex(state),
+  ): { ok: true } | { ok: false; hint: string } {
     const me = state.players.find((player) => player.id === this.playerId)!;
     const hq = me.buildings.find((building) => building.type === BUILDING_TYPES.HQ && building.exists);
     const { x, y } = position;
@@ -1513,20 +2063,11 @@ export class GameAgentBridge {
       if (tile.type !== "empty") {
         return { ok: false, hint: "The building footprint overlaps terrain or resources." };
       }
-      if (
-        state.players.some((player) =>
-          player.units.some((unit) =>
-            unit.exists &&
-            Math.round(unit.x) === cell.x &&
-            Math.round(unit.y) === cell.y
-          )
-        )
-      ) {
+      const key = `${cell.x},${cell.y}`;
+      if (occupancy.unitIdsByCell.has(key)) {
         return { ok: false, hint: "The building footprint is occupied by a unit right now." };
       }
-      if (state.players.some((player) => player.buildings.some((building) =>
-        building.exists && getBuildingFootprintCells(building.type, building.x, building.y).some((occupied) => occupied.x === cell.x && occupied.y === cell.y)
-      ))) {
+      if (occupancy.buildingCells.has(key)) {
         return { ok: false, hint: "The building footprint overlaps another structure." };
       }
     }
@@ -1538,10 +2079,30 @@ export class GameAgentBridge {
     return { ok: true };
   }
 
+  private createBuildOccupancyIndex(state: AgentReadState): BuildOccupancyIndex {
+    const unitIdsByCell = new Map<string, string[]>();
+    const buildingCells = new Set<string>();
+    for (const player of state.players) {
+      for (const unit of player.units) {
+        if (!unit.exists) continue;
+        const key = `${Math.round(unit.x)},${Math.round(unit.y)}`;
+        const ids = unitIdsByCell.get(key) ?? [];
+        ids.push(unit.id);
+        unitIdsByCell.set(key, ids);
+      }
+      for (const building of player.buildings) {
+        if (!building.exists) continue;
+        for (const cell of getBuildingFootprintCells(building.type, building.x, building.y)) {
+          buildingCells.add(`${cell.x},${cell.y}`);
+        }
+      }
+    }
+    return { unitIdsByCell, buildingCells };
+  }
+
   private isWorkerAdjacentToBuildFootprint(worker: { x: number; y: number }, buildingType: BuildingType, position: Position): boolean {
-    return getBuildingFootprintCells(buildingType, position.x, position.y).some((cell) =>
-      Math.max(Math.abs(worker.x - cell.x), Math.abs(worker.y - cell.y)) <= 1
-    );
+    const distance = getDistanceToBuildingFootprint(buildingType, position.x, position.y, worker.x, worker.y);
+    return distance > 0 && distance <= 1;
   }
 
   private validatePlanInput(input: OrchestratePlanInput): { ok: true; value: OrchestratePlanInput } | { ok: false; hint: string } {
@@ -1653,6 +2214,12 @@ export class GameAgentBridge {
           Number.isInteger(value.x) &&
           Number.isInteger(value.y) &&
           (value.distance === undefined || (Number.isInteger(value.distance) && Number(value.distance) >= 0))
+        );
+      case "worker_adjacent_to_build_footprint":
+        return (
+          isBuildableBuildingType(value.buildingType) &&
+          Number.isInteger(value.x) &&
+          Number.isInteger(value.y)
         );
       case "target_in_range":
       case "target_destroyed":

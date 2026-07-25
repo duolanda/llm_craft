@@ -147,7 +147,7 @@ export function buildMatchDiagnosticReport(record: GameRecord, recordName: strin
   }
 
   applyCommandDiagnostics(record, world, metrics, timeline);
-  applyTurnDiagnostics(record.aiTurns, metrics, timeline);
+  applyTurnDiagnostics(record.aiTurns ?? [], metrics, timeline);
   applySpawnTrapDiagnostics(metrics, lifecycles, timeline);
 
   const players = playerIds.map((playerId) => finalizePlayerDiagnostic(record, playerId, metrics[playerId]!));
@@ -157,9 +157,9 @@ export function buildMatchDiagnosticReport(record: GameRecord, recordName: strin
     status: record.metadata?.status ?? "unknown",
     winner: record.metadata?.winner ?? record.finalState?.winner ?? null,
     durationTicks: record.finalState?.tick ?? 0,
-    durationSeconds: ((record.finalState?.tick ?? 0) * 500) / 1000,
-    mapWidth: record.metadata?.map?.width ?? record.initialState.tiles[0]?.length ?? 0,
-    mapHeight: record.metadata?.map?.height ?? record.initialState.tiles.length ?? 0,
+    durationSeconds: ((record.finalState?.tick ?? 0) * record.definition.tickIntervalMs) / 1000,
+    mapWidth: record.definition.map.width,
+    mapHeight: record.definition.map.height,
     players,
     timeline: dedupeTimeline(timeline).sort((a, b) => a.tick - b.tick || eventPriority(a.type) - eventPriority(b.type)),
   };
@@ -396,7 +396,7 @@ function applyCommandDiagnostics(
   metrics: ReturnType<typeof createPlayerMetrics>,
   timeline: DiagnosticTimelineEvent[]
 ) {
-  for (const log of record.commandResults) {
+  for (const log of record.commandResults ?? []) {
     if (log.type !== LOG_TYPES.COMMAND_RESULT || !log.data) {
       continue;
     }

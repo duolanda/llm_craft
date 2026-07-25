@@ -37,7 +37,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -83,6 +84,26 @@ input {
   flex-direction: column;
   gap: 12px;
   align-items: flex-end;
+}
+
+.tv-toolbar > select,
+.tv-toolbar > button {
+  max-width: 360px;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  padding: 0 12px;
+}
+
+.tv-toolbar > button {
+  cursor: pointer;
+}
+
+.tv-toolbar > button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .tv-upload {
@@ -251,6 +272,11 @@ input {
 
 .tv-badge.delta {
   background: var(--delta);
+}
+
+.tv-badge.record {
+  color: #315c71;
+  background: #dcecf4;
 }
 
 .tv-main,
@@ -512,6 +538,26 @@ input {
 
 .tv-message-role.assistant {
   background: var(--full);
+}
+
+.tv-waterfall {
+  display: grid;
+  gap: 8px;
+}
+
+.tv-waterfall-row {
+  display: grid;
+  grid-template-columns: 42px 70px 80px minmax(110px, 1fr) minmax(140px, 1fr) 90px;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 10px;
+  border-left: 3px solid #56d6a9;
+  background: rgba(13, 25, 32, 0.78);
+  font: 12px/1.25 var(--mono);
+}
+
+.tv-waterfall-row.error {
+  border-left-color: #ff6b6b;
 }
 
 @media (max-width: 1380px) {

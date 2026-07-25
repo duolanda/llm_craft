@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
+    "dev": "node ../../scripts/quiet-tsc-watch.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

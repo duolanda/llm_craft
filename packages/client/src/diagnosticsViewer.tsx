@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { GameRecord, PlayerId } from "@llmcraft/shared";
+import { projectRecordToMatchRecord } from "@llmcraft/record";
 import {
   buildMatchDiagnosticReport,
   DiagnosticTag,
@@ -11,7 +12,7 @@ import {
 import "./diagnosticsViewer.css";
 
 const SERVER_HOST = window.location.hostname || "localhost";
-const API_BASE_URL = `http://${SERVER_HOST}:3001`;
+const API_BASE_URL = `http://${SERVER_HOST}:3101`;
 
 const TAG_LABELS: Record<DiagnosticTag, string> = {
   missed_defense: "未防守",
@@ -114,7 +115,7 @@ function DiagnosticsApp() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const record = await response.json() as GameRecord;
+      const record = projectRecordToMatchRecord(await response.json() as unknown);
       setSelectedRecord(record);
       setSelectedRecordName(selectedRecordFile);
       setTimelineFilter("all");

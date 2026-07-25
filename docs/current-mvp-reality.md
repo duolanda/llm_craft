@@ -1,247 +1,96 @@
-# LLMCraft 当前 MVP 现状说明
+# LLMCraft 当前实现现状
 
-日期: 2026-07-02
+日期：2026-07-25
 
-这份文档只描述当前代码真实行为，不描述理想设计。
+> 文件名为历史遗留；本文描述当前实现，不使用 MVP 阶段假设。
 
-## 1. 当前系统边界
+## 1. 运行边界
 
-- 前端: React + Vite + React Three Fiber / Three.js 3D 战场
-- 后端: Node.js + TypeScript
-- 游戏 Tick: `500ms`
-- AI 唤醒频率: 默认每 `5 tick` 触发一次
-- AI 决策方式: OpenAI-compatible tool calling agent runtime
-- 旧的 `AISandbox + Node vm + 生成 JavaScript` 链路已移除
-- 模型配置来源: 服务端预设库（磁盘加密存储）
-- live match 与 benchmark 现在共用同一套 runtime 外壳
+- `MatchRuntime` 拥有单局时钟、500ms tick、`CommandGateway` 和结束通知。
+- `SimulationCore` 同步编排 movement → projectiles → economy → harvest → combat → construction → production → victory。
+- `Game` 负责解释命令、持有 `WorldState`、执行规则并生成 UI/AI feedback log。
+- SimulationCore 异常会停止该局；不会克隆世界、回滚 tick 或继续运行半失败对局。
+- 命令在下一 tick 边界释放。每条命令独立执行，一条失败不会撤销同批次的其他成功命令。
+- 没有每 actor 每 tick 命令上限或全局路径命令额度。动态单位拥堵不会触发 A*；每个单位每 tick 的局部避障候选和移动子步都有固定上界。
 
-## 2. 当前可见信息与工具结构
+移动采用两层模型：A* 只根据地形和建筑规划全局路线；单位之间的动态冲突由确定性优先级、空间索引和有限角度/距离候选做局部避障。局部候选按前向进度、移动距离、转向幅度和确定性避让侧评分；无前向进度的横移不会清除拥堵计数，也不允许立即返回上一位置。持续拥堵后开放扩展侧移和保持车体朝向的倒车候选，由阻塞时间最长的单位优先脱困。单位终点预约只用于避免多个命令选择重叠终点，不会作为整条全局路线的硬障碍。权威碰撞在 XY 平面计算：worker/步兵使用按人体投影标定的圆，轻坦使用约 `2.96 × 1.96` 格的 OBB，建筑和障碍格组成静态 AABB。A* 不搜索朝向，因而以 OBB 包围圆提供保守静态净空；终点、出生、移动扫掠、单位避障和拥堵解叠使用精确 Circle/OBB + SAT。单位朝向由模拟层持有，写入实时状态和录像 delta，前端只做位置与最短角度插值。碰撞形状、避让优先级和 locomotion layer 集中在 simulation movement profile 中，后续碾压、让行或不同尺寸单位应扩展 profile 间交互策略，而不是向 A* 或前端塞单位特例。
 
-当前 AI 已不再使用也不再保留 `AIPromptPayload(full/delta)` 旧链路。
+实时 WebSocket 以 `frame` 作为唯一状态投影；兼容字段 `state` 和 `snapshots` 不再附带完整状态，避免大地图长局每 tick 重复序列化和传输整个世界。
 
-每次被唤醒时，模型只会收到：
+持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。
 
-- 固定 `system prompt`
-- 持续对话历史
-- 当前 `AgentRunInput`
+采矿循环会向最近的已完成 HQ 或 refinery 交付。省略矿点时，自动选择以反复交付路程为主、worker 初始路程和当前分配为辅；单格矿点最多保留 2 个 worker，超额分配会自动改派，避免终点预约将矿点围死。Refinery 只缩短交付路线，不增加采集速度；省略建造坐标时会按预计路线节省选址。自动建造任务以 worker 与建筑完整 footprint 实际相邻为移动步骤的完成条件。
 
-当我方 HQ 已处于敌方攻击范围内时，`summary` 会额外插入固定警告：
+## 2. 对局与玩家控制
 
-- `Alert: our HQ is under attack.`
+生命周期控制和玩法控制是两个边界：
 
-模型通过工具读取局面：
+- 生命周期：`MatchRegistry + MatchRuntime`，由 WebSocket、HTTP 或 CLI 触发创建、预热、开始、停止、查询和观察。
+- 玩法：`GameplayController`，供 AgentRuntime、CLI adapter 和 built-in CPU 使用同一套观察/动作工具。
+- `DecisionController` 是可由 harness 调度的决策来源；当前实现为 LLM 和 built-in CPU。
+- `GameOrchestrator` 订阅 committed tick。某方空闲且遇到新 tick 时可开始下一次决策；慢方仍运行时只跳过慢方，不阻塞快方。
+- 不存在 100ms AI poll 或固定 5 tick 宏观决策间隔。
+- `warmup` 只提前执行选中模型的首个真实请求并保留会话结果，不启动游戏时间。`start` 不等待首次决策：时钟立即启动并同时派发双方控制器，因此首次和后续响应耗时都属于实时对局成本。
+- 即时动作失败会在服务端已知时直接返回紧凑恢复候选；计划等待状态同时提供兼容摘要 `waitingReason` 和结构化 `waiting.code/message/details`，避免用额外全图读取猜测失败原因。
 
-- `get_map_state`: 全图战场信息；默认返回结构化单位、建筑和资源列表，不再返回 ASCII 小地图或迷雾兼容字段，需要逐格地形时才请求 `cells`
-- `get_my_state`: 我方经济、HQ、建筑、生产能力
-- `get_my_units`: 我方可直接控制单位，并按 `role + intent` 返回 `groups` 聚合，帮助直接看见 hold/idle 的战斗部队
-- `get_army_summary`: 我方/敌方兵种比例、ready/reloading 战斗单位数量，以及非强制的混编/阵型建议
-- `get_active_plans`: 当前高层计划
-- `get_recent_events`: 近期 AI-facing 反馈
+普通 live 流程只允许一个 active match。重复 start 返回提示。`llmcraft play` 重复调用只返回已有 active control match 的信息，不创建新对局或 session。benchmark round 仍可并行注册；前端的对局面板可以切换观察任一 registry entry。
 
-只读工具结果都会带当前 `tick`。其中 `get_my_units` 返回 `{ tick, groups, units }`，`get_army_summary` 返回 `{ tick, myCounts, enemyCounts, combatUnits, readyCombatUnits, reloadingCombatUnits, recommendedFormation, recommendations }`，`get_active_plans` 返回 `{ tick, plans }`，`get_recent_events` 返回 `{ tick, events }`。
+## 3. MatchDefinition
 
-同一个长 run 中，新的同名同参数读取会把旧读取结果折叠为 `expired: true` tombstone；assistant 思考文本和动作工具结果保留。这个机制用于避免旧地图、旧单位表和旧 recent events 在上下文中长期污染后续判断。
+当前定义由以下内容组成：
 
-模型通过工具改变局面：
+- `map`：地图 ID、144x96 尺寸、矿脉、障碍物、双方 HQ 和初始单位位置；
+- `players`：两个玩家槽位和初始 credits；
+- `rulesetId`、`tickIntervalMs` 和胜利条件。
 
-- `move_unit`
-- `attack`
-- `attack_move_unit`
-- `spawn_unit`
-- `build_structure`
-- `start_harvest_loop`
-- `hold_unit`
-- `orchestrate_plan`
+当前只接受内置 `standard` ruleset 和 `standard` map 的完整布局。命令限制、模型调度和记录配置不属于 MatchDefinition。
 
-动作/计划工具会先做明显无效请求的即时校验；单位、建筑或敌方目标不存在时通常返回 `ok: false` 和 `hint`，不会入队。`attack` 是例外：如果目标曾被看见但当前已不存在，会自动降级为移动到目标最后已知位置。所有动作/计划结果都会带当前 `tick`，如果本轮没有读取过局势或最后一次读取已超过 10 ticks，会额外返回 stale warning，但 warning 本身不阻止命令入队。
+shared constants 是内置 `standard` 规则和地图模板的定义处；`createDefaultMatchDefinition()` 会把地图布局复制进单局定义。运行中的地图尺寸、矿脉、障碍物、开局实体和 tick 时长读取该局 MatchDefinition；单位数值、造价和生产关系通过其 `rulesetId` 对应的 shared ruleset helper 读取。前者是“这一局采用什么”，后者是“内置 standard 具体是什么”，不是两套相互竞争的配置。
 
-`start_harvest_loop` 是暴露给 agent 的内建 worker 采矿循环；常规采矿不需要再用 `orchestrate_plan` 手写资源点和 HQ 之间的往返路线。
+## 4. Agent runtime
 
-`attack` 是暴露给 agent 的标准 RTS 点目标攻击命令，也是存在明确敌方目标 ID 时的默认战斗命令：agent 只传己方单位 ID 和敌方目标 ID。目标仍存在时，系统会移动到射程内并持续攻击；目标已死亡但曾被看见过时，系统会移动到目标最后已知位置，避免失败后反复重读局势。攻击敌方 HQ、barracks、war_factory、refinery 或关键敌军时，应优先使用 `attack`，不要用坐标移动命令代替。
+- 模型通过 OpenAI-compatible tool calling 观察和控制游戏，不生成可执行 JavaScript。
+- 只读工具：`get_map_state`、`get_my_state`、`get_my_units`、`get_army_summary`、`get_active_plans`、`get_recent_events`。
+- 动作工具：移动、attack move、group attack move、指定目标攻击、生产、建造、持续采矿和 hold。
+- `orchestrate_plan` 注册多步 Mission；`GameplayController.handleCommittedTick()` 在 committed tick 通知上推进 Mission 和持续攻击。
+- group attack move 会一次提交所有编队命令，不做跨 tick pending group release。
+- 同 tick 多个付费 plan 会按当前可用 credits 预留成本；这里的约束是游戏货币可用性，不是命令执行额度。
+- `ContextWindowLimiter` 暂时按消息数和字节裁剪 provider history。它不是持久 memory，也不是真正的语义 compactor。
 
-`attack_move_unit` 是暴露给 agent 的无目标区域推进命令：有攻击能力的单位会向目标点移动并在到达前自动攻击路上的角色匹配目标。默认目标优先级按单位类型分流：`rifleman` 优先清火箭/步兵，`rocket_soldier` 优先打 `light_tank`，`light_tank` 优先打敌方装甲和反装甲支援，其后才拆生产建筑/HQ/精炼厂。到达目标点后该命令结束，不会持续自动攻击后续靠近或新生产的敌方单位。它只用于没有明确 `targetId` 时穿越危险区域或试探接敌；点杀关键敌军或拆建筑应使用 `attack`。
+## 5. CLI / HTTP control
 
-`attack_move_group` 支持 `line`、`column`、`wedge`、`dispersed`、`battle_line`。`battle_line` 是角色化编队：light_tank 前排，soldier/rifleman 居中掩护，rocket_soldier 后排输出。它只是目的地分配和默认 target priority，不会强制 AI 攒兵或固定战术。
+- `POST /api/control/start-game` 创建 control match；已有 active control match 时返回该 `matchId` 和 `reused: true`。
+- control session 固定绑定 `matchId + playerId`，观察对象变化不会迁移 session。
+- 单 tool 请求直接进入绑定玩家的 `GameplayController`。
+- `/sessions/:id/actions` 接受带 `clientRequestId` 的 action 数组并提供请求级幂等；每个 action 独立执行和返回。部分失败时保留成功动作并返回 `partialSuccess: true`。
+- MatchRegistry HTTP API 支持列表、切换观察、停止和保存指定对局。
 
-单位有一层自卫保底：当有攻击力的单位被敌方单位攻击后，如果它仍然存活、处于 idle/hold、没有正在执行的移动路径，且攻击者在自身射程内，会自动还击攻击者。这个机制只处理单位自身被打后的反击；HQ / barracks / war_factory 不会触发周围单位自动护卫，也不会替代 `attack` / `attack_move_unit` 的主动作战决策。
+## 6. Match Record
 
-## 3. 当前高层计划能力
+正式产物是单个 `match-<ISO timestamp>-<short match id>.match.json`：
 
-`orchestrate_plan` 采用扁平 steps 列表，且只支持 `{ call, args, scope, when, until, retry }` 形态：把已有动作工具调用注册成后续 tick 自动推进的持续计划。
+- `off`：不保存；
+- `replay`：定义、元数据、初末状态和 tick delta；
+- `evaluation`：增加命令结果、Agent turn、工具和模型请求指标；
+- `includeTranscript`：可选增加完整模型 messages 与 assistant 输出。
 
-当前支持：
+终局只写一次文件，不重写大 JSON。运行中每个 tick 只向 worker thread 投递一个小 delta，由 worker 每 100 条封块并执行 JSON + gzip，压缩后留存；保存前也由 worker 解压解析。分块边界不再从模拟线程搬运整个大数组；worker 失败则保留 raw chunk，不影响对局。不生成单独 transcript、详细因果记录、临时事实工作区、状态 hash 或自动 retention 产物。
 
-- 顺序执行
-- `loop = -1` 无限循环
-- call steps: `move_unit`、`attack_move_unit`、`attack`、`spawn_unit`、`build_structure`、`start_harvest_loop`、`hold_unit`
-- step / plan `scope`: `per_unit` 对 `unitIds` 中每个单位展开，`global` 只执行一次
-- call step 的 `when` / `until`: `arrived`、`enemy_in_range`、`hq_in_range`、`near_position`、`target_in_range`、`target_destroyed`、`credits_at_least`、`building_exists`、`enemy_building_exists`、`unit_count_at_least`、`enemy_unit_count_at_least`、`production_queue_empty`
-- `spawn_unit` 在 plan 中可用 `buildingId: "$hq"`、`"$barracks"` 或 `"$war_factory"` 延迟解析当前友方建筑
-- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不再每 tick 入队必然失败的生产/建造命令
-- 同一 tick 内多个 active plan 共享预算；较早推进出的付费生产/建造命令会预留 credits，后续 plan 余额不足时等待，避免多个 plan 同时花掉同一笔钱
-- `get_active_plans` 会返回 `currentStep`、`waitingReason` 和 `lastAttempt`，用于区分计划是在等条件、等预算、刚刚生成命令、已推进 step，还是失败
+`@llmcraft/record` 是 server/client 共用的 Match Record 读取与状态投影包。它能导入项目已有的普通旧 JSON；不实现已删除的详细记录格式兼容。
 
-即时动作会打断同一单位的当前计划。
+`analyze-record.mjs` 是供开发者或 Agent 离线分析已有 Match Record 的工具。它与 benchmark runner 相互独立。
 
-## 4. 当前记录机制
+## 7. Benchmark
 
-回放与 transcript 现在记录的是 agent 行为，不是 JavaScript 代码。
+- 当前 benchmark 是 LLM preset 对 `random` 或 `rush` built-in CPU。
+- CPU 是模型/提示词的最低能力 baseline，不是性能规模测试，也不是平衡样本。
+- `BenchmarkRunner` 直接处理轮次、换边、并发和汇总；没有通用 ExperimentRunner。
+- `recordReplay=false` 时 round 不生成 Match Record；开启时使用 evaluation 档位，可另行选择 transcript。
 
-当前 `aiTurns` 会保存：
+## 8. 当前明确限制
 
-- `runInput.summary`
-- assistant 文本
-- tool calls
-- 注册的 plans
-- 本轮入队的 commands
-- stop reason
-- metrics
-
-当前 transcript 会保存：
-
-- summary
-- assistant text
-- tool calls
-- commands
-- plans
-- metrics
-
-服务端提供 `pnpm --filter @llmcraft/server analyze:record <record.json> [--debug <llm-debug.log>]`，用于离线统计回放里的囤钱、worker 过量、生产瓶颈、战斗命令噪声和 HQ 受击时机；传入 debug log 时还会补充工具调用分布和粗略 token 体量。
-
-当旧 record 缺少 `aiTurns` 但 metadata 显示双方是模型玩家时，`analyze-record` 会明确标记 `agent: unavailable (record has no aiTurns...)`，不再把缺失日志误读成模型请求数为 `0` 或 CPU 对局。新对局中，agent run 只要已经返回结果，会先写入 AI turn journal，再处理胜负后的 early return，避免最后一轮打出胜负时丢失模型/tool 调用记录。
-
-Benchmark 支持配置并发数，服务端会同时运行最多 `concurrency` 局 LLM vs CPU 对局；默认并发为 `1`，前端限制为 `1-10`。主画面会自动观战一局活跃 benchmark round，并在该 round 结束后切到剩余活跃 round 中编号最小的一局；前端状态条会显示当前画面对应的 round 和活跃 round 列表。最终结果按 round 编号排序，进度消息按实际完成顺序更新。
-
-## 5. 当前 MVP 规则
-
-- 当前规则已集中在 shared 默认 ruleset（`DEFAULT_RULESET`）中；`UNIT_STATS` / `BUILDING_STATS` 仍保留为兼容导出，但服务端核心创建、成本、生产关系和攻击能力判断开始通过 ruleset helper 读取。
-- 建筑包含 `hq`、`barracks`、`war_factory`、`refinery`
-- 单位包含 `worker`、`soldier`、`rifleman`、`rocket_soldier`、`light_tank`
-- `hq` 生产 `worker`
-- `barracks` 生产 `soldier`、`rifleman`、`rocket_soldier`
-- `war_factory` 生产 `light_tank`
-- `worker` 可建造 `barracks`、`war_factory`、`refinery`；`war_factory` 需要己方已有一个已完成 `barracks`
-- 建造不是瞬间完成：开始施工时扣除 credits 并创建占地建筑，施工中建筑可被攻击、会阻挡寻路，但不能生产、不能作为科技前置，也不会满足 plan 的 `building_exists`
-- 建造要求 worker 位于目标建筑完整 footprint 的相邻 1 格内；施工期间该 worker 进入 `building` 状态并被占用，不能移动、采矿或接收其他命令
-- 默认施工时间：`barracks` 12 ticks、`war_factory` 18 ticks、`refinery` 16 ticks
-- 当前 OpenRA-lite 武器模型：攻击不再是命令执行即扣血，而是开火生成 projectile；projectile 按飞行时间抵达后由 warhead 结算伤害。单位有 reload：`soldier` 3 ticks、`rifleman` 2 ticks、`rocket_soldier` 8 ticks、`light_tank` 6 ticks。
-- 当前移动/碰撞模型：地图、建筑、资源和寻路仍使用格子坐标；单位权威坐标允许为连续数值。A* 仍以最近格作为路径节点，但移动沿路径按速度推进，并在 tick 后做单位半径分离；轻坦半径大于步兵，避免多个坦克视觉上叠在同一点。到达、采矿和 plan `arrived` 判断使用近似位置/最近格，不再依赖 `x === tile.x`。
-- 当前单位数值：`soldier` 115 HP / 10 damage / range 1 / cost 55；`rifleman` 95 HP / 9 damage / range 6 / cost 70；`rocket_soldier` 80 HP / 34 damage / range 6 / cost 110；`light_tank` 420 HP / 42 damage / range 5 / cost 240。
-- 当前 armor / 伤害倍率：单位 armor 为 `infantry` 或 `vehicle`，建筑 armor 为 `structure`。`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x。伤害结算四舍五入为整数。
-- `rocket_soldier` 和 `light_tank` 的 projectile 有 1 格 splash，默认 falloff 分别为 35% / 50%。这让单位扎堆会吃亏，坦克前排、步兵掩护、火箭后排的阵型更有实际收益。
-- 内置 CPU benchmark 策略已开始使用新角色：有敌方 vehicle 时优先从 barracks 生产 `rocket_soldier`，否则优先 `rifleman`；有 war_factory 时生产 `light_tank`；rush 策略会在有 barracks 和足够 credits 后尝试建 `war_factory`。
-- Phase 3 增强 agent 决策脚手架：`get_my_state.techStatus` 汇总己方 worker / rifleman / rocket_soldier / light_tank / barracks / war_factory 数量、敌方 `war_factory` / `light_tank` 迹象，并给出推荐建造和生产项；`orchestrate_plan` 可用 `enemy_building_exists` / `enemy_unit_count_at_least` 表达看到敌方科技后触发反制生产。
-- Phase 4 增强角色化目标选择：默认 `attack_move_unit` 和无显式 priority 的 `attack_in_range` 会按攻击者类型选择目标；当前优先级更偏向部队交火：`rocket_soldier` 点敌方 `light_tank`，`light_tank` 优先打装甲/反装甲支援，然后再拆建筑。
-- Phase 5 降低计划噪声：计划内生产/建造会先检查 credits，余额不足时等待收入，不再刷 `spawn_insufficient_credits` / `build_insufficient_credits` 日志。
-- Phase 6 增强计划预算协调：同 tick 多个 active plan 推进时会按顺序预留生产/建造成本，避免不同计划基于同一份 credits 同时下达超额付费命令。
-- Phase 7 增强 active plan 可解释性：计划记录会暴露当前 step、等待原因和最近一次推进尝试，帮助 agent 判断计划是在等钱/等条件还是已经生成命令。
-- Phase 8 建立 OpenRA 迁移地图基线：默认地图从旧 `21 x 21` 扩大到 `37 x 25`。后续进一步扩大到 `144 x 96`，双方 HQ 固定在 `(14,48)` / `(129,48)`，资源点和中心障碍改为适合长距离推进、侧翼机动和大军团观战的布局。
-- Phase 9 增强资源分配：省略坐标调用 `start_harvest_loop` 时会倾向选择较近且较少 worker 占用的资源点；`get_my_state.economyStatus` 会暴露 worker / activeHarvester / idleWorker 数量、携带中的 credits、资源点分配和经济建议。
-- Phase 10 增强移动目标预约：寻路会把其他单位的当前格和已预约 `pathTarget` 都视为占用；多个单位同 tick 移动或 attack-move 到同一目标时，后续单位会自动解析到附近可达格，降低大地图集群推进时的同格拥堵。
-- Phase 19 重做单位战斗交互：引入 weapon/projectile/reload/splash，`GameState.projectiles` 向前端同步实时弹丸；客户端优先渲染 active projectiles，旧录像没有该字段时仍可回放。新增 `get_army_summary` 和 `attack_move_group` 的 `battle_line` 编队，给 AI 表达步坦协同的工具，但不强制 AI 攒兵或按脚本行动。
-- Phase 20 收敛 AI 读工具和表现层：`get_map_state` 移除 `fogOfWar`、`visibleTileCount`、`asciiMap`，默认只返回结构化单位/建筑/资源；`get_my_state` 的推荐项携带可直接调用工具的 `workerId` / `buildingId`；`get_my_units` 增加 `groups` 聚合。客户端对单位位置按服务器 tick 周期做时间插值；服务端单位坐标改为连续坐标 + 半径分离，降低大军团推进时的顿挫和坦克叠放感。
-- Phase 21 调整 3D 资源、默认地图和动作表现：资源 tile 在客户端渲染为更大的多晶簇矿脉；默认地图暂不生成任何 obstacle 岩石，只保留 `obstacle` 语义和渲染能力供后续地图设计使用。资源点移出 HQ / 生产建筑夹缝和中央主攻路线，改为基地外侧矿场与上下侧翼矿场。新增 `/?showcase=animation-lab` 本地动画调试入口，用固定 worker / 步兵 / 坦克样例单独观察采矿、交付、行走和攻击动作；worker 工作状态不再做高频上下跳动，单位移动插值增加缓入缓出和静止 deadzone。
-- Phase 22 建立 Animation Lab 预览架构和开发入口：`/?showcase=animation-lab` 是单一固定调试场景，包含原有 worker / infantry / tank 动作样例，并追加 rifleman / rocket soldier / tank 三组固定面对面靶场。左下角 `implemented` / `preview` tab 只切换同一批元素的表现层：前者展示当前已实装 projectile / combat feedback，后者用于单独验证尚未接入正式战场的候选弹药美术表现；普通命中不再做独立爆炸圆环、烟尘或火花碎片，避免喧宾夺主。开发环境右上角新增下移后的折叠式 `DEV` 快捷导航，保留 Live、Mass Battle、Animation Lab、FX Preview、Diagnostics 和 Transcript；Mass Battle 页面左下角提供 High Detail / Mass LOD 切换面板。
-- Phase 23 将 Animation Lab 验证后的弹药表现接入正式战场：`CombatEffects` 对服务器同步的 `ActiveProjectile` 使用连续本地时间分数插值，避免弹丸按服务器 tick 一格一格跳动；正式弹药表现改为飞行体 + 曳光/烟尾 + 枪口闪，并删除旧的命中大圈 / impact mesh。`/?showcase=animation-lab` 的 implemented tab 继续展示正式渲染路径，preview tab 仍作为下一轮未确认美术表现的隔离验证入口。
-- Phase 13 启用 3D 战场表现层：前端主战术视口从 2D Canvas 网格切换为 React Three Fiber / Three.js；HQ、兵营、工厂、工人、步兵、火箭兵、轻坦、资源和障碍加载 `packages/client/public/assets/models/battlefield/*.glb`。这些 GLB 由本机 Blender 后台脚本生成，运行时通过 `team_primary` / `team_accent` 材质名替换红蓝队色。底层仍保留离散战术坐标供 AI、寻路、攻击范围、回放和控制面使用，但前端默认不显示格线或坐标轴。
-- Phase 14 将首版几何占位资产替换为可复现的生产资产管线：步兵以 Quaternius CC0 `Animated Men` 人体网格为基础追加原创军装、护甲、武器和工程装备，轻坦基于 Quaternius CC0 `Animated Tanks` 重制材质和附加装甲；HQ 扩大为约 `7.2 x 6.5` 世界单位的指挥中心，并重制兵营和战车工厂。Blender 导出模型嵌入程序生成的 Albedo / Normal / Roughness 贴图，地面和道路也使用重复 PBR 纹理。
-- Phase 14 同时加入军团 LOD 和实例运动：单位总数达到 `100` 时自动切换为单网格、单材质的 mass-battle GLB；高细节版本仍用于小规模/近景。单位、矿石和岩石均通过 `InstancedMesh` 合批，移动步兵以 30 Hz 更新实例矩阵形成错相步态起伏。开发地址 `/?showcase=mass-battle` 可在没有服务端对局状态时独立生成 `80 vs 80` 压力场景，`&units=<每方数量>` 可用于资产审查。
-- Phase 15 增加客户端战斗表现层：轻坦由 Blender 分别导出车体和炮塔的详细版/LOD GLB，运行时车体保持移动朝向、炮塔独立追踪 `targetId`；`lastAttackTick` 驱动实例化后坐、弹丸、枪口焰和命中闪光，单位或建筑从状态中消失时生成短生命周期的实例化爆炸与碎片。该层只消费权威游戏状态，不修改服务器战斗规则。默认 `80 vs 80` 展示场景实测约 `24.3` 万三角形、`144` 次 draw call，应用内诊断为 `60 FPS`。
-- Phase 16 将视觉验收顺序改为画质优先：`/?showcase=mass-battle` 默认使用 `20 vs 20` 高细节 GLB、完整 PBR 材质和单位阴影，单材质 mass-battle LOD 仅在显式传入 `&lod=mass` 时启用。地表替换为 Poly Haven CC0 `Aerial Grass Rock` 2K PBR，临时十字道路和默认意图线已移除，展示模式使用全屏战场、紧凑交战编队和较低战术镜头；`&units=<每方数量>` 仍可用于逐级扩军验收。
-- Phase 17 修正坦克坐标契约并重做模型本体辨识：Blender 导出将 Tank 4 全部零件重定位到炮塔座圈中心，运行时按源模型 `-X` 前向轴增加 `90°` 校准，因此车体与炮塔可分别正确朝向移动/攻击目标。远景兵种图标已完全删除；普通步兵保持轻型突击步枪轮廓，`rifleman` 视觉改为配备长重机枪、弹药箱、两脚架和大型弹药背包的机枪兵，火箭筒兵改为肩扛大型发射管并携带两枚备用火箭，工人使用黄色工程护甲。服装与兵种主护甲保留中性、深色、沙色和工程黄色差异，同时约 30% 的头盔、肩甲、背包外壳、发射器环带和载具装甲使用连续队色区域；低透明度地环仅作选中反馈，不承担阵营识别。`/?showcase=mass-battle&view=far` 用于无图标远景辨识验收。
-- Phase 18 重建四类生产建筑的一级轮廓：HQ 使用分层指挥要塞、雷达阵列和双侧防御塔；兵营使用 U 形双营房、开放集结院、武器架和训练靶；战车工厂使用无外墙双装配工位、车体轨道、吊装炮塔和出车坡道；精炼厂使用发光晶矿卸料坑、斜向输送带、棱角破碎塔和方形储矿仓，并移除油罐、火炬塔等油气设施语汇。建筑继续共享工业 PBR 与阵营材质，但不再依赖屋顶颜色区分功能。
-- 开局每方 `1 HQ + 4 Worker + 800 credits`
-- 胜负条件是摧毁敌方所有建筑；HQ 被摧毁但仍有 barracks / war_factory / refinery 时不会立刻失败
-- 当前地图 `144 x 96`
-- 当前没有战争迷雾读取层：`get_map_state`、`get_my_state.techStatus.enemy` 和 active plan 的 enemy 条件使用全图真实状态，且不再返回 ASCII 小地图。单位自动索敌仍受各自 `visionRange` 限制；等侦察兵、雷达和 last-seen 系统完整后再重新评估迷雾。
-- `worker` 自动采矿，回最近已完成 HQ 或 refinery 交付；资源点有有限储量
-- `barracks`、`war_factory` 和 `refinery` 不能紧贴己方 `HQ`
-- idle/hold 的有攻击力单位被敌方单位攻击时，会在射程内自动还击攻击者
-
-## 6. CLI 控制面
-
-新增 `@llmcraft/cli` 包，提供 shell 可调用的游戏动作控制面。外部调用者（脚本、LLM agent、benchmark harness）可以通过 HTTP 控制玩家行动，无需理解项目内部 TypeScript API。agent-facing 命令是构建后的 `llmcraft`；`pnpm cli -- ...` 仅作为开发调试入口。shared 包现在按 Node ESM 运行时规则声明 `"type": "module"`，内部导入导出使用 `.js` 后缀，确保 CLI 通过 workspace 包加载 `@llmcraft/shared` 时能正常取得 ruleset helper 和常量导出。
-
-### 架构
-
-```
-外部调用者 (shell/script/agent)
-  |  llmcraft <command> [flags]
-  v
-@llmcraft/cli (参数解析、stdin 管道、JSON 输出)
-  |  HTTP control API
-  v
-server ControlSessionManager → ControlPlaneMatch(player bridge) → Game
-```
-
-Control session 只是访问令牌；同一 player 的多个 session 共享 match 里的 `GameAgentBridge`，因此 active plans、target memory 和持续 attack orders 不会因重连或多 session 被拆散。`orchestrate_plan` 注册后由 `ControlPlaneMatch` 按 tick 推进并排入游戏命令队列。
-
-### 会话管理
-
-- `llmcraft play --vs random|rush` — 创建 `player_1 vs CPU player_2` 对局，并自动加入 `player_1`
-- `llmcraft play --mode pvp` — 创建等待两个 control session 加入的 PVP 对局
-- `llmcraft session use --player player_1` — 创建或绑定控制会话
-- `llmcraft session show` — 查看当前会话信息
-
-### 读状态命令
-
-- `state [--compact] [--cells]` — 全图 + 玩家状态
-- `map [--ascii]` — ASCII 战场地图
-- `me` — 经济、HQ、建筑、产能
-- `events [--limit n]` — 近期事件
-- `plans` — 活跃计划
-
-`state --compact` 会返回 `winner`，方便 agent 快速判断对局是否结束。PVP lobby 在双方都创建 control session 前不会 tick；等待期间读命令仍可用，但 selector、transformer、action、plan、orchestrate 会返回 `game_not_started`，避免先加入的一方提前排队动作。对局结束后，`state` / `map` / `me` / `events` / `plans` 仍可读取；selector、transformer、action、plan、orchestrate 会直接返回 `game_over` 和赢家，不再继续执行无意义管道。
-
-### 选择器命令
-
-- `units [--type w|s] [--idle] [--planned|--unplanned] [--near x,y] [--limit n]`
-- `buildings [--type hq|barracks|war_factory|refinery] [--ready] [--near x,y] [--limit n]`
-- `enemies [--type w|s|rifleman|rocket_soldier|light_tank|hq|barracks|war_factory|refinery] [--near x,y] [--limit n]`
-- `resources [--near x,y] [--limit n]`
-
-### 动作命令
-
-- `move --unit <id> --to x,y`
-- `attack --unit <id> --target <id>`
-- `attack-move --unit <id> --to x,y [--priority soldier,rifleman,rocket_soldier,light_tank,worker,hq,barracks,war_factory,refinery]`
-- `gather --unit <id> [--resource x,y]`
-- `build barracks|war_factory|refinery --unit <id> --at x,y`
-- `train worker|soldier|rifleman|rocket_soldier|light_tank --building <id>`
-- `hold --unit <id>`
-
-所有动作命令支持参数输入和 stdin selection 输入（从选择器管道传入）。
-
-### 管道转换器
-
-- `nearest resource` — 为每个单位选择最近资源
-- `nearest enemy` — 为每个单位选择最近敌人
-- `target enemy-hq` — 配对敌方 HQ
-- `target weakest` — 配对最弱敌人
-
-### 计划与编排
-
-- `plan economy|tech|defend|attack-hq|custom --file <path>` — 生成计划 JSON
-- `orchestrate [--dry-run] [--max-actions n]` — 执行计划或批量动作
-
-### 示例管道
-
-```bash
-llmcraft units --idle --type worker | llmcraft gather
-llmcraft buildings --type barracks --ready | llmcraft train soldier
-llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
-llmcraft plan economy | llmcraft orchestrate
-llmcraft plan tech | llmcraft orchestrate
-```
-
-完整的 agent 操作手册见 `docs/cli-agent-guide.md`。双 CLI agent 同机对战时必须显式隔离 session：后续命令使用 `--session <id>`，或分别设置 `LLMCRAFT_SESSION`，避免两个 agent 共享并覆盖 `~/.llmcraft/session.json`。
-
-CLI 本身只执行单次读/动作命令，不内置 turn loop，也不要求两轮之间 `sleep`。外部 agent、benchmark harness 或脚本如果需要持续运行，应自行决定下一次读取和行动的调度节奏。
-
-## 7. 当前限制
-
-- WebSocket 每 `100ms` 检查一次状态，但只在对局实例、tick 或 `liveEnabled` 变化时发送 `state`；兼容字段 `snapshots` 只携带最新一帧，不再发送完整历史
-- 录像历史在 tick 当场转为 compact-v2 delta，每 `100 tick` gzip 分块；内存中只保留初始和最新两个完整快照。AI turn 与 terminal event 原样追加到系统临时目录中的每局 journal，实时 terminal 只缓存最近 `500` 条，旧记录可分页读取；最终 compact-v2 录像通过临时文件流式组装并原子改名，不做数量、字节或字段裁剪
-- 当前 `summary` 仍是服务端拼装的轻量文本，不是严格结构化状态摘要
-- 当前 tool-calling provider 基于 OpenAI-compatible chat completions 工具调用
-- 当前 plan 推进是 orchestrator 轮询驱动，实际执行相对 tick 有一个轻微的观察/入队延迟
+- `summary` 仍是服务端拼装字符串。
+- `ContextWindowLimiter` 只会丢弃/截断上下文，没有语义摘要。
+- Match Record 的压缩 tick delta 和未压缩 evaluation 数据在终局前留在内存，长局内存与终局 JSON 峰值仍需实测。
+- 当前地图定义虽然完整，但 SimulationCore 仍只接受内置 standard 布局。
+- 人类手操 adapter 尚未实现；当前没有占位的 HumanControllerAdapter。

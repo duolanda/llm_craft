@@ -1,4 +1,5 @@
-import { TileType, TILE_TYPES, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
+import { TileType, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
+import { isDiscBlockedByGrid } from "./navigation/NavigationGrid";
 
 interface Node {
   x: number;
@@ -67,8 +68,21 @@ export class PathFinder {
     targetX: number,
     targetY: number,
     tiles: TileType[][],
-    occupiedPositions?: Set<string>
+    occupiedPositions?: Set<string>,
+    clearanceRadius = 0,
   ): Array<{ x: number; y: number }> {
+    const width = MAP_WIDTH;
+    const nodeCount = MAP_WIDTH * MAP_HEIGHT;
+    const traversal = new Uint8Array(nodeCount);
+    const isBlocked = (x: number, y: number): boolean => {
+      const index = y * width + x;
+      const cached = traversal[index];
+      if (cached !== 0) return cached === 2;
+      const blocked = isDiscBlockedByGrid(x, y, clearanceRadius, tiles, occupiedPositions);
+      traversal[index] = blocked ? 2 : 1;
+      return blocked;
+    };
+
     // 目标点合法性检查
     if (
       targetX < 0 ||
@@ -80,7 +94,7 @@ export class PathFinder {
     }
 
     // 目标点是障碍物
-    if (tiles[targetY][targetX] === TILE_TYPES.OBSTACLE) {
+    if (isBlocked(targetX, targetY)) {
       return [];
     }
 
@@ -89,8 +103,6 @@ export class PathFinder {
       return [];
     }
 
-    const width = MAP_WIDTH;
-    const nodeCount = MAP_WIDTH * MAP_HEIGHT;
     const startIndex = startY * width + startX;
     const targetIndex = targetY * width + targetX;
     const open = new MinHeap();
@@ -132,12 +144,7 @@ export class PathFinder {
         }
 
         // 障碍物检查
-        if (tiles[y][x] === TILE_TYPES.OBSTACLE) {
-          continue;
-        }
-
-        // 被其他单位占据
-        if (occupiedPositions?.has(`${x},${y}`)) {
+        if (isBlocked(x, y)) {
           continue;
         }
 

@@ -25,7 +25,8 @@ export interface BuiltinCPURuntimeConfig {
 export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig | BuiltinCPURuntimeConfig;
 
 export interface MatchDebugOptions {
-  recordLLMTranscript?: boolean;
+  recordingProfile?: MatchRecordingProfile;
+  includeTranscript?: boolean;
 }
 
 export interface MatchWarmupOptions {
@@ -167,11 +168,12 @@ export interface Unit extends GameObject {
   hp: number;
   maxHp: number;
   state: UnitState;
-  my: boolean;
   playerId: PlayerId;
   attackRange: number;
   carryingCredits: number;
   carryCapacity: number;
+  /** Authoritative body heading in simulation XY radians; zero points toward +X. */
+  heading?: number;
   // 意图显示
   intent?: UnitIntent;
   // 寻路路径缓存
@@ -190,7 +192,6 @@ export interface Building extends GameObject {
   type: BuildingType;
   hp: number;
   maxHp: number;
-  my: boolean;
   playerId: PlayerId;
   productionQueue: UnitType[];
   productionProgress?: {
@@ -202,6 +203,7 @@ export interface Building extends GameObject {
     workerId: string;
     remainingTicks: number;
     totalTicks: number;
+    resumeWorkerOrder?: UnitIntent;
   };
 }
 
@@ -261,7 +263,100 @@ export interface Command {
   position?: Position;
   unitType?: UnitType;
   buildingType?: BuildingType;
+  resumeWorkerOrder?: UnitIntent;
   playerId: PlayerId;
+  provenance?: CommandProvenance;
+}
+
+export interface CommandProvenance {
+  controllerId: string;
+  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "cpu";
+  turnId?: string;
+  toolCallId?: string;
+  missionId?: string;
+  parentControllerId?: string;
+}
+
+export interface CommandEnvelope {
+  matchId: string;
+  actorId: string;
+  baseTick: number;
+  applyAtTick: number;
+  sequence: number;
+  clientRequestId: string;
+  commands: Command[];
+}
+
+export type CommandEnvelopeRejectCode =
+  | "invalid_envelope"
+  | "wrong_match"
+  | "invalid_tick"
+  | "unauthorized_actor"
+  | "duplicate_command_id"
+  | "idempotency_conflict";
+
+export type CommandEnvelopeSubmissionResult =
+  | {
+      accepted: true;
+      duplicate: boolean;
+      matchId: string;
+      clientRequestId: string;
+      applyAtTick: number;
+    }
+  | {
+      accepted: false;
+      duplicate: false;
+      matchId: string;
+      clientRequestId: string;
+      code: CommandEnvelopeRejectCode;
+      message: string;
+    };
+
+export interface MatchPlayerDefinition {
+  id: PlayerId;
+  startingCredits: number;
+}
+
+export interface MapStartingUnit {
+  type: UnitType;
+  position: Position;
+}
+
+export interface MapStartingBuilding {
+  type: BuildingType;
+  position: Position;
+}
+
+export interface MapPlayerStart {
+  playerId: PlayerId;
+  units: MapStartingUnit[];
+  buildings: MapStartingBuilding[];
+}
+
+export interface MapDefinition {
+  id: string;
+  width: number;
+  height: number;
+  resources: Position[];
+  obstacles: Position[];
+  playerStarts: [MapPlayerStart, MapPlayerStart];
+}
+
+export interface MatchDefinition {
+  rulesetId: string;
+  tickIntervalMs: number;
+  map: MapDefinition;
+  players: [MatchPlayerDefinition, MatchPlayerDefinition];
+  victoryCondition: {
+    type: "eliminate_all_buildings";
+  };
+}
+
+export type MatchRecordingProfile = "off" | "replay" | "evaluation";
+
+export interface MatchRecordingOptions {
+  profile: MatchRecordingProfile;
+  includeTranscript: boolean;
 }
 
 export interface GameSnapshot {
@@ -304,6 +399,16 @@ export interface AgentToolCallRecord {
   args: unknown;
   result: unknown;
   isError: boolean;
+  turnId?: string;
+  controllerId?: string;
+  modelRequestIndex?: number;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  observationTick?: number;
+  resultTick?: number;
+  resultBytes?: number;
+  commandIds?: string[];
 }
 
 export interface AgentMapStateUnit {
@@ -408,6 +513,7 @@ export type PlanStepCondition =
   | { condition: "enemy_in_range" }
   | { condition: "hq_in_range" }
   | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "worker_adjacent_to_build_footprint"; buildingType: BuildingType; x: number; y: number }
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
@@ -435,17 +541,27 @@ export interface OrchestratePlanInput {
   steps: PlanStep[];
 }
 
+export interface AgentPlanWaitingDiagnostic {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export interface AgentPlanAttemptRecord {
   tick: number;
   stepIndex: number;
   call: PlanCallToolName;
   status: "waiting" | "command_created" | "advanced" | "failed";
   detail?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   commandCount?: number;
 }
 
 export interface AgentPlanRecord {
   planId: string;
+  missionId?: string;
+  controllerId?: string;
+  createdByTurnId?: string;
   unitIds: string[];
   scope?: PlanStepScope;
   loop: number;
@@ -454,16 +570,56 @@ export interface AgentPlanRecord {
   status: "active" | "completed" | "interrupted" | "failed";
   currentStep?: PlanStep;
   waitingReason?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   lastAttempt?: AgentPlanAttemptRecord;
 }
+
+export type MissionRecord = AgentPlanRecord;
 
 export interface AgentRunMetrics {
   modelRequests: number;
   toolCalls: number;
   stallDetected: boolean;
+  modelRequestRecords?: AgentModelRequestRecord[];
+  contextWindow?: ContextWindowLimitRecord;
+}
+
+export interface ContextWindowLimitRecord {
+  maxMessages: number;
+  maxBytes: number;
+  messagesBefore: number;
+  messagesAfter: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  droppedMessages: number;
+  truncatedMessages: number;
+}
+
+export interface AgentModelRequestRecord {
+  requestIndex: number;
+  phase: "warmup" | "turn" | "subagent";
+  requestId?: string;
+  model?: string;
+  finishReason: string;
+  latencyMs?: number;
+  messageCount: number;
+  toolCount: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  status?: "success" | "error";
+  attempt?: number;
+  retryOfRequestIndex?: number;
+  error?: string;
+  messages?: unknown[];
 }
 
 export interface AITurnRecord {
+  turnId?: string;
+  controllerId?: string;
+  decisionKind?: "macro" | "tactical";
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
@@ -480,6 +636,9 @@ export interface AITurnRecord {
 }
 
 export interface SavedAITurnRecord {
+  turnId?: string;
+  controllerId?: string;
+  decisionKind?: "macro" | "tactical";
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
@@ -512,6 +671,7 @@ export interface TickDeltaRecord {
       attackRange?: number;
       carryingCredits?: number;
       carryCapacity?: number;
+      heading?: number;
       intent?: UnitIntent | null;
       constructingBuildingId?: string | null;
     }>;
@@ -533,21 +693,58 @@ export interface TickDeltaRecord {
   winner?: PlayerId | null;
 }
 
-export interface GameRecord {
+export interface StateFrameMetadata {
+  frameSequence: number;
+  simulationTick: number;
+  simulationTimeMs: number;
+  tickIntervalMs: number;
+  serverTimeMs: number;
+}
+
+export interface StateProjectionDelta {
+  tick: number;
+  players: Array<{
+    playerId: PlayerId;
+    resources?: Player["resources"];
+    unitUpserts: Unit[];
+    removedUnitIds: string[];
+    buildingUpserts: Building[];
+    removedBuildingIds: string[];
+  }>;
+  tileUpserts: Tile[];
+  projectiles?: ActiveProjectile[];
+  logs: { mode: "append" | "replace"; entries: GameLog[] };
+  winner?: PlayerId | null;
+}
+
+export type StateProjectionFrame =
+  | {
+      kind: "keyframe";
+      metadata: StateFrameMetadata;
+      state: GameState;
+      aiOutputs: Record<string, string>;
+    }
+  | {
+      kind: "delta";
+      metadata: StateFrameMetadata;
+      baseFrameSequence: number;
+      delta: StateProjectionDelta;
+      aiOutputs: Record<string, string>;
+    };
+
+export interface MatchRecord {
+  recordFormat: "match-record";
+  matchId: string;
+  definition: MatchDefinition;
   metadata: {
     startedAt: string;
     savedAt: string;
     endedAt?: string;
-    status: "running" | "stopped" | "finished";
+    status: "running" | "stopped" | "finished" | "failed";
     winner: PlayerId | null;
-    aiIntervalTicks: number;
-    aiContextWindowTurns: number;
-    map: {
-      width: number;
-      height: number;
-    };
-    recordFormat: "compact-v2";
-    systemPrompt: string;
+    recordingProfile: Exclude<MatchRecordingProfile, "off">;
+    includeTranscript: boolean;
+    systemPrompt?: string;
     players: Array<{
       playerId: PlayerId;
       model: string;
@@ -557,9 +754,12 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: GameLog[];
-  aiTurns: SavedAITurnRecord[];
+  commandResults?: GameLog[];
+  aiTurns?: SavedAITurnRecord[];
 }
+
+/** @deprecated Use MatchRecord. */
+export type GameRecord = MatchRecord;
 
 // --- Control Plane Types ---
 
@@ -598,4 +798,41 @@ export interface CreateControlSessionRequest {
 
 export interface ControlToolCallRequest {
   args?: Record<string, unknown>;
+}
+
+export interface ControlBatchAction {
+  tool: string;
+  args?: Record<string, unknown>;
+}
+
+export interface ControlActionBatchRequest {
+  clientRequestId: string;
+  actions: ControlBatchAction[];
+}
+
+export type MatchRegistryKind = "live" | "control" | "benchmark";
+
+export type MatchRegistryStatus =
+  | "warming_up"
+  | "waiting_for_players"
+  | "running"
+  | "stopped"
+  | "finished"
+  | "failed";
+
+export interface MatchRegistrySummary {
+  matchId: string;
+  kind: MatchRegistryKind;
+  status: MatchRegistryStatus;
+  tick: number;
+  winner: PlayerId | null;
+  createdAt: string;
+  label?: string;
+  parentId?: string;
+  observed: boolean;
+}
+
+export interface MatchRegistryListResponse {
+  matches: MatchRegistrySummary[];
+  observedMatchId: string | null;
 }

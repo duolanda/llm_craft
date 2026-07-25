@@ -2,6 +2,7 @@ import { BUILDING_TYPES, GameState, UNIT_TYPES, UnitType } from "@llmcraft/share
 
 interface StatsPanelProps {
   state: GameState | null;
+  tickIntervalMs?: number;
 }
 
 const UNIT_COLORS: Record<string, string> = {
@@ -28,7 +29,7 @@ const DISPLAY_UNIT_TYPES: UnitType[] = [
   UNIT_TYPES.LIGHT_TANK,
 ];
 
-export function StatsPanel({ state }: StatsPanelProps) {
+export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
   if (!state) {
     return (
       <div className="stats-grid">
@@ -76,7 +77,7 @@ export function StatsPanel({ state }: StatsPanelProps) {
   const p2HQHealth = getHQHealth(player2);
 
   const formatTime = (tick: number) => {
-    const seconds = Math.floor((tick * 500) / 1000);
+    const seconds = Math.floor((tick * tickIntervalMs) / 1000);
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;

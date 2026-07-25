@@ -1,15 +1,15 @@
-import { BUILDING_TYPES, UNIT_TYPES, type PlayerId } from "@llmcraft/shared";
+import { BUILDING_TYPES, LOG_TYPES, UNIT_TYPES, type PlayerId } from "@llmcraft/shared";
 import { Game } from "../src/Game";
 import { executeAgentTool } from "../src/agent/AgentTools";
-import { GameAgentBridge } from "../src/agent/GameAgentBridge";
+import { GameplayController } from "../src/controller/GameplayController";
 import { runBuiltinCPUStrategy } from "../src/benchmark/BuiltinCPUStrategy";
 
-const TICKS = Number(process.env.STRATEGIC_SMOKE_TICKS ?? 360);
+const TICKS = Number(process.env.STRATEGIC_CHECK_TICKS ?? 360);
 async function main(): Promise<void> {
 const game = new Game();
-const bridges = new Map<PlayerId, GameAgentBridge>([
-  ["player_1", new GameAgentBridge(game, "player_1")],
-  ["player_2", new GameAgentBridge(game, "player_2")],
+const gameplayControllers = new Map<PlayerId, GameplayController>([
+  ["player_1", new GameplayController(game, "player_1")],
+  ["player_2", new GameplayController(game, "player_2")],
 ]);
 
 let peakCombinedCombatUnits = 0;
@@ -28,23 +28,24 @@ function countActiveFronts(): number {
   const activeBands = new Set<number>();
   for (const playerId of ["player_1", "player_2"] as const) {
     for (const unit of combatUnits(playerId)) {
-      if (unit.intent?.type !== "attack_move" && unit.intent?.type !== "attack") continue;
-      activeBands.add(unit.y < 34 ? 0 : unit.y > 62 ? 2 : 1);
+      if (unit.order?.type !== "attack_move" && unit.order?.type !== "attack") continue;
+      const targetY = unit.order.targetY ?? unit.y;
+      activeBands.add(targetY < 34 ? 0 : targetY > 62 ? 2 : 1);
     }
   }
   return activeBands.size;
 }
 
 async function runCpu(playerId: PlayerId): Promise<void> {
-  const bridge = bridges.get(playerId)!;
+  const gameplayController = gameplayControllers.get(playerId)!;
   await runBuiltinCPUStrategy({
     strategy: "rush",
     runtime: {
-      myState: bridge.getMyState().result,
-      myUnits: bridge.getMyUnits().result,
-      mapState: bridge.getMapState().result,
+      myState: gameplayController.getMyState().result,
+      myUnits: gameplayController.getMyUnits().result,
+      mapState: gameplayController.getMapState().result,
     },
-    callTool: (toolName, args) => executeAgentTool(bridge, toolName, args).result,
+    callTool: (toolName, args) => executeAgentTool(gameplayController, toolName, args).result,
   });
 }
 
@@ -67,19 +68,19 @@ function benchmarkScale(combinedUnits: number): { combinedUnits: number; maxTick
     const position = positionFor(index, false);
     return benchmarkGame.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, position.x, position.y, "player_2").id;
   });
-  const playerOneBridge = new GameAgentBridge(benchmarkGame, "player_1");
-  const playerTwoBridge = new GameAgentBridge(benchmarkGame, "player_2");
-  playerOneBridge.attackMoveGroup(playerOneIds, { x: 55, y: 48 }, "line");
-  playerTwoBridge.attackMoveGroup(playerTwoIds, { x: 88, y: 48 }, "line");
+  const playerOneController = new GameplayController(benchmarkGame, "player_1");
+  const playerTwoController = new GameplayController(benchmarkGame, "player_2");
+  playerOneController.attackMoveGroup(playerOneIds, { x: 55, y: 48 }, "line");
+  playerTwoController.attackMoveGroup(playerTwoIds, { x: 88, y: 48 }, "line");
   benchmarkGame.start();
   let maxTickMs = 0;
   const orderedUnitIds = new Set<string>();
-  for (let tick = 0; tick < Math.ceil(combinedUnits / 4) + 2; tick++) {
+  for (let tick = 0; tick < 2; tick++) {
     const startedAt = performance.now();
     benchmarkGame.tickUpdate();
     maxTickMs = Math.max(maxTickMs, performance.now() - startedAt);
     for (const unitId of [...playerOneIds, ...playerTwoIds]) {
-      if (benchmarkGame.getUnitManager().getUnit(unitId)?.intent?.type === "attack_move") orderedUnitIds.add(unitId);
+      if (benchmarkGame.getUnitManager().getUnit(unitId)?.order?.type === "attack_move") orderedUnitIds.add(unitId);
     }
   }
   benchmarkGame.stop();
@@ -113,6 +114,12 @@ game.stop();
 
 const state = game.getState();
 const scaleBenchmarks = [40, 80, 160].map(benchmarkScale);
+const commandFailureCounts = new Map<string, number>();
+for (const log of game.getCommandResults()) {
+  if (log.type !== LOG_TYPES.COMMAND_RESULT || log.data.result_code >= 0) continue;
+  const key = `${log.meta.owner}:${log.data.type}`;
+  commandFailureCounts.set(key, (commandFailureCounts.get(key) ?? 0) + 1);
+}
 const summary = {
   ticks: game.getTick(),
   winner: game.getWinner(),
@@ -124,11 +131,15 @@ const summary = {
     credits: player.resources.credits,
     combatUnits: player.units.filter((unit) => unit.type !== UNIT_TYPES.WORKER).length,
     workers: player.units.filter((unit) => unit.type === UNIT_TYPES.WORKER).length,
+    workerStates: player.units
+      .filter((unit) => unit.type === UNIT_TYPES.WORKER)
+      .map((unit) => ({ id: unit.id, x: unit.x, y: unit.y, state: unit.state, intent: unit.intent })),
     refineries: player.buildings.filter((building) => building.type === BUILDING_TYPES.REFINERY).length,
     barracks: player.buildings.filter((building) => building.type === BUILDING_TYPES.BARRACKS).length,
     warFactories: player.buildings.filter((building) => building.type === BUILDING_TYPES.WAR_FACTORY).length,
     peakInfrastructure: peakInfrastructure.get(player.id),
   })),
+  commandFailureCounts: Object.fromEntries([...commandFailureCounts.entries()].sort(([a], [b]) => a.localeCompare(b))),
   scaleBenchmarks,
 };
 

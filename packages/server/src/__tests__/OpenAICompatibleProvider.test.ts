@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentRunInput, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
+import { ContextWindowLimiter } from "../agent/ContextWindowLimiter";
 
 function createInput(): AgentRunInput {
   return {
@@ -19,7 +20,7 @@ function createProviderWithResponses(responses: unknown[]) {
     model: "test-model",
   });
 
-  const create = vi.fn(async () => {
+  const create = vi.fn(async (_request?: unknown) => {
     const next = responses.shift();
     if (!next) {
       throw new Error("No more mocked responses");
@@ -27,7 +28,7 @@ function createProviderWithResponses(responses: unknown[]) {
     return next;
   });
 
-  (provider as any).client = {
+  (provider as any).transport.client = {
     chat: {
       completions: {
         create,
@@ -39,7 +40,89 @@ function createProviderWithResponses(responses: unknown[]) {
 }
 
 describe("OpenAICompatibleProvider", () => {
-  it("prepares the first real turn and defers tool execution until runAgent continues it", async () => {
+  it("records explicit retries and the exact message snapshot for each model attempt", async () => {
+    const provider = new OpenAICompatibleProvider({
+      providerType: "openai-compatible",
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      model: "test-model",
+    });
+    const transient = Object.assign(new Error("temporarily unavailable"), { status: 503 });
+    const create = vi.fn()
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce({
+        id: "response-2",
+        model: "test-model",
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "done", tool_calls: [] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      });
+    (provider as any).transport.client = { chat: { completions: { create } } };
+
+    const result = await provider.runAgent(createInput(), {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: {} }),
+      getRuntimeState: () => ({ mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null }),
+      runContext: { turnId: "turn-1", controllerId: "llm:player_1" },
+    });
+
+    expect(result.metrics.modelRequests).toBe(2);
+    expect(result.metrics.modelRequestRecords).toEqual([
+      expect.objectContaining({ requestIndex: 1, status: "error", attempt: 1, error: "temporarily unavailable" }),
+      expect.objectContaining({ requestIndex: 2, status: "success", attempt: 2, retryOfRequestIndex: 1 }),
+    ]);
+    expect(result.metrics.modelRequestRecords?.[0].messages).toEqual(result.metrics.modelRequestRecords?.[1].messages);
+  });
+
+  it("keeps provider history within its explicit context-window limit", async () => {
+    const provider = new OpenAICompatibleProvider(
+      {
+        providerType: "openai-compatible",
+        apiKey: "test-key",
+        baseURL: "https://example.test/v1",
+        model: "test-model",
+      },
+      undefined,
+      {
+        contextWindowLimiter: new ContextWindowLimiter({
+          maxMessages: 5,
+          maxBytes: 4096,
+          maxMessageBytes: 512,
+        }),
+      },
+    );
+    const create = vi.fn(async () => ({
+      choices: [{
+        finish_reason: "stop",
+        message: { content: "done", tool_calls: [] },
+      }],
+    }));
+    (provider as any).transport.client = { chat: { completions: { create } } };
+    const options = {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: {} }),
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    };
+
+    let finalResult: Awaited<ReturnType<OpenAICompatibleProvider["runAgent"]>> | undefined;
+    for (let tick = 0; tick < 4; tick += 1) {
+      finalResult = await provider.runAgent({ ...createInput(), tick }, options);
+    }
+
+    expect(finalResult?.metrics.contextWindow).toMatchObject({
+      maxMessages: 5,
+      messagesAfter: 5,
+    });
+    expect(finalResult?.metrics.contextWindow?.droppedMessages).toBeGreaterThan(0);
+    expect((provider as any).history).toHaveLength(5);
+  });
+
+  it("warms up the first real turn and defers tool execution until runAgent continues it", async () => {
     const { provider, create } = createProviderWithResponses([
       {
         choices: [
@@ -109,6 +192,11 @@ describe("OpenAICompatibleProvider", () => {
     expect(warmupExecuteTool).not.toHaveBeenCalled();
     expect(runExecuteTool).toHaveBeenCalledTimes(1);
     expect(runResult.assistantMessages).toEqual(["thinking", "done"]);
+    expect(runResult.metrics.modelRequests).toBe(2);
+    expect(runResult.metrics.modelRequestRecords?.map((record) => record.phase)).toEqual([
+      "warmup",
+      "turn",
+    ]);
     expect(warmupAssistant).toHaveBeenCalledWith("thinking");
     expect(runAssistant).toHaveBeenCalledWith("done");
     expect(runAssistant).not.toHaveBeenCalledWith("thinking");
@@ -153,7 +241,7 @@ describe("OpenAICompatibleProvider", () => {
       ],
     }));
 
-    (provider as any).client = {
+    (provider as any).transport.client = {
       chat: {
         completions: {
           create,
@@ -272,6 +360,68 @@ describe("OpenAICompatibleProvider", () => {
     expect(result.metrics.stallDetected).toBe(true);
     expect(result.toolCalls).toHaveLength(11);
     expect(create).toHaveBeenCalledTimes(11);
+  });
+
+  it("closes every tool call in a stalled multi-call assistant message before persisting history", async () => {
+    const responses = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        choices: [{
+          finish_reason: "tool_calls",
+          message: {
+            content: "",
+            tool_calls: [{
+              id: `call_${index + 1}`,
+              function: { name: "get_map_state", arguments: "{}" },
+            }],
+          },
+        }],
+      })),
+      {
+        choices: [{
+          finish_reason: "tool_calls",
+          message: {
+            content: "",
+            tool_calls: [
+              { id: "call_11", function: { name: "get_map_state", arguments: "{}" } },
+              { id: "call_12", function: { name: "get_my_state", arguments: "{}" } },
+            ],
+          },
+        }],
+      },
+      {
+        choices: [{
+          finish_reason: "stop",
+          message: { content: "recovered", tool_calls: [] },
+        }],
+      },
+    ];
+    const { provider, create } = createProviderWithResponses(responses);
+    const options = {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: { ok: true } }),
+      getRuntimeState: () => ({
+        mapState: null,
+        myState: null,
+        myUnits: null,
+        activePlans: null,
+        recentEvents: null,
+      }),
+    };
+
+    const stalled = await provider.runAgent(createInput(), options);
+    expect(stalled.stopReason).toBe("stall_detected");
+    expect(stalled.toolCalls).toHaveLength(11);
+
+    const recovered = await provider.runAgent({ ...createInput(), tick: 5 }, options);
+    expect(recovered.stopReason).toBe("stop");
+    const recoveryRequest = create.mock.calls[11]?.[0] as {
+      messages: Array<{ role: string; tool_call_id?: string; content?: string }>;
+    };
+    const trailingToolMessages = recoveryRequest.messages.filter(
+      (message) => message.role === "tool" && ["call_11", "call_12"].includes(message.tool_call_id ?? ""),
+    );
+    expect(trailingToolMessages.map((message) => message.tool_call_id)).toEqual(["call_11", "call_12"]);
+    expect(trailingToolMessages[1]?.content).toContain("stall_detected");
   });
 
   it("injects an urgent HQ warning into the same long-running turn when danger appears", async () => {
@@ -687,7 +837,7 @@ describe("OpenAICompatibleProvider", () => {
       });
     });
 
-    (provider as any).client = {
+    (provider as any).transport.client = {
       chat: {
         completions: {
           create,
@@ -715,6 +865,9 @@ describe("OpenAICompatibleProvider", () => {
     expect(receivedSignal).toBe(controller.signal);
     expect(receivedSignal?.aborted).toBe(true);
     expect(result.stopReason).toBe("aborted");
-    expect(result.metrics.modelRequests).toBe(0);
+    expect(result.metrics.modelRequests).toBe(1);
+    expect(result.metrics.modelRequestRecords?.[0]).toEqual(
+      expect.objectContaining({ status: "error", finishReason: "request_error" }),
+    );
   });
 });

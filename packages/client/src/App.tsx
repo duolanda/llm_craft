@@ -1,4 +1,4 @@
-import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CPUStrategyType,
   CreateLLMPresetRequest,
@@ -6,11 +6,14 @@ import {
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
-  MatchPrepareState,
+  MatchWarmupState,
+  MatchRecordingProfile,
+  MatchRegistrySummary,
   PlayerId,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
+import { projectRecordToMatchRecord, SimulationFrameBuffer } from "@llmcraft/record";
 import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
@@ -20,8 +23,11 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
+import { MatchPanel } from "./components/MatchPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
+import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
+import { readLocalRecordText } from "./lib/readRecordFile";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
@@ -33,13 +39,17 @@ interface ReplayRecordListEntry {
   fullPath: string;
   size: number;
   modifiedAt: string;
+  encoding?: "identity" | "gzip";
 }
 
 const SERVER_HOST = window.location.hostname || "localhost";
-const WS_URL = `ws://${SERVER_HOST}:3001`;
-const API_BASE_URL = `http://${SERVER_HOST}:3001`;
-const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection.v1";
+const WS_URL = `ws://${SERVER_HOST}:3101`;
+const API_BASE_URL = `http://${SERVER_HOST}:3101`;
+const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection";
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
+const REQUESTED_REPLAY_FILE = new URLSearchParams(window.location.search).get("replay");
+const requestedReplayTick = new URLSearchParams(window.location.search).get("tick");
+const REQUESTED_REPLAY_TICK = requestedReplayTick === null ? null : Number(requestedReplayTick);
 const MASS_BATTLE_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "mass-battle";
 const ANIMATION_LAB_SHOWCASE = import.meta.env.DEV && SHOWCASE_MODE === "animation-lab";
 const ANIMATION_LAB_MODE: AnimationLabMode = new URLSearchParams(window.location.search).get("lab") === "preview"
@@ -67,7 +77,7 @@ function DevQuickNav() {
     { label: "Animation Lab", href: "/?showcase=animation-lab" },
     { label: "FX Preview", href: "/?showcase=animation-lab&lab=preview" },
     { label: "Diagnostics", href: "/diagnostics.html" },
-    { label: "Transcript", href: "/transcript.html" },
+    { label: "Match Explorer", href: "/transcript.html" },
   ];
 
   return (
@@ -170,6 +180,7 @@ function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
 function App() {
   const {
     state,
+    frameBuffer,
     aiOutputs,
     aiTerminalEvents,
     terminalHistoryHasMore,
@@ -177,13 +188,14 @@ function App() {
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    matchStatus,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
-    prepareStatuses,
-    prepareMessage,
-    setPrepareStatuses,
-    setPrepareMessage,
+    warmupStatuses,
+    warmupMessage,
+    setWarmupStatuses,
+    setWarmupMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,
@@ -200,6 +212,8 @@ function App() {
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
+  const replayFrameBuffer = useMemo(() => new SimulationFrameBuffer(4), []);
+  const replayQueryLoaded = useRef(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
   const [presetsLoaded, setPresetsLoaded] = useState(false);
@@ -207,10 +221,17 @@ function App() {
   const [presetError, setPresetError] = useState<string | null>(null);
   const [player1PresetId, setPlayer1PresetId] = useState(() => readStoredLivePresetSelection().player1PresetId);
   const [player2PresetId, setPlayer2PresetId] = useState(() => readStoredLivePresetSelection().player2PresetId);
-  const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
+  const [recordingProfile, setRecordingProfile] = useState<MatchRecordingProfile>("evaluation");
+  const [includeTranscript, setIncludeTranscript] = useState(false);
   const [startPending, setStartPending] = useState(false);
   const [startBaselineTick, setStartBaselineTick] = useState(-1);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [matchesOpen, setMatchesOpen] = useState(false);
+  const [registeredMatches, setRegisteredMatches] = useState<MatchRegistrySummary[]>([]);
+  const [observedMatchId, setObservedMatchId] = useState<string | null>(null);
+  const [matchesLoading, setMatchesLoading] = useState(false);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+  const [switchingMatchId, setSwitchingMatchId] = useState<string | null>(null);
   const [benchmarkOpen, setBenchmarkOpen] = useState(false);
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkRunSummary, setBenchmarkRunSummary] = useState<{
@@ -221,6 +242,25 @@ function App() {
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const [showcaseTick, setShowcaseTick] = useState(0);
   const lastAutoSavedWinnerRef = useRef<string | null>(null);
+
+  const refreshRegisteredMatches = useCallback(async (showLoading = true) => {
+    if (showLoading) {
+      setMatchesLoading(true);
+      setMatchesError(null);
+    }
+    try {
+      const payload = await listRegisteredMatches(API_BASE_URL);
+      setRegisteredMatches(payload.matches);
+      setObservedMatchId(payload.observedMatchId);
+      setMatchesError(null);
+    } catch (error) {
+      setMatchesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (showLoading) {
+        setMatchesLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!LOCAL_SHOWCASE) {
@@ -234,6 +274,15 @@ function App() {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    if (LOCAL_SHOWCASE || mode !== "live" || !matchesOpen) return;
+    void refreshRegisteredMatches();
+    const interval = window.setInterval(() => {
+      void refreshRegisteredMatches(false);
+    }, 1_000);
+    return () => window.clearInterval(interval);
+  }, [matchesOpen, mode, refreshRegisteredMatches]);
 
   useEffect(() => {
     if (mode !== "live" || benchmarkRunning || benchmarkResult) {
@@ -251,6 +300,17 @@ function App() {
       lastAutoSavedWinnerRef.current = null;
     }
   }, [benchmarkResult, benchmarkRunning, mode, send, state?.winner]);
+
+  useEffect(() => {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult || matchStatus === null) {
+      return;
+    }
+    setIsPlaying(matchStatus === "running");
+    if (matchStatus === "running") {
+      setStartPending(false);
+      setHasLiveMatchStarted(true);
+    }
+  }, [benchmarkResult, benchmarkRunning, matchStatus, mode]);
 
   useEffect(() => {
     if (mode !== "live" || benchmarkRunning || benchmarkResult || !state?.winner || winnerOverlayDismissed) {
@@ -323,12 +383,12 @@ function App() {
         }
         return current + 1;
       });
-    }, Math.max(50, 500 / replaySpeed));
+    }, Math.max(50, (activeReplayRecord?.definition.tickIntervalMs ?? 500) / replaySpeed));
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [mode, replayFrames.length, replayPlaying, replaySpeed]);
+  }, [activeReplayRecord?.definition.tickIntervalMs, mode, replayFrames.length, replayPlaying, replaySpeed]);
 
   const fetchRecordEntries = async () => {
     setRecordsLoading(true);
@@ -339,9 +399,7 @@ function App() {
       }
       const payload = await response.json() as { records: ReplayRecordListEntry[] };
       setRecordEntries(payload.records);
-      if (!selectedRecordFile && payload.records.length > 0) {
-        setSelectedRecordFile(payload.records[0].fileName);
-      }
+      setSelectedRecordFile((current) => current || payload.records[0]?.fileName || "");
     } catch (error) {
       setReplayError(`获取服务端记录列表失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -392,9 +450,9 @@ function App() {
   }, [player1PresetId, player2PresetId]);
 
   useEffect(() => {
-    setPrepareStatuses({});
-    setPrepareMessage(null);
-  }, [player1PresetId, player2PresetId, recordLLMTranscript, setPrepareMessage, setPrepareStatuses]);
+    setWarmupStatuses({});
+    setWarmupMessage(null);
+  }, [player1PresetId, player2PresetId, recordingProfile, includeTranscript, setWarmupMessage, setWarmupStatuses]);
 
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
@@ -407,6 +465,24 @@ function App() {
     setMode("replay");
   };
 
+  useEffect(() => {
+    if (!REQUESTED_REPLAY_FILE || replayQueryLoaded.current || LOCAL_SHOWCASE) return;
+    replayQueryLoaded.current = true;
+    setSelectedRecordFile(REQUESTED_REPLAY_FILE);
+    void fetch(`${API_BASE_URL}/api/replay/records/${encodeURIComponent(REQUESTED_REPLAY_FILE)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const record = projectRecordToMatchRecord(await response.json() as unknown);
+        const frames = buildReplayFrames(record);
+        loadReplayRecord(record, REQUESTED_REPLAY_FILE);
+        if (REQUESTED_REPLAY_TICK !== null && Number.isFinite(REQUESTED_REPLAY_TICK)) {
+          const index = frames.findIndex((frame) => frame.tick >= REQUESTED_REPLAY_TICK);
+          setReplayFrameIndex(index >= 0 ? index : Math.max(0, frames.length - 1));
+        }
+      })
+      .catch((error) => setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`));
+  }, []);
+
   const handleLoadSelectedRecord = async () => {
     if (!selectedRecordFile) {
       return;
@@ -417,7 +493,7 @@ function App() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const record = await response.json() as GameRecord;
+      const record = projectRecordToMatchRecord(await response.json() as unknown);
       loadReplayRecord(record, selectedRecordFile);
     } catch (error) {
       setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -431,8 +507,8 @@ function App() {
     }
 
     try {
-      const text = await file.text();
-      const record = JSON.parse(text) as GameRecord;
+      const text = await readLocalRecordText(file);
+      const record = projectRecordToMatchRecord(JSON.parse(text) as unknown);
       loadReplayRecord(record, file.name);
       event.target.value = "";
     } catch (error) {
@@ -457,7 +533,7 @@ function App() {
       type: "reset",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     });
   };
 
@@ -467,7 +543,7 @@ function App() {
     }
 
     clearServerMessage();
-    setPrepareMessage(null);
+    setWarmupMessage(null);
     setStartPending(true);
     setStartBaselineTick(state?.tick ?? -1);
     setIsPlaying(false);
@@ -475,26 +551,26 @@ function App() {
       type: "start",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     });
   };
 
-  const handlePrepare = (playerId: PlayerId) => {
+  const handleWarmup = (playerId: PlayerId) => {
     if (!player1PresetId || !player2PresetId) {
       return;
     }
 
     clearServerMessage();
-    setPrepareStatuses((current) => ({
+    setWarmupStatuses((current) => ({
       ...current,
-      [playerId]: "preparing",
+      [playerId]: "warming_up",
     }));
-    setPrepareMessage(null);
+    setWarmupMessage(null);
     send({
-      type: "prepare",
+      type: "warmup",
       player1PresetId,
       player2PresetId,
-      debug: buildMatchDebugOptions(recordLLMTranscript),
+      debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
       warmup: {
         player_1: playerId === "player_1",
         player_2: playerId === "player_2",
@@ -512,12 +588,28 @@ function App() {
     send({ type: "save_record" });
   };
 
+  const handleObserveMatch = async (match: MatchRegistrySummary) => {
+    setSwitchingMatchId(match.matchId);
+    setMatchesError(null);
+    try {
+      await observeRegisteredMatch(API_BASE_URL, match.matchId);
+      setObservedMatchId(match.matchId);
+      setStartPending(false);
+      setIsPlaying(match.status === "running");
+      setWinnerOverlayDismissed(match.status !== "finished");
+      await refreshRegisteredMatches();
+    } catch (error) {
+      setMatchesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingMatchId(null);
+    }
+  };
+
   const handleStartBenchmark = (input: {
     presetId: string;
     cpuStrategy: CPUStrategyType;
     rounds: number;
     recordReplay: boolean;
-    decisionIntervalTicks: number;
     concurrency: number;
     debug?: MatchDebugOptions;
   }) => {
@@ -538,7 +630,6 @@ function App() {
       cpuStrategy: input.cpuStrategy,
       rounds: input.rounds,
       recordReplay: input.recordReplay,
-      decisionIntervalTicks: input.decisionIntervalTicks,
       concurrency: input.concurrency,
       debug: input.debug,
     });
@@ -564,6 +655,30 @@ function App() {
   };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
+  const replayTickIntervalMs = activeReplayRecord?.definition.tickIntervalMs ?? 500;
+  const displayTickIntervalMs = mode === "replay"
+    ? replayTickIntervalMs
+    : frameBuffer.getLatestFrame()?.metadata.tickIntervalMs ?? 500;
+  useEffect(() => {
+    replayFrameBuffer.clear();
+    const start = Math.max(0, replayFrameIndex - 1);
+    for (let index = start; index <= replayFrameIndex; index++) {
+      const frame = replayFrames[index];
+      if (!frame) continue;
+      replayFrameBuffer.ingest({
+        kind: "keyframe",
+        metadata: {
+          frameSequence: index + 1,
+          simulationTick: frame.tick,
+          simulationTimeMs: frame.tick * replayTickIntervalMs,
+          tickIntervalMs: replayTickIntervalMs,
+          serverTimeMs: 0,
+        },
+        state: frame.state,
+        aiOutputs: frame.aiOutputs,
+      });
+    }
+  }, [replayFrameBuffer, replayFrameIndex, replayFrames, replayTickIntervalMs]);
   const sourceDisplayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
   const displayState = useMemo(
     () => {
@@ -593,8 +708,13 @@ function App() {
     && hasLiveMatchStarted
     && Boolean(player1PresetId)
     && Boolean(player2PresetId);
-  const canSaveLiveMatch = connected && !benchmarkRunning && Boolean(state || isPlaying);
-  const isPreparing = prepareStatuses.player_1 === "preparing" || prepareStatuses.player_2 === "preparing";
+  const canSaveLiveMatch = connected
+    && !isPlaying
+    && !startPending
+    && !benchmarkRunning
+    && recordingProfile !== "off"
+    && hasLiveMatchStarted;
+  const isWarmingUp = warmupStatuses.player_1 === "warming_up" || warmupStatuses.player_2 === "warming_up";
   const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
   const benchmarkTotalRounds = benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0;
   const benchmarkCurrentRound = benchmarkTotalRounds > 0
@@ -627,7 +747,6 @@ function App() {
         <header className="app-header">
           <div className="brand">
             <h1>LLMCraft</h1>
-            <span className="brand-badge">{mode === "live" ? "LIVE OPS" : "REPLAY OPS"}</span>
           </div>
           <div className="controls">
             <div className="mode-switch">
@@ -668,11 +787,11 @@ function App() {
                       </select>
                       <button
                         type="button"
-                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_1)}`}
-                        onClick={() => handlePrepare("player_1")}
-                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_1 === "preparing"}
+                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_1)}`}
+                        onClick={() => handleWarmup("player_1")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || warmupStatuses.player_1 === "warming_up"}
                       >
-                        {getPrepareButtonLabel(prepareStatuses.player_1)}
+                        {getWarmupButtonLabel(warmupStatuses.player_1)}
                       </button>
                     </div>
                   </div>
@@ -694,84 +813,113 @@ function App() {
                       </select>
                       <button
                         type="button"
-                        className={`match-prepare-btn ${getPrepareStatusClass(prepareStatuses.player_2)}`}
-                        onClick={() => handlePrepare("player_2")}
-                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || prepareStatuses.player_2 === "preparing"}
+                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_2)}`}
+                        onClick={() => handleWarmup("player_2")}
+                        disabled={!connected || !canStartLiveMatch || isPlaying || startPending || benchmarkRunning || warmupStatuses.player_2 === "warming_up"}
                       >
-                        {getPrepareButtonLabel(prepareStatuses.player_2)}
+                        {getWarmupButtonLabel(warmupStatuses.player_2)}
                       </button>
                     </div>
                   </div>
-                  <label className="settings-field compact live-debug-toggle">
-                    <span>LLM Debug</span>
-                    <input
-                      type="checkbox"
-                      checked={recordLLMTranscript}
-                      onChange={(event) => setRecordLLMTranscript(event.target.checked)}
-                    />
-                  </label>
                 </div>
-                <button
-                  type="button"
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => setSettingsOpen(true)}
-                  disabled={benchmarkRunning}
-                >
-                  设置
-                </button>
-                <button
-                  type="button"
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => {
-                    clearBenchmarkResult();
-                    setBenchmarkOpen(true);
-                  }}
-                  disabled={!connected || presets.length === 0 || benchmarkRunning}
-                >
-                  Benchmark
-                </button>
-                <button
-                  onClick={isPlaying ? handleStop : handleStart}
-                  disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isPreparing || !canStartLiveMatch}
-                  className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
-                >
-                  {isPlaying ? "暂停模拟" : startPending ? "启动中" : "启动模拟"}
-                </button>
-                {benchmarkRunning && (
+                <div className="match-action-bar">
+                  <details className="match-options">
+                    <summary className="hud-btn hud-btn-ghost">录制</summary>
+                    <div className="match-options-menu">
+                      <label className="settings-field compact">
+                        <span>记录档位</span>
+                        <select
+                          className="settings-select"
+                          value={recordingProfile}
+                          onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
+                        >
+                          <option value="off">关闭</option>
+                          <option value="replay">回放</option>
+                          <option value="evaluation">评估</option>
+                        </select>
+                      </label>
+                      <label className="benchmark-inline-toggle-row">
+                        <input
+                          type="checkbox"
+                          checked={includeTranscript}
+                          onChange={(event) => setIncludeTranscript(event.target.checked)}
+                          disabled={recordingProfile !== "evaluation"}
+                        />
+                        完整 transcript
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleSaveRecord}
+                        disabled={!canSaveLiveMatch}
+                        className="hud-btn"
+                      >
+                        保存记录
+                      </button>
+                    </div>
+                  </details>
                   <button
                     type="button"
-                    className="hud-btn hud-btn-stop"
-                    onClick={handleStop}
-                    disabled={!canStopLiveMatch}
-                  >
-                    停止 Benchmark
-                  </button>
-                )}
-                {canRestartLiveMatch && (
-                  <button
-                    onClick={handleRestart}
-                    disabled={!canRestartLiveMatch}
                     className="hud-btn hud-btn-ghost"
+                    onClick={() => setMatchesOpen(true)}
+                    disabled={!connected}
                   >
-                    重置
+                    对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
                   </button>
-                )}
-                <button
-                  onClick={handleSaveRecord}
-                  disabled={!canSaveLiveMatch}
-                  className="hud-btn"
-                >
-                  保存记录
-                </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
+                    onClick={() => setSettingsOpen(true)}
+                    disabled={benchmarkRunning}
+                  >
+                    设置
+                  </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
+                    onClick={() => {
+                      clearBenchmarkResult();
+                      setBenchmarkOpen(true);
+                    }}
+                    disabled={!connected || presets.length === 0 || benchmarkRunning}
+                  >
+                    Benchmark
+                  </button>
+                  <button
+                    onClick={isPlaying ? handleStop : handleStart}
+                    disabled={benchmarkRunning ? true : isPlaying ? !canStopLiveMatch : startPending || isWarmingUp || !canStartLiveMatch}
+                    className={`hud-btn ${isPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+                  >
+                    {isPlaying ? "暂停对局" : startPending ? "启动中" : hasLiveMatchStarted ? "继续对局" : "启动对局"}
+                  </button>
+                  {benchmarkRunning && (
+                    <button
+                      type="button"
+                      className="hud-btn hud-btn-stop"
+                      onClick={handleStop}
+                      disabled={!canStopLiveMatch}
+                    >
+                      停止 Benchmark
+                    </button>
+                  )}
+                  {canRestartLiveMatch && (
+                    <button
+                      onClick={handleRestart}
+                      disabled={!canRestartLiveMatch}
+                      className="hud-btn hud-btn-ghost"
+                    >
+                      重置
+                    </button>
+                  )}
+                </div>
               </>
             )}
           </div>
         </header>
 
-        {(serverMessage || prepareMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
+        {(serverMessage || warmupMessage || benchmarkStatusVisible || replayError || presetError || lastSavedRecordPath) && (
           <div className="status-strip">
             {serverMessage && <span>{serverMessage}</span>}
-            {prepareMessage && <span>{prepareMessage}</span>}
+            {warmupMessage && <span>{warmupMessage}</span>}
             {benchmarkStatusVisible && (
               <span>
                 Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 已完成 {benchmarkProgress?.completedRounds ?? 0} / {benchmarkTotalRounds} 局
@@ -823,7 +971,7 @@ function App() {
               </div>
 
               <label className="file-pick">
-                <input type="file" accept=".json,application/json" onChange={handleLocalFileChange} />
+                <input type="file" accept=".json,.gz,application/json,application/gzip" onChange={handleLocalFileChange} />
                 导入本地 JSON
               </label>
             </div>
@@ -837,7 +985,7 @@ function App() {
                   Tick: {replayFrame?.tick ?? 0} / {activeReplayRecord?.finalState.tick ?? 0}
                 </span>
                 <span className="replay-meta-chip">
-                  时间: {formatTickTime(replayFrame?.tick ?? 0)}
+                  时间: {formatTickTime(replayFrame?.tick ?? 0, replayTickIntervalMs)}
                 </span>
                 {activeReplayRecord?.metadata.winner && (
                   <span className="replay-meta-chip">
@@ -910,17 +1058,17 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战场数据</span>
               </div>
-              <StatsPanel state={displayState} />
+              <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
             </div>
 
-            <div className="hud-panel" style={{ marginTop: 12 }}>
+            <details className="hud-panel legend-collapsible" style={{ marginTop: 12 }}>
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
-              <div className="panel-header">
+              <summary className="panel-header legend-summary">
                 <span className="panel-header-accent accent-red">战术图例</span>
-              </div>
+              </summary>
               <LegendPanel />
-            </div>
+            </details>
           </div>
 
           <div className="tactical-col">
@@ -935,7 +1083,11 @@ function App() {
                 <span className="data-line dl-br" />
               </div>
               <div className="viewport">
-                <Battlefield3D state={displayState} />
+                <Battlefield3D
+                  state={displayState}
+                  frameBuffer={mode === "replay" ? replayFrameBuffer : undefined}
+                  simulationTimeMs={mode === "replay" ? (replayFrame?.tick ?? 0) * replayTickIntervalMs : undefined}
+                />
               </div>
             </div>
 
@@ -966,6 +1118,22 @@ function App() {
             </div>
           </div>
         </div>
+
+        <SettingsOverlay
+          open={mode === "live" && matchesOpen}
+          title="对局观察"
+          onClose={() => setMatchesOpen(false)}
+        >
+          <MatchPanel
+            matches={registeredMatches}
+            observedMatchId={observedMatchId}
+            loading={matchesLoading}
+            error={matchesError}
+            switchingMatchId={switchingMatchId}
+            onRefresh={() => void refreshRegisteredMatches()}
+            onObserve={(match) => void handleObserveMatch(match)}
+          />
+        </SettingsOverlay>
 
         <SettingsOverlay
           open={mode === "live" && settingsOpen}
@@ -1038,21 +1206,27 @@ function App() {
 
 export default App;
 
-function buildMatchDebugOptions(recordLLMTranscript: boolean): MatchDebugOptions | undefined {
-  return recordLLMTranscript ? { recordLLMTranscript: true } : undefined;
+function buildMatchDebugOptions(
+  recordingProfile: MatchRecordingProfile,
+  includeTranscript: boolean,
+): MatchDebugOptions {
+  return {
+    recordingProfile,
+    includeTranscript: recordingProfile === "evaluation" && includeTranscript,
+  };
 }
 
-function getPrepareButtonLabel(status: MatchPrepareState | undefined): string {
-  if (status === "preparing") {
-    return "准备中";
+function getWarmupButtonLabel(status: MatchWarmupState | undefined): string {
+  if (status === "warming_up") {
+    return "预热中";
   }
   if (status === "ready") {
-    return "已准备";
+    return "已预热";
   }
   if (status === "error") {
     return "重试";
   }
-  return "准备";
+  return "预热";
 }
 
 function formatRoundList(rounds: number[]): string {
@@ -1062,6 +1236,6 @@ function formatRoundList(rounds: number[]): string {
   return `第 ${rounds.join("、")} 局`;
 }
 
-function getPrepareStatusClass(status: MatchPrepareState | undefined): string {
-  return status ? `prepare-${status}` : "prepare-idle";
+function getWarmupStatusClass(status: MatchWarmupState | undefined): string {
+  return status ? `warmup-${status}` : "warmup-idle";
 }

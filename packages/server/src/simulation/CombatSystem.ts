@@ -192,10 +192,11 @@ export class CombatSystem {
           }
           if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
             if (attackMoveOrder.targetId === target.target.id && unit.pathTarget) continue;
+            const targetCell = this.toGridPosition(world, target.target);
             const moveResult = world.units.setMoveTarget(
               unit,
-              target.target.x,
-              target.target.y,
+              targetCell.x,
+              targetCell.y,
               world.tiles,
               world.buildings.getOccupiedPositions(),
               true,
@@ -278,6 +279,15 @@ export class CombatSystem {
 
   private chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
     return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+  }
+
+  private toGridPosition(world: WorldState, position: { x: number; y: number }): { x: number; y: number } {
+    const height = world.tiles.length;
+    const width = world.tiles[0]?.length ?? 0;
+    return {
+      x: Math.max(0, Math.min(width - 1, Math.round(position.x))),
+      y: Math.max(0, Math.min(height - 1, Math.round(position.y))),
+    };
   }
 
   private isNearPosition(

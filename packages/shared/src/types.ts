@@ -172,6 +172,8 @@ export interface Unit extends GameObject {
   attackRange: number;
   carryingCredits: number;
   carryCapacity: number;
+  /** Authoritative body heading in simulation XY radians; zero points toward +X. */
+  heading?: number;
   // 意图显示
   intent?: UnitIntent;
   // 寻路路径缓存
@@ -201,6 +203,7 @@ export interface Building extends GameObject {
     workerId: string;
     remainingTicks: number;
     totalTicks: number;
+    resumeWorkerOrder?: UnitIntent;
   };
 }
 
@@ -260,6 +263,7 @@ export interface Command {
   position?: Position;
   unitType?: UnitType;
   buildingType?: BuildingType;
+  resumeWorkerOrder?: UnitIntent;
   playerId: PlayerId;
   provenance?: CommandProvenance;
 }
@@ -509,6 +513,7 @@ export type PlanStepCondition =
   | { condition: "enemy_in_range" }
   | { condition: "hq_in_range" }
   | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "worker_adjacent_to_build_footprint"; buildingType: BuildingType; x: number; y: number }
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
@@ -536,12 +541,19 @@ export interface OrchestratePlanInput {
   steps: PlanStep[];
 }
 
+export interface AgentPlanWaitingDiagnostic {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export interface AgentPlanAttemptRecord {
   tick: number;
   stepIndex: number;
   call: PlanCallToolName;
   status: "waiting" | "command_created" | "advanced" | "failed";
   detail?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   commandCount?: number;
 }
 
@@ -558,6 +570,7 @@ export interface AgentPlanRecord {
   status: "active" | "completed" | "interrupted" | "failed";
   currentStep?: PlanStep;
   waitingReason?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   lastAttempt?: AgentPlanAttemptRecord;
 }
 
@@ -658,6 +671,7 @@ export interface TickDeltaRecord {
       attackRange?: number;
       carryingCredits?: number;
       carryCapacity?: number;
+      heading?: number;
       intent?: UnitIntent | null;
       constructingBuildingId?: string | null;
     }>;

@@ -34,7 +34,7 @@ export class ProductionSystem {
         const spawnBuilding = world.buildings.getBuilding(completion.buildingId);
         if (!spawnBuilding?.exists) continue;
 
-        const spawnPosition = this.findEmptySpawnPosition(world, spawnBuilding);
+        const spawnPosition = this.findEmptySpawnPosition(world, spawnBuilding, completion.unitType);
         if (!spawnPosition) {
           events.push({
             type: "unit_spawn_failed",
@@ -60,7 +60,11 @@ export class ProductionSystem {
     return events;
   }
 
-  private findEmptySpawnPosition(world: WorldState, building: Building): { x: number; y: number } | null {
+  private findEmptySpawnPosition(
+    world: WorldState,
+    building: Building,
+    unitType: UnitType,
+  ): { x: number; y: number } | null {
     const footprint = getBuildingFootprint(building.type);
     const halfWidth = Math.floor(footprint.width / 2);
     const halfHeight = Math.floor(footprint.height / 2);
@@ -72,7 +76,15 @@ export class ProductionSystem {
           const y = building.y + dy;
           if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
           if (world.tiles[y][x] === TILE_TYPES.OBSTACLE) continue;
-          if (!world.units.hasUnitAt(x, y) && !world.buildings.hasBuildingAt(x, y)) {
+          if (
+            world.units.canPlaceUnitAt(
+              unitType,
+              x,
+              y,
+              world.tiles,
+              world.buildings.getOccupiedPositions(),
+            )
+          ) {
             return { x, y };
           }
         }

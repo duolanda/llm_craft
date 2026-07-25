@@ -4,6 +4,8 @@ import { MapGenerator } from "../MapGenerator";
 import { ConstructionSystem } from "../simulation/ConstructionSystem";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { PathFinder } from "../PathFinder";
+import { getCollisionManifold } from "../navigation/CollisionShape";
+import { getUnitCollisionShape } from "../navigation/UnitCollision";
 import {
   BUILDING_TYPES,
   MAP_HEIGHT,
@@ -550,7 +552,7 @@ describe("Game", () => {
 
     const tank = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK);
     expect(tank).toBeDefined();
-    expect(game.getBuildingManager().getDistanceToBuilding(warFactory, tank!.x, tank!.y)).toBe(1);
+    expect(game.getBuildingManager().getDistanceToBuilding(warFactory, tank!.x, tank!.y)).toBe(2);
   });
 
   it("keeps worker unable to attack and applies large-map OpenRA-lite combat ranges", () => {
@@ -1103,8 +1105,7 @@ describe("Game", () => {
 
     advanceTicks(1);
 
-    const distance = Math.hypot(tank1.x - tank2.x, tank1.y - tank2.y);
-    expect(distance).toBeGreaterThan(1);
+    expect(getCollisionManifold(getUnitCollisionShape(tank1), getUnitCollisionShape(tank2))).toBeNull();
     expect(Number.isInteger(tank1.x) && Number.isInteger(tank1.y) && Number.isInteger(tank2.x) && Number.isInteger(tank2.y)).toBe(false);
   });
 

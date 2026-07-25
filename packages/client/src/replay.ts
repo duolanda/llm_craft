@@ -87,6 +87,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       attackRange: change.attackRange ?? 0,
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
+      heading: change.heading,
       intent: change.intent ?? undefined,
       constructingBuildingId: change.constructingBuildingId ?? undefined,
     };
@@ -106,6 +107,7 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     attackRange: change.attackRange ?? current.attackRange,
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
+    heading: change.heading ?? current.heading,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
     constructingBuildingId: "constructingBuildingId" in change
       ? change.constructingBuildingId ?? undefined

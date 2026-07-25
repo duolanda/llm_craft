@@ -41,7 +41,11 @@ export class BuiltinCPUController implements DecisionController {
     };
   }
 
-  async run(_input: AgentRunInput, callbacks?: AgentRuntimeCallbacks, signal?: AbortSignal): Promise<AgentRuntimeResult> {
+  async run(
+    _input: AgentRunInput,
+    callbacks?: AgentRuntimeCallbacks,
+    signal?: AbortSignal,
+  ): Promise<AgentRuntimeResult> {
     if (signal?.aborted) return this.emptyResult("aborted");
     this.gameplayController.beginRun({
       controllerId: this.descriptor.controllerId,

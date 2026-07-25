@@ -7,6 +7,8 @@ import {
   isWithinDeliveryRange,
 } from "./EconomyRules";
 
+const MAX_HARVESTERS_PER_RESOURCE = 2;
+
 export class HarvestOrderSystem {
   step(world: WorldState): void {
     for (const worker of world.units.getAllUnits()) {
@@ -79,18 +81,6 @@ export class HarvestOrderSystem {
   ): { x: number; y: number } | null {
     const height = world.tiles.length;
     const width = world.tiles[0]?.length ?? 0;
-    if (
-      requestedPosition
-      && requestedPosition.x >= 0
-      && requestedPosition.x < width
-      && requestedPosition.y >= 0
-      && requestedPosition.y < height
-      && world.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
-    ) {
-      return requestedPosition;
-    }
-    if (requestedPosition) return null;
-
     const assignedHarvesters = new Map<string, number>();
     for (const unit of world.units.getUnitsByPlayer(worker.playerId)) {
       if (unit.id === worker.id || unit.type !== UNIT_TYPES.WORKER || unit.order?.type !== "harvest_loop") continue;
@@ -101,23 +91,61 @@ export class HarvestOrderSystem {
       assignedHarvesters.set(key, (assignedHarvesters.get(key) ?? 0) + 1);
     }
 
-    let best: { x: number; y: number; distance: number; assignedHarvesters: number; score: number } | null = null;
+    const requestedResource = Boolean(
+      requestedPosition
+      && requestedPosition.x >= 0
+      && requestedPosition.x < width
+      && requestedPosition.y >= 0
+      && requestedPosition.y < height
+      && world.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
+    );
+    if (requestedResource && requestedPosition) {
+      const assigned = assignedHarvesters.get(`${requestedPosition.x},${requestedPosition.y}`) ?? 0;
+      if (assigned < MAX_HARVESTERS_PER_RESOURCE) return requestedPosition;
+      // More workers cannot physically occupy one resource cell without
+      // blocking its approach. Fall through to the automatic route scorer.
+    } else if (requestedPosition) {
+      return null;
+    }
+
+    const deliveryBuildings = world.buildings
+      .getBuildingsByPlayer(worker.playerId)
+      .filter(isResourceDeliveryBuilding);
+    let best: {
+      x: number;
+      y: number;
+      workerDistance: number;
+      deliveryDistance: number;
+      assignedHarvesters: number;
+      score: number;
+    } | null = null;
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         if (world.tiles[y][x] !== TILE_TYPES.RESOURCE || (world.resourceRemaining.get(`${x},${y}`) ?? 0) <= 0) continue;
-        const distance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
+        const workerDistance = Math.max(Math.abs(worker.x - x), Math.abs(worker.y - y));
+        const deliveryDistance = deliveryBuildings.length > 0
+          ? Math.min(...deliveryBuildings.map((building) =>
+            Math.max(0, world.buildings.getDistanceToBuilding(building, x, y) - getDeliveryRange(building))
+          ))
+          : workerDistance;
         const assigned = assignedHarvesters.get(`${x},${y}`) ?? 0;
-        const score = distance + assigned * 4;
+        if (assigned >= MAX_HARVESTERS_PER_RESOURCE) continue;
+        // A harvest loop pays the mine-to-dropoff route repeatedly. Initial worker travel
+        // matters, but should not send idle workers to a remote unassigned deposit while
+        // several closer routes still have room to operate.
+        const score = deliveryDistance * 2 + Math.ceil(workerDistance / 4) + assigned * 4;
         if (
           !best
           || score < best.score
           || (score === best.score
             && (assigned < best.assignedHarvesters
               || (assigned === best.assignedHarvesters
-                && (distance < best.distance
-                  || (distance === best.distance && (y < best.y || (y === best.y && x < best.x)))))))
+                && (deliveryDistance < best.deliveryDistance
+                  || (deliveryDistance === best.deliveryDistance
+                    && (workerDistance < best.workerDistance
+                      || (workerDistance === best.workerDistance && (y < best.y || (y === best.y && x < best.x)))))))))
         ) {
-          best = { x, y, distance, assignedHarvesters: assigned, score };
+          best = { x, y, workerDistance, deliveryDistance, assignedHarvesters: assigned, score };
         }
       }
     }

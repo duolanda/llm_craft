@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { BUILDING_TYPES, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
+import { describe, expect, it, vi } from "vitest";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { WorldState } from "../WorldState";
 import { ConstructionSystem } from "../simulation/ConstructionSystem";
@@ -10,6 +10,9 @@ import { MovementSystem } from "../simulation/MovementSystem";
 import { ProductionSystem } from "../simulation/ProductionSystem";
 import { ProjectileSystem } from "../simulation/ProjectileSystem";
 import { VictorySystem } from "../simulation/VictorySystem";
+import { PathFinder } from "../PathFinder";
+import { getCollisionManifold } from "../navigation/CollisionShape";
+import { getUnitCollisionShape } from "../navigation/UnitCollision";
 
 describe("simulation systems", () => {
   it("advances path movement using only WorldState", () => {
@@ -27,6 +30,155 @@ describe("simulation systems", () => {
     expect(result).toBe(RESULT_CODES.OK);
     new MovementSystem().step(world);
     expect({ x: worker.x, y: worker.y }).not.toEqual(start);
+  });
+
+  it("updates a tank's authoritative hull heading when it turns", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    tank.path = [{ x: 70, y: 54 }];
+    tank.pathTarget = { x: 70, y: 54 };
+
+    new MovementSystem().step(world);
+
+    expect(tank.y).toBeGreaterThan(50);
+    expect(tank.heading).toBeCloseTo(Math.PI / 2);
+  });
+
+  it("yields from a dynamically blocked tank path without retrying A* forever", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const mover = world.createUnit(UNIT_TYPES.LIGHT_TANK, 59, 44, "player_2");
+    world.createUnit(UNIT_TYPES.LIGHT_TANK, 60, 45, "player_2");
+    mover.path = [{ x: 59, y: 45 }, { x: 59, y: 46 }, { x: 59, y: 47 }];
+    mover.pathTarget = { x: 59, y: 47 };
+    const pathFinder = vi.spyOn(PathFinder, "findPath");
+
+    new MovementSystem().step(world);
+
+    expect(pathFinder).not.toHaveBeenCalled();
+    pathFinder.mockRestore();
+    expect(Number.isFinite(mover.x)).toBe(true);
+    expect(Number.isFinite(mover.y)).toBe(true);
+    expect({ x: mover.x, y: mover.y }).not.toEqual({ x: 59, y: 44 });
+    expect(mover.pathTarget).toEqual({ x: 59, y: 47 });
+  });
+
+  it("keeps congested movement work bounded across repeated ticks", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const movers = Array.from({ length: 24 }, (_, index) => {
+      const x = 50 + (index % 6);
+      const y = 40 + Math.floor(index / 6);
+      const unit = world.createUnit(UNIT_TYPES.SOLDIER, x, y, "player_1");
+      unit.path = Array.from({ length: 8 }, (__, step) => ({ x: x + step + 1, y }));
+      unit.pathTarget = { x: x + 8, y };
+      return unit;
+    });
+    const starts = movers.map((unit) => ({ x: unit.x, y: unit.y }));
+
+    for (let tick = 0; tick < 20; tick++) new MovementSystem().step(world);
+
+    expect(movers.some((unit, index) => unit.x !== starts[index].x || unit.y !== starts[index].y)).toBe(true);
+    expect(movers.every((unit) => Number.isFinite(unit.x) && Number.isFinite(unit.y))).toBe(true);
+  });
+
+  it("does not let opposing movers swap through one another in a tick", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const left = world.createUnit(UNIT_TYPES.SOLDIER, 70, 40, "player_1");
+    const right = world.createUnit(UNIT_TYPES.SOLDIER, 71, 40, "player_2");
+    left.path = [{ x: 71, y: 40 }];
+    left.pathTarget = { x: 71, y: 40 };
+    right.path = [{ x: 70, y: 40 }];
+    right.pathTarget = { x: 70, y: 40 };
+
+    new MovementSystem().step(world);
+
+    expect(
+      left.x === 71 && left.y === 40 && right.x === 70 && right.y === 40,
+    ).toBe(false);
+    expect(getCollisionManifold(getUnitCollisionShape(left), getUnitCollisionShape(right))).toBeNull();
+  });
+
+  it("separates tank hulls and infantry bodies using their rendered footprint", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    const soldier = world.createUnit(UNIT_TYPES.SOLDIER, 70, 50, "player_2");
+
+    new MovementSystem().step(world);
+
+    expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(soldier))).toBeNull();
+  });
+
+  it("resolves a mixed tank and infantry pile without leaving intersecting bodies", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const units = [
+      world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1"),
+      world.createUnit(UNIT_TYPES.LIGHT_TANK, 70.6, 50.2, "player_2"),
+      world.createUnit(UNIT_TYPES.SOLDIER, 69.8, 50.1, "player_1"),
+      world.createUnit(UNIT_TYPES.RIFLEMAN, 70.2, 49.8, "player_2"),
+      world.createUnit(UNIT_TYPES.ROCKET_SOLDIER, 70.4, 50.4, "player_1"),
+    ];
+
+    for (let tick = 0; tick < 12; tick++) new MovementSystem().step(world);
+
+    for (let leftIndex = 0; leftIndex < units.length; leftIndex++) {
+      for (let rightIndex = leftIndex + 1; rightIndex < units.length; rightIndex++) {
+        expect(getCollisionManifold(
+          getUnitCollisionShape(units[leftIndex]),
+          getUnitCollisionShape(units[rightIndex]),
+        )).toBeNull();
+      }
+    }
+  });
+
+  it("attack-moves toward a moving target using an integer grid destination", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const attacker = world.createUnit(UNIT_TYPES.SOLDIER, 60, 48, "player_1");
+    const target = world.createUnit(UNIT_TYPES.SOLDIER, 65, 48, "player_2");
+    target.x = 65.4;
+    target.y = 48.6;
+    attacker.order = {
+      type: "attack_move",
+      targetX: 100,
+      targetY: 48,
+      targetPriority: [UNIT_TYPES.SOLDIER],
+    };
+
+    new CombatSystem().step(world);
+
+    expect(attacker.pathTarget).toEqual(expect.objectContaining({
+      x: expect.any(Number),
+      y: expect.any(Number),
+    }));
+    expect(Number.isInteger(attacker.pathTarget?.x)).toBe(true);
+    expect(Number.isInteger(attacker.pathTarget?.y)).toBe(true);
+  });
+
+  it("keeps automatic harvest assignments on efficient delivery routes instead of fleeing assigned near deposits", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const workers = world.units.getUnitsByPlayer("player_1");
+    const chooser = workers[0];
+    const assignedWorkers = [
+      ...workers.slice(1),
+      world.createUnit(UNIT_TYPES.WORKER, chooser.x, chooser.y, "player_1"),
+    ];
+    for (const [index, worker] of assignedWorkers.entries()) {
+      const resource = DEFAULT_MAP_LAYOUT.resources[index];
+      worker.order = { type: "harvest_loop", targetX: resource.x, targetY: resource.y };
+    }
+
+    const target = new HarvestOrderSystem().resolveResourceTarget(world, chooser);
+
+    expect(target).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+    expect(DEFAULT_MAP_LAYOUT.resources.slice(0, 4)).toContainEqual(target);
+  });
+
+  it("uses a completed forward refinery when automatically selecting a harvest route", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const worker = world.units.getUnitsByPlayer("player_1")[0];
+    world.createBuilding(BUILDING_TYPES.REFINERY, 43, 18, "player_1");
+
+    const target = new HarvestOrderSystem().resolveResourceTarget(world, worker);
+
+    expect(target).toEqual(DEFAULT_MAP_LAYOUT.resources[8]);
   });
 
   it("completes construction and returns a serializable domain outcome", () => {
@@ -59,6 +211,26 @@ describe("simulation systems", () => {
     expect(JSON.parse(JSON.stringify(events))).toEqual(events);
     expect(building.constructionProgress).toBeUndefined();
     expect(worker.constructingBuildingId).toBeUndefined();
+  });
+
+  it("restores a worker's harvest loop after construction", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const worker = world.units.getUnitsByPlayer("player_1")[0];
+    const resumeWorkerOrder = { type: "harvest_loop" as const, targetX: 31, targetY: 35 };
+    const building = world.createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1", {
+      constructionProgress: {
+        workerId: worker.id,
+        remainingTicks: 1,
+        totalTicks: 1,
+        resumeWorkerOrder,
+      },
+    });
+    worker.constructingBuildingId = building.id;
+
+    new ConstructionSystem().step(world);
+
+    expect(worker.order).toEqual(resumeWorkerOrder);
+    expect(worker.state).toBe("idle");
   });
 
   it("ticks production and returns spawned entity identity without logging", () => {

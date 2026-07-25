@@ -1,6 +1,7 @@
 import {
   AgentPlanAttemptRecord,
   AgentPlanRecord,
+  AgentPlanWaitingDiagnostic,
   Building,
   Command,
   CommandProvenance,
@@ -29,7 +30,7 @@ interface PlanSnapshot {
 }
 
 interface InternalPlan {
-  record: Omit<AgentPlanRecord, "currentStepIndex" | "status" | "currentStep" | "waitingReason" | "lastAttempt">;
+  record: Omit<AgentPlanRecord, "currentStepIndex" | "status" | "currentStep" | "waitingReason" | "waiting" | "lastAttempt">;
   currentStepIndex: number;
   completedLoops: number;
   status: AgentPlanRecord["status"];
@@ -37,6 +38,7 @@ interface InternalPlan {
   issuedGlobalStep?: boolean;
   issuedUnitIds: Set<string>;
   waitingReason?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
   lastAttempt?: AgentPlanAttemptRecord;
 }
 
@@ -52,6 +54,7 @@ export interface PlanToolHandler {
   defaultRetry?: boolean;
   estimateCost?(context: PlanToolContext): number;
   createCommand(context: PlanToolContext): Command | null;
+  diagnoseWait?(context: PlanToolContext): AgentPlanWaitingDiagnostic;
   validateArgs(args: Record<string, unknown>): boolean;
 }
 
@@ -129,6 +132,7 @@ export class MissionRuntime {
       this.recordAttempt(plan, tick, step, "failed", detail);
     }
     plan.waitingReason = undefined;
+    plan.waiting = undefined;
     plan.status = "failed";
     return true;
   }
@@ -164,6 +168,7 @@ export class MissionRuntime {
           continue;
         }
         plan.waitingReason = undefined;
+        plan.waiting = undefined;
         plan.status = "completed";
         return [];
       }
@@ -211,7 +216,11 @@ export class MissionRuntime {
     }
 
     if (step.when && !this.matchesCondition(step.when, step, unit, snapshot)) {
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for when: ${this.describeCondition(step.when)}`);
+      this.recordWaiting(plan, snapshot.tick, step, {
+        code: "condition_not_met",
+        message: `Waiting for condition: ${this.describeCondition(step.when)}.`,
+        details: { condition: step.when },
+      });
       return [];
     }
 
@@ -222,7 +231,11 @@ export class MissionRuntime {
         this.advanceStep(plan);
         return "advance";
       }
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for until: ${this.describeCondition(step.until)}`);
+      this.recordWaiting(plan, snapshot.tick, step, {
+        code: "completion_condition_not_met",
+        message: `Command was issued; waiting for completion condition: ${this.describeCondition(step.until)}.`,
+        details: { condition: step.until },
+      });
       return [];
     }
 
@@ -234,14 +247,17 @@ export class MissionRuntime {
     };
     const estimatedCost = handler.estimateCost?.(context) ?? 0;
     if (estimatedCost > snapshot.myCredits) {
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for credits: need ${estimatedCost} credits, available ${snapshot.myCredits}`);
+      this.recordWaiting(plan, snapshot.tick, step, this.creditWait(estimatedCost, snapshot.myCredits));
       return [];
     }
 
     const command = handler.createCommand(context);
     if (!command) {
       if (shouldRetry || step.when) {
-        this.recordWaiting(plan, snapshot.tick, step, "waiting for command prerequisites");
+        this.recordWaiting(plan, snapshot.tick, step, handler.diagnoseWait?.(context) ?? {
+          code: "command_unavailable",
+          message: `The ${step.call} command cannot be created from the current unit and arguments.`,
+        });
         return [];
       }
       this.recordAttempt(plan, snapshot.tick, step, "failed", "command prerequisites failed");
@@ -250,7 +266,7 @@ export class MissionRuntime {
     }
     const commandCost = this.getCommandCost(command);
     if (commandCost > snapshot.myCredits) {
-      this.recordWaiting(plan, snapshot.tick, step, `waiting for credits: need ${commandCost} credits, available ${snapshot.myCredits}`);
+      this.recordWaiting(plan, snapshot.tick, step, this.creditWait(commandCost, snapshot.myCredits));
       return [];
     }
 
@@ -308,14 +324,22 @@ export class MissionRuntime {
     const shouldRetry = step.retry === true || handler.defaultRetry === true;
     const commands: Command[] = [];
     let availableCredits = snapshot.myCredits;
-    let waitingReason: string | undefined;
+    let waiting: AgentPlanWaitingDiagnostic | undefined;
     for (const unit of units) {
       if (step.when && !this.matchesCondition(step.when, step, unit, snapshot)) {
-        waitingReason ??= `waiting for when: ${this.describeCondition(step.when)}`;
+        waiting ??= {
+          code: "condition_not_met",
+          message: `Waiting for condition: ${this.describeCondition(step.when)}.`,
+          details: { condition: step.when, unitId: unit.id },
+        };
         continue;
       }
       if (plan.issuedUnitIds.has(unit.id) && !shouldRetry) {
-        waitingReason ??= "waiting for other units or step advance";
+        waiting ??= {
+          code: "other_units_pending",
+          message: "This unit already received the one-shot command; waiting for the remaining assigned units.",
+          details: { unitId: unit.id },
+        };
         continue;
       }
 
@@ -327,18 +351,22 @@ export class MissionRuntime {
       };
       const estimatedCost = handler.estimateCost?.(context) ?? 0;
       if (estimatedCost > availableCredits) {
-        waitingReason = `waiting for credits: need ${estimatedCost} credits, available ${availableCredits}`;
+        waiting = this.creditWait(estimatedCost, availableCredits);
         continue;
       }
 
       const command = handler.createCommand(context);
       if (!command) {
-        waitingReason ??= "waiting for command prerequisites";
+        waiting ??= handler.diagnoseWait?.(context) ?? {
+          code: "command_unavailable",
+          message: `The ${step.call} command cannot be created for unit ${unit.id}.`,
+          details: { unitId: unit.id },
+        };
         continue;
       }
       const cost = this.getCommandCost(command);
       if (cost > availableCredits) {
-        waitingReason = `waiting for credits: need ${cost} credits, available ${availableCredits}`;
+        waiting = this.creditWait(cost, availableCredits);
         continue;
       }
       availableCredits -= cost;
@@ -349,7 +377,10 @@ export class MissionRuntime {
     if (commands.length > 0) {
       this.recordAttempt(plan, snapshot.tick, step, "command_created", undefined, commands.length);
     } else {
-      this.recordWaiting(plan, snapshot.tick, step, waitingReason ?? "waiting for eligible units");
+      this.recordWaiting(plan, snapshot.tick, step, waiting ?? {
+        code: "no_eligible_units",
+        message: "No assigned unit is currently eligible for this step.",
+      });
     }
 
     if (!step.until && !shouldRetry && units.every((unit) => plan.issuedUnitIds.has(unit.id))) {
@@ -394,6 +425,7 @@ export class MissionRuntime {
     plan.issuedGlobalStep = false;
     plan.issuedUnitIds.clear();
     plan.waitingReason = undefined;
+    plan.waiting = undefined;
   }
 
   private matchesCondition(
@@ -420,6 +452,17 @@ export class MissionRuntime {
         return Boolean(unit && this.isEnemyHqInRange(unit, snapshot));
       case "near_position":
         return Boolean(unit && Math.max(Math.abs(unit.x - condition.x), Math.abs(unit.y - condition.y)) <= (condition.distance ?? 1));
+      case "worker_adjacent_to_build_footprint": {
+        if (!unit || unit.type !== "worker") return false;
+        const distance = getDistanceToBuildingFootprint(
+          condition.buildingType,
+          condition.x,
+          condition.y,
+          unit.x,
+          unit.y,
+        );
+        return distance > 0 && distance <= 1;
+      }
       case "target_in_range": {
         if (!unit) {
           return false;
@@ -524,9 +567,23 @@ export class MissionRuntime {
     return 0;
   }
 
-  private recordWaiting(plan: InternalPlan, tick: number, step: PlanStep, detail: string): void {
-    plan.waitingReason = detail;
-    this.recordAttempt(plan, tick, step, "waiting", detail);
+  private creditWait(required: number, available: number): AgentPlanWaitingDiagnostic {
+    return {
+      code: "insufficient_credits",
+      message: `Need ${required} credits; ${available} available.`,
+      details: { requiredCredits: required, availableCredits: available },
+    };
+  }
+
+  private recordWaiting(
+    plan: InternalPlan,
+    tick: number,
+    step: PlanStep,
+    waiting: AgentPlanWaitingDiagnostic,
+  ): void {
+    plan.waitingReason = waiting.message;
+    plan.waiting = waiting;
+    this.recordAttempt(plan, tick, step, "waiting", waiting.message, undefined, waiting);
   }
 
   private recordAttempt(
@@ -535,10 +592,12 @@ export class MissionRuntime {
     step: PlanStep,
     status: AgentPlanAttemptRecord["status"],
     detail?: string,
-    commandCount?: number
+    commandCount?: number,
+    waiting?: AgentPlanWaitingDiagnostic,
   ): void {
     if (status !== "waiting") {
       plan.waitingReason = undefined;
+      plan.waiting = undefined;
     }
     plan.lastAttempt = {
       tick,
@@ -546,6 +605,7 @@ export class MissionRuntime {
       call: step.call,
       status,
       ...(detail ? { detail } : {}),
+      ...(waiting ? { waiting } : {}),
       ...(commandCount !== undefined ? { commandCount } : {}),
     };
   }
@@ -561,6 +621,7 @@ export class MissionRuntime {
       status: plan.status,
       currentStep: plan.record.steps[plan.currentStepIndex],
       waitingReason: plan.waitingReason,
+      waiting: plan.waiting,
       lastAttempt: plan.lastAttempt,
     };
   }

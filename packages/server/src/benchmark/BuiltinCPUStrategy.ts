@@ -256,11 +256,10 @@ export async function runBuiltinCPUStrategy(options: {
     for (let front = 0; front < frontY.length; front++) {
       const unitIds = awaitingOrders.filter((_: any, index: number) => index % 3 === front).map((unit: any) => unit.id);
       if (unitIds.length > 0) {
-        await callTool("attack_move_group", {
+        await callTool("attack_move_unit", {
           unitIds,
           x: stagingX,
           y: frontY[front],
-          formation: front === 1 ? "wedge" : "line",
         });
       }
     }

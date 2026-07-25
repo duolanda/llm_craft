@@ -88,12 +88,35 @@ describe("GameOrchestrator", () => {
     orchestrator.stop();
   });
 
+  it("starts the clock while initial decisions are still running", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    let releaseBlue: (() => void) | undefined;
+    const blueReady = new Promise<void>((resolve) => { releaseBlue = resolve; });
+    (orchestrator as any).controllerByPlayer.player_1.run = vi.fn(async () => createRunResult());
+    (orchestrator as any).controllerByPlayer.player_2.run = vi.fn(async () => {
+      await blueReady;
+      return createRunResult();
+    });
+
+    await orchestrator.start();
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 4);
+    expect(orchestrator.getGame().getTick()).toBe(4);
+    expect(orchestrator.getGame().isGameRunning()).toBe(true);
+
+    releaseBlue?.();
+    await Promise.resolve();
+    orchestrator.stop();
+  });
+
   it("lets the fast side take later tick opportunities while the slow side is still running", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     let resolveSlow: (() => void) | undefined;
     const slow = new Promise<void>((resolve) => { resolveSlow = resolve; });
     const fastRun = vi.fn(async () => createRunResult());
+    let slowRunCount = 0;
     const slowRun = vi.fn(async () => {
+      slowRunCount += 1;
+      if (slowRunCount === 1) return createRunResult();
       await slow;
       return createRunResult();
     });
@@ -104,11 +127,11 @@ describe("GameOrchestrator", () => {
     await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 3);
 
     expect(fastRun.mock.calls.length).toBeGreaterThan(1);
-    expect(slowRun).toHaveBeenCalledTimes(1);
+    expect(slowRun).toHaveBeenCalledTimes(2);
     resolveSlow?.();
     await Promise.resolve();
     await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS);
-    expect(slowRun.mock.calls.length).toBeGreaterThan(1);
+    expect(slowRun.mock.calls.length).toBeGreaterThan(2);
     orchestrator.stop();
   });
 

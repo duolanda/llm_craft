@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameplayController } from "../controller/GameplayController";
-import { getAgentToolDefinitions } from "../agent/AgentTools";
+import { executeAgentTool, getAgentToolDefinitions } from "../agent/AgentTools";
 import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint } from "@llmcraft/shared";
 
 describe("GameplayController", () => {
@@ -25,12 +25,15 @@ describe("GameplayController", () => {
     }
   }
 
-  it("does not cap attack_move_group at 100 units in the tool schema", () => {
-    const tool = getAgentToolDefinitions().find((candidate) => candidate.name === "attack_move_group")!;
-    const unitIds = (tool.parameters.properties as Record<string, Record<string, unknown>>).unitIds;
-
-    expect(unitIds.minItems).toBe(1);
-    expect(unitIds).not.toHaveProperty("maxItems");
+  it("uses box-selection style unit arrays without a separate formation tool", () => {
+    const tools = getAgentToolDefinitions();
+    expect(tools.some((tool) => tool.name === "attack_move_group")).toBe(false);
+    for (const name of ["move_unit", "attack_move_unit", "attack"]) {
+      const tool = tools.find((candidate) => candidate.name === name)!;
+      const unitIds = (tool.parameters.properties as Record<string, Record<string, unknown>>).unitIds;
+      expect(unitIds.minItems).toBe(1);
+      expect(unitIds).not.toHaveProperty("maxItems");
+    }
   });
 
   it("queues action commands into the game immediately", () => {
@@ -65,6 +68,9 @@ describe("GameplayController", () => {
       tick: 0,
       ok: false,
       error: "invalid_unit",
+      availableFriendlyUnits: expect.arrayContaining([
+        expect.objectContaining({ type: UNIT_TYPES.WORKER }),
+      ]),
     });
     expect(gameplayController.takeIssuedCommands()).toHaveLength(0);
   });
@@ -109,9 +115,29 @@ describe("GameplayController", () => {
     expect(result.result).toMatchObject({
       ok: false,
       error: "invalid_build_position",
+      suggestedPlacements: expect.any(Array),
     });
     expect((result.result as { hint: string }).hint).toContain("building footprint");
     expect(gameplayController.takeIssuedCommands()).toHaveLength(0);
+  });
+
+  it("does not search suggested placements for a valid explicit build position", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const placementSpy = vi.spyOn(
+      gameplayController as unknown as { getSuggestedBuildSites: (...args: unknown[]) => unknown },
+      "getSuggestedBuildSites",
+    );
+
+    const result = gameplayController.buildStructure(
+      worker.id,
+      BUILDING_TYPES.BARRACKS,
+      player1BuildSite,
+    );
+
+    expect((result.result as { ok: boolean }).ok).toBe(true);
+    expect(placementSpy).not.toHaveBeenCalled();
   });
 
   it("rejects old non-call orchestrate_plan steps instead of registering a stuck plan", () => {
@@ -452,11 +478,15 @@ describe("GameplayController", () => {
           call: "spawn_unit",
           args: { buildingId: "$war_factory", unitType: "light_tank" },
         }),
-        waitingReason: "waiting for credits: need 240 credits, available 200",
+        waiting: {
+          code: "insufficient_credits",
+          message: "Need 240 credits; 200 available.",
+          details: { requiredCredits: 240, availableCredits: 200 },
+        },
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for credits: need 240 credits, available 200",
+          waiting: expect.objectContaining({ code: "insufficient_credits" }),
         }),
       }),
     ]);
@@ -558,18 +588,22 @@ describe("GameplayController", () => {
         }),
       }),
       expect.objectContaining({
-        waitingReason: "waiting for credits: need 110 credits, available 60",
+        waiting: {
+          code: "insufficient_credits",
+          message: "Need 110 credits; 60 available.",
+          details: { requiredCredits: 110, availableCredits: 60 },
+        },
         lastAttempt: expect.objectContaining({
           call: "spawn_unit",
           status: "waiting",
-          detail: "waiting for credits: need 110 credits, available 60",
+          waiting: expect.objectContaining({ code: "insufficient_credits" }),
         }),
       }),
     ]);
     game.stop();
   });
 
-  it("summarizes tech status and recommends counters from get_my_state", () => {
+  it("summarizes objective tech status without prescribing counters", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
@@ -592,73 +626,123 @@ describe("GameplayController", () => {
       techStatus: {
         own: Record<string, number>;
         enemy: Record<string, unknown>;
-        recommendedStructures: Array<Record<string, unknown>>;
-        recommendedProduction: Array<Record<string, unknown>>;
       };
+      buildOptions: Array<{ buildingType: string; prerequisiteMet: boolean }>;
     };
 
     expect(result.techStatus.own.barracks).toBe(1);
     expect(result.techStatus.enemy).toMatchObject({ hasWarFactory: true, lightTanks: 1 });
-    expect(result.techStatus.recommendedStructures).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ workerId: expect.any(String), buildingType: "refinery" }),
-      ])
-    );
-    expect(result.techStatus.recommendedProduction).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ buildingId: expect.any(String), buildingType: "barracks", unitType: "rocket_soldier" }),
-      ])
-    );
+    expect(result.techStatus).not.toHaveProperty("recommendedStructures");
+    expect(result.techStatus).not.toHaveProperty("recommendedProduction");
+    expect(result.buildOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ buildingType: "war_factory", prerequisiteMet: true }),
+    ]));
     game.stop();
   });
 
-  it("pairs recommended building centers with valid worker approach positions", () => {
+  it("auto-selects a legal building center and turns a distant build into a durable plan", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
-    const state = gameplayController.getMyState().result as {
-      techStatus: {
-        recommendedStructures: Array<{
-          workerId: string;
-          buildingType: typeof BUILDING_TYPES.BARRACKS;
-          suggestedSites: Array<{ x: number; y: number; workerPosition: { x: number; y: number } }>;
-        }>;
-      };
-    };
-    const barracks = state.techStatus.recommendedStructures.find(
-      (recommendation) => recommendation.buildingType === BUILDING_TYPES.BARRACKS,
-    )!;
-    const site = barracks.suggestedSites[0];
-
-    expect(site.workerPosition).toEqual({ x: expect.any(Number), y: expect.any(Number) });
     expect(
       getBuildingFootprint(BUILDING_TYPES.BARRACKS).width,
     ).toBeGreaterThan(1);
 
-    const result = gameplayController.buildStructure(worker.id, BUILDING_TYPES.BARRACKS, { x: site.x, y: site.y }).result as {
+    const result = gameplayController.buildStructure(worker.id, BUILDING_TYPES.BARRACKS).result as {
       ok: boolean;
-      error: string;
-      hint: string;
-      suggestedPlacements: Array<{ x: number; y: number; workerPosition: { x: number; y: number } }>;
+      planId: string;
+      position: { x: number; y: number };
+      workerPosition: { x: number; y: number };
     };
     expect(result).toMatchObject({
-      ok: false,
-      error: "worker_too_far",
-      suggestedPlacements: expect.arrayContaining([
-        expect.objectContaining({
-          x: expect.any(Number),
-          y: expect.any(Number),
-          workerPosition: { x: expect.any(Number), y: expect.any(Number) },
-        }),
-      ]),
+      ok: true,
+      planId: expect.any(String),
+      position: { x: expect.any(Number), y: expect.any(Number) },
+      workerPosition: { x: expect.any(Number), y: expect.any(Number) },
     });
-    expect(result.hint).toContain("move worker to");
-    expect(result.hint).toContain("Do not move the worker onto the building center");
+    expect(gameplayController.getActivePlans()).toEqual([
+      expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            call: "move_unit",
+            until: {
+              condition: "worker_adjacent_to_build_footprint",
+              buildingType: BUILDING_TYPES.BARRACKS,
+              x: result.position.x,
+              y: result.position.y,
+            },
+          }),
+        ]),
+      }),
+    ]);
     game.stop();
   });
 
-  it("stops recommending isolated tanks into massed enemy rocket soldiers", () => {
+  it("auto-places refineries for route savings and explains the nearby deposits", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+
+    const result = gameplayController.buildStructure(worker.id, BUILDING_TYPES.REFINERY).result as {
+      ok: boolean;
+      position: { x: number; y: number };
+      estimatedRouteSaving: number;
+      nearbyResources: Array<{ x: number; y: number; newDeliveryDistance: number }>;
+    };
+
+    expect(result).toMatchObject({
+      ok: true,
+      estimatedRouteSaving: expect.any(Number),
+      nearbyResources: expect.arrayContaining([
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), newDeliveryDistance: expect.any(Number) }),
+      ]),
+    });
+    expect(result.estimatedRouteSaving).toBeGreaterThan(0);
+    expect(Math.max(
+      Math.abs(result.position.x - DEFAULT_MAP_LAYOUT.player1Hq.x),
+      Math.abs(result.position.y - DEFAULT_MAP_LAYOUT.player1Hq.y),
+    )).toBeGreaterThan(10);
+    game.stop();
+  });
+
+  it("explains the exact prerequisite that is keeping a plan step waiting", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+
+    gameplayController.orchestratePlan({
+      unitIds: [worker.id],
+      steps: [{
+        call: "build_structure",
+        args: {
+          unitId: worker.id,
+          buildingType: BUILDING_TYPES.BARRACKS,
+          x: player1BuildSite.x,
+          y: player1BuildSite.y,
+        },
+        scope: "global",
+        retry: true,
+      }],
+    });
+
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
+    expect(gameplayController.getActivePlans()).toEqual([
+      expect.objectContaining({
+        waiting: expect.objectContaining({
+          code: "worker_not_adjacent",
+          details: expect.objectContaining({
+            workerId: worker.id,
+            buildingPosition: player1BuildSite,
+          }),
+        }),
+        waitingReason: expect.stringContaining("does not need replacement"),
+      }),
+    ]);
+  });
+
+  it("reports enemy composition without embedding a production policy", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
@@ -668,7 +752,7 @@ describe("GameplayController", () => {
       player1BuildSite.y,
       "player_1",
     );
-    const warFactory = game.getBuildingManager().createBuilding(
+    game.getBuildingManager().createBuilding(
       BUILDING_TYPES.WAR_FACTORY,
       player1BuildSite.x + 8,
       player1BuildSite.y,
@@ -686,23 +770,11 @@ describe("GameplayController", () => {
     const state = gameplayController.getMyState().result as {
       techStatus: {
         enemy: { rocketSoldiers: number };
-        productionWarnings: Array<Record<string, unknown>>;
-        recommendedProduction: Array<{ buildingId: string; unitType: string }>;
       };
     };
     expect(state.techStatus.enemy.rocketSoldiers).toBe(3);
-    expect(state.techStatus.productionWarnings).toEqual([
-      expect.objectContaining({
-        type: "enemy_anti_armor_mass",
-        avoidUnitType: UNIT_TYPES.LIGHT_TANK,
-        preferredUnitType: UNIT_TYPES.RIFLEMAN,
-      }),
-    ]);
-    expect(state.techStatus.recommendedProduction).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ buildingId: warFactory.id, unitType: UNIT_TYPES.LIGHT_TANK }),
-      ]),
-    );
+    expect(state.techStatus).not.toHaveProperty("productionWarnings");
+    expect(state.techStatus).not.toHaveProperty("recommendedProduction");
     game.stop();
   });
 
@@ -723,7 +795,6 @@ describe("GameplayController", () => {
         idleWorkers: number;
         carryingCredits: number;
         resourceAssignments: Array<Record<string, unknown>>;
-        recommendations: Array<Record<string, unknown>>;
       };
     };
 
@@ -749,9 +820,7 @@ describe("GameplayController", () => {
         ]),
       );
     }
-    expect(result.economyStatus.recommendations).toEqual(
-      expect.arrayContaining([expect.objectContaining({ action: "start_harvest_loop" })])
-    );
+    expect(result.economyStatus).not.toHaveProperty("recommendations");
     game.stop();
   });
 
@@ -985,30 +1054,27 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("assigns distinct formation destinations and queues a 100-unit army immediately", () => {
+  it("queues the same attack-move for a 100-unit box selection", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
     const unitIds = Array.from({ length: 100 }, (_, index) =>
       game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20 + (index % 10), 12 + Math.floor(index / 10), "player_1").id
     );
 
-    const result = gameplayController.attackMoveGroup(unitIds, { x: 108, y: 48 }, "line");
+    const result = executeAgentTool(gameplayController, "attack_move_unit", { unitIds, x: 108, y: 48 });
     const payload = result.result as {
       ok: boolean;
-      assignments: Array<{ position: { x: number; y: number } }>;
-      hint: string;
+      results: Array<{ unitId: string; ok: boolean }>;
     };
 
     expect(payload.ok).toBe(true);
-    expect(payload.assignments).toHaveLength(100);
-    expect(payload.hint).toContain("queued immediately");
-    expect(new Set(payload.assignments.map((assignment) => `${assignment.position.x},${assignment.position.y}`)).size).toBe(100);
+    expect(payload.results).toHaveLength(100);
     const commands = gameplayController.takeIssuedCommands();
     expect(commands).toHaveLength(100);
     expect(new Set(commands.map((command) => command.unitId))).toEqual(new Set(unitIds));
   });
 
-  it("summarizes army readiness and recommends battle_line for tank groups", () => {
+  it("summarizes army composition without recommending a formation", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
     game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
@@ -1020,41 +1086,32 @@ describe("GameplayController", () => {
     const summary = gameplayController.getArmySummary().result as {
       myCounts: Record<string, number>;
       enemyCounts: Record<string, number>;
-      recommendedFormation: string;
-      recommendations: Array<{ action: string; formation?: string }>;
+      largestGroupUnitIds: string[];
     };
 
     expect(summary.myCounts.light_tank).toBe(4);
     expect(summary.enemyCounts.rocket_soldier).toBe(1);
-    expect(summary.recommendedFormation).toBe("battle_line");
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "attack_move_group", formation: "battle_line" }),
-    ]));
+    expect(summary.largestGroupUnitIds).toHaveLength(4);
+    expect(summary).not.toHaveProperty("recommendedFormation");
+    expect(summary).not.toHaveProperty("recommendations");
   });
 
-  it("recommends immediate HQ pressure once the first six-unit wave is ready", () => {
+  it("reports a nearby six-unit group without prescribing its target", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
     for (let index = 0; index < 6; index++) {
       game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10 + index, 10, "player_1");
     }
-    const enemyHq = game.getState().players[1].buildings.find(
-      (building) => building.type === BUILDING_TYPES.HQ,
-    )!;
-
     const summary = gameplayController.getArmySummary().result as {
-      recommendations: Array<{ action: string; targetId?: string; unitIds?: string[] }>;
+      groupedCombatUnits: number;
+      largestGroupUnitIds: string[];
     };
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        action: "attack",
-        targetId: enemyHq.id,
-        unitIds: expect.arrayContaining([expect.any(String)]),
-      }),
-    ]));
+    expect(summary.groupedCombatUnits).toBe(6);
+    expect(summary.largestGroupUnitIds).toHaveLength(6);
+    expect(summary).not.toHaveProperty("recommendations");
   });
 
-  it("recommends regrouping instead of counting six units spread across the map as an attack wave", () => {
+  it("reports that six units spread across the map are not one nearby group", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
     for (let index = 0; index < 6; index++) {
@@ -1063,34 +1120,12 @@ describe("GameplayController", () => {
 
     const summary = gameplayController.getArmySummary().result as {
       groupedCombatUnits: number;
-      assemblyPoint: { x: number; y: number } | null;
-      recommendations: Array<{ action: string }>;
+      largestGroupUnitIds: string[];
     };
     expect(summary.groupedCombatUnits).toBe(1);
-    expect(summary.assemblyPoint).toEqual({ x: expect.any(Number), y: expect.any(Number) });
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "regroup" }),
-    ]));
-    expect(summary.recommendations).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "attack" }),
-    ]));
-  });
-
-  it("assigns battle_line formation with tanks ahead of rockets", () => {
-    const game = new Game();
-    const gameplayController = new GameplayController(game, "player_1");
-    const tank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 10, 10, "player_1");
-    const rifleman = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 10, 11, "player_1");
-    const rocket = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 10, 12, "player_1");
-
-    const result = gameplayController.attackMoveGroup([rocket.id, tank.id, rifleman.id], { x: 60, y: 48 }, "battle_line").result as {
-      assignments: Array<{ unitId: string; position: { x: number; y: number } }>;
-    };
-    const byUnit = new Map(result.assignments.map((assignment) => [assignment.unitId, assignment.position]));
-
-    expect(byUnit.get(tank.id)?.x).toBe(60);
-    expect(byUnit.get(rifleman.id)?.x).toBe(56);
-    expect(byUnit.get(rocket.id)?.x).toBe(52);
+    expect(summary.largestGroupUnitIds).toHaveLength(1);
+    expect(summary).not.toHaveProperty("assemblyPoint");
+    expect(summary).not.toHaveProperty("recommendations");
   });
 
   it("queues high-level attack as movement until the target is in range", () => {
@@ -1158,10 +1193,13 @@ describe("GameplayController", () => {
     const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20, 5, "player_2");
+    target.x = 20.4;
+    target.y = 5.6;
 
     gameplayController.getMapState();
     gameplayController.attackTarget(attacker.id, target.id);
     const [move] = gameplayController.takeIssuedCommands();
+    expect(move.position).toEqual({ x: 20, y: 6 });
     game.queueCommand(move);
     game.tickUpdate();
 
@@ -1198,7 +1236,7 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("moves to a remembered target position when the attack target has died", () => {
+  it("reports a dead target instead of using fog-of-war memory", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
@@ -1210,16 +1248,38 @@ describe("GameplayController", () => {
 
     const result = gameplayController.attackTarget(attacker.id, target.id);
 
-    expect(result.result).toMatchObject({ ok: true, mode: "move_to_last_seen" });
-    expect(gameplayController.takeIssuedCommands()).toEqual([
-      expect.objectContaining({
-        type: "move",
-        unitId: attacker.id,
-        position: { x: 8, y: 5 },
-      }),
-    ]);
+    expect(result.result).toMatchObject({
+      ok: false,
+      error: "target_missing",
+      targetId: target.id,
+      targetStatus: "destroyed",
+      availableEnemyTargetCount: expect.any(Number),
+      availableEnemyTargets: expect.arrayContaining([
+        expect.objectContaining({ type: BUILDING_TYPES.HQ }),
+      ]),
+    });
+    expect(gameplayController.takeIssuedCommands()).toEqual([]);
     expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
+  });
+
+  it("hoists shared recovery candidates out of batch unit results", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 20, 20, "player_1");
+
+    const execution = executeAgentTool(gameplayController, "attack", {
+      unitIds: ["missing_1", "missing_2"],
+      targetId: "missing_target",
+    });
+    const result = execution.result as {
+      availableAttackers: unknown[];
+      results: Array<Record<string, unknown>>;
+    };
+
+    expect(result.availableAttackers.length).toBeGreaterThan(0);
+    expect(result.results).toHaveLength(2);
+    expect(result.results.every((item) => item.availableAttackers === undefined)).toBe(true);
   });
 
   it("returns detailed map cells only when requested", () => {
@@ -1304,6 +1364,28 @@ describe("GameplayController", () => {
 
     expect(readStateSpy).toHaveBeenCalledTimes(1);
     expect(fullStateSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not search building placements while reading my state", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    for (let index = 0; index < 8; index++) {
+      game.getUnitManager().createUnit(
+        UNIT_TYPES.WORKER,
+        DEFAULT_MAP_LAYOUT.player1Hq.x + index,
+        DEFAULT_MAP_LAYOUT.player1Hq.y - 6,
+        "player_1",
+      );
+    }
+    const placementSpy = vi.spyOn(
+      gameplayController as unknown as { getSuggestedBuildSites: (...args: unknown[]) => unknown },
+      "getSuggestedBuildSites",
+    );
+
+    const state = gameplayController.getMyState().result as { buildOptions: Array<Record<string, unknown>> };
+
+    expect(placementSpy).not.toHaveBeenCalled();
+    expect(state.buildOptions.every((option) => !("placementsByWorker" in option))).toBe(true);
   });
 
   it("invalidates the lightweight read cache on the next tick", () => {

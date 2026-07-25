@@ -46,10 +46,11 @@ export class ConstructionSystem {
       construction.remainingTicks -= 1;
       if (construction.remainingTicks > 0) continue;
 
+      const resumeWorkerOrder = construction.resumeWorkerOrder;
       building.constructionProgress = undefined;
       worker.constructingBuildingId = undefined;
       worker.state = UNIT_STATES.IDLE;
-      worker.order = undefined;
+      worker.order = resumeWorkerOrder ? structuredClone(resumeWorkerOrder) : undefined;
       events.push({
         type: "building_completed",
         playerId: building.playerId,

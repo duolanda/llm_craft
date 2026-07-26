@@ -28,6 +28,7 @@ import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
 import { readLocalRecordText } from "./lib/readRecordFile";
+import { API_BASE_URL, WS_URL } from "./lib/serverConnection";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
@@ -42,9 +43,6 @@ interface ReplayRecordListEntry {
   encoding?: "identity" | "gzip";
 }
 
-const SERVER_HOST = window.location.hostname || "localhost";
-const WS_URL = `ws://${SERVER_HOST}:3101`;
-const API_BASE_URL = `http://${SERVER_HOST}:3101`;
 const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection";
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
 const REQUESTED_REPLAY_FILE = new URLSearchParams(window.location.search).get("replay");

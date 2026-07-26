@@ -9,10 +9,8 @@ import {
   PlayerDiagnostic,
   RecordListEntry,
 } from "./diagnostics";
+import { API_BASE_URL } from "./lib/serverConnection";
 import "./diagnosticsViewer.css";
-
-const SERVER_HOST = window.location.hostname || "localhost";
-const API_BASE_URL = `http://${SERVER_HOST}:3101`;
 
 const TAG_LABELS: Record<DiagnosticTag, string> = {
   missed_defense: "未防守",

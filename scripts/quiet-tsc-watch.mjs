@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
-const tsc = join(process.cwd(), 'node_modules', '.bin', 'tsc');
-const child = spawn(tsc, ['--watch', '--pretty', 'false'], {
+const packageRequire = createRequire(join(process.cwd(), 'package.json'));
+const tsc = packageRequire.resolve('typescript/bin/tsc');
+const child = spawn(process.execPath, [tsc, '--watch', '--pretty', 'false'], {
   stdio: ['inherit', 'pipe', 'inherit'],
 });
 
@@ -36,6 +38,11 @@ child.stdout.on('end', () => {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => child.kill(signal));
 }
+
+child.on('error', (error) => {
+  console.error(`Failed to start TypeScript watch: ${error.message}`);
+  process.exitCode = 1;
+});
 
 child.on('exit', (code, signal) => {
   if (signal) {

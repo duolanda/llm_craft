@@ -3,11 +3,9 @@ import ReactDOM from "react-dom/client";
 import type { AgentModelRequestRecord, MatchRecord, SavedAITurnRecord } from "@llmcraft/shared";
 import { detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
 import { readLocalRecordText } from "./lib/readRecordFile";
+import { API_BASE_URL } from "./lib/serverConnection";
 import { buildMatchDiagnosticReport, type MatchDiagnosticReport } from "./diagnostics";
 import "./transcriptViewer.css";
-
-const SERVER_HOST = window.location.hostname || "localhost";
-const API_BASE_URL = `http://${SERVER_HOST}:3101`;
 
 type ChatRole = "system" | "user" | "assistant";
 

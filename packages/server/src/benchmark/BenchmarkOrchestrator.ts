@@ -1,11 +1,8 @@
 import {
-  AITerminalEvent,
   BuiltinCPURuntimeConfig,
   CPUStrategyType,
-  GameState,
   MatchDebugOptions,
   OpenAICompatibleRuntimeConfig,
-  ServerBenchmarkActiveRound,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
   ServerBenchmarkRoundResult,
@@ -27,16 +24,6 @@ import { createDefaultMatchDefinition } from "../MatchDefinition";
 type SendOnlyWebSocket = Pick<WebSocket, "send">;
 
 type BenchmarkGameFactory = (config: GameOrchestratorConfig) => GameOrchestrator;
-type BenchmarkActiveRound = {
-  orchestrator: GameOrchestrator;
-  llmSide: "player_1" | "player_2";
-};
-
-const EMPTY_GAME = {
-  getState: (): GameState | null => null,
-  getSnapshots: () => [],
-};
-
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
 const SERVER_PACKAGE_DIR = path.resolve(CURRENT_DIR, "..", "..");
@@ -54,9 +41,7 @@ export interface BenchmarkConfig {
 
 export class BenchmarkOrchestrator {
   private readonly rounds: ServerBenchmarkRoundResult[] = [];
-  private currentOrchestrator: GameOrchestrator | null = null;
-  private viewedRound: number | null = null;
-  private readonly activeRounds = new Map<number, BenchmarkActiveRound>();
+  private readonly activeRounds = new Map<number, GameOrchestrator>();
   private currentRun: Promise<void> | null = null;
   private stopRequested = false;
   private ws: SendOnlyWebSocket | null;
@@ -94,36 +79,9 @@ export class BenchmarkOrchestrator {
 
   stop(): void {
     this.stopRequested = true;
-    for (const { orchestrator } of this.activeRounds.values()) {
+    for (const orchestrator of this.activeRounds.values()) {
       orchestrator.stop();
     }
-    this.currentOrchestrator?.stop();
-  }
-
-  async saveRecord(): Promise<string> {
-    if (!this.currentOrchestrator) {
-      throw new Error("当前没有可保存的 benchmark 对局。");
-    }
-    return this.currentOrchestrator.saveRecord();
-  }
-
-  getGame() {
-    return this.currentOrchestrator?.getGame() ?? EMPTY_GAME;
-  }
-
-  getAITerminalFeed(sinceSequence?: number) {
-    return this.currentOrchestrator?.getAITerminalFeed?.(sinceSequence) ?? {
-      sessionId: "benchmark-idle",
-      events: [],
-      latestSequence: 0,
-      reset: sinceSequence === undefined,
-      hasMore: false,
-    };
-  }
-
-  getTerminalHistory(beforeSequence?: number, limit?: number) {
-    return this.currentOrchestrator?.getTerminalHistory(beforeSequence, limit)
-      ?? Promise.resolve({ events: [], hasMore: false });
   }
 
   private async run(): Promise<void> {
@@ -162,13 +120,9 @@ export class BenchmarkOrchestrator {
       kind: "benchmark",
       parentId: this.benchmarkId,
       label: `Benchmark round ${roundNumber}`,
-      observe: this.viewedRound === null,
       terminalPolicy: this.config.recordReplay ? "save" : "none",
     });
-    this.activeRounds.set(roundNumber, { orchestrator, llmSide });
-    if (this.viewedRound === null) {
-      this.setViewedRound(roundNumber);
-    }
+    this.activeRounds.set(roundNumber, orchestrator);
     this.sendProgress();
     let completed = false;
     try {
@@ -206,9 +160,6 @@ export class BenchmarkOrchestrator {
       return roundResult;
     } finally {
       this.activeRounds.delete(roundNumber);
-      if (this.viewedRound === roundNumber) {
-        this.setViewedRound(this.getNextActiveRoundNumber());
-      }
       if (completed && !this.stopRequested) {
         this.sendProgress();
       }
@@ -225,34 +176,7 @@ export class BenchmarkOrchestrator {
       llmWins: this.rounds.filter((round) => round.winner === "llm").length,
       cpuWins: this.rounds.filter((round) => round.winner === "cpu").length,
       draws: this.rounds.filter((round) => round.winner === "draw").length,
-      viewedRound: this.viewedRound ?? undefined,
-      activeRounds: this.getActiveRoundSummaries(),
     } satisfies ServerBenchmarkProgressMessage);
-  }
-
-  private setViewedRound(roundNumber: number | null): void {
-    this.viewedRound = roundNumber;
-    this.currentOrchestrator = roundNumber === null
-      ? null
-      : this.activeRounds.get(roundNumber)?.orchestrator ?? null;
-    if (this.currentOrchestrator && this.matchRegistry?.get(this.currentOrchestrator.getMatchId())) {
-      this.matchRegistry.observe(this.currentOrchestrator.getMatchId());
-    }
-  }
-
-  private getNextActiveRoundNumber(): number | null {
-    const [roundNumber] = [...this.activeRounds.keys()].sort((a, b) => a - b);
-    return roundNumber ?? null;
-  }
-
-  private getActiveRoundSummaries(): ServerBenchmarkActiveRound[] {
-    return [...this.activeRounds.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([round, activeRound]) => ({
-        round,
-        llmSide: activeRound.llmSide,
-        tick: activeRound.orchestrator.getGame().getState().tick,
-      }));
   }
 
   private buildCompleteMessage(): ServerBenchmarkCompleteMessage {

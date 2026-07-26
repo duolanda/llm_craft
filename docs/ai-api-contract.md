@@ -330,20 +330,14 @@ interface ServerBenchmarkProgressMessage {
   llmWins: number;
   cpuWins: number;
   draws: number;
-  viewedRound?: number;
-  activeRounds: Array<{
-    round: number;
-    llmSide: "player_1" | "player_2";
-    tick: number;
-  }>;
 }
 ```
 
 说明：
 
-- `viewedRound` 是当前主画面正在显示的 benchmark round；并发运行时由服务端自动选择
-- `activeRounds` 是仍在运行中的 round 列表，按 round 编号排序
-- 当 `viewedRound` 对应 round 结束时，服务端会自动切到剩余活跃 round 中编号最小的一局
+- benchmark progress 只报告完成数和胜负汇总，不拥有主画面的观察选择
+- benchmark round 会分别注册到 `MatchRegistry`；当前观察对象和所有活跃 round 统一通过对局列表查询并由用户选择
+- benchmark 启动或 round 结束不会覆盖用户已经选择的观察对象
 
 ### 0.17 WebSocket `benchmark_complete`
 

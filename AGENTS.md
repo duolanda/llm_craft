@@ -164,9 +164,10 @@ flowchart LR
 - 兼容 OpenAI 风格端点的新模型接入优先扩展 transport，不要直接写进 orchestrator 或模拟层
 
 **Agent turn 与工具调用性能判断:**
-- 一个用户/游戏 turn 内连续执行多轮工具调用是标准 agent loop，本身不是问题：模型可一次返回多个 tool calls，本地执行 tool results，再继续下一次模型请求直到收敛。
-- 不要仅因为单个 turn 很长或工具调用次数多就判定设计有问题；性能分析应落到 turn 内每一次模型请求的 latency、finish_reason、visible output tokens、reasoning tokens、cache hit tokens，以及是否反复读取同类状态工具导致循环。
-- 慢 turn 的重点风险是某些内部模型请求异常变慢、hidden reasoning 膨胀、可见输出为空却打到 max_tokens，或工具选择陷入重复，而不是“一个 turn 里跑了工具”这个事实。
+- **一个 turn 打完整局是受支持且预期的 harness 设计。** CLI、Claude Code、Codex、Pi 等 harness 都可以在同一个用户/游戏 turn 内持续观察实时状态、连续执行多轮工具调用并完成整场对局；无需为了获得新的 tick 状态而人为切分成多个 turn。
+- 模型可一次返回多个 tool calls，本地执行 tool results，再继续下一次模型请求直到对局结束或主动收敛。工具结果携带调用时的实时状态，因此 `requestTick` / `executeTick` 跨度大、单 turn 贯穿多数乃至全部 tick、模型请求或工具调用次数多，**单独看都不是缺陷、失控或决策刷新不足的证据**。
+- **禁止仅凭 turn 数、单 turn 时长、首个 turn 覆盖 tick 数，或拿 LLM turn 数量与 CPU committed-tick 调度次数对比，就判断 agent loop 有问题或提出“缩短 / 拆分 / 强制 yield turn”。** 只有出现具体失败证据（例如重复读取而不行动、同类无效命令循环、异常 finish_reason、空输出打满 token、状态明显过期却不重读、内部请求 latency / reasoning 异常）时，才能把问题归因到 turn 内行为。
+- 性能分析应落到 turn 内每一次模型请求的 latency、finish_reason、visible output tokens、reasoning tokens、cache hit tokens，以及工具调用是否推动了有效游戏状态变化。慢 turn 的重点风险是某些内部模型请求异常变慢、hidden reasoning 膨胀、可见输出为空却打到 max_tokens，或工具选择陷入重复，而不是“一个 turn 打了很久 / 跑了很多工具”这个事实。
 
 **对局身份与记录:**
 - `MatchRegistry` 管理 live/control/benchmark 多个稳定 `matchId`；WebSocket 只投影 observed match

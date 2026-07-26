@@ -715,13 +715,6 @@ function App() {
   const isWarmingUp = warmupStatuses.player_1 === "warming_up" || warmupStatuses.player_2 === "warming_up";
   const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
   const benchmarkTotalRounds = benchmarkProgress?.totalRounds ?? benchmarkRunSummary?.totalRounds ?? 0;
-  const benchmarkCurrentRound = benchmarkTotalRounds > 0
-    ? Math.min((benchmarkProgress?.completedRounds ?? 0) + 1, benchmarkTotalRounds)
-    : 0;
-  const benchmarkViewedRound = benchmarkProgress?.viewedRound ?? null;
-  const benchmarkActiveRoundLabel = benchmarkProgress?.activeRounds.length
-    ? formatRoundList(benchmarkProgress.activeRounds.map((round) => round.round))
-    : null;
 
   if (LOCAL_SHOWCASE) {
     return (
@@ -923,14 +916,6 @@ function App() {
                 Benchmark {(benchmarkProgress?.cpuStrategy ?? benchmarkRunSummary?.cpuStrategy)}: 已完成 {benchmarkProgress?.completedRounds ?? 0} / {benchmarkTotalRounds} 局
                 {" · "}
                 LLM / CPU / 平 {benchmarkProgress?.llmWins ?? 0} / {benchmarkProgress?.cpuWins ?? 0} / {benchmarkProgress?.draws ?? 0}
-                {" · "}
-                当前画面: {benchmarkViewedRound ? `第 ${benchmarkViewedRound} 局（自动观战）` : benchmarkCurrentRound ? `等待第 ${benchmarkCurrentRound} 局` : "等待活跃对局"}
-                {benchmarkActiveRoundLabel && (
-                  <>
-                    {" · "}
-                    活跃: {benchmarkActiveRoundLabel}
-                  </>
-                )}
               </span>
             )}
             {replayError && <span className="status-error">{replayError}</span>}
@@ -1225,13 +1210,6 @@ function getWarmupButtonLabel(status: MatchWarmupState | undefined): string {
     return "重试";
   }
   return "预热";
-}
-
-function formatRoundList(rounds: number[]): string {
-  if (rounds.length === 0) {
-    return "";
-  }
-  return `第 ${rounds.join("、")} 局`;
 }
 
 function getWarmupStatusClass(status: MatchWarmupState | undefined): string {

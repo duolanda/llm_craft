@@ -82,8 +82,10 @@ shared constants 是内置 `standard` 规则和地图模板的定义处；`creat
 
 - 当前 benchmark 是 LLM preset 对 `random` 或 `rush` built-in CPU。
 - CPU 是模型/提示词的最低能力 baseline，不是性能规模测试，也不是平衡样本。
+- `random` / `rush` 在敌方 HQ 摧毁后会继续显式攻击剩余建筑；HQ 不再被当作唯一终局目标。
 - `BenchmarkRunner` 直接处理轮次、换边、并发和汇总；没有通用 ExperimentRunner。
 - `recordReplay=false` 时 round 不生成 Match Record；开启时使用 evaluation 档位，可另行选择 transcript。
+- 每个 round 都作为独立 match 注册；benchmark 只报告进度，不自动切换主画面的观察对象。
 
 ## 8. 当前明确限制
 

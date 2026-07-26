@@ -13,4 +13,4 @@ packages/server/logs/records/
 packages/server/logs/benchmark-records/
 packages/server/logs/benchmark-llm-debug/
 packages/server/logs/orphan-journals/
-**/llm-presets.json
+packages/server/data/

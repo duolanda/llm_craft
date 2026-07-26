@@ -100,30 +100,6 @@ describe("BenchmarkOrchestrator", () => {
     });
   });
 
-  it("proxies AI terminal feed from the current round orchestrator", () => {
-    const round = createFakeRound({ winner: null, tick: 120 });
-    const orchestrator = new BenchmarkOrchestrator(
-      {
-        presetId: "preset-1",
-        llmConfig: {
-          providerType: "openai-compatible",
-          apiKey: "token",
-          baseURL: "https://api.example.test/v1",
-          model: "gpt-4.1-mini",
-        },
-        cpuStrategy: "rush",
-        rounds: 1,
-        recordReplay: false,
-      },
-      null,
-      () => round as any
-    );
-
-    (orchestrator as any).currentOrchestrator = round;
-
-    expect(orchestrator.getAITerminalFeed()).toEqual(round.getAITerminalFeed());
-  });
-
   it("limits active benchmark rounds by concurrency", async () => {
     const ws = { send: vi.fn() };
     let activeStarts = 0;
@@ -162,17 +138,11 @@ describe("BenchmarkOrchestrator", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     const startupMessages = ws.send.mock.calls.map((call) => JSON.parse(call[0]));
-    const activeProgress = startupMessages.find((message) =>
-      message.type === "benchmark_progress" && message.activeRounds?.length === 2
-    );
+    const activeProgress = startupMessages.find((message) => message.type === "benchmark_progress");
 
-    expect(activeProgress).toMatchObject({
-      viewedRound: 1,
-      activeRounds: [
-        { round: 1 },
-        { round: 2 },
-      ],
-    });
+    expect(activeProgress).toBeDefined();
+    expect(activeProgress).not.toHaveProperty("viewedRound");
+    expect(activeProgress).not.toHaveProperty("activeRounds");
 
     await new Promise((resolve) => setTimeout(resolve, 120));
 
@@ -216,5 +186,34 @@ describe("BenchmarkOrchestrator", () => {
         observed: true,
       }),
     ]);
+  });
+
+  it("does not replace the match selected by the user when benchmark rounds start", async () => {
+    const registry = new MatchRegistry();
+    const selectedMatch = createFakeRound({ winner: null, tick: 50 });
+    registry.register(selectedMatch as any, { kind: "live", observe: true });
+    const round = createFakeRound({ winner: "player_1", tick: 90 });
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "test-model",
+        },
+        cpuStrategy: "random",
+        rounds: 1,
+        recordReplay: false,
+      },
+      null,
+      () => round as any,
+      registry,
+    );
+
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(registry.getObservedMatchId()).toBe("match_round_50");
   });
 });

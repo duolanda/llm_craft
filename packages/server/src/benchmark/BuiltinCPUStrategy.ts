@@ -20,6 +20,18 @@ function chooseRandom<T>(items: readonly T[]): T {
   return items[Math.floor(Math.random() * items.length)] as T;
 }
 
+function findClosest<T extends { id: string; x: number; y: number }>(
+  origin: { x: number; y: number },
+  candidates: T[],
+): T | null {
+  return candidates.reduce<T | null>((closest, candidate) => {
+    if (!closest) return candidate;
+    return chebyshevDistance(origin, candidate) < chebyshevDistance(origin, closest)
+      ? candidate
+      : closest;
+  }, null);
+}
+
 function findBuildSite(
   hq: { x: number; y: number },
   mapWidth: number,
@@ -45,7 +57,9 @@ function findRoleTarget(
   enemyBuildings: any[],
 ): any | null {
   if (combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER) {
-    return enemyUnits.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK) ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.WAR_FACTORY) ?? null;
+    return enemyUnits.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK)
+      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.WAR_FACTORY)
+      ?? findClosest(combatUnit, enemyBuildings);
   }
 
   if (combatUnit.type === UNIT_TYPES.LIGHT_TANK) {
@@ -54,7 +68,7 @@ function findRoleTarget(
       enemyBuildings.find((building) => building.type === BUILDING_TYPES.WAR_FACTORY) ??
       enemyBuildings.find((building) => building.type === BUILDING_TYPES.BARRACKS) ??
       enemyUnits.find((unit) => unit.type === UNIT_TYPES.LIGHT_TANK) ??
-      null
+      findClosest(combatUnit, enemyBuildings)
     );
   }
 
@@ -64,7 +78,7 @@ function findRoleTarget(
       enemyUnits.find((unit) => unit.type === UNIT_TYPES.ROCKET_SOLDIER) ??
       enemyUnits.find((unit) => unit.type === UNIT_TYPES.SOLDIER) ??
       enemyUnits.find((unit) => unit.type === UNIT_TYPES.WORKER) ??
-      null
+      findClosest(combatUnit, enemyBuildings)
     );
   }
 
@@ -242,6 +256,9 @@ export async function runBuiltinCPUStrategy(options: {
     return false;
   };
   const issueMultiFrontAdvance = async (): Promise<boolean> => {
+    if (!enemyHQ && enemyBuildings.length > 0) {
+      return false;
+    }
     if (!enemyBase || combatUnits.length < ARMY_MASSING_THRESHOLD) {
       return false;
     }
@@ -466,7 +483,7 @@ export async function runBuiltinCPUStrategy(options: {
     }
   }
 
-  if (!isHQUnderPressure && combatUnits.length < ARMY_MASSING_THRESHOLD) {
+  if (!isHQUnderPressure && enemyHQ && combatUnits.length < ARMY_MASSING_THRESHOLD) {
     return;
   }
 
@@ -499,11 +516,16 @@ export async function runBuiltinCPUStrategy(options: {
     }
     for (const combatUnit of combatUnits) {
       if (!enemyHQ) {
-        const closestEnemy = enemyUnits[0];
-        if (closestEnemy) {
-          await callTool("attack", { unitId: combatUnit.id, targetId: closestEnemy.id });
+        const cleanupTarget = findClosest(combatUnit, enemyBuildings);
+        if (cleanupTarget) {
+          await callTool("attack", { unitId: combatUnit.id, targetId: cleanupTarget.id });
         } else {
-          await callTool("attack_move_unit", { unitId: combatUnit.id, x: enemyBase.x, y: enemyBase.y });
+          const closestEnemy = findClosest(combatUnit, enemyUnits);
+          if (closestEnemy) {
+            await callTool("attack", { unitId: combatUnit.id, targetId: closestEnemy.id });
+          } else {
+            await callTool("attack_move_unit", { unitId: combatUnit.id, x: enemyBase.x, y: enemyBase.y });
+          }
         }
         continue;
       }

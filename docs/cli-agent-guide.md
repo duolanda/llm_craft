@@ -211,7 +211,7 @@ Select which match the Web UI observes without stopping the others:
 llmcraft matches observe --game match_abc123
 ```
 
-Save a Trace v3 record. With no `--game`, the command uses the match bound to the saved local session:
+Save a Match Record. With no `--game`, the command uses the match bound to the saved local session:
 
 ```bash
 llmcraft record save
@@ -226,18 +226,7 @@ llmcraft matches stop --game match_abc123
 
 Observation selection and session binding are deliberately separate: `matches observe` changes the Web UI projection; it does not retarget existing CLI sessions.
 
-Storage lifecycle commands are operator tools rather than agent turn tools. They default to read-only previews:
-
-```bash
-llmcraft storage journals
-llmcraft storage recover
-llmcraft storage recover --apply
-llmcraft storage inspect
-llmcraft storage cleanup
-llmcraft storage cleanup --apply
-```
-
-`storage cleanup --apply` deletes only entries already selected by the reported retention policy. Versioned pins and `.keep` / `.llmcraft-keep` markers remain protected.
+The current CLI does not expose journal recovery or retention commands. A Match Record is written once after the match has stopped; transcript data is an optional part of an evaluation record rather than a separate storage lifecycle.
 
 ## 4. Read Before Acting
 
@@ -481,7 +470,6 @@ If you run commands manually, always pass the matching `--session` flag for that
 | Match | `play --vs random`, `play --vs rush`, `play --mode pvp`, `matches list`, `matches observe`, `matches stop` |
 | Session | `session use`, `session show` |
 | Record | `record save` |
-| Storage | `storage journals`, `storage recover`, `storage inspect`, `storage cleanup` |
 | State | `state`, `map`, `me`, `events`, `plans` |
 | Selectors | `units`, `buildings`, `enemies`, `resources` |
 | Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `hold` |

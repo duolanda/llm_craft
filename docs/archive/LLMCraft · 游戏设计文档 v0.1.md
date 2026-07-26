@@ -1,3 +1,11 @@
+<!--
+  归档文档：这是项目最初的早期设计稿（2026 年 v0.1），记录立项时的设想。
+  当前实现与现状以 README.md、AGENTS.md、docs/ai-api-contract.md 和
+  docs/current-implementation.md 为准；本文仅作历史参考，不代表当前代码、
+  机制或架构。其中“AI 生成一次性执行代码来操作游戏”的方向已被舍弃，
+  现在改为模型通过工具调用/CLI 控制面指挥单位。
+-->
+
 # LLMCraft · 游戏设计文档 v0.1
 
 > 工作标题：**LLMCraft**（模型争霸）

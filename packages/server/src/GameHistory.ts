@@ -113,6 +113,7 @@ function diffBuildings(
         y: building.y,
         hp: building.hp,
         maxHp: building.maxHp,
+        rallyPoint: building.rallyPoint ?? null,
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,
         constructionProgress: building.constructionProgress ?? null,
@@ -123,7 +124,8 @@ function diffBuildings(
     const damaged = previousBuilding.hp !== building.hp;
     const updated = JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue)
       || JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress)
-      || JSON.stringify(previousBuilding.constructionProgress) !== JSON.stringify(building.constructionProgress);
+      || JSON.stringify(previousBuilding.constructionProgress) !== JSON.stringify(building.constructionProgress)
+      || JSON.stringify(previousBuilding.rallyPoint) !== JSON.stringify(building.rallyPoint);
 
     if (damaged || updated) {
       changes.push({
@@ -134,6 +136,7 @@ function diffBuildings(
         y: building.y,
         hp: building.hp,
         maxHp: building.maxHp,
+        rallyPoint: building.rallyPoint ?? null,
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,
         constructionProgress: building.constructionProgress ?? null,

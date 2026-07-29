@@ -20,6 +20,8 @@ import {
   PlanStepScope,
   PlayerId,
   Position,
+  ProductionBatchRequest,
+  RallyMode,
   LOG_TYPES,
   RESULT_TYPES,
   TILE_TYPES,
@@ -33,7 +35,7 @@ import {
   getBuildingConstructionTicks,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
-  getProducerBuildingType,
+  getUnitVisionRange,
   getUnitCost,
   getProductionOptions,
   isBuildableBuildingType,
@@ -47,6 +49,7 @@ import { MissionRuntime } from "../agent/MissionRuntime";
 import type { AgentToolExecutionContext } from "../LLMProvider";
 import { ObservationProjection } from "../agent/ObservationProjection";
 import { AgentPolicy } from "../agent/AgentPolicy";
+import { MAX_PENDING_PRODUCTION_PER_UNIT_TYPE } from "../BuildingManager";
 
 type ToolEffect = "read" | "action" | "plan";
 export interface ExecutedToolResult {
@@ -79,11 +82,17 @@ interface BuildOccupancyIndex {
   buildingCells: Set<string>;
 }
 
+interface HarvesterProgress {
+  x: number;
+  y: number;
+  carryingCredits: number;
+  lastProgressTick: number;
+}
+
 const PLAN_CALL_TOOL_NAMES = [
   "move_unit",
   "attack_move_unit",
   "attack",
-  "spawn_unit",
   "build_structure",
   "start_harvest_loop",
   "hold_unit",
@@ -136,6 +145,7 @@ export class GameplayController {
   }>();
   private readonly pendingBuildResumeOrders = new Map<string, UnitIntent>();
   private readonly knownEnemyTargetIds = new Set<string>();
+  private readonly harvesterProgress = new Map<string, HarvesterProgress>();
 
   constructor(
     private readonly game: Game,
@@ -214,7 +224,9 @@ export class GameplayController {
   handleCommittedTick(): Command[] {
     this.observationProjection.invalidate();
     this.consumeMissionCommandFailures();
-    const missionCommands = this.missionRuntime.advance(this.getPlanSnapshot());
+    const snapshot = this.getPlanSnapshot();
+    this.updateHarvesterProgress(snapshot.tick, snapshot.myUnits);
+    const missionCommands = this.missionRuntime.advance(snapshot);
     const previousProvenance = this.commandProvenance;
     this.commandProvenance = {
       controllerId: previousProvenance?.controllerId ?? `mission:${this.playerId}`,
@@ -231,6 +243,10 @@ export class GameplayController {
 
   getActivePlans(): AgentPlanRecord[] {
     return this.missionRuntime.getActivePlans();
+  }
+
+  getAllPlans(): AgentPlanRecord[] {
+    return this.missionRuntime.getAllPlans();
   }
 
   private getReadState(): AgentReadState {
@@ -304,7 +320,7 @@ export class GameplayController {
           y: unit.y,
           hp: unit.hp,
           maxHp: unit.maxHp,
-          state: unit.state,
+          phase: unit.state,
           relation,
         } satisfies AgentMapStateUnit;
         units.push(mapUnit);
@@ -322,6 +338,7 @@ export class GameplayController {
           hp: building.hp,
           maxHp: building.maxHp,
           relation,
+          rallyPoint: relation === "self" && building.rallyPoint ? { ...building.rallyPoint } : undefined,
           constructionProgress: building.constructionProgress,
         } satisfies AgentMapStateBuilding;
         buildings.push(mapBuilding);
@@ -411,70 +428,67 @@ export class GameplayController {
         },
         diagnoseWait: (context) => this.diagnosePlanWait("attack", context),
       },
-      spawn_unit: {
-        defaultScope: "global",
-        defaultRetry: true,
-        validateArgs: (args) =>
-          (args.buildingId === undefined || typeof args.buildingId === "string") &&
-          (args.buildingType === undefined || isBuildingType(args.buildingType)) &&
-          isUnitType(args.unitType),
-        estimateCost: (context) => isUnitType(context.args.unitType) ? getUnitCost(context.args.unitType) : 0,
-        createCommand: (context) => {
-          const unitType = context.args.unitType;
-          if (!isUnitType(unitType)) {
-            return null;
-          }
-          const fallbackType = getProducerBuildingType(unitType);
-          if (!fallbackType) {
-            return null;
-          }
-          if (context.snapshot.myCredits < getUnitCost(unitType)) {
-            return null;
-          }
-          const buildingId = this.resolvePlanBuildingId(context, fallbackType);
-          const building = context.snapshot.myBuildings.find((candidate) => candidate.id === buildingId);
-          if (!building || building.productionQueue.length > 0) {
-            return null;
-          }
-          return this.createCommand("spawn", { buildingId: building.id, unitType });
-        },
-        diagnoseWait: (context) => this.diagnosePlanWait("spawn_unit", context),
-      },
       build_structure: {
         defaultScope: "global",
         defaultRetry: true,
+        untilRequiresIssuedCommand: true,
         validateArgs: (args) =>
           this.hasOptionalPlanUnitId(args) &&
           isBuildableBuildingType(args.buildingType) &&
-          Number.isInteger(args.x) &&
-          Number.isInteger(args.y),
+          ((args.x === undefined && args.y === undefined) ||
+            (Number.isInteger(args.x) && Number.isInteger(args.y))),
         estimateCost: (context) => isBuildableBuildingType(context.args.buildingType) ? getBuildingCost(context.args.buildingType) : 0,
         createCommand: (context) => {
           const unitId = this.resolvePlanUnitId(context);
-          if (!isBuildableBuildingType(context.args.buildingType) || context.snapshot.myCredits < getBuildingCost(context.args.buildingType)) {
+          const buildingType = context.args.buildingType;
+          if (!isBuildableBuildingType(buildingType) || context.snapshot.myCredits < getBuildingCost(buildingType)) {
             return null;
           }
           const worker = context.snapshot.myUnits.find((unit) => unit.id === unitId && unit.exists && unit.type === UNIT_TYPES.WORKER);
-          const position = { x: Number(context.args.x), y: Number(context.args.y) };
           if (
             !worker ||
             worker.constructingBuildingId ||
-            (context.args.buildingType === BUILDING_TYPES.WAR_FACTORY &&
-              !context.snapshot.myBuildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))) ||
-            !Number.isInteger(position.x) ||
-            !Number.isInteger(position.y) ||
-            !this.isWorkerAdjacentToBuildFootprint(worker, context.args.buildingType, position)
+            (buildingType === BUILDING_TYPES.WAR_FACTORY &&
+              !context.snapshot.myBuildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building)))
           ) {
             return null;
           }
-          return unitId && isBuildableBuildingType(context.args.buildingType) && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
-            ? this.createCommand("build", {
-                unitId,
-                buildingType: context.args.buildingType,
-                position,
-                resumeWorkerOrder: this.pendingBuildResumeOrders.get(unitId),
-              })
+
+          const state = this.getReadState();
+          const occupancy = this.createBuildOccupancyIndex(state);
+          let position = Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
+            ? { x: Number(context.args.x), y: Number(context.args.y) }
             : null;
+          if (!position || !this.validateBuildPosition(position, buildingType, state, occupancy).ok) {
+            const replacement = this.getSuggestedBuildSites(state, buildingType, 1, worker, undefined, occupancy)[0];
+            if (!replacement) {
+              return null;
+            }
+            position = { x: replacement.x, y: replacement.y };
+            context.args.x = position.x;
+            context.args.y = position.y;
+          }
+
+          const workerPosition = this.getWorkerApproachPosition(state, buildingType, position, worker, occupancy);
+          if (!workerPosition) {
+            return null;
+          }
+          if (!this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
+            if (
+              worker.intent?.type === "move" &&
+              worker.intent.targetX === workerPosition.x &&
+              worker.intent.targetY === workerPosition.y
+            ) {
+              return null;
+            }
+            return this.createCommand("move", { unitId: worker.id, position: workerPosition });
+          }
+          return this.createCommand("build", {
+            unitId: worker.id,
+            buildingType,
+            position,
+            resumeWorkerOrder: this.pendingBuildResumeOrders.get(worker.id),
+          });
         },
         diagnoseWait: (context) => this.diagnosePlanWait("build_structure", context),
       },
@@ -575,27 +589,6 @@ export class GameplayController {
       }
     }
 
-    if (call === "spawn_unit") {
-      const unitType = context.args.unitType;
-      const fallbackType = isUnitType(unitType) ? getProducerBuildingType(unitType) : null;
-      const buildingId = fallbackType ? this.resolvePlanBuildingId(context, fallbackType) : null;
-      const building = context.snapshot.myBuildings.find((candidate) => candidate.id === buildingId);
-      if (!building) {
-        return {
-          code: "producer_missing",
-          message: `No completed production building is available for ${String(unitType)}.`,
-          details: { unitType, requiredBuildingType: fallbackType },
-        };
-      }
-      if (building.productionQueue.length > 0) {
-        return {
-          code: "production_queue_busy",
-          message: `Production building ${building.id} is busy.`,
-          details: { buildingId: building.id, productionQueue: building.productionQueue },
-        };
-      }
-    }
-
     if (call === "build_structure") {
       const worker = unitId
         ? context.snapshot.myUnits.find((candidate) => candidate.id === unitId && candidate.exists && candidate.type === UNIT_TYPES.WORKER)
@@ -661,31 +654,6 @@ export class GameplayController {
     return context.planUnitIds.find((unitId) => context.snapshot.myUnits.some((unit) => unit.id === unitId && unit.exists)) ?? null;
   }
 
-  private resolvePlanBuildingId(context: PlanToolContext, fallbackType: BuildingType): string | null {
-    const requested = context.args.buildingId;
-    if (typeof requested === "string" && !requested.startsWith("$")) {
-      return requested;
-    }
-    const placeholderType = this.resolveBuildingPlaceholder(requested);
-    const type = placeholderType ?? (isBuildingType(context.args.buildingType) ? context.args.buildingType : fallbackType);
-    return context.snapshot.myBuildings.find((building) => building.type === type && isBuildingComplete(building))?.id ?? null;
-  }
-
-  private resolveBuildingPlaceholder(value: unknown): BuildingType | null {
-    if (value === "$hq") {
-      return BUILDING_TYPES.HQ;
-    }
-    if (value === "$barracks") {
-      return BUILDING_TYPES.BARRACKS;
-    }
-    if (value === "$war_factory") {
-      return BUILDING_TYPES.WAR_FACTORY;
-    }
-    if (value === "$refinery") {
-      return BUILDING_TYPES.REFINERY;
-    }
-    return null;
-  }
 
   private resolveTargetPriority(value: unknown): AttackTargetType[] | undefined {
     if (!Array.isArray(value)) {
@@ -713,13 +681,39 @@ export class GameplayController {
     const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
     const enemyRocketCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.ROCKET_SOLDIER).length;
     const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
-    const activeHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
+    const assignedHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
+    this.updateHarvesterProgress(state.tick, workers);
+    const stalledHarvesters = assignedHarvesters
+      .map((unit) => {
+        const target = unit.intent?.type === "harvest_loop"
+          ? state.tiles[unit.intent.targetY ?? -1]?.[unit.intent.targetX ?? -1]
+          : undefined;
+        const progress = this.harvesterProgress.get(unit.id);
+        const hasStalled = progress !== undefined && state.tick - progress.lastProgressTick >= 12;
+        const reason: "resource_depleted" | "delivery_blocked" | "path_blocked" | null = !target
+          || target.type !== TILE_TYPES.RESOURCE
+          || (target.resourceRemaining ?? 0) <= 0
+          ? "resource_depleted"
+          : hasStalled && unit.carryingCredits >= unit.carryCapacity
+            ? "delivery_blocked"
+            : hasStalled
+              ? "path_blocked"
+            : null;
+        return { unitId: unit.id, reason, carryingCredits: unit.carryingCredits };
+      })
+      .filter((item): item is {
+        unitId: string;
+        reason: "resource_depleted" | "delivery_blocked" | "path_blocked";
+        carryingCredits: number;
+      } => item.reason !== null);
+    const stalledHarvesterIds = new Set(stalledHarvesters.map((item) => item.unitId));
+    const activeHarvesters = assignedHarvesters.filter((unit) => !stalledHarvesterIds.has(unit.id));
     const idleWorkers = workers.filter((unit) => unit.state === "idle" && unit.intent?.type !== "harvest_loop");
     const resourceAssignments = state.tiles
       .flat()
       .filter((tile) => tile.type === TILE_TYPES.RESOURCE)
       .map((tile) => {
-        const assignedHarvesters = activeHarvesters.filter((unit) =>
+        const assignedToResource = assignedHarvesters.filter((unit) =>
           unit.intent?.type === "harvest_loop" &&
           unit.intent.targetX === tile.x &&
           unit.intent.targetY === tile.y
@@ -728,7 +722,8 @@ export class GameplayController {
         return {
           x: tile.x,
           y: tile.y,
-          assignedHarvesters,
+          assignedHarvesters: assignedToResource,
+          remaining: tile.resourceRemaining ?? 0,
           distanceToHq,
         };
       })
@@ -760,6 +755,14 @@ export class GameplayController {
         availableBuilderIds: availableBuilders.map((worker) => worker.id),
       };
     });
+    const canQueueUnit = (unitType: UnitType): boolean => myBuildings.some((building) =>
+      isBuildingComplete(building) &&
+      canBuildingProduce(building.type, unitType) &&
+      building.productionQueue.reduce(
+        (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+        0,
+      ) < MAX_PENDING_PRODUCTION_PER_UNIT_TYPE
+    );
     return {
       effect: "read",
       result: {
@@ -772,14 +775,16 @@ export class GameplayController {
         canBuildBarracks: me.resources.credits >= getBuildingCost(BUILDING_TYPES.BARRACKS),
         canBuildWarFactory: hasBarracks && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
         canBuildRefinery: me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY),
-        canSpawnWorker: me.resources.credits >= getUnitCost(UNIT_TYPES.WORKER),
-        canSpawnSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.SOLDIER),
-        canSpawnRifleman: me.resources.credits >= getUnitCost(UNIT_TYPES.RIFLEMAN),
-        canSpawnRocketSoldier: me.resources.credits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER),
-        canSpawnLightTank: me.resources.credits >= getUnitCost(UNIT_TYPES.LIGHT_TANK),
+        canQueueWorker: canQueueUnit(UNIT_TYPES.WORKER),
+        canQueueSoldier: canQueueUnit(UNIT_TYPES.SOLDIER),
+        canQueueRifleman: canQueueUnit(UNIT_TYPES.RIFLEMAN),
+        canQueueRocketSoldier: canQueueUnit(UNIT_TYPES.ROCKET_SOLDIER),
+        canQueueLightTank: canQueueUnit(UNIT_TYPES.LIGHT_TANK),
         economyStatus: {
           workers: workers.length,
+          assignedHarvesters: assignedHarvesters.length,
           activeHarvesters: activeHarvesters.length,
+          stalledHarvesters,
           idleWorkers: idleWorkers.length,
           carryingCredits: workers.reduce((sum, unit) => sum + unit.carryingCredits, 0),
           resourceAssignments,
@@ -834,10 +839,15 @@ export class GameplayController {
     const plannedUnitIds = new Set(this.missionRuntime.getActivePlans().flatMap((plan) => plan.unitIds));
     const units = me.units
       .filter((unit) => unit.exists)
-      .map((unit) => ({
-        ...unit,
-        hasActivePlan: plannedUnitIds.has(unit.id),
-      }));
+      .map((unit) => {
+        const { path, state: phase, ...summary } = unit;
+        return {
+          ...summary,
+          phase,
+          ...(path?.length ? { remainingPathSteps: path.length } : {}),
+          hasActivePlan: plannedUnitIds.has(unit.id),
+        };
+      });
     const groupMap = new Map<string, AgentUnitGroup & { xSum: number; ySum: number }>();
     for (const unit of units) {
       const role = unitCanAttack(unit.type) ? "combat" : "worker";
@@ -1059,31 +1069,54 @@ export class GameplayController {
       });
     }
 
-    const resolution = this.resolveAttackOrderCommand(unitId, targetId);
+    let actualTargetId = targetId;
+    let retargetedFrom: string | undefined;
+    let resolution = this.resolveAttackOrderCommand(unitId, actualTargetId);
     if (!resolution.ok) {
-      const recovery = resolution.error === "target_missing"
-        ? this.getEnemyTargetRecovery(attacker, targetId)
-        : {};
-      return this.actionResult({
-        ok: false,
-        error: resolution.error,
-        hint: resolution.hint,
-        ...recovery,
-      });
+      const initialFailure = resolution;
+      if (initialFailure.error !== "target_missing") {
+        return this.actionResult({
+          ok: false,
+          error: initialFailure.error,
+          hint: initialFailure.hint,
+        });
+      }
+      const recovery = this.getEnemyTargetRecovery(attacker, targetId);
+      const fallbackTargetId = recovery.targetStatus === "destroyed"
+        ? this.findNearbyAttackFallback(attacker)
+        : null;
+      if (!fallbackTargetId) {
+        return this.actionResult({
+          ok: false,
+          error: initialFailure.error,
+          hint: initialFailure.hint,
+          ...recovery,
+        });
+      }
+      const fallbackResolution = this.resolveAttackOrderCommand(unitId, fallbackTargetId);
+      if (!fallbackResolution.ok) {
+        return this.actionResult({
+          ok: false,
+          error: fallbackResolution.error,
+          hint: fallbackResolution.hint,
+          ...recovery,
+        });
+      }
+      actualTargetId = fallbackTargetId;
+      retargetedFrom = targetId;
+      resolution = fallbackResolution;
     }
 
     this.missionRuntime.interruptUnit(unitId);
-    if (resolution.completedAfterCommand) {
-      this.attackOrders.delete(unitId);
-    } else {
-      this.attackOrders.set(unitId, { unitId, targetId });
-    }
+    this.attackOrders.set(unitId, { unitId, targetId: actualTargetId });
     if (resolution.mode === "attack" && this.isAttackReloading(attacker)) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: true,
           mode: "wait_for_reload",
+          targetId: actualTargetId,
+          ...(retargetedFrom ? { retargetedFrom } : {}),
         }),
       };
     }
@@ -1094,11 +1127,13 @@ export class GameplayController {
         ok: true,
         commandId: command.id,
         mode: resolution.mode,
+        targetId: actualTargetId,
+        ...(retargetedFrom ? { retargetedFrom } : {}),
       }),
     };
   }
 
-  spawnUnit(buildingId: string, unitType: UnitType): ExecutedToolResult {
+  spawnUnit(buildingId: string, requests: ProductionBatchRequest[]): ExecutedToolResult {
     const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const building = me.buildings.find((candidate) => candidate.id === buildingId && candidate.exists);
@@ -1110,7 +1145,7 @@ export class GameplayController {
           error: "invalid_building",
           hint: "No living friendly building matches this buildingId; use one of availableProductionBuildings.",
           availableProductionBuildings: me.buildings
-            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && canBuildingProduce(candidate.type, unitType))
+            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && getProductionOptions(candidate.type).length > 0)
             .map((candidate) => ({ id: candidate.id, type: candidate.type, x: candidate.x, y: candidate.y })),
         }),
       };
@@ -1127,19 +1162,25 @@ export class GameplayController {
       };
     }
 
-    if (!isUnitType(unitType)) {
+    if (!Array.isArray(requests) || requests.length === 0) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_spawn_request",
-          hint: "Unknown unit type. Supported unit types are worker, soldier, rifleman, rocket_soldier, and light_tank.",
+          hint: "units must contain at least one { unitType, count } entry.",
         }),
       };
     }
 
-    const canProduce = canBuildingProduce(building.type, unitType);
-    if (!canProduce) {
+    const invalidRequest = requests.find((request) =>
+      !isUnitType(request.unitType) || !Number.isInteger(request.count) || request.count <= 0
+    );
+    const incompatibleRequest = requests.find((request) =>
+      isUnitType(request.unitType) && !canBuildingProduce(building.type, request.unitType)
+    );
+    if (invalidRequest || incompatibleRequest) {
+      const requestedType = invalidRequest?.unitType ?? incompatibleRequest?.unitType;
       return {
         effect: "action",
         result: this.withActionMetadata({
@@ -1148,32 +1189,205 @@ export class GameplayController {
           hint: `${building.type} can produce: ${getProductionOptions(building.type).join(", ")}.`,
           validUnitTypes: getProductionOptions(building.type),
           compatibleProductionBuildings: me.buildings
-            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && canBuildingProduce(candidate.type, unitType))
+            .filter((candidate) => candidate.exists && isBuildingComplete(candidate) && isUnitType(requestedType) && canBuildingProduce(candidate.type, requestedType))
             .map((candidate) => ({ id: candidate.id, type: candidate.type, x: candidate.x, y: candidate.y })),
         }),
       };
     }
 
-    const cost = getUnitCost(unitType);
-    if (me.resources.credits < cost) {
+    const requestedCounts = new Map<UnitType, number>();
+    for (const request of requests) {
+      requestedCounts.set(request.unitType, (requestedCounts.get(request.unitType) ?? 0) + request.count);
+    }
+    const overflow = [...requestedCounts].find(([unitType, count]) => {
+      const pending = building.productionQueue.reduce(
+        (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+        0,
+      );
+      return pending + count > MAX_PENDING_PRODUCTION_PER_UNIT_TYPE;
+    });
+    if (overflow) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
-          error: "insufficient_credits",
-          hint: `Need ${cost} credits before spawning ${unitType}.`,
+          error: "production_queue_limit",
+          hint: `Each building may have at most ${MAX_PENDING_PRODUCTION_PER_UNIT_TYPE} pending ${overflow[0]} units.`,
         }),
       };
     }
 
-    const command = this.enqueue(this.createCommand("spawn", { buildingId, unitType }));
+    const normalizedRequests = requests.map((request) => ({ unitType: request.unitType, count: request.count }));
+    const command = this.enqueue(this.createCommand("spawn", {
+      buildingId,
+      productionRequests: normalizedRequests,
+    }));
     return {
       effect: "action",
       result: this.withActionMetadata({
         ok: true,
         commandId: command.id,
+        buildingId,
+        requested: normalizedRequests,
+        queueBefore: building.productionQueue,
+        payment: "charged_per_tick; production pauses automatically when credits are insufficient",
       }),
     };
+  }
+
+  getProductionQueue(buildingIds?: string[]): ExecutedToolResult {
+    const state = this.getReadState();
+    this.trackRead(state.tick, true);
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const requested = buildingIds ? new Set(buildingIds) : null;
+    const queues = me.buildings
+      .filter((building) => building.exists && getProductionOptions(building.type).length > 0)
+      .filter((building) => !requested || requested.has(building.id))
+      .map((building) => ({
+        buildingId: building.id,
+        buildingType: building.type,
+        queue: building.productionQueue,
+        progress: building.productionProgress ?? null,
+        pendingByUnitType: Object.fromEntries(
+          getProductionOptions(building.type).map((unitType) => [
+            unitType,
+            building.productionQueue.reduce(
+              (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+              0,
+            ),
+          ]),
+        ),
+        maxPendingPerUnitType: MAX_PENDING_PRODUCTION_PER_UNIT_TYPE,
+      }));
+    return {
+      effect: "read",
+      result: {
+        tick: state.tick,
+        credits: me.resources.credits,
+        queues,
+        unknownBuildingIds: buildingIds?.filter((buildingId) => !queues.some((queue) => queue.buildingId === buildingId)) ?? [],
+      },
+    };
+  }
+
+  cancelProduction(input: { orderIds?: string[]; buildingIds?: string[] }): ExecutedToolResult {
+    const orderIds = [...new Set(input.orderIds ?? [])];
+    const buildingIds = [...new Set(input.buildingIds ?? [])];
+    if ((orderIds.length === 0) === (buildingIds.length === 0)) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_cancel_request",
+        hint: "Pass either orderIds or buildingIds. buildingIds clear complete queues; orderIds cancel selected batches.",
+      });
+    }
+
+    const state = this.getReadState();
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    if (buildingIds.length > 0) {
+      const known = me.buildings.filter((building) => buildingIds.includes(building.id) && building.exists);
+      const unknownBuildingIds = buildingIds.filter((buildingId) => !known.some((building) => building.id === buildingId));
+      if (unknownBuildingIds.length > 0) {
+        return this.actionResult({
+          ok: false,
+          error: "invalid_building",
+          hint: "Every buildingId must name a living friendly production building.",
+          unknownBuildingIds,
+        });
+      }
+      const commands = known.map((building) => this.enqueue(this.createCommand("cancel_production", {
+        buildingId: building.id,
+      })));
+      return this.actionResult({
+        ok: true,
+        commandIds: commands.map((command) => command.id),
+        buildingIds,
+        queuesBefore: known.map((building) => ({ buildingId: building.id, queue: building.productionQueue })),
+      });
+    }
+
+    const knownOrderIds = new Set(me.buildings.flatMap((building) => building.productionQueue.map((order) => order.orderId)));
+    const unknownOrderIds = orderIds.filter((orderId) => !knownOrderIds.has(orderId));
+    if (unknownOrderIds.length > 0) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_production_order",
+        hint: "Use get_production_queue to refresh active order IDs.",
+        unknownOrderIds,
+      });
+    }
+    const command = this.enqueue(this.createCommand("cancel_production", { productionOrderIds: orderIds }));
+    return this.actionResult({
+      ok: true,
+      commandId: command.id,
+      orderIds,
+    });
+  }
+
+  setRallyPoint(buildingId: string, position?: Position, mode: RallyMode = "move"): ExecutedToolResult {
+    const state = this.getReadState();
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const building = me.buildings.find((candidate) => candidate.id === buildingId && candidate.exists);
+    const productionBuildings = me.buildings
+      .filter((candidate) => candidate.exists && getProductionOptions(candidate.type).length > 0)
+      .map((candidate) => ({
+        id: candidate.id,
+        type: candidate.type,
+        x: candidate.x,
+        y: candidate.y,
+        rallyPoint: candidate.rallyPoint ?? null,
+      }));
+    if (!building || getProductionOptions(building.type).length === 0) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_production_building",
+        hint: "Use a friendly HQ, barracks, or war factory.",
+        availableProductionBuildings: productionBuildings,
+      });
+    }
+
+    if (mode !== "move" && mode !== "attack_move") {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_rally_mode",
+        hint: "Use rally mode move or attack_move.",
+      });
+    }
+
+    if (position && mode === "attack_move" && building.type === BUILDING_TYPES.HQ) {
+      return this.actionResult({
+        ok: false,
+        error: "unsupported_rally_mode",
+        hint: "HQ produces workers, so its rally point only supports move mode.",
+      });
+    }
+
+    if (
+      position &&
+      (!Number.isInteger(position.x) ||
+        !Number.isInteger(position.y) ||
+        position.y < 0 ||
+        position.y >= state.tiles.length ||
+        position.x < 0 ||
+        position.x >= (state.tiles[position.y]?.length ?? 0))
+    ) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_position",
+        hint: "Choose an integer rally destination inside the map bounds.",
+      });
+    }
+
+    const command = this.enqueue(this.createCommand("set_rally_point", {
+      buildingId,
+      position,
+      ...(position ? { rallyMode: mode } : {}),
+    }));
+    return this.actionResult({
+      ok: true,
+      commandId: command.id,
+      buildingId,
+      rallyPoint: position ? { ...position, mode } : null,
+    });
   }
 
   buildStructure(unitId: string, buildingType: BuildingType, requestedPosition?: Position): ExecutedToolResult {
@@ -1238,6 +1452,7 @@ export class GameplayController {
     }
 
     const occupancy = this.createBuildOccupancyIndex(state);
+    this.reserveActiveBuildPlanFootprints(occupancy);
     let selectedPlacement: SuggestedBuildSite | undefined;
     if (requestedPosition) {
       const validation = this.validateBuildPosition(requestedPosition, buildingType, state, occupancy);
@@ -1282,68 +1497,34 @@ export class GameplayController {
 
     this.missionRuntime.interruptUnit(unitId);
     this.attackOrders.delete(unitId);
-    if (!this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
-      const plan = this.orchestratePlan({
-        unitIds: [unitId],
-        loop: 1,
-        replaceExisting: true,
-        steps: [
-          {
-            call: "move_unit",
-            args: { unitId, x: selectedPlacement.workerPosition.x, y: selectedPlacement.workerPosition.y },
-            scope: "global",
-            until: {
-              condition: "worker_adjacent_to_build_footprint",
-              buildingType,
-              x: position.x,
-              y: position.y,
-            },
-            retry: true,
-          },
-          {
-            call: "build_structure",
-            args: { unitId, buildingType, x: position.x, y: position.y },
-            scope: "global",
-            retry: true,
-          },
-        ],
-      });
-      return {
-        effect: "plan",
-        result: {
-          ...(plan.result as Record<string, unknown>),
-          buildingType,
-          position,
-          workerPosition: selectedPlacement.workerPosition,
-          ...(selectedPlacement.estimatedRouteSaving !== undefined
-            ? {
-              estimatedRouteSaving: selectedPlacement.estimatedRouteSaving,
-              nearbyResources: selectedPlacement.nearbyResources,
-            }
-            : {}),
+    const plan = this.orchestratePlan({
+      unitIds: [unitId],
+      loop: 1,
+      replaceExisting: true,
+      steps: [
+        {
+          call: "build_structure",
+          args: { unitId, buildingType, x: position.x, y: position.y },
+          scope: "global",
+          until: { condition: "building_exists", buildingType },
+          retry: true,
         },
-      };
-    }
-    const command = this.enqueue(this.createCommand("build", {
-      unitId,
-      buildingType,
-      position,
-      resumeWorkerOrder: this.pendingBuildResumeOrders.get(unitId),
-    }));
+      ],
+    });
     return {
-      effect: "action",
-      result: this.withActionMetadata({
-        ok: true,
-        commandId: command.id,
+      effect: "plan",
+      result: {
+        ...(plan.result as Record<string, unknown>),
         buildingType,
         position,
+        workerPosition: selectedPlacement.workerPosition,
         ...(selectedPlacement.estimatedRouteSaving !== undefined
           ? {
             estimatedRouteSaving: selectedPlacement.estimatedRouteSaving,
             nearbyResources: selectedPlacement.nearbyResources,
           }
           : {}),
-      }),
+      },
     };
   }
 
@@ -1382,6 +1563,34 @@ export class GameplayController {
         error: "invalid_resource_target",
         hint: "The requested tile is not a resource tile; omit x/y for automatic selection or use nearbyResources.",
         nearbyResources: this.getNearbyResourceOptions(state, unit),
+      });
+    }
+
+    const currentIntent = unit.intent?.type === "harvest_loop" ? unit.intent : null;
+    const currentTarget = currentIntent
+      ? state.tiles[currentIntent.targetY ?? -1]?.[currentIntent.targetX ?? -1]
+      : undefined;
+    const sameTarget = currentIntent !== null && (
+      position === undefined
+      || (currentIntent.targetX === position.x && currentIntent.targetY === position.y)
+    );
+    const progress = this.harvesterProgress.get(unitId);
+    const stalled = progress !== undefined && state.tick - progress.lastProgressTick >= 12;
+    if (
+      sameTarget
+      && currentTarget?.type === TILE_TYPES.RESOURCE
+      && (currentTarget.resourceRemaining ?? 0) > 0
+      && !stalled
+    ) {
+      return this.actionResult({
+        ok: true,
+        status: "already_active",
+        unitId,
+        phase: unit.state,
+        resource: {
+          x: currentIntent.targetX,
+          y: currentIntent.targetY,
+        },
       });
     }
 
@@ -1438,7 +1647,7 @@ export class GameplayController {
 
     const normalizedInput = validated.value;
     if (normalizedInput.replaceExisting !== false) {
-      for (const unitId of normalizedInput.unitIds) {
+      for (const unitId of normalizedInput.unitIds ?? []) {
         this.missionRuntime.interruptUnit(unitId);
         this.attackOrders.delete(unitId);
       }
@@ -1458,6 +1667,37 @@ export class GameplayController {
     };
   }
 
+  cancelPlan(input: { planIds?: string[] }): ExecutedToolResult {
+    const planIds = Array.isArray(input.planIds)
+      ? [...new Set(input.planIds.filter((planId): planId is string => typeof planId === "string" && planId.length > 0))]
+      : [];
+    if (planIds.length === 0) {
+      return {
+        effect: "plan",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "missing_plans",
+          hint: "Pass one or more active plan IDs from get_active_plans in planIds.",
+        }),
+      };
+    }
+
+    const cancellation = this.missionRuntime.cancel(planIds);
+    const failedPlanIds = [...cancellation.inactivePlanIds, ...cancellation.unknownPlanIds];
+    return {
+      effect: "plan",
+      result: this.withActionMetadata({
+        ok: failedPlanIds.length === 0,
+        ...(failedPlanIds.length > 0 ? {
+          error: cancellation.cancelledPlanIds.length > 0 ? "partial_failure" : "invalid_plan",
+          hint: "Use get_active_plans to refresh active plan IDs.",
+          failedPlanIds,
+        } : {}),
+        ...cancellation,
+      }),
+    };
+  }
+
   private enqueue(command: Command): Command {
     this.issuedCommands.push(command);
     this.submitCommands([command]);
@@ -1466,7 +1706,6 @@ export class GameplayController {
 
   private consumeMissionCommandFailures(): void {
     const deterministicFailures = new Set<string>([
-      RESULT_TYPES.BUILD_INVALID_POSITION,
       RESULT_TYPES.BUILD_INVALID_BUILDING,
       RESULT_TYPES.SPAWN_INVALID_BUILDING,
       RESULT_TYPES.INVALID_UNIT,
@@ -1534,11 +1773,11 @@ export class GameplayController {
 
   private withActionMetadata<T extends Record<string, unknown>>(result: T): T & Record<string, unknown> {
     const currentTick = this.game.getTick();
-    const staleWarning = this.policy.getStaleReadWarning(this.lastReadTick, currentTick);
+    const readWarning = this.policy.getReadWarning(this.lastReadTick, currentTick);
     return {
       tick: currentTick,
       ...result,
-      ...(staleWarning ? { warning: staleWarning } : {}),
+      ...(readWarning ? { warning: readWarning } : {}),
     };
   }
 
@@ -1557,7 +1796,7 @@ export class GameplayController {
         x: unit.x,
         y: unit.y,
         hp: unit.hp,
-        state: unit.state,
+        phase: unit.state,
       }));
   }
 
@@ -1662,13 +1901,32 @@ export class GameplayController {
         this.attackOrders.delete(unitId);
         continue;
       }
-      if (unit.state === "moving" && unit.intent?.type === "move") {
+      if (
+        unit.state === "moving" &&
+        unit.intent?.type === "move" &&
+        this.getEnemyTarget(order.targetId)
+      ) {
         continue;
       }
 
       const resolution = this.resolveAttackOrderCommand(order.unitId, order.targetId);
       if (!resolution.ok) {
+        const fallbackTargetId = resolution.error === "target_missing"
+          ? this.findNearbyAttackFallback(unit)
+          : null;
+        if (fallbackTargetId) {
+          order.targetId = fallbackTargetId;
+          const fallback = this.resolveAttackOrderCommand(order.unitId, fallbackTargetId);
+          if (fallback.ok) commands.push(fallback.command);
+          continue;
+        }
         this.attackOrders.delete(unitId);
+        if (unit.intent?.type === "move" || unit.intent?.type === "attack") {
+          commands.push(this.createCommand("hold", { unitId }));
+        }
+        continue;
+      }
+      if (resolution.mode === "attack" && unit.intent?.type === "attack" && unit.intent.targetId === order.targetId) {
         continue;
       }
       if (resolution.mode === "attack" && this.isAttackReloading(unit)) {
@@ -1676,11 +1934,60 @@ export class GameplayController {
       }
 
       commands.push(resolution.command);
-      if (resolution.completedAfterCommand) {
-        this.attackOrders.delete(unitId);
-      }
     }
     return commands;
+  }
+
+  private findNearbyAttackFallback(attacker: Unit): string | null {
+    const state = this.getReadState();
+    const me = state.players.find((player) => player.id === this.playerId)!;
+    const friendlyIds = new Set([
+      ...me.units.filter((unit) => unit.exists).map((unit) => unit.id),
+      ...me.buildings.filter((building) => building.exists).map((building) => building.id),
+    ]);
+    const priority = getDefaultAttackMovePriority(attacker.type);
+    const priorityIndex = (type: AttackTargetType): number => {
+      const index = priority.indexOf(type);
+      return index >= 0 ? index : priority.length;
+    };
+    const visionRange = getUnitVisionRange(attacker.type);
+    const candidates = state.players
+      .filter((player) => player.id !== this.playerId)
+      .flatMap((player) => [
+        ...player.units
+          .filter((unit) => unit.exists)
+          .map((unit) => ({
+            id: unit.id,
+            type: unit.type as AttackTargetType,
+            hp: unit.hp,
+            distance: Math.max(Math.abs(unit.x - attacker.x), Math.abs(unit.y - attacker.y)),
+            threatening: unit.intent?.targetId ? friendlyIds.has(unit.intent.targetId) : false,
+          })),
+        ...player.buildings
+          .filter((building) => building.exists)
+          .map((building) => ({
+            id: building.id,
+            type: building.type as AttackTargetType,
+            hp: building.hp,
+            distance: getDistanceToBuildingFootprint(
+              building.type,
+              building.x,
+              building.y,
+              attacker.x,
+              attacker.y,
+            ),
+            threatening: false,
+          })),
+      ])
+      .filter((candidate) => candidate.distance <= visionRange)
+      .sort((left, right) =>
+        Number(right.threatening) - Number(left.threatening)
+        || priorityIndex(left.type) - priorityIndex(right.type)
+        || left.distance - right.distance
+        || left.hp - right.hp
+        || left.id.localeCompare(right.id)
+      );
+    return candidates[0]?.id ?? null;
   }
 
   private resolveAttackOrderCommand(unitId: string, targetId: string): AttackOrderResolution {
@@ -1824,14 +2131,14 @@ export class GameplayController {
 
     const preferredX = hq.x + (hq.x < state.tiles[0]?.length / 2 ? 12 : -12);
     const candidates: Position[] = [];
-    for (let radius = 5; radius <= 32 && candidates.length < limit * 4; radius++) {
+    for (let radius = 5; radius <= 32; radius++) {
       for (let dy = -radius; dy <= radius; dy++) {
         for (const dx of [-radius, radius]) {
           const position = { x: hq.x + dx, y: hq.y + dy };
           if (this.validateBuildPosition(position, buildingType, state, occupancy).ok) candidates.push(position);
         }
       }
-      for (let dx = -radius + 1; dx < radius && candidates.length < limit * 4; dx++) {
+      for (let dx = -radius + 1; dx < radius; dx++) {
         for (const dy of [-radius, radius]) {
           const position = { x: hq.x + dx, y: hq.y + dy };
           if (this.validateBuildPosition(position, buildingType, state, occupancy).ok) candidates.push(position);
@@ -1841,8 +2148,8 @@ export class GameplayController {
 
     return candidates
       .sort((a, b) => {
-        const aScore = Math.abs(a.x - preferredX) * 3 + Math.abs(a.y - hq.y);
-        const bScore = Math.abs(b.x - preferredX) * 3 + Math.abs(b.y - hq.y);
+        const aScore = Math.abs(a.x - preferredX) + Math.abs(a.y - hq.y) * 3;
+        const bScore = Math.abs(b.x - preferredX) + Math.abs(b.y - hq.y) * 3;
         if (aScore !== bScore) {
           return aScore - bScore;
         }
@@ -2100,30 +2407,85 @@ export class GameplayController {
     return { unitIdsByCell, buildingCells };
   }
 
+  private reserveActiveBuildPlanFootprints(occupancy: BuildOccupancyIndex): void {
+    for (const plan of this.missionRuntime.getActivePlans()) {
+      for (const step of plan.steps) {
+        if (
+          step.call !== "build_structure" ||
+          !isBuildableBuildingType(step.args.buildingType) ||
+          !Number.isInteger(step.args.x) ||
+          !Number.isInteger(step.args.y)
+        ) {
+          continue;
+        }
+        for (const cell of getBuildingFootprintCells(
+          step.args.buildingType,
+          Number(step.args.x),
+          Number(step.args.y),
+        )) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              occupancy.buildingCells.add(`${cell.x + dx},${cell.y + dy}`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private updateHarvesterProgress(tick: number, units: readonly Unit[]): void {
+    const assignedIds = new Set<string>();
+    for (const unit of units) {
+      if (!unit.exists || unit.type !== UNIT_TYPES.WORKER || unit.intent?.type !== "harvest_loop") {
+        continue;
+      }
+      assignedIds.add(unit.id);
+      const previous = this.harvesterProgress.get(unit.id);
+      const moved = previous
+        ? Math.max(Math.abs(unit.x - previous.x), Math.abs(unit.y - previous.y)) >= 0.75
+        : true;
+      const gatheredOrDelivered = previous?.carryingCredits !== unit.carryingCredits;
+      if (!previous || moved || gatheredOrDelivered) {
+        this.harvesterProgress.set(unit.id, {
+          x: unit.x,
+          y: unit.y,
+          carryingCredits: unit.carryingCredits,
+          lastProgressTick: tick,
+        });
+      }
+    }
+    for (const unitId of this.harvesterProgress.keys()) {
+      if (!assignedIds.has(unitId)) {
+        this.harvesterProgress.delete(unitId);
+      }
+    }
+  }
+
   private isWorkerAdjacentToBuildFootprint(worker: { x: number; y: number }, buildingType: BuildingType, position: Position): boolean {
     const distance = getDistanceToBuildingFootprint(buildingType, position.x, position.y, worker.x, worker.y);
     return distance > 0 && distance <= 1;
   }
 
   private validatePlanInput(input: OrchestratePlanInput): { ok: true; value: OrchestratePlanInput } | { ok: false; hint: string } {
-    if (!input || !Array.isArray(input.unitIds) || input.unitIds.length === 0) {
-      return { ok: false, hint: "unitIds must contain at least one friendly unit id." };
+    if (!input || !Array.isArray(input.steps) || input.steps.length === 0) {
+      return { ok: false, hint: "steps must contain at least one supported plan step." };
+    }
+    if (input.unitIds !== undefined && !Array.isArray(input.unitIds)) {
+      return { ok: false, hint: "unitIds must be an array when provided." };
     }
 
     const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const myUnitIds = new Set(me.units.filter((unit) => unit.exists).map((unit) => unit.id));
-    const normalizedUnitIds = [...new Set(input.unitIds.map((unitId) => String(unitId)))];
-    const invalidUnitId = normalizedUnitIds.find((unitId) => !myUnitIds.has(unitId));
-    if (invalidUnitId) {
-      return { ok: false, hint: `Unknown controllable unit id: ${invalidUnitId}. Plans can only target friendly units.` };
+    const myBuildingIds = new Set(me.buildings.filter((building) => building.exists).map((building) => building.id));
+    const subjectIds = [...new Set((input.unitIds ?? []).map((unitId) => String(unitId)))];
+    const invalidSubjectId = subjectIds.find((subjectId) => !myUnitIds.has(subjectId) && !myBuildingIds.has(subjectId));
+    if (invalidSubjectId) {
+      return { ok: false, hint: `Unknown friendly unit or building id: ${invalidSubjectId}.` };
     }
+    const normalizedUnitIds = subjectIds.filter((subjectId) => myUnitIds.has(subjectId));
 
-    if (!Array.isArray(input.steps) || input.steps.length === 0) {
-      return { ok: false, hint: "steps must contain at least one supported plan step." };
-    }
-
-    const allowedPlanUnitIds = new Set(normalizedUnitIds);
+    const allowedPlanUnitIds = myUnitIds;
     if (!input.steps.every((step) => this.isPlanStep(step, allowedPlanUnitIds))) {
       return {
         ok: false,
@@ -2139,14 +2501,27 @@ export class GameplayController {
       return { ok: false, hint: "scope must be either global or per_unit." };
     }
 
+    const hasPerUnitStep = input.steps.some((step) => {
+      const handler = this.planToolHandlers[step.call];
+      return (step.scope ?? input.scope ?? handler?.defaultScope) === "per_unit";
+    });
+    if (hasPerUnitStep && normalizedUnitIds.length === 0) {
+      return {
+        ok: false,
+        hint: "per_unit steps require at least one friendly unit ID in unitIds; global building plans may omit unitIds.",
+      };
+    }
+
+    const normalizedSteps = structuredClone(input.steps);
+
     return {
       ok: true,
       value: {
-        unitIds: normalizedUnitIds,
+        unitIds: hasPerUnitStep ? normalizedUnitIds : subjectIds,
         replaceExisting: input.replaceExisting,
         scope: input.scope,
         loop: input.loop,
-        steps: structuredClone(input.steps),
+        steps: normalizedSteps,
       },
     };
   }
@@ -2227,6 +2602,11 @@ export class GameplayController {
       case "credits_at_least":
         return typeof value.amount === "number" && Number.isInteger(value.amount) && value.amount >= 0;
       case "building_exists":
+        return (
+          isBuildingType(value.buildingType) &&
+          (value.count === undefined || (Number.isInteger(value.count) && Number(value.count) > 0)) &&
+          ((value.x === undefined && value.y === undefined) || (Number.isInteger(value.x) && Number.isInteger(value.y)))
+        );
       case "enemy_building_exists":
         return (
           isBuildingType(value.buildingType) &&
@@ -2242,8 +2622,7 @@ export class GameplayController {
       case "production_queue_empty":
         return (
           (value.buildingId === undefined || typeof value.buildingId === "string") &&
-          (value.buildingType === undefined || isBuildingType(value.buildingType)) &&
-          (value.buildingId !== undefined || value.buildingType !== undefined)
+          (value.buildingType === undefined || isBuildingType(value.buildingType))
         );
       default:
         return true;

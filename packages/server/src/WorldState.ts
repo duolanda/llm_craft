@@ -103,6 +103,14 @@ export class WorldState {
   }
 
   destroyEntity(id: string): boolean {
+    const entity = this.entities.resolve(id);
+    if (entity?.kind === "building") {
+      const cancellation = this.buildings.cancelProduction(entity.entity);
+      const owner = this.getPlayerState(entity.entity.playerId);
+      if (owner && cancellation.refundCredits > 0) {
+        owner.resources.credits += cancellation.refundCredits;
+      }
+    }
     const destroyed = this.entities.destroy(id) !== undefined;
     if (destroyed) this.markChanged();
     return destroyed;
@@ -127,7 +135,8 @@ export class WorldState {
       }),
       buildings: this.buildings.getBuildingsByPlayer(player.id).map((building) => ({
         ...building,
-        productionQueue: [...building.productionQueue],
+        rallyPoint: building.rallyPoint ? { ...building.rallyPoint } : undefined,
+        productionQueue: building.productionQueue.map((order) => ({ ...order })),
         productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
         constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),

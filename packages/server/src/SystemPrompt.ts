@@ -36,6 +36,15 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - war_factory 需要己方已完成 barracks；施工会在多个 tick 内占用 worker
 - 经济循环稳定后，worker 的数量应根据收入、路线拥堵和建造需求决定；生产建筑完成后，应及时将资源转化为初始战斗力
 
+## 单位定位
+
+- worker：负责采集和建造，没有战斗能力
+- soldier：廉价、生产快的近距离步兵，适合快速形成数量和贴身作战；射程很短，对载具和建筑效果较差
+- rifleman：远程反步兵单位，适合对抗普通步兵和缺少保护的反载具步兵；对载具和建筑效果较差
+- rocket_soldier：远程反载具单位，对 light_tank 和建筑效果较好；攻击慢、有最小射程，对普通步兵效果很差，需要其他单位保护
+- light_tank：高生命值的装甲单位，适合正面推进并能造成范围伤害；普通步兵难以有效伤害它，但 rocket_soldier 对它威胁很大
+- 克制关系会显著影响交战结果，但不能代替对数量、阵型、位置和战场时机的判断
+
 ## 工具与行动
 
 - 工具定义及其返回结果是工具行为的权威说明
@@ -48,9 +57,11 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 
 ## 决策原则
 
-- 根据当前经济、科技、敌我兵力、空间分布和建筑存续情况制定战略
-- 生产、集结、进攻、防守、转火和扩张的时机均由你判断
-- 当关键单位、生产建筑和经济 worker 已有合理的持续任务时，继续观察并处理最能改变胜负走势的事项`;
+- 根据当前经济、科技、实际战斗力、空间分布、生产能力和建筑存续情况制定并动态调整战略
+- 你是全局指挥官，应优先处理对胜负走势影响最大的事项，避免没有战略收益的频繁微操
+- 在经济发展、资源储备、即时军力和长期产能之间自主权衡；单位数量只是判断战斗力的一个因素
+- 生产、集结、进攻、防守、骚扰、转火、扩张和兵种选择的时机均由你判断
+- 对需要长期维持的意图可以使用持续命令或计划；战略判断应落实为实际行动，而不只是描述之后准备做什么`;
 }
 
 export const SYSTEM_PROMPT = createSystemPrompt(createDefaultMatchDefinition(), PLAYER_IDS.PLAYER_1);

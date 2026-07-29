@@ -1,6 +1,6 @@
 import { PLAYER_IDS, ACTOR_IDS } from "./constants.js";
 import type { ResultCode, PlayerId, ActorId } from "./constants.js";
-import type { Command } from "./types.js";
+import type { Command, ProductionOrder, RallyPoint } from "./types.js";
 
 // ============================================================
 // 日志等级
@@ -82,8 +82,13 @@ export const RESULT_TYPES = {
 
   // 生产相关
   SPAWN_SUCCESS: "spawn_success",
-  SPAWN_INSUFFICIENT_CREDITS: "spawn_insufficient_credits",
   SPAWN_INVALID_BUILDING: "spawn_invalid_building",
+  PRODUCTION_CANCELLED: "production_cancelled",
+  PRODUCTION_INVALID_ORDER: "production_invalid_order",
+
+  // 集结点相关
+  RALLY_POINT_UPDATED: "rally_point_updated",
+  RALLY_INVALID_TARGET: "rally_invalid_target",
 
   // 暂停相关
   HOLD_SUCCESS: "hold_success",
@@ -161,19 +166,29 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.SPAWN_SUCCESS]: {
     buildingId: string;
-    unitType: string;
-  };
-  [RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS]: {
-    buildingId: string;
-    unitType: string;
-    requiredCredits: number;
-    currentCredits: number;
-    hint: string;
+    orders: ProductionOrder[];
+    queue: ProductionOrder[];
   };
   [RESULT_TYPES.SPAWN_INVALID_BUILDING]: {
     buildingId: string;
     buildingType: string;
     unitType: string;
+    hint: string;
+  };
+  [RESULT_TYPES.PRODUCTION_CANCELLED]: {
+    buildingIds: string[];
+    cancelledOrderIds: string[];
+    refundCredits: number;
+  };
+  [RESULT_TYPES.PRODUCTION_INVALID_ORDER]: {
+    hint: string;
+  };
+  [RESULT_TYPES.RALLY_POINT_UPDATED]: {
+    buildingId: string;
+    rallyPoint: RallyPoint | null;
+  };
+  [RESULT_TYPES.RALLY_INVALID_TARGET]: {
+    buildingId: string;
     hint: string;
   };
   [RESULT_TYPES.HOLD_SUCCESS]: {
@@ -249,6 +264,7 @@ export const LOG_TYPES = {
 
   // 单位系统
   UNIT_SPAWNED: "unit_spawned",
+  UNIT_DESTROYED: "unit_destroyed",
   SPAWN_FAILED: "spawn_failed",
   BUILDING_COMPLETED: "building_completed",
 
@@ -287,7 +303,8 @@ export interface GameLogDataMap {
     amount: number;
     credits: number;
   };
-  [LOG_TYPES.UNIT_SPAWNED]: { unitType: string };
+  [LOG_TYPES.UNIT_SPAWNED]: { unitId: string; unitType: string };
+  [LOG_TYPES.UNIT_DESTROYED]: { unitId: string; unitType: string };
   [LOG_TYPES.SPAWN_FAILED]: { unitType: string };
   [LOG_TYPES.BUILDING_COMPLETED]: {
     buildingId: string;
@@ -338,6 +355,7 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.RESOURCE_GATHERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.CREDITS_DELIVERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.UNIT_SPAWNED]: {},
+  [LOG_TYPES.UNIT_DESTROYED]: {},
   [LOG_TYPES.SPAWN_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.BUILDING_COMPLETED]: {},
   [LOG_TYPES.COMMAND_RESULT]: {},

@@ -15,6 +15,62 @@ import { getCollisionManifold } from "../navigation/CollisionShape";
 import { getUnitCollisionShape } from "../navigation/UnitCollision";
 
 describe("simulation systems", () => {
+  it("sends a produced unit toward the nearest reachable tile around an occupied rally point", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const barracks = world.createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1");
+    const occupiedRallyPoint = { x: 45, y: 48, mode: "move" as const };
+    barracks.rallyPoint = occupiedRallyPoint;
+    const [order] = world.buildings.enqueueProduction(barracks, [{ unitType: UNIT_TYPES.RIFLEMAN, count: 1 }]);
+    barracks.productionProgress = {
+      orderId: order.orderId,
+      unitType: UNIT_TYPES.RIFLEMAN,
+      remainingTicks: 1,
+      totalTicks: 1,
+      paidCredits: 0,
+      totalCost: 80,
+      status: "producing",
+    };
+    world.createUnit(UNIT_TYPES.WORKER, occupiedRallyPoint.x, occupiedRallyPoint.y, "player_1");
+
+    const events = new ProductionSystem().step(world);
+    const spawned = events.find((event) => event.type === "unit_spawned");
+    expect(spawned?.type).toBe("unit_spawned");
+    if (!spawned || spawned.type !== "unit_spawned") return;
+    const unit = world.units.getUnit(spawned.unitId)!;
+
+    expect(unit.order).toMatchObject({ type: "move" });
+    expect(unit.pathTarget).toBeDefined();
+    expect(unit.pathTarget).not.toEqual(occupiedRallyPoint);
+    expect(Math.abs(unit.pathTarget!.x - occupiedRallyPoint.x) + Math.abs(unit.pathTarget!.y - occupiedRallyPoint.y)).toBe(1);
+  });
+
+  it("gives produced combat units an attack-move order for an attack-move rally point", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const barracks = world.createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1");
+    barracks.rallyPoint = { x: 45, y: 48, mode: "attack_move" };
+    const [order] = world.buildings.enqueueProduction(barracks, [{ unitType: UNIT_TYPES.RIFLEMAN, count: 1 }]);
+    barracks.productionProgress = {
+      orderId: order.orderId,
+      unitType: UNIT_TYPES.RIFLEMAN,
+      remainingTicks: 1,
+      totalTicks: 1,
+      paidCredits: 0,
+      totalCost: 80,
+      status: "producing",
+    };
+
+    const events = new ProductionSystem().step(world);
+    const spawned = events.find((event) => event.type === "unit_spawned");
+    expect(spawned?.type).toBe("unit_spawned");
+    if (!spawned || spawned.type !== "unit_spawned") return;
+
+    expect(world.units.getUnit(spawned.unitId)?.order).toMatchObject({
+      type: "attack_move",
+      targetX: 45,
+      targetY: 48,
+    });
+  });
+
   it("advances path movement using only WorldState", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const worker = world.units.getUnitsByPlayer("player_1")[0];
@@ -60,6 +116,53 @@ describe("simulation systems", () => {
     expect(Number.isFinite(mover.y)).toBe(true);
     expect({ x: mover.x, y: mover.y }).not.toEqual({ x: 59, y: 44 });
     expect(mover.pathTarget).toEqual({ x: 59, y: 47 });
+  });
+
+  it("lets a tank and worker escape traffic beside an HQ instead of oscillating forever", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 11.637597859575969, 42.97192172836485, "player_1");
+    tank.heading = 1.5347068724483233;
+    tank.path = [
+      { x: 12, y: 42 },
+      { x: 13, y: 42 },
+      { x: 14, y: 42 },
+      { x: 15, y: 42 },
+      { x: 16, y: 42 },
+      { x: 17, y: 42 },
+      { x: 18, y: 42 },
+      { x: 19, y: 42 },
+      { x: 20, y: 42 },
+      { x: 20, y: 43 },
+    ];
+    tank.pathTarget = { x: 20, y: 43 };
+
+    // Preserve the odd unit-id avoidance side from the benchmark fixture.
+    world.createUnit(UNIT_TYPES.WORKER, 40, 40, "player_1");
+    const worker = world.createUnit(UNIT_TYPES.WORKER, 10.087894146970639, 43.407306036546764, "player_1");
+    worker.heading = 1.1518951022505093;
+    worker.path = [
+      { x: 11, y: 43 },
+      { x: 12, y: 43 },
+      { x: 13, y: 43 },
+      { x: 14, y: 43 },
+      { x: 15, y: 43 },
+      { x: 16, y: 43 },
+      { x: 17, y: 43 },
+      { x: 18, y: 43 },
+      { x: 19, y: 43 },
+      { x: 20, y: 43 },
+      { x: 20, y: 44 },
+      { x: 20, y: 45 },
+      { x: 20, y: 46 },
+      { x: 20, y: 47 },
+      { x: 20, y: 48 },
+    ];
+    worker.pathTarget = { x: 20, y: 48 };
+
+    for (let tick = 0; tick < 30; tick++) new MovementSystem().step(world);
+
+    expect(tank.x).toBeGreaterThan(14);
+    expect(worker.x).toBeGreaterThan(12);
   });
 
   it("keeps congested movement work bounded across repeated ticks", () => {
@@ -236,11 +339,15 @@ describe("simulation systems", () => {
   it("ticks production and returns spawned entity identity without logging", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const building = world.createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1");
-    building.productionQueue.push(UNIT_TYPES.SOLDIER);
+    const [order] = world.buildings.enqueueProduction(building, [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }]);
     building.productionProgress = {
+      orderId: order.orderId,
       unitType: UNIT_TYPES.SOLDIER,
       remainingTicks: 1,
       totalTicks: 1,
+      paidCredits: 0,
+      totalCost: 60,
+      status: "producing",
     };
 
     const events = new ProductionSystem().step(world);
@@ -381,6 +488,53 @@ describe("simulation systems", () => {
       targetY: 40,
       targetId: defender.id,
     });
+  });
+
+  it("acquires a nearby replacement after a direct attack target is destroyed", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const attacker = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
+    const destroyed = world.createUnit(UNIT_TYPES.SOLDIER, 41, 40, "player_2");
+    const replacement = world.createUnit(UNIT_TYPES.ROCKET_SOLDIER, 40, 41, "player_2");
+    attacker.order = { type: "attack", targetId: destroyed.id };
+    world.destroyEntity(destroyed.id);
+
+    new CombatSystem().step(world);
+
+    expect(world.projectiles.some((projectile) => projectile.targetId === replacement.id)).toBe(true);
+    expect(attacker.order).toMatchObject({ type: "attack", targetId: replacement.id });
+  });
+
+  it("delivers a full load while the worker remains on a resource inside refinery range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const resource = createDefaultMatchDefinition().map.resources[0];
+    const worker = world.units.getUnitsByPlayer("player_1").find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    world.createBuilding(BUILDING_TYPES.REFINERY, resource.x - 3, resource.y, "player_1");
+    worker.x = resource.x;
+    worker.y = resource.y;
+    worker.carryingCredits = worker.carryCapacity;
+    worker.order = { type: "harvest_loop", targetX: resource.x, targetY: resource.y };
+    const creditsBefore = world.getPlayerState("player_1")!.resources.credits;
+
+    const events = new EconomySystem().step(world);
+
+    expect(worker.carryingCredits).toBe(0);
+    expect(world.getPlayerState("player_1")!.resources.credits).toBe(creditsBefore + worker.carryCapacity);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "credits_delivered", unitId: worker.id }),
+    ]));
+  });
+
+  it("retargets an explicit harvest loop after its resource is depleted", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const depleted = createDefaultMatchDefinition().map.resources[0];
+    const worker = world.units.getUnitsByPlayer("player_1").find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    worker.order = { type: "harvest_loop", targetX: depleted.x, targetY: depleted.y };
+    world.setResourceRemaining(depleted.x, depleted.y, 0);
+
+    new HarvestOrderSystem().step(world);
+
+    expect(worker.order).toMatchObject({ type: "harvest_loop" });
+    expect(worker.order).not.toMatchObject({ targetX: depleted.x, targetY: depleted.y });
   });
 
   it("derives victory from authoritative building lifecycle", () => {

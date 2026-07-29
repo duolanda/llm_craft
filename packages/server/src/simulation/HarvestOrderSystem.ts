@@ -27,7 +27,7 @@ export class HarvestOrderSystem {
       const resourceTarget = this.resolveResourceTarget(world, worker, {
         x: harvestOrder.targetX ?? worker.x,
         y: harvestOrder.targetY ?? worker.y,
-      });
+      }, true);
       if (!resourceTarget) continue;
 
       worker.order = { type: "harvest_loop", targetX: resourceTarget.x, targetY: resourceTarget.y };
@@ -78,6 +78,7 @@ export class HarvestOrderSystem {
     world: WorldState,
     worker: WorldUnit,
     requestedPosition?: { x: number; y: number },
+    allowAutomaticFallback = false,
   ): { x: number; y: number } | null {
     const height = world.tiles.length;
     const width = world.tiles[0]?.length ?? 0;
@@ -98,13 +99,14 @@ export class HarvestOrderSystem {
       && requestedPosition.y >= 0
       && requestedPosition.y < height
       && world.tiles[requestedPosition.y][requestedPosition.x] === TILE_TYPES.RESOURCE
+      && (world.resourceRemaining.get(`${requestedPosition.x},${requestedPosition.y}`) ?? 0) > 0
     );
     if (requestedResource && requestedPosition) {
       const assigned = assignedHarvesters.get(`${requestedPosition.x},${requestedPosition.y}`) ?? 0;
       if (assigned < MAX_HARVESTERS_PER_RESOURCE) return requestedPosition;
       // More workers cannot physically occupy one resource cell without
       // blocking its approach. Fall through to the automatic route scorer.
-    } else if (requestedPosition) {
+    } else if (requestedPosition && !allowAutomaticFallback) {
       return null;
     }
 

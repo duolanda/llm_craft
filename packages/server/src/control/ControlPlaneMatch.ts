@@ -55,7 +55,7 @@ export class ControlPlaneMatch {
       this.matchRuntime,
       options?.recordDir ?? DEFAULT_CONTROL_RECORDS_DIR,
     );
-    this.recording = options?.recording ?? { profile: "replay", includeTranscript: false };
+    this.recording = options?.recording ?? { profile: "evaluation", includeTranscript: false };
     this.gameplayControllerByPlayer = {
       [PLAYER_IDS.PLAYER_1]: new GameplayController(this.game, PLAYER_IDS.PLAYER_1, {
         submitCommands: (commands, submitOptions) => this.submitCommands(PLAYER_IDS.PLAYER_1, commands, submitOptions),

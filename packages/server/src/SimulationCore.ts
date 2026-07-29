@@ -5,10 +5,10 @@ import { EconomySystem, type EconomyEvent } from "./simulation/EconomySystem";
 import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
 import { MovementSystem } from "./simulation/MovementSystem";
 import { ProductionSystem, type ProductionEvent } from "./simulation/ProductionSystem";
-import { ProjectileSystem } from "./simulation/ProjectileSystem";
+import { ProjectileSystem, type ProjectileEvent } from "./simulation/ProjectileSystem";
 import { VictorySystem, type VictoryOutcome } from "./simulation/VictorySystem";
 
-export type SimulationEvent = EconomyEvent | ConstructionEvent | ProductionEvent | VictoryOutcome;
+export type SimulationEvent = EconomyEvent | ConstructionEvent | ProductionEvent | ProjectileEvent | VictoryOutcome;
 
 export interface SimulationStepResult {
   advanced: true;
@@ -59,7 +59,7 @@ export class SimulationCore {
     const events: SimulationEvent[] = [];
 
     this.systems.movement.step(world);
-    this.systems.projectiles.step(world);
+    events.push(...this.systems.projectiles.step(world));
     events.push(...this.systems.economy.step(world));
     this.systems.harvestOrders.step(world);
     this.systems.combat.step(world);

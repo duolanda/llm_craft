@@ -170,16 +170,18 @@ export function buildControlResponse(
   const tick = (data.tick as number) ?? 0;
 
   if (data.ok === false) {
+    const code = (data.error as string) ?? "unknown";
+    const hint = data.hint as string | undefined;
     const error: ControlError = {
-      code: (data.error as string) ?? "unknown",
-      message: (data.message as string) ?? "Unknown error",
-      hint: data.hint as string | undefined,
+      code,
+      message: (data.message as string) ?? hint ?? `Tool failed with error: ${code}.`,
+      hint,
     };
     return {
       ok: false,
       tick,
       kind: overrideKind ?? kindFromEffect(result.effect),
-      data: {},
+      data,
       error,
     };
   }

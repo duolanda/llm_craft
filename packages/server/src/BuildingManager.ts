@@ -2,22 +2,26 @@ import {
   PlayerId,
   Building,
   BuildingType,
+  ProductionBatchRequest,
+  ProductionOrder,
   UnitType,
   canBuildingProduce,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
   getBuildingStats,
-  getUnitProductionTicks,
 } from "@llmcraft/shared";
 
-export interface ProductionCompletion {
-  buildingId: string;
-  unitType: UnitType;
+export const MAX_PENDING_PRODUCTION_PER_UNIT_TYPE = 100;
+
+export interface ProductionCancellation {
+  cancelledOrderIds: string[];
+  refundCredits: number;
 }
 
 export class BuildingManager {
   private buildings: Map<string, Building> = new Map();
   private idCounter = 0;
+  private productionOrderCounter = 0;
 
   /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createBuilding(
@@ -91,13 +95,47 @@ export class BuildingManager {
     return positions;
   }
 
-  spawnUnit(building: Building, unitType: UnitType): boolean {
+  enqueueProduction(building: Building, requests: readonly ProductionBatchRequest[]): ProductionOrder[] {
     if (!building.exists || building.constructionProgress) {
-      return false;
+      return [];
     }
 
-    building.productionQueue.push(unitType);
-    return true;
+    const orders = requests.map((request) => ({
+      orderId: `production_${++this.productionOrderCounter}`,
+      unitType: request.unitType,
+      count: request.count,
+      remainingCount: request.count,
+    }));
+    building.productionQueue.push(...orders);
+    return orders;
+  }
+
+  getPendingCount(building: Building, unitType: UnitType): number {
+    return building.productionQueue.reduce(
+      (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+      0,
+    );
+  }
+
+  cancelProduction(building: Building, orderIds?: ReadonlySet<string>): ProductionCancellation {
+    const cancelAll = orderIds === undefined;
+    const cancelledOrderIds = building.productionQueue
+      .filter((order) => cancelAll || orderIds.has(order.orderId))
+      .map((order) => order.orderId);
+    if (cancelledOrderIds.length === 0) {
+      return { cancelledOrderIds: [], refundCredits: 0 };
+    }
+
+    const cancelled = new Set(cancelledOrderIds);
+    const activeCancelled = Boolean(
+      building.productionProgress && cancelled.has(building.productionProgress.orderId),
+    );
+    const refundCredits = activeCancelled ? building.productionProgress?.paidCredits ?? 0 : 0;
+    building.productionQueue = building.productionQueue.filter((order) => !cancelled.has(order.orderId));
+    if (activeCancelled) {
+      building.productionProgress = undefined;
+    }
+    return { cancelledOrderIds, refundCredits };
   }
 
   canProduce(building: Building, unitType: UnitType): boolean {
@@ -123,35 +161,4 @@ export class BuildingManager {
     return false; // Building still alive
   }
 
-  processProductionQueues(): Map<PlayerId, ProductionCompletion[]> {
-    const completedUnits = new Map<PlayerId, ProductionCompletion[]>();
-
-    for (const building of this.buildings.values()) {
-      if (building.exists && !building.constructionProgress && building.productionQueue.length > 0) {
-        const queuedType = building.productionQueue[0];
-        if (!queuedType) {
-          continue;
-        }
-        if (!building.productionProgress || building.productionProgress.unitType !== queuedType) {
-          const totalTicks = getUnitProductionTicks(queuedType);
-          building.productionProgress = { unitType: queuedType, remainingTicks: totalTicks, totalTicks };
-        }
-        building.productionProgress.remainingTicks -= 1;
-        if (building.productionProgress.remainingTicks <= 0) {
-          const completedType = building.productionQueue.shift();
-          building.productionProgress = undefined;
-          if (!completedType) {
-            continue;
-          }
-          const playerCompleted = completedUnits.get(building.playerId) || [];
-          playerCompleted.push({ buildingId: building.id, unitType: completedType });
-          completedUnits.set(building.playerId, playerCompleted);
-        }
-      } else if (building.productionProgress) {
-        building.productionProgress = undefined;
-      }
-    }
-
-    return completedUnits;
-  }
 }

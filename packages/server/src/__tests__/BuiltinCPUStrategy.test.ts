@@ -16,7 +16,7 @@ describe("BuiltinCPUStrategy", () => {
         x: 100 + index,
         y: 48,
         attackRange: 1,
-        state: "idle",
+        phase: "idle",
         relation: "self",
       }));
       const calls: Array<{ toolName: string; args: Record<string, unknown> }> = [];
@@ -82,6 +82,9 @@ describe("BuiltinCPUStrategy", () => {
               },
             });
             observedBuilderMove ||= toolNames.includes("move_unit");
+          }
+          for (const command of gameplayController.handleCommittedTick()) {
+            game.queueCommand(command);
           }
           game.tickUpdate();
         }

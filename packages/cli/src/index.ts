@@ -5,7 +5,7 @@ import { ExitCode, exit } from "./io/errors.js";
 import { printJson, printError } from "./io/json.js";
 import { handleState, handleMap, handleMe, handleEvents, handlePlans } from "./commands/state.js";
 import { handleUnits, handleBuildings, handleEnemies, handleResources } from "./commands/select.js";
-import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold } from "./commands/actions.js";
+import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold, handleRally, handleProductionQueue, handleCancelProduction } from "./commands/actions.js";
 import { handleNearest, handleTarget } from "./commands/transform.js";
 import { handlePlan, handleOrchestrate } from "./commands/plan.js";
 import { handlePlay } from "./commands/play.js";
@@ -106,11 +106,14 @@ function printHelp(): void {
     "  gather             Assign worker to harvest loop",
     "  build              Build a structure (build barracks/war_factory)",
     "  train              Train a unit (worker/soldier/rifleman/rocket_soldier/light_tank)",
+    "  production-queue   Inspect finite production queues and progress",
+    "  cancel-production  Cancel batches by order ID or clear building queues",
+    "  rally              Set or clear move/attack-move production rally points",
     "  hold               Hold position",
     "  nearest            Find nearest resource/enemy for each unit",
     "  target             Pair units with enemy-hq or weakest enemy",
     "  plan               Generate a plan (economy/tech/defend/attack-hq/custom)",
-    "  orchestrate        Execute a plan or batch of actions from stdin",
+    "  orchestrate        Execute a batch of tool-shaped actions from stdin",
     "  play               Start a CPU or PVP control-plane game",
     "",
     "Plan flags:",
@@ -123,11 +126,17 @@ function printHelp(): void {
     "",
     "Action flags:",
     "  --unit <id>        Unit ID",
+    "  --units <list>     Comma-separated unit IDs for move/attack/attack-move/hold",
     "  --to <x,y>         Target coordinates",
     "  --target <id>      Target ID",
     "  --resource <x,y>   Resource coordinates",
     "  --at <x,y>         Build location",
     "  --building <id>    Building ID",
+    "  --buildings <list> Comma-separated production building IDs for rally",
+    "  --count <n>        Units to append with train (1-100)",
+    "  --order <id>       Production order ID to cancel",
+    "  --orders <list>    Comma-separated production order IDs to cancel",
+    "  --mode <mode>      Rally travel mode: move or attack-move",
     "  --priority <list>  Target priority (soldier,rifleman,rocket_soldier,light_tank,worker,hq,barracks,war_factory)",
     "  --request-id <id>  Stable idempotency key when stdin expands to multiple actions",
     "",
@@ -165,15 +174,16 @@ function printHelp(): void {
     "  llmcraft attack --unit soldier_1 --target enemy_hq",
     "  llmcraft units --idle --type worker | llmcraft gather",
     "  llmcraft buildings --type barracks --ready | llmcraft train rifleman",
+    "  llmcraft rally --building building_4 --to 40,30 --mode attack-move  # omit --to to clear",
     "  llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather",
     "  llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack",
     "  llmcraft plan economy | llmcraft orchestrate",
     "  llmcraft plan tech | llmcraft orchestrate",
     "  llmcraft plan attack-hq | llmcraft orchestrate",
-    "  llmcraft orchestrate --dry-run < actions.json",
+    "  llmcraft orchestrate --dry-run < actions.json  # accepts { actions: [...] }",
     "  llmcraft units --idle --type worker | llmcraft gather",
     "",
-    "PowerShell: quote coordinates, e.g. --at '5,10' or --to '18,10'.",
+    "PowerShell: quote comma-separated values, e.g. --at '5,10' or --units 'unit_1,unit_2'.",
     "",
     "Exit codes:",
     "  0  Success",
@@ -195,7 +205,7 @@ function gameOverKindForCommand(command: string): CommandKind | null {
   if (["units", "buildings", "enemies", "resources", "nearest", "target"].includes(command)) {
     return "selection";
   }
-  if (["move", "attack", "attack-move", "gather", "build", "train", "hold"].includes(command)) {
+  if (["move", "attack", "attack-move", "gather", "build", "train", "production-queue", "cancel-production", "rally", "hold"].includes(command)) {
     return "action_result";
   }
   if (["plan", "orchestrate"].includes(command)) {
@@ -487,6 +497,18 @@ async function main(): Promise<void> {
   }
   if (parsed.command === "train") {
     await handleTrain(client, sessionId, parsed.subcommand, parsed.flags);
+    return;
+  }
+  if (parsed.command === "production-queue") {
+    await handleProductionQueue(client, sessionId, parsed.flags);
+    return;
+  }
+  if (parsed.command === "cancel-production") {
+    await handleCancelProduction(client, sessionId, parsed.flags);
+    return;
+  }
+  if (parsed.command === "rally") {
+    await handleRally(client, sessionId, parsed.flags);
     return;
   }
   if (parsed.command === "hold") {

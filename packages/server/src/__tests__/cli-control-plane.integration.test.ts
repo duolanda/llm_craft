@@ -298,6 +298,25 @@ describe("CLI Control Plane Integration", () => {
     expect(response.error?.code).toBeDefined();
   });
 
+  it("uses structured error details instead of an unknown-error placeholder", () => {
+    const response = buildControlResponse({
+      effect: "action",
+      result: {
+        tick: 12,
+        ok: false,
+        error: "invalid_spawn_request",
+        hint: "hq can produce: worker.",
+      },
+    });
+
+    expect(response.error).toEqual({
+      code: "invalid_spawn_request",
+      message: "hq can produce: worker.",
+      hint: "hq can produce: worker.",
+    });
+    expect(response.data).toMatchObject({ error: "invalid_spawn_request" });
+  });
+
   it("filters units by type locally (simulates CLI selector)", () => {
     const game = new Game();
     game.start();

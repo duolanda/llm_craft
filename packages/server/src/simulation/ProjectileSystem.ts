@@ -5,13 +5,23 @@ import {
   getUnitWeapon,
   type ActiveProjectile,
   type Building,
+  type PlayerId,
+  type UnitType,
 } from "@llmcraft/shared";
 import { WorldState } from "../WorldState";
 import type { WorldUnit } from "../WorldUnit";
 
+export type ProjectileEvent = {
+  type: "unit_destroyed";
+  playerId: PlayerId;
+  unitId: string;
+  unitType: UnitType;
+};
+
 export class ProjectileSystem {
-  step(world: WorldState): void {
-    if (world.projectiles.length === 0) return;
+  step(world: WorldState): ProjectileEvent[] {
+    const events: ProjectileEvent[] = [];
+    if (world.projectiles.length === 0) return events;
 
     const remaining: ActiveProjectile[] = [];
     for (const projectile of world.projectiles) {
@@ -22,7 +32,7 @@ export class ProjectileSystem {
       }
 
       if (world.tick >= projectile.impactTick) {
-        this.applyImpact(world, projectile);
+        this.applyImpact(world, projectile, events);
         continue;
       }
 
@@ -34,6 +44,7 @@ export class ProjectileSystem {
       remaining.push(projectile);
     }
     world.projectiles = remaining;
+    return events;
   }
 
   private resolveTarget(world: WorldState, projectile: ActiveProjectile): { x: number; y: number } | null {
@@ -43,7 +54,7 @@ export class ProjectileSystem {
     return { x: target.entity.x, y: target.entity.y };
   }
 
-  private applyImpact(world: WorldState, projectile: ActiveProjectile): void {
+  private applyImpact(world: WorldState, projectile: ActiveProjectile, events: ProjectileEvent[]): void {
     const impact = this.resolveTarget(world, projectile) ?? { x: projectile.targetX, y: projectile.targetY };
     const weapon = getUnitWeapon(projectile.attackerType);
     const radius = weapon.splashRadius ?? 0;
@@ -58,7 +69,7 @@ export class ProjectileSystem {
       && projectile.targetKind === "unit"
       && directTarget.entity.playerId !== projectile.playerId
     ) {
-      this.damageUnit(world, projectile, directTarget.entity, 1);
+      this.damageUnit(world, projectile, directTarget.entity, 1, events);
       damagedUnits.add(directTarget.entity.id);
     } else if (
       directTarget?.kind === "building"
@@ -75,7 +86,7 @@ export class ProjectileSystem {
       if (unit.playerId === projectile.playerId || damagedUnits.has(unit.id)) continue;
       const distance = this.chebyshevDistance(unit, impact);
       const multiplier = this.splashMultiplier(distance, weapon.splashFalloff, radius);
-      if (multiplier > 0) this.damageUnit(world, projectile, unit, multiplier);
+      if (multiplier > 0) this.damageUnit(world, projectile, unit, multiplier, events);
     }
 
     for (const building of world.buildings.getAllBuildings()) {
@@ -98,14 +109,23 @@ export class ProjectileSystem {
     projectile: ActiveProjectile,
     target: WorldUnit,
     multiplier: number,
+    events: ProjectileEvent[],
   ): void {
+    if (!target.exists) return;
     const damage = Math.max(
       0,
       Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier),
     );
     if (damage <= 0) return;
     target.hp -= damage;
-    if (target.hp <= 0) world.destroyEntity(target.id);
+    if (target.hp <= 0 && world.destroyEntity(target.id)) {
+      events.push({
+        type: "unit_destroyed",
+        playerId: target.playerId,
+        unitId: target.id,
+        unitType: target.type,
+      });
+    }
   }
 
   private damageBuilding(

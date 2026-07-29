@@ -1,8 +1,13 @@
 import {
   MAP_HEIGHT,
   MAP_WIDTH,
+  RESULT_CODES,
   TILE_TYPES,
+  getDefaultAttackMovePriority,
   getBuildingFootprint,
+  getUnitCost,
+  getUnitProductionTicks,
+  unitCanAttack,
   type Building,
   type PlayerId,
   type UnitType,
@@ -28,33 +33,108 @@ export type ProductionEvent =
 export class ProductionSystem {
   step(world: WorldState): ProductionEvent[] {
     const events: ProductionEvent[] = [];
-    const completedUnits = world.buildings.processProductionQueues();
-    for (const [playerId, completions] of completedUnits) {
-      for (const completion of completions) {
-        const spawnBuilding = world.buildings.getBuilding(completion.buildingId);
-        if (!spawnBuilding?.exists) continue;
+    for (const spawnBuilding of world.buildings.getAllBuildings()) {
+      if (spawnBuilding.constructionProgress) continue;
+      const order = spawnBuilding.productionQueue[0];
+      if (!order) {
+        if (spawnBuilding.productionProgress) {
+          spawnBuilding.productionProgress = undefined;
+          world.markChanged();
+        }
+        continue;
+      }
 
-        const spawnPosition = this.findEmptySpawnPosition(world, spawnBuilding, completion.unitType);
-        if (!spawnPosition) {
-          events.push({
-            type: "unit_spawn_failed",
-            playerId,
-            buildingId: completion.buildingId,
-            unitType: completion.unitType,
-            reason: "no_empty_position",
-          });
+      let progress = spawnBuilding.productionProgress;
+      if (!progress || progress.orderId !== order.orderId || progress.unitType !== order.unitType) {
+        const totalTicks = getUnitProductionTicks(order.unitType);
+        progress = {
+          orderId: order.orderId,
+          unitType: order.unitType,
+          remainingTicks: totalTicks,
+          totalTicks,
+          paidCredits: 0,
+          totalCost: getUnitCost(order.unitType),
+          status: "producing",
+        };
+        spawnBuilding.productionProgress = progress;
+        world.markChanged();
+      }
+
+      if (progress.remainingTicks > 0) {
+        const elapsedTicks = progress.totalTicks - progress.remainingTicks;
+        const nextElapsedTicks = elapsedTicks + 1;
+        const paidAfterTick = Math.floor(progress.totalCost * nextElapsedTicks / progress.totalTicks);
+        const tickCharge = paidAfterTick - progress.paidCredits;
+        const player = world.getPlayerState(spawnBuilding.playerId);
+        if (!player || player.resources.credits < tickCharge) {
+          if (progress.status !== "waiting_for_credits") {
+            progress.status = "waiting_for_credits";
+            world.markChanged();
+          }
           continue;
         }
-
-        const unit = world.createUnit(completion.unitType, spawnPosition.x, spawnPosition.y, playerId);
-        events.push({
-          type: "unit_spawned",
-          playerId,
-          buildingId: completion.buildingId,
-          unitId: unit.id,
-          unitType: completion.unitType,
-        });
+        player.resources.credits -= tickCharge;
+        progress.paidCredits += tickCharge;
+        progress.remainingTicks -= 1;
+        progress.status = "producing";
+        world.markChanged();
       }
+
+      if (progress.remainingTicks > 0) continue;
+
+      const spawnPosition = this.findEmptySpawnPosition(world, spawnBuilding, order.unitType);
+      if (!spawnPosition) {
+        const alreadyWaiting = progress.status === "waiting_for_spawn";
+        progress.status = "waiting_for_spawn";
+        if (!alreadyWaiting) {
+          world.markChanged();
+          events.push({
+            type: "unit_spawn_failed",
+            playerId: spawnBuilding.playerId,
+            buildingId: spawnBuilding.id,
+            unitType: order.unitType,
+            reason: "no_empty_position",
+          });
+        }
+        continue;
+      }
+
+      const unit = world.createUnit(order.unitType, spawnPosition.x, spawnPosition.y, spawnBuilding.playerId);
+      if (spawnBuilding.rallyPoint) {
+          const result = world.units.setMoveTarget(
+            unit,
+            spawnBuilding.rallyPoint.x,
+            spawnBuilding.rallyPoint.y,
+            world.tiles,
+            world.buildings.getOccupiedPositions(),
+            spawnBuilding.rallyPoint.mode === "attack_move" && unitCanAttack(unit.type),
+          );
+          if (
+            result === RESULT_CODES.OK
+            && spawnBuilding.rallyPoint.mode === "attack_move"
+            && unitCanAttack(unit.type)
+          ) {
+            unit.order = {
+              type: "attack_move",
+              targetX: unit.pathTarget?.x ?? spawnBuilding.rallyPoint.x,
+              targetY: unit.pathTarget?.y ?? spawnBuilding.rallyPoint.y,
+              targetPriority: getDefaultAttackMovePriority(unit.type),
+            };
+          }
+      }
+      order.remainingCount -= 1;
+      if (order.remainingCount <= 0) {
+        spawnBuilding.productionQueue.shift();
+      }
+      spawnBuilding.productionProgress = undefined;
+      world.markChanged();
+      events.push({
+        type: "unit_spawned",
+        playerId: spawnBuilding.playerId,
+        buildingId: spawnBuilding.id,
+        unitId: unit.id,
+        unitType: order.unitType,
+      });
     }
     world.units.resolveUnitSeparation(world.tiles, world.buildings.getOccupiedPositions());
     return events;

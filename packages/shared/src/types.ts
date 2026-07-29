@@ -188,17 +188,44 @@ export interface Unit extends GameObject {
   constructingBuildingId?: string;
 }
 
+export type RallyMode = "move" | "attack_move";
+
+export interface RallyPoint extends Position {
+  mode: RallyMode;
+}
+
+export interface ProductionBatchRequest {
+  unitType: UnitType;
+  count: number;
+}
+
+export interface ProductionOrder extends ProductionBatchRequest {
+  orderId: string;
+  /** Units from this order that have not spawned yet, including the active unit. */
+  remainingCount: number;
+}
+
+export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn";
+
+export interface ProductionProgress {
+  orderId: string;
+  unitType: UnitType;
+  remainingTicks: number;
+  totalTicks: number;
+  paidCredits: number;
+  totalCost: number;
+  status: ProductionStatus;
+}
+
 export interface Building extends GameObject {
   type: BuildingType;
   hp: number;
   maxHp: number;
   playerId: PlayerId;
-  productionQueue: UnitType[];
-  productionProgress?: {
-    unitType: UnitType;
-    remainingTicks: number;
-    totalTicks: number;
-  };
+  /** Persistent destination and travel order assigned to newly produced units. */
+  rallyPoint?: RallyPoint;
+  productionQueue: ProductionOrder[];
+  productionProgress?: ProductionProgress;
   constructionProgress?: {
     workerId: string;
     remainingTicks: number;
@@ -262,7 +289,10 @@ export interface Command {
   targetPriority?: AttackTargetType[];
   position?: Position;
   unitType?: UnitType;
+  productionRequests?: ProductionBatchRequest[];
+  productionOrderIds?: string[];
   buildingType?: BuildingType;
+  rallyMode?: RallyMode;
   resumeWorkerOrder?: UnitIntent;
   playerId: PlayerId;
   provenance?: CommandProvenance;
@@ -418,7 +448,8 @@ export interface AgentMapStateUnit {
   y: number;
   hp: number;
   maxHp: number;
-  state: UnitState;
+  /** Instantaneous simulation phase; intent remains the authoritative durable assignment. */
+  phase: UnitState;
   relation: "self" | "enemy";
 }
 
@@ -430,6 +461,7 @@ export interface AgentMapStateBuilding {
   hp: number;
   maxHp: number;
   relation: "self" | "enemy";
+  rallyPoint?: RallyPoint;
   constructionProgress?: Building["constructionProgress"];
 }
 
@@ -501,7 +533,6 @@ export type PlanCallToolName =
   | "move_unit"
   | "attack_move_unit"
   | "attack"
-  | "spawn_unit"
   | "build_structure"
   | "start_harvest_loop"
   | "hold_unit";
@@ -517,7 +548,7 @@ export type PlanStepCondition =
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
-  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number; x?: number; y?: number }
   | { condition: "enemy_building_exists"; buildingType: BuildingType; count?: number }
   | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
   | { condition: "enemy_unit_count_at_least"; unitType: UnitType; count: number }
@@ -534,7 +565,7 @@ export interface PlanStep {
 }
 
 export interface OrchestratePlanInput {
-  unitIds: string[];
+  unitIds?: string[];
   replaceExisting?: boolean;
   scope?: PlanStepScope;
   loop?: number;
@@ -683,7 +714,8 @@ export interface TickDeltaRecord {
       y?: number;
       hp?: number;
       maxHp?: number;
-      productionQueue?: UnitType[];
+      rallyPoint?: RallyPoint | null;
+      productionQueue?: ProductionOrder[];
       productionProgress?: Building["productionProgress"] | null;
       constructionProgress?: Building["constructionProgress"] | null;
     }>;

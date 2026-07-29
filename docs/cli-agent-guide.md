@@ -244,9 +244,8 @@ llmcraft events --limit 5
 Action results can include warnings:
 
 - `no_recent_read`: this session has not read state before acting
-- `state_stale`: the last read is too old for the current tick
 
-If you see either warning, stop issuing actions and read again. When running through `pnpm cli`, process startup plus agent thinking can make the read stale before the action. Prefer short turns with explicit session flags, and issue only the actions justified by the latest read:
+If you see this warning, read before making further decisions. Once the session has read state, elapsed ticks alone do not produce a stale-state warning: actions validate targets and rules against live state when called.
 
 ```bash
 llmcraft state --compact
@@ -294,9 +293,11 @@ Actions can take explicit IDs:
 ```bash
 llmcraft move --unit unit_1 --to 5,8
 llmcraft gather --unit unit_1
+llmcraft gather --units unit_1,unit_2,unit_3
 llmcraft build barracks --unit unit_1 --at 6,12
 llmcraft train worker --building building_1
 llmcraft train soldier --building building_3
+llmcraft rally --building building_3 --to 32,12 --mode attack-move
 llmcraft attack --unit unit_7 --target building_2
 llmcraft attack-move --unit unit_7 --to 32,12
 llmcraft hold --unit unit_7
@@ -310,7 +311,7 @@ llmcraft buildings --type hq --ready | llmcraft train worker
 llmcraft buildings --type barracks --ready | llmcraft train soldier
 ```
 
-When piped, each selected item becomes one action, but the CLI sends the complete expansion through one HTTP request and one `CommandEnvelope`. The simulation applies the whole envelope in one tick or rolls it all back; it never silently carries the tail into later ticks. The output is `kind: "batch_result"`.
+When piped, the CLI groups compatible selections into array-shaped actions and sends the complete expansion through one HTTP request and one `CommandEnvelope`. Each action is applied independently at the same tick boundary; one failed action does not roll back successful siblings. The output is `kind: "batch_result"`.
 
 For a retryable automation step, supply a stable idempotency key:
 
@@ -364,6 +365,8 @@ llmcraft units --type soldier | llmcraft attack-move --to 32,12
 ```
 
 Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
+
+Production rallies have the same two travel modes. `rally --mode move` is the default; `rally --mode attack-move` is available for barracks and war factories. HQ worker rallies only support `move`.
 
 At long range, `attack` may first appear as movement toward the target. Re-read state/events after the unit arrives; if the target still exists and the unit is idle, issue `attack` again.
 
@@ -459,7 +462,7 @@ If you run commands manually, always pass the matching `--session` flag for that
 | `stdin selection has no units` | Selector returned an empty list | Read state and try a different selector |
 | `insufficient_credits` | Not enough credits | Gather, wait, or train less |
 | `invalid_build_position` | Tile blocked or too close to HQ | Pick another empty tile |
-| `state_stale` / `no_recent_read` | You acted without a recent read | Run `state`, `me`, or `units` before acting |
+| `no_recent_read` | This session has not read state yet | Run `state`, `me`, or `units` before acting |
 | `game_not_started` | PVP lobby is waiting for both players | Wait for the other agent to run `session use`, then read `state` |
 | `game_over` | The match already has a winner | Stop issuing actions; read `state` for final details |
 
@@ -472,7 +475,7 @@ If you run commands manually, always pass the matching `--session` flag for that
 | Record | `record save` |
 | State | `state`, `map`, `me`, `events`, `plans` |
 | Selectors | `units`, `buildings`, `enemies`, `resources` |
-| Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `hold` |
+| Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `rally`, `hold` |
 | Transformers | `nearest`, `target` |
 | Plans | `plan`, `orchestrate` |
 

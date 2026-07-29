@@ -635,6 +635,43 @@ describe("OpenAICompatibleProvider", () => {
     expect(alertCount).toBe(0);
   });
 
+  it("injects and deduplicates compact EVA completion, ready, and loss notices", async () => {
+    const stopResponse = () => ({
+      choices: [{ finish_reason: "stop", message: { content: "acknowledged", tool_calls: [] } }],
+    });
+    const { provider, create } = createProviderWithResponses([stopResponse(), stopResponse()]);
+    const runtimeState = {
+      mapState: { units: [] },
+      myState: { hq: { id: "hq_1", type: "hq", ...DEFAULT_MAP_LAYOUT.player1Hq } },
+      myUnits: null,
+      activePlans: null,
+      recentEvents: {
+        events: [
+          { tick: 10, type: "building_completed", data: { buildingId: "building_5", buildingType: "barracks" } },
+          { tick: 12, type: "unit_spawned", data: { unitId: "unit_20", unitType: "rifleman" } },
+          { tick: 12, type: "unit_spawned", data: { unitId: "unit_21", unitType: "rifleman" } },
+          { tick: 15, type: "unit_destroyed", data: { unitId: "unit_20", unitType: "rifleman" } },
+        ],
+      },
+    };
+    const options = {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: { ok: true } }),
+      getRuntimeState: () => runtimeState,
+    };
+
+    await provider.runAgent(createInput(), options);
+    await provider.runAgent({ ...createInput(), tick: 16 }, options);
+
+    const calls = create.mock.calls as unknown as Array<Array<{ messages: Array<{ role: string; content: string }> }>>;
+    const latestMessages = calls[1]![0]!.messages;
+    const evaMessages = latestMessages.filter((message) => message.role === "user" && message.content.includes("EVA:"));
+    expect(evaMessages).toHaveLength(1);
+    expect(evaMessages[0]!.content).toContain("Building complete: barracks building_5");
+    expect(evaMessages[0]!.content).toContain("Unit ready: 2 rifleman");
+    expect(evaMessages[0]!.content).toContain("Unit lost: 1 rifleman");
+  });
+
   it("expires older read tool results when the same read tool and args are called again", async () => {
     const responses = [
       {

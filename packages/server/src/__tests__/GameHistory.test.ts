@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UNIT_STATES, UNIT_TYPES, type GameSnapshot, type Unit } from "@llmcraft/shared";
+import { BUILDING_TYPES, UNIT_STATES, UNIT_TYPES, type Building, type GameSnapshot, type Unit } from "@llmcraft/shared";
 import { buildTickDelta } from "../GameHistory";
 
 function tank(heading: number): Unit {
@@ -20,7 +20,7 @@ function tank(heading: number): Unit {
   };
 }
 
-function snapshot(tick: number, units: Unit[]): GameSnapshot {
+function snapshot(tick: number, units: Unit[], buildings: Building[] = []): GameSnapshot {
   return {
     tick,
     aiOutputs: {},
@@ -30,7 +30,7 @@ function snapshot(tick: number, units: Unit[]): GameSnapshot {
       logs: [],
       tiles: [],
       players: [
-        { id: "player_1", units, buildings: [], resources: { credits: 0 } },
+        { id: "player_1", units, buildings, resources: { credits: 0 } },
         { id: "player_2", units: [], buildings: [], resources: { credits: 0 } },
       ],
     },
@@ -46,6 +46,31 @@ describe("tick history", () => {
         id: "tank_1",
         change: "updated",
         heading: Math.PI / 2,
+      }),
+    ]);
+  });
+
+  it("records rally-point updates for replay projection", () => {
+    const barracks: Building = {
+      id: "building_1",
+      type: BUILDING_TYPES.BARRACKS,
+      x: 30,
+      y: 48,
+      hp: 450,
+      maxHp: 450,
+      playerId: "player_1",
+      exists: true,
+      productionQueue: [],
+    };
+    const withRally = { ...barracks, rallyPoint: { x: 45, y: 48, mode: "move" as const } };
+
+    const delta = buildTickDelta(snapshot(1, [], [barracks]), snapshot(2, [], [withRally]));
+
+    expect(delta.players[0].buildings).toEqual([
+      expect.objectContaining({
+        id: barracks.id,
+        change: "updated",
+        rallyPoint: withRally.rallyPoint,
       }),
     ]);
   });

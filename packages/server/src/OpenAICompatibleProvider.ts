@@ -53,6 +53,7 @@ export interface OpenAIAgentSessionOptions {
 export class OpenAIAgentSession implements LLMProvider {
   private history: any[] = [];
   private warmedTurn: WarmedTurn | null = null;
+  private readonly seenRuntimeEventSignatures = new Set<string>();
   private readonly systemPrompt: string;
   private readonly contextWindowLimiter: ContextWindowLimiter;
 
@@ -77,7 +78,7 @@ export class OpenAIAgentSession implements LLMProvider {
     ];
     const persistentHistory = messages.slice(1);
     const modelRequestRecords: AgentModelRequestRecord[] = [];
-    this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), null);
+    this.injectUrgentRuntimeAlert(messages, persistentHistory, options.getRuntimeState(), null);
 
     try {
       const response = await this.createAgentCompletion(messages, options, modelRequestRecords, "warmup");
@@ -194,7 +195,12 @@ export class OpenAIAgentSession implements LLMProvider {
           },
         });
         const urgentAlertStartedAt = Date.now();
-        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, runtimeState, lastRuntimeAlertSignature);
+        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(
+          messages,
+          persistentHistory,
+          runtimeState,
+          lastRuntimeAlertSignature,
+        );
         this.maybeEmitProviderWarning(options, "inject_urgent_alert", Date.now() - urgentAlertStartedAt, {
           details: {
             messages: messages.length,
@@ -603,20 +609,61 @@ export class OpenAIAgentSession implements LLMProvider {
     }
   }
 
-  private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {
+  private injectUrgentRuntimeAlert(
+    messages: any[],
+    persistentHistory: any[],
+    runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>,
+    previousSignature: string | null,
+  ): string | null {
     const alert = getHQUnderAttackAlertFromRuntimeState(runtimeState);
-    if (!alert) {
-      return null;
+    const notices: string[] = [];
+    if (alert && alert !== previousSignature) {
+      notices.push(alert);
     }
 
-    if (alert !== previousSignature) {
-      messages.push({
-        role: "user",
-        content: alert,
-      });
+    const recentEvents = runtimeState.recentEvents as {
+      events?: Array<{
+        tick?: number;
+        type?: string;
+        data?: Record<string, unknown>;
+      }>;
+    } | null;
+    const buildingCompletions: string[] = [];
+    const readyUnits = new Map<string, number>();
+    const lostUnits = new Map<string, number>();
+    for (const event of recentEvents?.events ?? []) {
+      if (!["building_completed", "unit_spawned", "unit_destroyed"].includes(event.type ?? "")) continue;
+      const signature = JSON.stringify([
+        event.tick,
+        event.type,
+        event.data?.buildingId,
+        event.data?.unitId,
+        event.data?.buildingType,
+        event.data?.unitType,
+      ]);
+      if (this.seenRuntimeEventSignatures.has(signature)) continue;
+      this.seenRuntimeEventSignatures.add(signature);
+      if (event.type === "building_completed") {
+        buildingCompletions.push(`${String(event.data?.buildingType ?? "building")} ${String(event.data?.buildingId ?? "")}`.trim());
+      } else if (event.type === "unit_spawned") {
+        const type = String(event.data?.unitType ?? "unit");
+        readyUnits.set(type, (readyUnits.get(type) ?? 0) + 1);
+      } else if (event.type === "unit_destroyed") {
+        const type = String(event.data?.unitType ?? "unit");
+        lostUnits.set(type, (lostUnits.get(type) ?? 0) + 1);
+      }
+    }
+    if (buildingCompletions.length > 0) notices.push(`EVA: Building complete: ${buildingCompletions.join(", ")}.`);
+    if (readyUnits.size > 0) notices.push(`EVA: Unit ready: ${[...readyUnits].map(([type, count]) => `${count} ${type}`).join(", ")}.`);
+    if (lostUnits.size > 0) notices.push(`EVA: Unit lost: ${[...lostUnits].map(([type, count]) => `${count} ${type}`).join(", ")}.`);
+
+    if (notices.length > 0) {
+      const noticeMessage = { role: "user", content: notices.join("\n") };
+      messages.push(noticeMessage);
+      persistentHistory.push(noticeMessage);
     }
 
-    return alert;
+    return alert ?? null;
   }
 
   private expireSupersededReadToolResults(messages: any[], currentToolCallId: string, toolName: string, args: unknown): void {

@@ -26,6 +26,7 @@ import {
 } from "./navigation/UnitCollision";
 
 const ARRIVAL_EPSILON = 0.001;
+const INTERMEDIATE_WAYPOINT_RADIUS = 0.5;
 const SEPARATION_SLOP = 1e-6;
 const SEPARATION_ITERATIONS = 8;
 const MAX_UNIT_COLLISION_BOUNDING_RADIUS = Math.hypot(1.48, 0.98);
@@ -374,6 +375,15 @@ export class UnitManager {
       const nextStep = unit.path[0];
       const distanceToStep = getDistance(unit.x, unit.y, nextStep.x, nextStep.y);
 
+      // Grid waypoints guide the route; they are not destinations that large
+      // bodies must hit at sub-millimetre precision. Requiring the exact cell
+      // centre can trap a unit that already cleared the corner but cannot
+      // rotate into that precise pose beside terrain or another unit.
+      if (unit.path.length > 1 && distanceToStep <= INTERMEDIATE_WAYPOINT_RADIUS) {
+        unit.path.shift();
+        continue;
+      }
+
       if (distanceToStep <= ARRIVAL_EPSILON) {
         unit.x = nextStep.x;
         unit.y = nextStep.y;
@@ -450,9 +460,15 @@ export class UnitManager {
       madeForwardProgress ||= localMove.forwardProgress >= MOVEMENT_PROGRESS_EPSILON;
       this.lastMovementOrigins.set(unit.id, movementOrigin);
 
-      if (getDistance(unit.x, unit.y, nextStep.x, nextStep.y) <= ARRIVAL_EPSILON) {
-        unit.x = nextStep.x;
-        unit.y = nextStep.y;
+      const distanceAfterMove = getDistance(unit.x, unit.y, nextStep.x, nextStep.y);
+      if (
+        distanceAfterMove <= ARRIVAL_EPSILON
+        || (unit.path.length > 1 && distanceAfterMove <= INTERMEDIATE_WAYPOINT_RADIUS)
+      ) {
+        if (distanceAfterMove <= ARRIVAL_EPSILON) {
+          unit.x = nextStep.x;
+          unit.y = nextStep.y;
+        }
         unit.path.shift();
       }
     }
@@ -737,6 +753,47 @@ export class UnitManager {
     const preferredSide = this.getDeterministicAvoidanceSide(unit.id);
     let best: LocalMovementCandidate | null = null;
 
+    const considerCandidate = (
+      distance: number,
+      movementAngle: number,
+      heading: number,
+    ): void => {
+      const x = unit.x + Math.cos(movementAngle) * distance;
+      const y = unit.y + Math.sin(movementAngle) * distance;
+      const angularOffset = Math.atan2(
+        Math.sin(movementAngle - direction),
+        Math.cos(movementAngle - direction),
+      );
+      const forwardProgress = Math.cos(angularOffset) * distance;
+      if (
+        lastOrigin
+        && forwardProgress < MOVEMENT_PROGRESS_EPSILON
+        && getDistance(x, y, lastOrigin.x, lastOrigin.y) <= MOVEMENT_PROGRESS_EPSILON
+      ) return;
+      if (
+        this.isTerrainMovementBlocked(
+          unit,
+          x,
+          y,
+          heading,
+          tiles,
+          blockedPositions,
+        )
+      ) return;
+      if (this.hasIndexedUnitCollisionAlongMovement(unit, x, y, heading, index)) return;
+      if (this.hasReservedMovementCollision(unit, x, y, heading, movementReservations)) return;
+
+      const turnDelta = Math.abs(Math.atan2(
+        Math.sin(heading - currentHeading),
+        Math.cos(heading - currentHeading),
+      ));
+      const side = Math.sign(angularOffset);
+      const sidePreference = side === 0 || side === preferredSide ? 0.25 : 0;
+      const score = forwardProgress * 100 + distance * 2 - turnDelta * 3 + sidePreference;
+      const candidate = { x, y, distance, heading, forwardProgress, score };
+      if (!best || candidate.score > best.score) best = candidate;
+    };
+
     for (const distanceFactor of LOCAL_AVOIDANCE_DISTANCE_FACTORS) {
       const distance = preferredDistance * distanceFactor;
       for (const angleDegrees of angles) {
@@ -745,36 +802,19 @@ export class UnitManager {
         // Congested OBBs must be able to reverse out without sweeping through
         // neighbours while rotating 120-180 degrees in place.
         const heading = isEscapeMove ? currentHeading : movementAngle;
-        const x = unit.x + Math.cos(movementAngle) * distance;
-        const y = unit.y + Math.sin(movementAngle) * distance;
-        const forwardProgress = Math.cos(angleDegrees * (Math.PI / 180)) * distance;
-        if (
-          lastOrigin
-          && forwardProgress < MOVEMENT_PROGRESS_EPSILON
-          && getDistance(x, y, lastOrigin.x, lastOrigin.y) <= MOVEMENT_PROGRESS_EPSILON
-        ) continue;
-        if (
-          this.isTerrainMovementBlocked(
-            unit,
-            x,
-            y,
-            heading,
-            tiles,
-            blockedPositions,
-          )
-        ) continue;
-        if (this.hasIndexedUnitCollisionAlongMovement(unit, x, y, heading, index)) continue;
-        if (this.hasReservedMovementCollision(unit, x, y, heading, movementReservations)) continue;
+        considerCandidate(distance, movementAngle, heading);
+      }
 
-        const turnDelta = Math.abs(Math.atan2(
-          Math.sin(heading - currentHeading),
-          Math.cos(heading - currentHeading),
-        ));
-        const side = Math.sign(angleDegrees);
-        const sidePreference = side === 0 || side === preferredSide ? 0.25 : 0;
-        const score = forwardProgress * 100 + distance * 2 - turnDelta * 3 + sidePreference;
-        const candidate = { x, y, distance, heading, forwardProgress, score };
-        if (!best || candidate.score > best.score) best = candidate;
+      // An OBB wedged beside terrain may have room to translate but not to
+      // sweep through the rotation required by its next path segment. Once it
+      // is genuinely congested, let it move along its hull axis first so it
+      // can create turning room without teleporting or intersecting geometry.
+      if (
+        blockedTicks >= CONGESTION_ESCAPE_TICKS
+        && getMovementProfile(unit.type).collisionShape.kind === "obb"
+      ) {
+        considerCandidate(distance, currentHeading, currentHeading);
+        considerCandidate(distance, currentHeading + Math.PI, currentHeading);
       }
     }
     return best;

@@ -302,7 +302,7 @@ export async function runBuiltinCPUStrategy(options: {
         worker.intent?.targetX !== forwardResource.x ||
         worker.intent?.targetY !== forwardResource.y
       );
-      if (needsForwardAssignment || (worker.intent?.type !== "harvest_loop" && worker.state === "idle")) {
+      if (needsForwardAssignment || (worker.intent?.type !== "harvest_loop" && worker.phase === "idle")) {
         await callTool(
           "start_harvest_loop",
           needsForwardAssignment
@@ -315,7 +315,7 @@ export async function runBuiltinCPUStrategy(options: {
 
   if (options.strategy === "random") {
     if (workers.length === 0 && canSpawnWorker && hq) {
-      await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
+      await callTool("spawn_unit", { buildingId: hq.id, units: [{ unitType: "worker", count: 1 }] });
     } else if (!hasStartedBarracks && canBuildBarracks && availableWorkers[0] && hq) {
       const site = findBuildSite(hq, mapState?.width ?? 21, buildings, myUnits);
       const worker = availableWorkers[0];
@@ -352,7 +352,7 @@ export async function runBuiltinCPUStrategy(options: {
       await issueWorkerEconomy();
 
       if (selectedPlan === "spawn-worker" && hq) {
-        await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
+        await callTool("spawn_unit", { buildingId: hq.id, units: [{ unitType: "worker", count: 1 }] });
       } else if (selectedPlan === "build-refinery" && availableWorkers[0] && hq) {
         const site = findForwardRefinerySite(hq, mapState?.width ?? 144);
         const worker = availableWorkers[0];
@@ -372,17 +372,17 @@ export async function runBuiltinCPUStrategy(options: {
         }
       } else if (selectedPlan === "spawn-infantry") {
         for (const barracks of barracksBuildings) {
-          await callTool("spawn_unit", { buildingId: barracks.id, unitType: preferredBarracksUnit });
+          await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: preferredBarracksUnit, count: 1 }] });
         }
       } else if (selectedPlan === "spawn-tank") {
         for (const warFactory of warFactoryBuildings) {
-          await callTool("spawn_unit", { buildingId: warFactory.id, unitType: UNIT_TYPES.LIGHT_TANK });
+          await callTool("spawn_unit", { buildingId: warFactory.id, units: [{ unitType: UNIT_TYPES.LIGHT_TANK, count: 1 }] });
         }
       } else if (selectedPlan === "attack") {
         const shouldAttackThisTurn = Math.random() > 0.75;
         if (combatUnits.length === 0 && barracksBuildings.length > 0 && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
           for (const barracks of barracksBuildings) {
-            await callTool("spawn_unit", { buildingId: barracks.id, unitType: preferredBarracksUnit });
+            await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: preferredBarracksUnit, count: 1 }] });
           }
         } else if (!(await issueMultiFrontAdvance())) {
           for (const combatUnit of combatUnits) {
@@ -407,7 +407,7 @@ export async function runBuiltinCPUStrategy(options: {
     : false;
 
   if (hq && workers.length < 4 && canSpawnWorker) {
-    await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
+    await callTool("spawn_unit", { buildingId: hq.id, units: [{ unitType: "worker", count: 1 }] });
   }
 
   if (!hasStartedBarracks && canBuildBarracks && availableWorkers[0] && hq) {
@@ -451,13 +451,13 @@ export async function runBuiltinCPUStrategy(options: {
 
   if (hasBarracks && rushBarracksUnit) {
     for (const barracks of barracksBuildings) {
-      await callTool("spawn_unit", { buildingId: barracks.id, unitType: rushBarracksUnit });
+      await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: rushBarracksUnit, count: 1 }] });
     }
   }
 
   if (hasWarFactory && canSpawnLightTank) {
     for (const warFactory of warFactoryBuildings) {
-      await callTool("spawn_unit", { buildingId: warFactory.id, unitType: UNIT_TYPES.LIGHT_TANK });
+      await callTool("spawn_unit", { buildingId: warFactory.id, units: [{ unitType: UNIT_TYPES.LIGHT_TANK, count: 1 }] });
     }
   }
 
@@ -547,6 +547,6 @@ export async function runBuiltinCPUStrategy(options: {
   }
 
   if (!hasBarracks && !canBuildBarracks && canSpawnWorker && hq && workers.length < 4) {
-    await callTool("spawn_unit", { buildingId: hq.id, unitType: "worker" });
+    await callTool("spawn_unit", { buildingId: hq.id, units: [{ unitType: "worker", count: 1 }] });
   }
 }

@@ -437,7 +437,10 @@ function applyCommandDiagnostics(
         });
       }
 
-      if (data.type === RESULT_TYPES.SPAWN_SUCCESS && data.result_data.unitType === "soldier") {
+      if (
+        data.type === RESULT_TYPES.SPAWN_SUCCESS &&
+        data.result_data.orders.some((order) => order.unitType === "soldier")
+      ) {
         metric.spawnedCombatUnderPressure += 1;
         timeline.push({
           tick: log.tick,

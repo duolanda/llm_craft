@@ -7,10 +7,8 @@ import {
   CommandProvenance,
   getBuildingCost,
   getDistanceToBuildingFootprint,
-  getUnitCost,
   isBuildableBuildingType,
   isBuildingType,
-  isUnitType,
   OrchestratePlanInput,
   PlanCallToolName,
   PlanStep,
@@ -44,6 +42,7 @@ interface InternalPlan {
 
 export interface PlanToolContext {
   args: Record<string, unknown>;
+  step: PlanStep;
   unit?: Unit;
   snapshot: PlanSnapshot;
   planUnitIds: string[];
@@ -52,6 +51,7 @@ export interface PlanToolContext {
 export interface PlanToolHandler {
   defaultScope: PlanStepScope;
   defaultRetry?: boolean;
+  untilRequiresIssuedCommand?: boolean;
   estimateCost?(context: PlanToolContext): number;
   createCommand(context: PlanToolContext): Command | null;
   diagnoseWait?(context: PlanToolContext): AgentPlanWaitingDiagnostic;
@@ -73,13 +73,14 @@ export class MissionRuntime {
     }
 
     const planId = `plan_${++this.planCounter}`;
+    const unitIds = input.unitIds ?? [];
     const internal: InternalPlan = {
       record: {
         planId,
         missionId: planId,
         controllerId: provenance?.controllerId,
         createdByTurnId: provenance?.turnId,
-        unitIds: [...input.unitIds],
+        unitIds: [...unitIds],
         scope: input.scope,
         loop,
         steps: structuredClone(input.steps),
@@ -91,7 +92,7 @@ export class MissionRuntime {
     };
 
     if (input.replaceExisting) {
-      for (const unitId of input.unitIds) {
+      for (const unitId of unitIds) {
         this.interruptUnit(unitId);
       }
     }
@@ -116,6 +117,34 @@ export class MissionRuntime {
 
   getAllPlans(): AgentPlanRecord[] {
     return [...this.plans.values()].map((plan) => this.summarizePlan(plan));
+  }
+
+  cancel(planIds: readonly string[]): {
+    cancelledPlanIds: string[];
+    inactivePlanIds: string[];
+    unknownPlanIds: string[];
+  } {
+    const cancelledPlanIds: string[] = [];
+    const inactivePlanIds: string[] = [];
+    const unknownPlanIds: string[] = [];
+
+    for (const planId of [...new Set(planIds)]) {
+      const plan = this.plans.get(planId);
+      if (!plan) {
+        unknownPlanIds.push(planId);
+        continue;
+      }
+      if (plan.status !== "active") {
+        inactivePlanIds.push(planId);
+        continue;
+      }
+      plan.status = "interrupted";
+      plan.waitingReason = undefined;
+      plan.waiting = undefined;
+      cancelledPlanIds.push(planId);
+    }
+
+    return { cancelledPlanIds, inactivePlanIds, unknownPlanIds };
   }
 
   failMission(missionId: string, tick: number, detail: string): boolean {
@@ -202,8 +231,25 @@ export class MissionRuntime {
   ): Command[] | "advance" {
     this.ensureStepStarted(plan, snapshot.tick);
     const unit = this.resolveGlobalStepUnit(plan, step, snapshot);
+    const requestedUnitId = typeof step.args.unitId === "string" && step.args.unitId !== "$unitId"
+      ? step.args.unitId
+      : undefined;
+    const expectsAssignedUnit = requestedUnitId !== undefined || plan.record.unitIds.length > 0;
+    if (expectsAssignedUnit && !unit) {
+      const missingIds = requestedUnitId ? [requestedUnitId] : plan.record.unitIds;
+      this.recordAttempt(
+        plan,
+        snapshot.tick,
+        step,
+        "failed",
+        `assigned unit is no longer alive: ${missingIds.join(", ")}`,
+      );
+      plan.status = "failed";
+      return [];
+    }
 
-    if (step.until && this.matchesCondition(step.until, step, unit, snapshot)) {
+    const canEvaluateUntil = !handler.untilRequiresIssuedCommand || plan.issuedGlobalStep === true;
+    if (step.until && canEvaluateUntil && this.matchesCondition(step.until, step, unit, snapshot)) {
       this.recordAttempt(plan, snapshot.tick, step, "advanced", `until matched: ${this.describeCondition(step.until)}`);
       this.advanceStep(plan);
       return "advance";
@@ -241,6 +287,7 @@ export class MissionRuntime {
 
     const context = {
       args: step.args,
+      step,
       unit,
       snapshot,
       planUnitIds: plan.record.unitIds,
@@ -309,7 +356,10 @@ export class MissionRuntime {
       return [];
     }
 
-    if (step.until && units.every((unit) => this.matchesCondition(step.until!, step, unit, snapshot))) {
+    const canEvaluateUntil =
+      !handler.untilRequiresIssuedCommand ||
+      units.every((unit) => plan.issuedUnitIds.has(unit.id));
+    if (step.until && canEvaluateUntil && units.every((unit) => this.matchesCondition(step.until!, step, unit, snapshot))) {
       this.recordAttempt(plan, snapshot.tick, step, "advanced", `until matched for all units: ${this.describeCondition(step.until)}`);
       this.advanceStep(plan);
       return "advance";
@@ -345,6 +395,7 @@ export class MissionRuntime {
 
       const context = {
         args: step.args,
+        step,
         unit,
         snapshot,
         planUnitIds: plan.record.unitIds,
@@ -480,8 +531,21 @@ export class MissionRuntime {
         return this.findVisibleTarget(condition.targetId, snapshot) === null;
       case "credits_at_least":
         return snapshot.myCredits >= condition.amount;
-      case "building_exists":
-        return snapshot.myBuildings.filter((building) => building.type === condition.buildingType).length >= (condition.count ?? 1);
+      case "building_exists": {
+        const stepX = step.call === "build_structure" && Number.isInteger(step.args.x)
+          ? Number(step.args.x)
+          : undefined;
+        const stepY = step.call === "build_structure" && Number.isInteger(step.args.y)
+          ? Number(step.args.y)
+          : undefined;
+        const x = condition.x ?? stepX;
+        const y = condition.y ?? stepY;
+        return snapshot.myBuildings.filter(
+          (building) =>
+            building.type === condition.buildingType &&
+            (x === undefined || y === undefined || (building.x === x && building.y === y)),
+        ).length >= (condition.count ?? 1);
+      }
       case "enemy_building_exists":
         return (
           snapshot.visibleBuildings.filter(
@@ -497,7 +561,7 @@ export class MissionRuntime {
           ).length >= condition.count
         );
       case "production_queue_empty": {
-        const building = this.findFriendlyBuildingForCondition(condition, snapshot);
+        const building = this.findFriendlyBuildingForCondition(condition, step, snapshot);
         return Boolean(building && building.productionQueue.length === 0);
       }
       default:
@@ -514,6 +578,7 @@ export class MissionRuntime {
 
   private findFriendlyBuildingForCondition(
     condition: Extract<PlanStepCondition, { condition: "production_queue_empty" }>,
+    step: PlanStep,
     snapshot: PlanSnapshot
   ): Building | null {
     if (condition.buildingId) {
@@ -521,6 +586,22 @@ export class MissionRuntime {
     }
     if (condition.buildingType) {
       return snapshot.myBuildings.find((building) => building.type === condition.buildingType) ?? null;
+    }
+    if (typeof step.args.buildingId === "string" && !step.args.buildingId.startsWith("$")) {
+      return snapshot.myBuildings.find((building) => building.id === step.args.buildingId) ?? null;
+    }
+    const placeholderTypes: Record<string, Building["type"]> = {
+      $hq: "hq",
+      $barracks: "barracks",
+      $war_factory: "war_factory",
+      $refinery: "refinery",
+    };
+    const placeholderType = typeof step.args.buildingId === "string"
+      ? placeholderTypes[step.args.buildingId]
+      : undefined;
+    const inferredType = placeholderType ?? (isBuildingType(step.args.buildingType) ? step.args.buildingType : undefined);
+    if (inferredType) {
+      return snapshot.myBuildings.find((building) => building.type === inferredType) ?? null;
     }
     return null;
   }
@@ -558,9 +639,6 @@ export class MissionRuntime {
   }
 
   private getCommandCost(command: Command): number {
-    if (command.type === "spawn" && isUnitType(command.unitType)) {
-      return getUnitCost(command.unitType);
-    }
     if (command.type === "build" && isBuildableBuildingType(command.buildingType)) {
       return getBuildingCost(command.buildingType);
     }

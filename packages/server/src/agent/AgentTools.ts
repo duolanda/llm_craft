@@ -39,6 +39,15 @@ const getUnitIds = (args: Record<string, unknown>): string[] => {
   return [...new Set(ids)];
 };
 
+const getBuildingIds = (args: Record<string, unknown>): string[] => {
+  const ids = Array.isArray(args.buildingIds)
+    ? args.buildingIds.filter((value): value is string => typeof value === "string")
+    : typeof args.buildingId === "string"
+      ? [args.buildingId]
+      : [];
+  return [...new Set(ids)];
+};
+
 const executeUnitBatch = (
   gameplayController: GameplayController,
   args: Record<string, unknown>,
@@ -67,13 +76,64 @@ const executeUnitBatch = (
       delete result[key];
     }
   }
+  const failures = results.filter((result) => result.ok === false);
+  const errorCodes = [...new Set(failures
+    .map((result) => typeof result.error === "string" ? result.error : "action_failed"))];
+  const error = failures.length === 0
+    ? undefined
+    : failures.length === results.length && errorCodes.length === 1
+      ? errorCodes[0]
+      : "partial_failure";
+  const firstHint = failures.find((result) => typeof result.hint === "string")?.hint;
   return {
     effect: "action",
     result: {
       tick: results.find((result) => typeof result.tick === "number")?.tick,
-      ok: results.every((result) => result.ok !== false),
+      ok: failures.length === 0,
+      ...(error ? {
+        error,
+        message: `${failures.length} of ${results.length} unit actions failed: ${errorCodes.join(", ")}.`,
+        ...(typeof firstHint === "string" ? { hint: firstHint } : {}),
+        failedUnitIds: failures.map((result) => result.unitId),
+      } : {}),
       results,
       ...recoveryContext,
+    },
+  };
+};
+
+const executeBuildingBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+  execute: (buildingId: string) => AgentToolExecution,
+): AgentToolExecution => {
+  const buildingIds = getBuildingIds(args);
+  if (buildingIds.length === 0) {
+    return {
+      effect: "action",
+      result: { ok: false, error: "missing_buildings", hint: "Pass one or more friendly production building IDs in buildingIds." },
+    };
+  }
+  const results: Array<{ buildingId: string; ok?: unknown; error?: unknown; tick?: unknown; [key: string]: unknown }> = buildingIds.map((buildingId) => {
+    const execution = execute(buildingId);
+    const result = execution.result && typeof execution.result === "object"
+      ? execution.result as Record<string, unknown>
+      : { value: execution.result };
+    return { buildingId, ...result };
+  });
+  const failures = results.filter((result) => result.ok === false);
+  const errorCodes = [...new Set(failures.map((result) => typeof result.error === "string" ? result.error : "action_failed"))];
+  return {
+    effect: "action",
+    result: {
+      tick: results.find((result) => typeof result.tick === "number")?.tick,
+      ok: failures.length === 0,
+      ...(failures.length > 0 ? {
+        error: failures.length === results.length && errorCodes.length === 1 ? errorCodes[0] : "partial_failure",
+        message: `${failures.length} of ${results.length} building actions failed: ${errorCodes.join(", ")}.`,
+        failedBuildingIds: failures.map((result) => result.buildingId),
+      } : {}),
+      results,
     },
   };
 };
@@ -82,7 +142,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "get_map_state",
     description:
-      "Read the full battlefield as structured unit, building, and resource lists. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need all grid cells including empty cells.",
+      "Read the full battlefield as structured unit, building, and resource lists. Unit phase is instantaneous, not a durable assignment. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need all grid cells including empty cells.",
     parameters: {
       type: "object",
       properties: {
@@ -105,7 +165,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "get_my_units",
-    description: "Read my controllable units plus role+intent groups, so idle/holding combat forces are visible without manually counting the unit list.",
+    description: "Read my controllable units plus role+intent groups. phase is the instantaneous simulation phase; intent is the durable assignment, so phase=idle with intent=harvest_loop is still assigned.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: (gameplayController) => gameplayController.getMyUnits(),
   },
@@ -118,9 +178,22 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "get_active_plans",
-    description: "Read active orchestration plans currently attached to my units, including currentStep, structured waiting diagnostics, and lastAttempt.",
+    description: "Read active orchestration plans currently attached to my units, including planId, currentStep, structured waiting diagnostics, and lastAttempt. Pass unwanted plan IDs directly to cancel_plan.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: (gameplayController) => gameplayController.getActivePlansTool(),
+  },
+  {
+    name: "cancel_plan",
+    description: "Immediately stop one or more active orchestration plans by planId. This does not cancel production orders; use cancel_production for production queue orderIds.",
+    parameters: {
+      type: "object",
+      required: ["planIds"],
+      properties: {
+        planIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.cancelPlan({ planIds: args.planIds }),
   },
   {
     name: "get_recent_events",
@@ -175,7 +248,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack",
     description:
-      "Order one or more selected combat units to attack one enemy target ID. Units move into range and keep attacking while the target exists. A missing target result includes compact current alternatives.",
+      "Order one or more selected combat units to attack one enemy target ID. Units move into range and keep attacking while the target exists. If an observed target dies before execution, each attacker immediately retargets a nearby visible enemy when possible; otherwise the result includes compact current alternatives.",
     parameters: {
       type: "object",
       required: ["unitIds", "targetId"],
@@ -193,17 +266,99 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "spawn_unit",
-    description: "Queue a production command for one building.",
+    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick, pauses without losing progress when credits are insufficient, and resumes automatically. Each building may keep at most 100 pending units of each unit type. Use get_production_queue to inspect order IDs and cancel_production to change course.",
     parameters: {
       type: "object",
-      required: ["buildingId", "unitType"],
+      required: ["buildingId", "units"],
       properties: {
         buildingId: { type: "string" },
-        unitType: { type: "string", enum: ALL_UNIT_TYPES },
+        units: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            required: ["unitType", "count"],
+            properties: {
+              unitType: { type: "string", enum: ALL_UNIT_TYPES },
+              count: { type: "integer", minimum: 1, maximum: 100 },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
-    execute: (gameplayController, args) => gameplayController.spawnUnit(String(args.buildingId), args.unitType),
+    execute: (gameplayController, args) => gameplayController.spawnUnit(
+      String(args.buildingId),
+      Array.isArray(args.units)
+        ? args.units.map((request: Record<string, unknown>) => ({
+            unitType: request.unitType,
+            count: Number(request.count),
+          }))
+        : [],
+    ),
+  },
+  {
+    name: "get_production_queue",
+    description: "Inspect production queues, active per-unit progress/payment status, pending counts, and stable order IDs. Omit buildingIds to inspect every friendly production building.",
+    parameters: {
+      type: "object",
+      properties: {
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.getProductionQueue(
+      Array.isArray(args.buildingIds) ? getBuildingIds(args) : undefined,
+    ),
+  },
+  {
+    name: "cancel_production",
+    description: "Cancel production without waiting. Pass orderIds to cancel selected queued batches, or buildingIds to clear whole building queues. Exactly one mode is allowed. Credits already paid toward each unfinished active unit are refunded; queued units that have not started cost nothing.",
+    parameters: {
+      type: "object",
+      properties: {
+        orderIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.cancelProduction({
+      orderIds: Array.isArray(args.orderIds) ? args.orderIds.map(String) : undefined,
+      buildingIds: Array.isArray(args.buildingIds) ? getBuildingIds(args) : undefined,
+    }),
+  },
+  {
+    name: "set_rally_point",
+    description: "Set one persistent rally destination for one or more production buildings. mode=move gives newly produced units an ordinary move order; mode=attack_move makes combat units fight enemies encountered while traveling. HQ worker rallies only support move. Omit both x and y to clear the rally point.",
+    parameters: {
+      type: "object",
+      required: ["buildingIds"],
+      properties: {
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        x: { type: "integer" },
+        y: { type: "integer" },
+        mode: { type: "string", enum: ["move", "attack_move"], default: "move" },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => {
+      const hasX = args.x !== undefined;
+      const hasY = args.y !== undefined;
+      if (hasX !== hasY) {
+        return {
+          effect: "action" as const,
+          result: { ok: false, error: "invalid_position", hint: "Pass both x and y to set a rally point, or omit both to clear it." },
+        };
+      }
+      const position = hasX ? { x: Number(args.x), y: Number(args.y) } : undefined;
+      const mode = args.mode === "attack_move" ? "attack_move" : "move";
+      return executeBuildingBatch(
+        gameplayController,
+        args,
+        (buildingId) => gameplayController.setRallyPoint(buildingId, position, mode),
+      );
+    },
   },
   {
     name: "build_structure",
@@ -229,12 +384,12 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "start_harvest_loop",
     description:
-      "Assign one friendly worker to the built-in mining loop. The worker delivers to the nearest completed HQ or refinery. Omit x/y to auto-select a deposit using recurring delivery distance, initial travel, and current assignments; specify x/y only when intentionally overriding that choice. Multiple workers may share one deposit. Do not repeatedly reissue unless the worker is idle, blocked, or needs reassignment.",
+      "Assign one or more friendly workers to the built-in mining loop. The worker delivers to the nearest completed HQ or refinery. Omit x/y to auto-select deposits using recurring delivery distance, initial travel, and current assignments; specify x/y only when intentionally assigning every selected worker to one deposit. Multiple workers may share one deposit. A worker with harvest_loop intent is already assigned even when its instantaneous phase is idle; repeated identical calls return already_active without restarting it. Reissue only after path_blocked or for deliberate reassignment.",
     parameters: {
       type: "object",
-      required: ["unitId"],
+      required: ["unitIds"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
       },
@@ -245,23 +400,38 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       const hasY = args?.y !== undefined;
       const position = hasX && hasY ? { x: Number(args.x), y: Number(args.y) } : undefined;
       if (hasX !== hasY) {
-        return gameplayController.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
+        return {
+          effect: "action",
+          result: {
+            ok: false,
+            error: "invalid_resource_target",
+            hint: "Pass both x and y, or omit both for automatic resource selection.",
+          },
+        };
       }
-      return gameplayController.startHarvestLoop(String(args.unitId), position);
+      return executeUnitBatch(
+        gameplayController,
+        args,
+        (unitId) => gameplayController.startHarvestLoop(unitId, position),
+      );
     },
   },
   {
     name: "hold_unit",
-    description: "Queue a hold-position command for one unit.",
+    description: "Queue hold-position commands for one or more selected units.",
     parameters: {
       type: "object",
-      required: ["unitId"],
+      required: ["unitIds"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
       },
       additionalProperties: false,
     },
-    execute: (gameplayController, args) => gameplayController.holdUnit(String(args.unitId)),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.holdUnit(unitId),
+    ),
   },
   {
     name: "spawn_agent",
@@ -324,17 +494,17 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "orchestrate_plan",
     description: [
-      "Register a flat orchestration plan for one or more units using existing action-tool calls, optional until conditions, and looping.",
-      "Prefer this for durable multi-tick intentions that would otherwise require repeated economy, production, move, or attack tool calls.",
+      "Register a durable plan using the same parameter shapes as existing action tools, optional completion conditions, and looping.",
+      "Prefer this for durable multi-tick intentions that would otherwise require repeated economy, move, build, or attack tool calls.",
       "Rules:",
       "- Step shape: { call: existing_action_tool_name, args: {...}, scope: \"per_unit\"|\"global\", when: {...}, until: {...}, retry: true/false, maxTicks: number }.",
-      "- Supported call tools in plans: move_unit, attack_move_unit, attack, spawn_unit, build_structure, start_harvest_loop, hold_unit.",
-      "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for production/building actions.",
+      "- Supported call tools in plans: move_unit, attack_move_unit, attack, build_structure, start_harvest_loop, hold_unit. Production is intentionally managed by spawn_unit/get_production_queue/cancel_production instead of plans.",
+      "- unitIds is only required for per_unit steps. Global building plans may omit it.",
+      "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
-      "- In global production args, buildingId can be \"$hq\", \"$barracks\", \"$war_factory\", or \"$refinery\" to resolve the current friendly building at execution time.",
       "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, worker_adjacent_to_build_footprint, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
-      "- Plan spawn_unit/build_structure steps automatically wait when current credits cannot pay the requested unit or building; build_structure also waits until the worker is adjacent to the requested footprint.",
-      "- Multiple active plans share the same-tick available credits. Earlier paid spawn/build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
+      "- Plan build_structure steps automatically wait for credits, select a site when x/y are omitted, move the worker, and immediately reselect if the footprint becomes occupied.",
+      "- Multiple active plans share the same-tick available credits. Earlier paid build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
       "- Use get_active_plans to inspect currentStep, waiting.code/message/details, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
@@ -343,7 +513,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     ].join("\n"),
     parameters: {
       type: "object",
-      required: ["unitIds", "steps"],
+      required: ["steps"],
       properties: {
         unitIds: { type: "array", items: { type: "string" } },
         replaceExisting: { type: "boolean" },
@@ -357,7 +527,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             properties: {
               call: {
                 type: "string",
-                enum: ["move_unit", "attack_move_unit", "attack", "spawn_unit", "build_structure", "start_harvest_loop", "hold_unit"],
+                enum: ["move_unit", "attack_move_unit", "attack", "build_structure", "start_harvest_loop", "hold_unit"],
               },
               scope: { type: "string", enum: ["global", "per_unit"] },
               args: {

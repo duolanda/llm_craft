@@ -7,7 +7,7 @@ import { WorldState } from "../WorldState";
 function createRecordingSystems(phases: string[]): SimulationSystems {
   return {
     movement: { step: () => { phases.push("movement"); } },
-    projectiles: { step: () => { phases.push("projectiles"); } },
+    projectiles: { step: () => { phases.push("projectiles"); return []; } },
     economy: {
       step: () => {
         phases.push("economy");

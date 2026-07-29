@@ -77,7 +77,7 @@ export class EconomySystem {
           }
         }
 
-        if (deliveryBuilding && !onResourceTile && unit.carryingCredits > 0) {
+        if (deliveryBuilding && unit.carryingCredits > 0) {
           const deliveredCredits = unit.carryingCredits;
           player.resources.credits += deliveredCredits;
           unit.carryingCredits = 0;

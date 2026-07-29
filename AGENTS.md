@@ -154,6 +154,10 @@ flowchart LR
 
 **Agent 运行时 (server/src/controller/GameplayController.ts):**
 - 模型通过只读与动作工具观察/控制游戏，不再生成并执行 JavaScript
+- `orchestrate_plan` 与其支持的即时动作使用同一套工具名和参数形状，并暴露给 LLM；生产不属于 plan call，由专用有限队列工具管理；其余 global 建造计划可省略 `unitIds`，由 `MissionRuntime` 在每个 committed tick 持续推进；`cancel_plan` 按 `planId` 直接终止 active plan，显式绑定的单位死亡时 plan 自动失败而不是永久等待
+- plan 中的自动建造会自行选址、移动 worker，并在 footprint 被动态占据时立即重选
+- HQ、兵营和重工使用严格有序的有限生产队列；`spawn_unit` 一次追加多个 `{ unitType, count }`，`get_production_queue` 查询进度，`cancel_production` 按 order/building 取消。生产逐 tick 扣款，缺钱暂停并自动恢复，取消或建筑被摧毁时退还当前未完成单位已支付的 credits；每建筑每兵种最多保留 100 个待生产单位
+- HQ、兵营和重工可持久保存 rally point；单位生产完成后由 ProductionSystem 生成普通 move order，目标占用时复用寻路层的附近可达格解析
 - 动作通过 MatchRuntime 专属 CommandGateway 提交，禁止异步直接修改 WorldState
 
 **LLM 调用层 (server/src/model + server/src/PresetStore.ts):**
@@ -175,6 +179,7 @@ flowchart LR
 - `MatchRecorder` 支持 `off` / `replay` / `evaluation` 档位；transcript 只是 evaluation record 中的可选内容
 - 运行中 delta 在共享 worker 中按块压缩留存，终局或显式保存时只写一次 JSON；不要重新引入 Journal workspace、事实流或 artifact retention 平台
 - CLI stdin batch 必须使用 `/sessions/:id/actions` 形成单个 CommandEnvelope；禁止重新引入逐 action HTTP 循环
+- control-plane match 默认使用 `evaluation` 档位且关闭 transcript，以保存 CLI/HTTP 命令结果与 controller provenance
 - 当前没有每 actor 每 tick 命令数或全局路径命令额度；batch 中每条 action 独立执行，一条失败不会回滚其他成功动作
 - CPU-vs-CPU 仅允许用于确定性规则/规模 smoke，不作为模型、策略或平衡样本
 
@@ -229,6 +234,12 @@ const game = new Game();
 game.start();
 // ... 队列命令，推进 tick，断言状态
 ```
+
+不要为 system prompt、工具描述或其他指导性文案编写固定字符串测试，包括用
+`toContain`、`not.toContain`、整段 `toEqual` 或 snapshot 锁定具体措辞。这类测试
+不能验证模型行为，却会妨碍正常的 prompt 迭代。prompt 文案修改通过代码审阅和实际
+对局评估验证；只有在存在独立于措辞的结构化逻辑或稳定行为契约时，才为那部分逻辑
+编写测试。
 
 ## 代码风格约定
 

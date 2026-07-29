@@ -237,6 +237,18 @@ export class CombatSystem {
       if (!unit.exists || unit.order?.type !== "attack" || unit.lastAttackTick === world.tick) continue;
       const result = this.executeAttackOrder(world, unit, unit.playerId, unit.order);
       if (result === RESULT_CODES.ERR_INVALID_TARGET && unit.order?.targetId) {
+        const target = this.findPrioritizedTarget(world, unit, unit.playerId, unit.order.targetPriority);
+        if (target) {
+          const fallbackResult = this.executeAttackTarget(world, unit, target.target, target.kind);
+          if (fallbackResult === RESULT_CODES.OK || fallbackResult === RESULT_CODES.ERR_BUSY) {
+            unit.order = {
+              type: "attack",
+              targetId: target.target.id,
+              targetPriority: unit.order.targetPriority,
+            };
+            continue;
+          }
+        }
         unit.order = { type: "hold" };
         unit.state = UNIT_STATES.IDLE;
       } else if (result !== RESULT_CODES.OK && unit.order?.targetId) {
@@ -256,14 +268,29 @@ export class CombatSystem {
       hasExplicitPriority ? targetPriority! : getDefaultAttackMovePriority(attacker.type)
     ).map((value) => String(value).toLowerCase());
     const acquisitionRange = getUnitVisionRange(attacker.type);
+    const friendlyIds = new Set([
+      ...world.units.getUnitsByPlayer(playerId).filter((unit) => unit.exists).map((unit) => unit.id),
+      ...world.buildings.getBuildingsByPlayer(playerId).filter((building) => building.exists).map((building) => building.id),
+    ]);
     const units = world.units.getAllUnits()
       .filter((unit) => unit.exists && unit.playerId !== playerId)
       .filter((unit) => this.chebyshevDistance(attacker, unit) <= acquisitionRange)
-      .sort((left, right) => left.id.localeCompare(right.id));
+      .sort((left, right) =>
+        Number(Boolean(right.order?.targetId && friendlyIds.has(right.order.targetId)))
+        - Number(Boolean(left.order?.targetId && friendlyIds.has(left.order.targetId)))
+        || this.chebyshevDistance(attacker, left) - this.chebyshevDistance(attacker, right)
+        || left.hp - right.hp
+        || left.id.localeCompare(right.id)
+      );
     const buildings = world.buildings.getAllBuildings()
       .filter((building) => building.exists && building.playerId !== playerId)
       .filter((building) => world.buildings.getDistanceToBuilding(building, attacker.x, attacker.y) <= acquisitionRange)
-      .sort((left, right) => left.id.localeCompare(right.id));
+      .sort((left, right) =>
+        world.buildings.getDistanceToBuilding(left, attacker.x, attacker.y)
+        - world.buildings.getDistanceToBuilding(right, attacker.x, attacker.y)
+        || left.hp - right.hp
+        || left.id.localeCompare(right.id)
+      );
 
     for (const requestedType of priority) {
       const unit = units.find((candidate) => candidate.type === requestedType);

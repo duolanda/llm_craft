@@ -5,6 +5,7 @@ import {
   BuildingType,
   Player,
   PlayerId,
+  UnitType,
   GameLog,
   Command,
   GameSnapshot,
@@ -23,7 +24,7 @@ import {
   getBuildingConstructionTicks,
   getBuildingFootprint,
   getBuildingFootprintCells,
-  getUnitCost as getRulesetUnitCost,
+  getProductionOptions,
   isBuildableBuildingType,
   isBuildingType,
   isUnitType,
@@ -44,7 +45,7 @@ import {
 } from "@llmcraft/shared";
 import { buildTickDelta } from "./GameHistory";
 import { UnitManager } from "./UnitManager";
-import { BuildingManager } from "./BuildingManager";
+import { BuildingManager, MAX_PENDING_PRODUCTION_PER_UNIT_TYPE } from "./BuildingManager";
 import { createDefaultMatchDefinition, type MatchDefinition, validateMatchDefinition } from "./MatchDefinition";
 import { SimulationCore, type SimulationEvent, type SimulationStepResult } from "./SimulationCore";
 import { WorldState } from "./WorldState";
@@ -715,14 +716,97 @@ export class Game {
         break;
       }
 
+      case "set_rally_point": {
+        if (command.buildingId) {
+          const building = this.world.buildings.getBuilding(command.buildingId);
+          const positionValid = !command.position || (
+            Number.isInteger(command.position.x) &&
+            Number.isInteger(command.position.y) &&
+            command.position.y >= 0 &&
+            command.position.y < this.world.tiles.length &&
+            command.position.x >= 0 &&
+            command.position.x < (this.world.tiles[command.position.y]?.length ?? 0)
+          );
+          if (
+            building?.exists &&
+            building.playerId === command.playerId &&
+            getProductionOptions(building.type).length > 0 &&
+            positionValid &&
+            !(command.position && command.rallyMode === "attack_move" && building.type === BUILDING_TYPES.HQ)
+          ) {
+            if (command.position) {
+              building.rallyPoint = {
+                ...command.position,
+                mode: command.rallyMode === "attack_move" ? "attack_move" : "move",
+              };
+            } else {
+              delete building.rallyPoint;
+            }
+            this.world.markChanged();
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              command.position
+                ? `Rally point for ${building.id} set to (${command.position.x}, ${command.position.y}) using ${building.rallyPoint?.mode}`
+                : `Rally point for ${building.id} cleared`,
+              {
+                command,
+                result_code: RESULT_CODES.OK,
+                type: RESULT_TYPES.RALLY_POINT_UPDATED,
+                result_data: {
+                  buildingId: building.id,
+                  rallyPoint: building.rallyPoint ?? null,
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+              },
+            );
+          } else {
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Cannot update rally point for ${command.buildingId}`,
+              {
+                command,
+                result_code: RESULT_CODES.ERR_INVALID_TARGET,
+                type: RESULT_TYPES.RALLY_INVALID_TARGET,
+                result_data: {
+                  buildingId: command.buildingId,
+                  hint: "Use a friendly HQ, barracks, or war factory and choose an in-bounds destination.",
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+                level: LOG_LEVELS.WARNING,
+              },
+            );
+          }
+        }
+        break;
+      }
+
       case "spawn": {
-        if (command.buildingId && command.unitType) {
+        if (command.buildingId && command.productionRequests?.length) {
           const building = this.world.buildings.getBuilding(command.buildingId);
           if (building && building.playerId === command.playerId) {
-            const player = this.world.getPlayerState(command.playerId);
-            if (player) {
-              const unitCost = this.getUnitCost(command.unitType);
-              if (building.constructionProgress) {
+            const requests = command.productionRequests;
+            const invalidRequest = requests.find((request) =>
+              !isUnitType(request.unitType) ||
+              !Number.isInteger(request.count) ||
+              request.count <= 0 ||
+              !this.world.buildings.canProduce(building, request.unitType)
+            );
+            const requestedCounts = new Map<UnitType, number>();
+            for (const request of requests) {
+              if (isUnitType(request.unitType) && Number.isInteger(request.count) && request.count > 0) {
+                requestedCounts.set(request.unitType, (requestedCounts.get(request.unitType) ?? 0) + request.count);
+              }
+            }
+            const overflowingType = [...requestedCounts].find(([unitType, count]) =>
+              this.world.buildings.getPendingCount(building, unitType) + count > MAX_PENDING_PRODUCTION_PER_UNIT_TYPE
+            )?.[0];
+            if (building.constructionProgress) {
                 const result = RESULT_CODES.ERR_BUSY;
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
@@ -734,7 +818,7 @@ export class Game {
                     result_data: {
                       buildingId: building.id,
                       buildingType: building.type,
-                      unitType: command.unitType,
+                      unitType: String(requests[0]?.unitType ?? "unknown"),
                       hint: `${building.type} is still under construction and cannot produce units yet.`,
                     },
                   },
@@ -744,11 +828,11 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
-              } else if (!this.world.buildings.canProduce(building, command.unitType)) {
+            } else if (invalidRequest || overflowingType) {
                 const result = RESULT_CODES.ERR_INVALID_BUILDING;
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
-                  `Spawn command failed: ${building.type} cannot produce ${command.unitType}`,
+                  `Production queue command failed for ${building.type}`,
                   {
                     command,
                     result_code: result,
@@ -756,10 +840,10 @@ export class Game {
                     result_data: {
                       buildingId: building.id,
                       buildingType: building.type,
-                      unitType: command.unitType,
-                      hint: building.type === BUILDING_TYPES.HQ
-                        ? "HQ can only spawn workers. Build a barracks to produce soldiers."
-                        : "Check that the unit type matches the building.",
+                      unitType: String(invalidRequest?.unitType ?? overflowingType ?? "unknown"),
+                      hint: overflowingType
+                        ? `A building may have at most ${MAX_PENDING_PRODUCTION_PER_UNIT_TYPE} pending ${overflowingType} units.`
+                        : `${building.type} cannot produce one of the requested unit types, or its count is not a positive integer.`,
                     },
                   },
                   {
@@ -768,19 +852,20 @@ export class Game {
                     level: LOG_LEVELS.WARNING,
                   }
                 );
-              } else if (player.resources.credits >= unitCost) {
-                player.resources.credits -= unitCost;
-                this.world.buildings.spawnUnit(building, command.unitType);
+            } else {
+                const orders = this.world.buildings.enqueueProduction(building, requests);
+                this.world.markChanged();
                 this.addLog(
                   LOG_TYPES.COMMAND_RESULT,
-                  `Spawn command queued: ${command.unitType} from ${building.type}`,
+                  `Production batch queued from ${building.type}`,
                   {
                     command,
                     result_code: RESULT_CODES.OK,
                     type: RESULT_TYPES.SPAWN_SUCCESS,
                     result_data: {
                       buildingId: building.id,
-                      unitType: command.unitType,
+                      orders: orders.map((order) => ({ ...order })),
+                      queue: building.productionQueue.map((order) => ({ ...order })),
                     },
                   },
                   {
@@ -788,32 +873,73 @@ export class Game {
                     feedbackTarget: command.playerId,
                   }
                 );
-              } else {
-                this.addLog(
-                  LOG_TYPES.COMMAND_RESULT,
-                  "Spawn command failed: insufficient credits",
-                  {
-                    command,
-                    result_code: RESULT_CODES.ERR_NOT_ENOUGH_CREDITS,
-                    type: RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS,
-                    result_data: {
-                      buildingId: building.id,
-                      unitType: command.unitType,
-                      requiredCredits: unitCost,
-                      currentCredits: player.resources.credits,
-                      hint: `Need ${unitCost} credits before spawning ${command.unitType}.`,
-                    },
-                  },
-                  {
-                    owner: command.playerId,
-                    feedbackTarget: command.playerId,
-                    level: LOG_LEVELS.WARNING,
-                  }
-                );
-              }
             }
           }
         }
+        break;
+      }
+
+      case "cancel_production": {
+        const player = this.world.getPlayerState(command.playerId);
+        const requestedOrderIds = new Set(command.productionOrderIds ?? []);
+        const ownedBuildings = this.world.buildings.getBuildingsByPlayer(command.playerId);
+        const targetBuildings = command.buildingId
+          ? ownedBuildings.filter((building) => building.id === command.buildingId)
+          : ownedBuildings.filter((building) =>
+              building.productionQueue.some((order) => requestedOrderIds.has(order.orderId))
+            );
+        if (!player || targetBuildings.length === 0 || (!command.buildingId && requestedOrderIds.size === 0)) {
+          this.addLog(LOG_TYPES.COMMAND_RESULT, "Cancel production failed: no matching queue or order", {
+            command,
+            result_code: RESULT_CODES.ERR_INVALID_TARGET,
+            type: RESULT_TYPES.PRODUCTION_INVALID_ORDER,
+            result_data: { hint: "Use get_production_queue and pass friendly buildingIds or active orderIds." },
+          }, {
+            owner: command.playerId,
+            feedbackTarget: command.playerId,
+            level: LOG_LEVELS.WARNING,
+          });
+          break;
+        }
+
+        const cancelledOrderIds: string[] = [];
+        let refundCredits = 0;
+        for (const building of targetBuildings) {
+          const cancellation = this.world.buildings.cancelProduction(
+            building,
+            command.buildingId ? undefined : requestedOrderIds,
+          );
+          cancelledOrderIds.push(...cancellation.cancelledOrderIds);
+          refundCredits += cancellation.refundCredits;
+        }
+        if (cancelledOrderIds.length === 0) {
+          this.addLog(LOG_TYPES.COMMAND_RESULT, "Cancel production failed: no matching queue or order", {
+            command,
+            result_code: RESULT_CODES.ERR_INVALID_TARGET,
+            type: RESULT_TYPES.PRODUCTION_INVALID_ORDER,
+            result_data: { hint: "The selected queues are already empty or the order IDs no longer exist." },
+          }, {
+            owner: command.playerId,
+            feedbackTarget: command.playerId,
+            level: LOG_LEVELS.WARNING,
+          });
+          break;
+        }
+        player.resources.credits += refundCredits;
+        this.world.markChanged();
+        this.addLog(LOG_TYPES.COMMAND_RESULT, "Production cancelled", {
+          command,
+          result_code: RESULT_CODES.OK,
+          type: RESULT_TYPES.PRODUCTION_CANCELLED,
+          result_data: {
+            buildingIds: targetBuildings.map((building) => building.id),
+            cancelledOrderIds,
+            refundCredits,
+          },
+        }, {
+          owner: command.playerId,
+          feedbackTarget: command.playerId,
+        });
         break;
       }
 
@@ -1026,10 +1152,6 @@ export class Game {
     }
   }
 
-  private getUnitCost(unitType: string): number {
-    return isUnitType(unitType) ? getRulesetUnitCost(unitType) : 0;
-  }
-
   private getBuildingCost(buildingType: string): number {
     return isBuildingType(buildingType) ? getRulesetBuildingCost(buildingType) : 0;
   }
@@ -1108,10 +1230,21 @@ export class Game {
           break;
         case "unit_spawned":
           this.addLog(LOG_TYPES.UNIT_SPAWNED, `Unit ${event.unitType} spawned for ${event.playerId}`, {
+            unitId: event.unitId,
             unitType: event.unitType,
           }, {
             owner: event.playerId,
             feedbackTarget: event.playerId,
+          });
+          break;
+        case "unit_destroyed":
+          this.addLog(LOG_TYPES.UNIT_DESTROYED, `Unit ${event.unitId} (${event.unitType}) lost by ${event.playerId}`, {
+            unitId: event.unitId,
+            unitType: event.unitType,
+          }, {
+            owner: event.playerId,
+            feedbackTarget: event.playerId,
+            level: LOG_LEVELS.WARNING,
           });
           break;
         case "unit_spawn_failed":
@@ -1245,7 +1378,8 @@ export class Game {
       }),
       buildings: player.buildings.map((building) => ({
         ...building,
-        productionQueue: [...building.productionQueue],
+        rallyPoint: building.rallyPoint ? { ...building.rallyPoint } : undefined,
+        productionQueue: building.productionQueue.map((order) => ({ ...order })),
         productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
         constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
       })),
@@ -1464,7 +1598,16 @@ export class Game {
           }
         : undefined,
       unitType: command.unitType,
+      productionRequests: command.productionRequests?.map((request) => ({ ...request })),
+      productionOrderIds: command.productionOrderIds?.map(String),
       buildingType: command.buildingType,
+      rallyMode:
+        command.rallyMode === "move" || command.rallyMode === "attack_move"
+          ? command.rallyMode
+          : undefined,
+      resumeWorkerOrder: command.resumeWorkerOrder
+        ? this.cloneValue(command.resumeWorkerOrder)
+        : undefined,
       playerId: command.playerId,
       provenance: command.provenance ? this.cloneValue(command.provenance) : undefined,
     };

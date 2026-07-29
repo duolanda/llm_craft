@@ -5,8 +5,8 @@ import {
   getBuildingCost,
   getBuildingFootprint,
   getCombatUnitTypes,
-  getUnitCost,
   type BuildingType,
+  type ControlBatchAction,
 } from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
@@ -73,7 +73,6 @@ export async function handlePlan(
     const q = queueData.find((qd) => qd.buildingId === b.id);
     return !q || q.queue.length === 0;
   });
-  const credits = typeof stateData.credits === "number" ? stateData.credits : 0;
   const hqX = typeof hqBuilding?.x === "number" ? hqBuilding.x : 0;
   const hqY = typeof hqBuilding?.y === "number" ? hqBuilding.y : 0;
   const buildDirection = hqBuilding?.playerId === "player_2" ? -1 : 1;
@@ -155,17 +154,6 @@ export async function handlePlan(
       ));
     }
 
-    // Step 3: train workers from HQ when queue is empty
-    if (hqBuilding && credits >= getUnitCost(UNIT_TYPES.WORKER)) {
-      steps.push({
-        call: "spawn_unit",
-        args: { buildingId: "$hq", unitType: "worker" },
-        scope: "global",
-        when: { condition: "production_queue_empty", buildingType: "hq" },
-        retry: true,
-      });
-    }
-
     plan = {
       unitIds,
       loop: -1,
@@ -191,37 +179,9 @@ export async function handlePlan(
       steps.push(...createBuildSteps(unitIds[0], BUILDING_TYPES.BARRACKS, barracksSite));
     }
 
-    steps.push({
-      call: "spawn_unit",
-      args: { buildingId: "$barracks", unitType: "rifleman" },
-      scope: "global",
-      when: { condition: "production_queue_empty", buildingType: "barracks" },
-      until: { condition: "unit_count_at_least", unitType: "rifleman", count: 3 },
-      retry: true,
-    });
-
     if (warFactoryBuildings.length === 0) {
       steps.push(...createBuildSteps(unitIds[0], BUILDING_TYPES.WAR_FACTORY, factorySite));
     }
-
-    steps.push(
-      {
-        call: "spawn_unit",
-        args: { buildingId: "$war_factory", unitType: "light_tank" },
-        scope: "global",
-        when: { condition: "production_queue_empty", buildingType: "war_factory" },
-        until: { condition: "unit_count_at_least", unitType: "light_tank", count: 1 },
-        retry: true,
-      },
-      {
-        call: "spawn_unit",
-        args: { buildingId: "$barracks", unitType: "rocket_soldier" },
-        scope: "global",
-        when: { condition: "enemy_unit_count_at_least", unitType: "light_tank", count: 1 },
-        until: { condition: "unit_count_at_least", unitType: "rocket_soldier", count: 2 },
-        retry: true,
-      },
-    );
 
     plan = {
       unitIds,
@@ -311,6 +271,30 @@ export async function handlePlan(
 
 // --- orchestrate ---
 
+const ACTION_TOOL_ALIASES: Record<string, string> = {
+  move: "move_unit",
+  "attack-move": "attack_move_unit",
+  build: "build_structure",
+  train: "spawn_unit",
+  gather: "start_harvest_loop",
+  hold: "hold_unit",
+};
+
+function normalizeBatchAction(action: ControlBatchAction): ControlBatchAction {
+  const tool = ACTION_TOOL_ALIASES[action.tool] ?? action.tool;
+  const args = { ...(action.args ?? {}) };
+  if (tool === "build_structure" && args.unitId === undefined && typeof args.workerId === "string") {
+    args.unitId = args.workerId;
+    delete args.workerId;
+  }
+  if (tool === "spawn_unit" && args.units === undefined && typeof args.unitType === "string") {
+    args.units = [{ unitType: args.unitType, count: Number(args.count ?? 1) }];
+    delete args.unitType;
+    delete args.count;
+  }
+  return { tool, args };
+}
+
 export async function handleOrchestrate(
   client: ControlClient,
   sessionId: string,
@@ -323,7 +307,7 @@ export async function handleOrchestrate(
 
   const stdinInput = await readStdin();
   if (!stdinInput || (stdinInput.kind !== "plan" && stdinInput.kind !== "actions")) {
-    exit(ExitCode.ArgError, "orchestrate requires stdin input (kind=plan or kind=actions). Pipe from 'plan' or a batch.");
+    exit(ExitCode.ArgError, "orchestrate requires a tool-call batch ({ actions: [...] }) or legacy plan input on stdin.");
   }
   const data = stdinInput.data as Record<string, unknown>;
 
@@ -353,7 +337,7 @@ export async function handleOrchestrate(
   }
 
   // kind === "actions"
-  const actions = (data.actions as Array<{ tool: string; args: Record<string, unknown> }>) ?? [];
+  const actions = ((data.actions as ControlBatchAction[]) ?? []).map(normalizeBatchAction);
   if (actions.length === 0) {
     exit(ExitCode.ArgError, "orchestrate: actions input has no actions");
   }

@@ -188,7 +188,7 @@ describe("Game", () => {
     }
   });
 
-  it("allows HQ to spawn workers and deducts credits", () => {
+  it("queues workers without upfront payment and pays their full cost by completion", () => {
     const state = game.getState();
     const player1 = state.players[0];
     const hq = player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ);
@@ -197,14 +197,19 @@ describe("Game", () => {
       id: "spawn_worker",
       type: "spawn",
       buildingId: hq!.id,
-      unitType: UNIT_TYPES.WORKER,
+      productionRequests: [{ unitType: UNIT_TYPES.WORKER, count: 1 }],
       playerId: "player_1",
     });
 
     game.processCommands();
 
-    expect(game.getState().players[0].resources.credits).toBe(750);
+    expect(game.getState().players[0].resources.credits).toBe(800);
+    expect(game.getState().players[0].buildings.find((building) => building.id === hq!.id)?.productionQueue).toHaveLength(1);
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+    game.start();
+    for (let tick = 0; tick < getUnitProductionTicks(UNIT_TYPES.WORKER); tick++) game.tickUpdate();
+    game.stop();
+    expect(game.getState().players[0].resources.credits).toBe(750);
   });
 
   it("rejects spawning soldiers directly from HQ", () => {
@@ -216,7 +221,7 @@ describe("Game", () => {
       id: "spawn_soldier_from_hq",
       type: "spawn",
       buildingId: hq!.id,
-      unitType: UNIT_TYPES.SOLDIER,
+      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
       playerId: "player_1",
     });
 
@@ -280,6 +285,30 @@ describe("Game", () => {
     expect(freedWorker.constructingBuildingId).toBeUndefined();
   });
 
+  it("preserves a worker resume order through command normalization and construction", () => {
+    const worker = game.getState().players[0].units.find((unit) => unit.type === UNIT_TYPES.WORKER)!;
+    const resumeWorkerOrder = {
+      type: "harvest_loop" as const,
+      targetX: DEFAULT_MAP_LAYOUT.resources[0].x,
+      targetY: DEFAULT_MAP_LAYOUT.resources[0].y,
+    };
+    moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
+
+    game.queueCommand({
+      id: "build_then_resume_harvest",
+      type: "build",
+      unitId: worker.id,
+      buildingType: BUILDING_TYPES.BARRACKS,
+      position: player1BuildSite,
+      resumeWorkerOrder,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    completeConstruction(BUILDING_TYPES.BARRACKS);
+
+    expect(game.getUnitManager().getUnit(worker.id)?.order).toEqual(resumeWorkerOrder);
+  });
+
   it("keeps a construction worker busy until the building completes", () => {
     const worker = game.getState().players[0].units.find((u) => u.type === UNIT_TYPES.WORKER)!;
     moveWorkerAdjacentToBuildSite(worker.id, BUILDING_TYPES.BARRACKS);
@@ -324,7 +353,7 @@ describe("Game", () => {
       id: "spawn_from_unfinished_barracks",
       type: "spawn",
       buildingId: barracks.id,
-      unitType: UNIT_TYPES.RIFLEMAN,
+      productionRequests: [{ unitType: UNIT_TYPES.RIFLEMAN, count: 1 }],
       playerId: "player_1",
     });
     game.processCommands();
@@ -403,7 +432,7 @@ describe("Game", () => {
       id: "soldier_without_barracks",
       type: "spawn",
       buildingId: hq.id,
-      unitType: UNIT_TYPES.SOLDIER,
+      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
       playerId: "player_1",
     });
 
@@ -440,7 +469,7 @@ describe("Game", () => {
       id: "spawn_soldier",
       type: "spawn",
       buildingId: barracks.id,
-      unitType: UNIT_TYPES.SOLDIER,
+      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
       playerId: "player_1",
     });
     game.processCommands();
@@ -540,7 +569,7 @@ describe("Game", () => {
       id: "spawn_light_tank",
       type: "spawn",
       buildingId: warFactory.id,
-      unitType: UNIT_TYPES.LIGHT_TANK,
+      productionRequests: [{ unitType: UNIT_TYPES.LIGHT_TANK, count: 1 }],
       playerId: "player_1",
     });
     game.processCommands();
@@ -1146,7 +1175,7 @@ describe("Game", () => {
       id: "spawn_worker",
       type: "spawn",
       buildingId: hq.id,
-      unitType: UNIT_TYPES.WORKER,
+      productionRequests: [{ unitType: UNIT_TYPES.WORKER, count: 1 }],
       playerId: "player_1",
     });
     game.processCommands();

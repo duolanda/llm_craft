@@ -467,7 +467,7 @@ interface CommandProvenance {
     y: number;
     hp: number;
     maxHp: number;
-    state: UnitState;
+    phase: UnitState;
     relation: "self" | "enemy";
   }>;
   buildings: Array<{
@@ -495,7 +495,7 @@ interface CommandProvenance {
       y: number;
       hp: number;
       maxHp: number;
-      state: UnitState;
+      phase: UnitState;
       relation: "self" | "enemy";
     };
     building?: {
@@ -521,7 +521,7 @@ interface CommandProvenance {
 - 默认不返回 `cells`，以降低上下文体积
 - 传 `includeCells=true` 时只返回全图“有信息量”的格子：资源、障碍、单位、建筑
 - 传 `includeEmptyTiles=true` 时会隐含 `includeCells=true`，返回完整地图格子信息（包括 empty）
-- `unit` 是精简视图，不返回 `playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段；`my` 已从权威实体类型删除，不属于任何观察接口契约
+- `unit` 是精简视图，不返回 `playerId / carryingCredits / carryCapacity / attackRange / intent` 等字段；`phase` 只表示当前 tick 的瞬时模拟阶段，不能据此判断持久任务是否存在；`my` 已从权威实体类型删除，不属于任何观察接口契约
 
 ### 2.1.1 旧读取结果折叠
 
@@ -550,24 +550,35 @@ interface CommandProvenance {
   credits: number;
   hq: Building | null;
   buildings: Building[];
-  productionQueues: Array<{ buildingId: string; queue: UnitType[] }>;
+  productionQueues: Array<{
+    buildingId: string;
+    queue: ProductionOrder[];
+    progress: ProductionProgress | null;
+  }>;
   canBuildBarracks: boolean;
   canBuildWarFactory: boolean;
   canBuildRefinery: boolean;
-  canSpawnWorker: boolean;
-  canSpawnSoldier: boolean;
-  canSpawnRifleman: boolean;
-  canSpawnRocketSoldier: boolean;
-  canSpawnLightTank: boolean;
+  canQueueWorker: boolean;
+  canQueueSoldier: boolean;
+  canQueueRifleman: boolean;
+  canQueueRocketSoldier: boolean;
+  canQueueLightTank: boolean;
   economyStatus: {
     workers: number;
+    assignedHarvesters: number;
     activeHarvesters: number;
+    stalledHarvesters: Array<{
+      unitId: string;
+      reason: "resource_depleted" | "delivery_blocked" | "path_blocked";
+      carryingCredits: number;
+    }>;
     idleWorkers: number;
     carryingCredits: number;
     resourceAssignments: Array<{
       x: number;
       y: number;
       assignedHarvesters: number;
+      remaining: number;
       distanceToHq: number | null;
     }>;
   };
@@ -601,7 +612,7 @@ interface CommandProvenance {
 }
 ```
 
-`economyStatus`、`techStatus` 和 `buildOptions` 只提供客观事实与合法选项，不推荐固定 worker 数量、兵种、科技路线、出兵规模或攻击时机。`activeHarvesters` 表示已挂 `harvest_loop` 的 worker 数量；`resourceAssignments` 表示各资源点当前分配情况，不是矿点容量上限。`buildOptions` 只返回成本、前置条件和可用 worker，不预计算候选工地；`build_structure` 省略坐标时自动选址，显式坐标非法时才在失败结果中返回少量 `suggestedPlacements`。施工中的建筑会出现在 `buildings` 中并带 `constructionProgress`，但不会计入已完成科技，也不能生产。
+`economyStatus`、`techStatus` 和 `buildOptions` 只提供客观事实与合法选项，不推荐固定 worker 数量、兵种、科技路线、出兵规模或攻击时机。`assignedHarvesters` 表示仍挂有 `harvest_loop` 意图的 worker 数量；`activeHarvesters` 排除已经停滞的 worker；`stalledHarvesters` 报告资源耗尽、满载无法交付，或连续 12 tick 没有位移和 credits 变化的 `path_blocked`。`resourceAssignments` 同时给出各资源点分配数和剩余量，不是矿点容量上限。`buildOptions` 只返回成本、前置条件和可用 worker，不预计算候选工地；`build_structure` 省略坐标时自动选址，显式坐标非法时才在失败结果中返回少量 `suggestedPlacements`。施工中的建筑会出现在 `buildings` 中并带 `constructionProgress`，但不会计入已完成科技，也不能生产。
 
 #### `get_my_units`
 
@@ -619,13 +630,15 @@ interface CommandProvenance {
     center?: Position;
     hasActivePlanCount: number;
   }>;
-  units: Array<Unit & {
+  units: Array<Omit<Unit, "path" | "state"> & {
+    phase: UnitState;
+    remainingPathSteps?: number;
     hasActivePlan: boolean;
   }>;
 }
 ```
 
-`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。
+`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。`phase` 是当前 tick 的瞬时模拟阶段，`intent` 才是持续任务；例如采矿循环等待下一步时可以是 `phase: "idle"`、`intent.type: "harvest_loop"`，这不表示任务丢失。单元详情不返回完整逐格 `path`，只保留 `pathTarget` 和可选的 `remainingPathSteps`，避免长路径重复占据模型上下文。
 
 #### `get_army_summary`
 
@@ -709,6 +722,8 @@ interface AgentPlanRecord {
 }
 ```
 
+Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入下一次模型请求：`building_completed`、`unit_spawned`、己方 `unit_destroyed`，以及任一己方建筑正在遭受攻击。相同事件按 tick 和实体 ID 去重；不会为 HQ 单独增加 `hq_lost` 之类的冗余事件。
+
 ### 2.2 即时动作工具
 
 #### `move_unit`
@@ -760,7 +775,8 @@ interface AgentPlanRecord {
 - 框选的所有合法战斗单位对同一 `targetId` 下达持续攻击命令
 - `targetId` 必须来自全图情报中的敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
-- 目标已死亡或不存在时返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`，无需为了恢复该失败再读取全图
+- 聚焦目标在观察后、首次命令提交前死亡时，攻击者会立刻在自身自动索敌视野内按同样规则换目标，成功结果携带 `retargetedFrom`；持续攻击中目标消失时也会重选。排序先看正在威胁友军的目标，再按兵种默认优先级、距离、残血和稳定 ID
+- 附近没有合法目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则转为 hold 并清掉旧追击路径
 - `targetStatus` 在目标曾被当前控制器观察且后来消失时为 `destroyed`；友军 ID 为 `not_enemy`；其他未知 ID 为 `invalid_id`
 
 #### `spawn_unit`
@@ -768,9 +784,57 @@ interface AgentPlanRecord {
 ```ts
 {
   buildingId: string;
-  unitType: "worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank";
+  units: Array<{
+    unitType: "worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank";
+    count: number; // 1..100
+  }>;
 }
 ```
+
+`units` 是追加到该建筑的有限批次，严格按数组顺序生产。每座建筑每种单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；当期 credits 不够时当前单位暂停且不丢进度，有收入后自动继续。单位真正完成时累计扣款恰好等于其完整造价。
+
+```ts
+interface ProductionOrder {
+  orderId: string;
+  unitType: UnitType;
+  count: number;
+  remainingCount: number;
+}
+
+interface ProductionProgress {
+  orderId: string;
+  unitType: UnitType;
+  remainingTicks: number;
+  totalTicks: number;
+  paidCredits: number;
+  totalCost: number;
+  status: "producing" | "waiting_for_credits" | "waiting_for_spawn";
+}
+```
+
+#### `get_production_queue`
+
+```ts
+{ buildingIds?: string[] }
+```
+
+省略 `buildingIds` 时返回全部己方 HQ、兵营和重工。结果包含严格有序的 `queue`、当前 `progress`、`pendingByUnitType`、每兵种上限和当前 credits。
+
+#### `cancel_production`
+
+```ts
+{ orderIds: string[] } | { buildingIds: string[] }
+```
+
+两种模式必须二选一：`orderIds` 取消指定批次，`buildingIds` 清空指定建筑的全部队列。当前尚未完成的单位已经支付多少就退多少；尚未开始的队列项未扣款，无需退款。生产建筑被摧毁时执行相同的清队列和退款规则。
+
+#### `cancel_plan`
+
+```ts
+{ planIds: string[] }
+```
+
+按 `get_active_plans` 返回的 `planId` 立即终止一个或多个 active plan。它只负责 MissionRuntime 计划，不接受生产 `orderId`；生产队列仍使用 `cancel_production`。global plan 显式绑定的单位死亡后会自动转为 `failed` 并从 active 列表移除，不会以 `assigned_unit_missing` 无限等待。
 
 #### `build_structure`
 
@@ -787,7 +851,7 @@ interface AgentPlanRecord {
 
 - 当前允许建造 `barracks`、`war_factory` 和 `refinery`
 - `war_factory` 需要己方已有一个已完成的 `barracks`
-- 省略 `x/y` 时自动选择合法工地；普通建筑选择 HQ 方向的附近工地，`refinery` 按可缩短的矿点交付路线排序。显式传入时使用指定建筑中心
+- 省略 `x/y` 时自动选择合法工地；普通生产建筑优先沿 HQ 朝战场方向横向展开，同批尚未落地的建造计划会预留 footprint 外一格，避免贴边或竖向封住 HQ 出口；`refinery` 按可缩短的矿点交付路线排序。显式传入时使用指定建筑中心
 - worker 不在 footprint 旁时，工具会注册持久建造任务，自动移动；只有工人实际与完整 footprint 相邻时才进入建造步骤
 - 建造成功会立即扣 credits 并创建施工中的建筑；施工中建筑占地、可被攻击，但不能生产，也不满足科技前置
 - 施工会占用该 worker；如果建造前处于 `harvest_loop`，完工后自动恢复原采矿循环
@@ -801,7 +865,7 @@ interface AgentPlanRecord {
 
 ```ts
 {
-  unitId: string;
+  unitIds: string[];
   x?: number;
   y?: number;
 }
@@ -809,27 +873,49 @@ interface AgentPlanRecord {
 
 说明：
 
-- 只接受己方 `worker`
+- `unitIds` 接受一个或多个己方 `worker`；同一批显式坐标会应用到所有选中 worker
 - 让 worker 进入内建采矿循环，在资源点和最近的己方已完成 HQ/refinery 之间自动往返
 - 省略 `x/y` 时，游戏按反复交付路程、worker 初始路程和当前分配数自动选择矿点；交付路程权重更高，避免近矿尚可用时仅为分散分配跑去远矿
 - 单个矿点最多保留 2 个 worker；超出后内建循环会自动改派到下一条高效路线，避免多个单位围住单格矿点
 - 显式传入 `x/y` 会尊重该矿点，只应在需要主动覆盖自动选择时使用
-- 常规采矿应优先使用这个工具，不要用 `orchestrate_plan` 手写 worker 往返路线
-- 已经处于 `harvest_loop` 的 worker 默认视为已有任务，除非被堵、资源选择错误或需要改派，不要每轮重复调用
+- 当前矿点耗尽后，持续采矿循环会自动选择下一条可用路线；worker 只要进入已完成 HQ/refinery 的交付范围就能卸货，即使其位置仍是资源格
+- 常规采矿应优先使用这个工具，不要用多步 plan 手写 worker 往返路线
+- 已经处于同一 `harvest_loop` 的 worker 即使瞬时 `phase` 为 `idle`，也视为已有任务；相同调用返回 `status: "already_active"` 且不会重启路径。只有 `path_blocked`、矿点失效或主动改派时才需要重发
 
 #### `hold_unit`
 
 ```ts
 {
-  unitId: string;
+  unitIds: string[];
 }
 ```
 
+#### `set_rally_point`
+
+```ts
+{
+  buildingIds: string[];
+  x?: number;
+  y?: number;
+  mode?: "move" | "attack_move";
+}
+```
+
+说明：
+
+- 接受一个或多个己方 HQ、兵营或重工；同一批建筑共享目标
+- 同时传入整数 `x/y` 时设置持久集结点；同时省略时清除，不能只传一个坐标
+- `mode` 默认 `move`；兵营和重工可选 `attack_move`，让新战斗单位在前往集结点时攻击沿途敌人
+- HQ 只生产 worker，因此其集结点仅支持 `move`
+- 集结点或其他单位的预留终点被占时，每个新单位会解析到目标附近的可达格；不会等待原格清空
+- `move` 不主动索敌；`attack_move` 会按单位默认目标优先级索敌
+- 清除集结点不会取消已经出发单位的移动命令
+
 这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。只要服务端已经掌握恢复所需事实，失败结果会直接附带紧凑候选，例如 `availableFriendlyUnits`、`availableAttackers`、`availableWorkers`、`availableProductionBuildings`、`availableEnemyTargets` 或 `nearbyResources`，hint 不再要求额外调用状态读取工具。
 
-批量 `move_unit` / `attack_move_unit` / `attack` 会把相同候选列表提升到批量结果顶层，不在每个单位的子结果中重复。候选默认有数量上限；敌方目标返回完整计数，并优先包含敌方建筑和距离攻击者最近的单位。
+批量 `move_unit` / `attack_move_unit` / `attack` / `hold_unit` 会把相同候选列表提升到批量结果顶层，不在每个单位的子结果中重复。批量失败也会在顶层返回具体 `error`、`message`、`hint` 和 `failedUnitIds`，不会退化成 `unknown error`；候选默认有数量上限，敌方目标返回完整计数，并优先包含敌方建筑和距离攻击者最近的单位。
 
-成功和失败结果都会带当前 `tick`。如果本轮最后一次只读工具调用距离当前超过 10 ticks，或本轮还没有调用过只读工具，动作/计划工具会附带 `warning`，但不会仅因为 warning 拒绝入队：
+成功和失败结果都会带当前 `tick`。如果本轮还没有调用过只读工具，动作/计划工具会附带 `no_recent_read` warning，但不会仅因为 warning 拒绝入队。读过一次之后不会因为模型推理或工具调用跨过若干 tick 而产生过期警告；动作仍使用调用时的实时状态验证对象和规则：
 
 ```ts
 {
@@ -839,25 +925,22 @@ interface AgentPlanRecord {
   error?: string;
   hint?: string;
   warning?: {
-    type: "state_stale" | "no_recent_read";
+    type: "no_recent_read";
     message: string;
     currentTick: number;
-    lastReadTick?: number;
-    ageTicks?: number;
-    staleAfterTicks: number;
   };
 }
 ```
 
 这些工具只负责把命令加入当前 tick 的 command queue。真正的移动、攻击、建造、产兵依然由 `Game` 逐 tick 结算。
 
-### 2.3 高层编排工具 `orchestrate_plan`
+### 2.3 持久计划入口 `orchestrate_plan`
 
-这是当前唯一的高层计划工具。
+这是 LLM、HTTP control 和 CLI 共用的多 tick 计划工具。step 的 `call` 与 `args` 复用其支持的 2.2 节即时动作工具名称和参数形状，内部 `MissionRuntime` 在每个 committed tick 推进；生产队列工具不属于 plan call。
 
 ```ts
 interface OrchestratePlanInput {
-  unitIds: string[];
+  unitIds?: string[];
   replaceExisting?: boolean;
   scope?: PlanStepScope;
   loop?: number; // -1 表示无限循环
@@ -882,7 +965,6 @@ type PlanCallToolName =
   | "move_unit"
   | "attack_move_unit"
   | "attack"
-  | "spawn_unit"
   | "build_structure"
   | "start_harvest_loop"
   | "hold_unit";
@@ -902,7 +984,7 @@ type PlanStepCondition =
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
-  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number; x?: number; y?: number }
   | { condition: "enemy_building_exists"; buildingType: BuildingType; count?: number }
   | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
   | { condition: "enemy_unit_count_at_least"; unitType: UnitType; count: number }
@@ -916,17 +998,31 @@ type PlanStepCondition =
 - 即时动作会打断相关单位的当前计划
 - 如果单位已有合适的 active plan，不要每个 run 都重复注册同一个计划
 - `steps` 只接受 call step，把现有动作工具调用注册成持续计划
-- `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开；`scope = "global"` 只执行一次
+- `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开并要求 `unitIds`；`scope = "global"` 只执行一次，纯建造计划可省略 `unitIds`
 - `when` 是执行前置条件，未满足时等待；`until` 是完成条件，满足后推进到下一 step
 - global step 如果在 `args.unitId` 中指定具体单位，`when` / `until` 的 `arrived`、`near_position`、`worker_adjacent_to_build_footprint`、`enemy_in_range`、`hq_in_range` 和 `target_in_range` 会基于该单位判断
-- `enemy_building_exists` / `enemy_unit_count_at_least` 用于表达反制触发，例如看到敌方 `war_factory` 或 `light_tank` 后补 `rocket_soldier`
+- `enemy_building_exists` / `enemy_unit_count_at_least` 可用于表达侦察或战术触发
 - `args.unitId` 可以省略或设为 `"$unitId"`，表示 per-unit 展开时使用当前单位
-- `spawn_unit` 的 `args.buildingId` 可使用 `"$hq"`、`"$barracks"` 或 `"$war_factory"`，在执行时解析为当前友方建筑
-- plan 中的 `spawn_unit` / `build_structure` 会在当前 credits 不足时等待，不会入队必然失败的生产或建造命令；即时 `build_structure` 会自动选择或使用指定工地，并在 worker 距离较远时注册移动加施工的持久任务
-- 多个 active plan 在同一 tick 推进时按顺序检查实际可用 credits；较早生成的 `spawn_unit` / `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
+- 生产不属于 plan call；用 `spawn_unit` 一次追加有限队列，并用 `get_production_queue` / `cancel_production` 检查或调整。`production_queue_empty` 只保留为其他 plan step 的显式条件，使用时必须指定 `buildingId` 或 `buildingType`
+- plan 中的 `build_structure` 会在当前 credits 不足时等待；它可省略 x/y 自动选址，自行移动 worker，footprint 被临时占据时立即换址
+- `building_exists` 用于 `build_structure` 时默认跟随该 step 当前的 x/y，因此换址后会等待新位置的建筑完成，并在完成边界先结束步骤而非重复 build
+- 多个 active plan 在同一 tick 推进时按顺序检查实际可用 credits；较早生成的 `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
 
-示例：先用即时 `start_harvest_loop` 把另外 3 个开局 worker 挂矿，再为保留的 builder 注册兵营计划并持续造到第一波 6 个 rifleman。
+最小自动建造计划只需指定 worker 和建筑类型；坐标省略时自动选择，后续动态占位会自动换址：
+
+```json
+{
+  "steps": [{
+    "call": "build_structure",
+    "args": { "unitId": "unit_1", "buildingType": "barracks" },
+    "until": { "condition": "building_exists", "buildingType": "barracks" },
+    "retry": true
+  }]
+}
+```
+
+示例：先用即时 `start_harvest_loop` 把另外 3 个开局 worker 挂矿，再为保留的 builder 注册兵营建造计划。兵营完成后另用一次 `spawn_unit({ buildingId, units: [{ unitType: "rifleman", count: 6 }] })` 注册有限生产批次。
 
 ```json
 {
@@ -947,20 +1043,12 @@ type PlanStepCondition =
       "when": { "condition": "credits_at_least", "amount": 120 },
       "until": { "condition": "building_exists", "buildingType": "barracks" },
       "retry": true
-    },
-    {
-      "call": "spawn_unit",
-      "args": { "buildingId": "$barracks", "unitType": "rifleman" },
-      "scope": "global",
-      "when": { "condition": "production_queue_empty", "buildingType": "barracks" },
-      "until": { "condition": "unit_count_at_least", "unitType": "rifleman", "count": 6 },
-      "retry": true
     }
   ]
 }
 ```
 
-示例：第一波约 6 个战斗单位已经形成，或敌方装甲科技已出现时，补 `war_factory` 并生产 1 台 `light_tank`。
+示例：需要补 `war_factory` 时注册建造计划；完成后用独立生产工具追加坦克批次。
 
 ```json
 {
@@ -980,34 +1068,6 @@ type PlanStepCondition =
       "scope": "global",
       "when": { "condition": "credits_at_least", "amount": 220 },
       "until": { "condition": "building_exists", "buildingType": "war_factory" },
-      "retry": true
-    },
-    {
-      "call": "spawn_unit",
-      "args": { "buildingId": "$war_factory", "unitType": "light_tank" },
-      "scope": "global",
-      "when": { "condition": "production_queue_empty", "buildingType": "war_factory" },
-      "until": { "condition": "unit_count_at_least", "unitType": "light_tank", "count": 1 },
-      "retry": true
-    }
-  ]
-}
-```
-
-示例：敌方出现 `light_tank` 后，从兵营补到 2 个 `rocket_soldier`。
-
-```json
-{
-  "unitIds": ["unit_1"],
-  "replaceExisting": false,
-  "loop": -1,
-  "steps": [
-    {
-      "call": "spawn_unit",
-      "args": { "buildingId": "$barracks", "unitType": "rocket_soldier" },
-      "scope": "global",
-      "when": { "condition": "enemy_unit_count_at_least", "unitType": "light_tank", "count": 1 },
-      "until": { "condition": "unit_count_at_least", "unitType": "rocket_soldier", "count": 2 },
       "retry": true
     }
   ]
@@ -1208,11 +1268,13 @@ Read combined map + player state for the session.
 
 Call an agent tool on behalf of the session's player. Control plane 只暴露可直接落到游戏状态的工具；provider-only 工具（目前为 `spawn_agent`）不通过 HTTP control API 暴露。
 
-Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_army_summary`, `get_active_plans`, `get_recent_events`
+Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_army_summary`, `get_production_queue`, `get_active_plans`, `get_recent_events`
 
-Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `build_structure`, `start_harvest_loop`, `hold_unit`
+Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `cancel_production`, `set_rally_point`, `build_structure`, `start_harvest_loop`, `hold_unit`
 
 Plan tool: `orchestrate_plan`
+
+同一个 plan tool 也包含在 LLM provider 收到的 tool definitions 中。
 
 Request:
 ```ts
@@ -1232,7 +1294,7 @@ interface ControlActionBatchRequest {
   clientRequestId: string;
   actions: Array<{
     tool: "move_unit" | "attack_move_unit" | "attack" |
-      "spawn_unit" | "build_structure" | "start_harvest_loop" | "hold_unit";
+      "spawn_unit" | "cancel_production" | "set_rally_point" | "build_structure" | "start_harvest_loop" | "hold_unit";
     args?: Record<string, unknown>;
   }>;
 }
@@ -1283,6 +1345,8 @@ interface MatchRecord {
 - `off`：不保存 Match Record。
 - `replay`：保存初始状态、逐 tick delta 和终态，足以供前端回放。
 - `evaluation`：在 replay 内容上增加命令结果和 `aiTurns`，供 benchmark 与 agent 行为分析。
+
+Control-plane match 默认使用 `evaluation` 且关闭 transcript，因此 CLI 命令链及其 `controllerId/source` provenance 会进入 `commandResults`；显式选择 replay 档位时才只保留回放状态。
 
 `includeTranscript` 只在 evaluation 档位生效。关闭时仍保留 tool calls、commands、plans、性能指标和停止原因，但清空 assistant 原文与各模型请求的 messages；开启时才保存完整模型输出和请求消息。前端 transcript 页面直接从 Match Record 的 `aiTurns` 投影，不另写一种 transcript 文件。
 

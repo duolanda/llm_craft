@@ -40,7 +40,12 @@ export async function handlePlay(
   if (!startResult.ok) {
     exit(ExitCode.BackendFailure, getErrorMessage(startResult, "Failed to start game"));
   }
-  const startData = startResult.data as { matchId?: string; reused?: boolean; status?: string };
+  const startData = startResult.data as {
+    matchId?: string;
+    reused?: boolean;
+    status?: string;
+    decisionIntervalTicks?: number;
+  };
   if (startData.reused) {
     printJson({
       ok: true,
@@ -48,6 +53,7 @@ export async function handlePlay(
       message: "已有 control 对局正在进行；未创建新对局或 control session。",
       matchId: startData.matchId,
       status: startData.status,
+      decisionIntervalTicks: startData.decisionIntervalTicks,
       serverUrl: client.getBaseUrl(),
     });
     return;
@@ -92,6 +98,7 @@ export async function handlePlay(
     playerId: "player_1",
     cpuPlayer: "player_2",
     cpuStrategy: strategy,
+    decisionIntervalTicks: startData.decisionIntervalTicks,
     sessionId: data.sessionId,
     serverUrl: client.getBaseUrl(),
     instructions: [

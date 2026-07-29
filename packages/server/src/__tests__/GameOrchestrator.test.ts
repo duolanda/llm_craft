@@ -88,6 +88,30 @@ describe("GameOrchestrator", () => {
     orchestrator.stop();
   });
 
+  it("keeps LLM decisions committed-tick driven while throttling the CPU to 10 ticks", async () => {
+    const orchestrator = new GameOrchestrator({
+      player1: createMatchConfig().player1,
+      player2: { providerType: "builtin-cpu", strategy: "rush" },
+    });
+    const llmRun = vi.fn(async (_input: AgentRunInput) => createRunResult());
+    const cpuRun = vi.fn(async (_input: AgentRunInput) => createRunResult("cpu_turn_complete"));
+    (orchestrator as any).controllerByPlayer.player_1.run = llmRun;
+    (orchestrator as any).controllerByPlayer.player_2.run = cpuRun;
+
+    await orchestrator.start();
+    expect(llmRun.mock.calls.map(([input]) => input.tick)).toEqual([0]);
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0]);
+
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 9);
+    expect(llmRun).toHaveBeenCalledTimes(10);
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0]);
+
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS);
+    expect(llmRun).toHaveBeenCalledTimes(11);
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0, 10]);
+    orchestrator.stop();
+  });
+
   it("starts the clock while initial decisions are still running", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     let releaseBlue: (() => void) | undefined;

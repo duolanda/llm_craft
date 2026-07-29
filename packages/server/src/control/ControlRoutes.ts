@@ -119,6 +119,7 @@ export async function handleControlHttpRequest(
     if (activeMatch) {
       state.matchRegistry.observe(activeMatch.getMatchId());
       const lobby = activeMatch.getLobbyStatus();
+      const decisionIntervalTicks = activeMatch.getCPUDecisionIntervalTicks();
       sendJson(res, 200, {
         ok: true,
         tick: activeMatch.getGame().getTick(),
@@ -128,6 +129,7 @@ export async function handleControlHttpRequest(
           status: lobby.status,
           reused: true,
           message: "An active control match already exists; no new match was created.",
+          ...(decisionIntervalTicks !== null ? { decisionIntervalTicks } : {}),
         },
       });
       return true;
@@ -144,6 +146,7 @@ export async function handleControlHttpRequest(
         status: "waiting_for_players",
         reused: false,
         ...(cpu ? { cpu, cpuPlayer: "player_2" } : {}),
+        ...(cpu ? { decisionIntervalTicks: controlMatch.getCPUDecisionIntervalTicks() } : {}),
       },
     });
     return true;

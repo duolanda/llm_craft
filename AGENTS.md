@@ -149,7 +149,7 @@ flowchart LR
 **游戏循环 (server/src/MatchRuntime.ts):**
 - MatchRuntime 拥有墙钟和单局生命周期，默认 500ms 一个 tick
 - CommandGateway 在 tick 边界应用命令，SimulationCore.step 同步更新 WorldState
-- 每个 committed tick 都是新的决策机会；某方仍有 in-flight 决策时只跳过该方，不阻塞另一方
+- 对 LLM 而言，每个 committed tick 都是新的决策机会；某方仍有 in-flight 决策时只跳过该方，不阻塞另一方。built-in CPU 独立使用 `decisionIntervalTicks`，默认 10 tick
 - 胜利条件：摧毁敌方所有建筑；HQ 是首要目标，但单独摧毁 HQ 不会结束对局
 
 **Agent 运行时 (server/src/controller/GameplayController.ts):**

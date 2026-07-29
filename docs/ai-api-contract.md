@@ -303,6 +303,7 @@ interface ServerRecordSavedMessage {
   "presetId": "preset-red",
   "cpuStrategy": "rush",
   "rounds": 10,
+  "decisionIntervalTicks": 10,
   "concurrency": 4,
   "recordReplay": true,
   "debug": {
@@ -316,6 +317,7 @@ interface ServerRecordSavedMessage {
 - benchmark 只支持 `LLM preset vs CPU strategy`
 - 当前 CPU 策略支持 `random` 和 `rush`
 - benchmark 与 live match 现在共用同一套 tool-calling runtime
+- `decisionIntervalTicks` 只控制 built-in CPU，允许 `1` 到 `60`，省略时统一使用 `10`；LLM 仍在每个 committed tick 空闲时获得新决策机会
 - `concurrency` 可选，默认 `1`，允许 `1` 到 `10`；并发运行时完成顺序可能不同于 round 编号，最终结果按 round 编号输出
 - `recordReplay=false` 表示 round 不生成 Match Record
 
@@ -1202,7 +1204,7 @@ Response (201；复用已有对局时为 200 且 `reused: true`):
 }
 ```
 
-`cpu` 仅表示 `player_2` 使用内建规则对手，主要用于单 agent 控制链路与 LLM-vs-CPU benchmark。CPU 是判断当前模型与提示词是否达到最低可用水平的基线；规则正确性和性能规模由测试与专门检查覆盖。
+`cpu` 仅表示 `player_2` 使用内建规则对手，主要用于单 agent 控制链路与 LLM-vs-CPU benchmark。CPU 是判断当前模型与提示词是否达到最低可用水平的基线；规则正确性和性能规模由测试与专门检查覆盖。ControlPlane CPU 使用服务端统一的 `decisionIntervalTicks=10`，成功响应会返回实际采用的值；CLI 不维护另一套默认值。
 
 ### 3.3 MatchRegistry 管理端点
 

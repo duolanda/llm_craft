@@ -688,6 +688,7 @@ describe("server settings", () => {
         }),
         cpuStrategy: "random",
         rounds: 12,
+        decisionIntervalTicks: 10,
         recordReplay: true,
         debug: { recordingProfile: "evaluation", includeTranscript: true },
       },

@@ -10,6 +10,7 @@ import {
   ClientMessage,
   ClientStartBenchmarkMessage,
   CreateLLMPresetRequest,
+  DEFAULT_CPU_DECISION_INTERVAL_TICKS,
   GameSnapshot,
   GameState,
   MatchDebugOptions,
@@ -21,6 +22,8 @@ import {
   PLAYER_IDS,
   GameLogDataMap,
   LOG_TYPES,
+  MAX_CPU_DECISION_INTERVAL_TICKS,
+  MIN_CPU_DECISION_INTERVAL_TICKS,
   ServerWarmupStatusMessage,
   ServerMessage,
   StateProjectionFrame,
@@ -128,6 +131,7 @@ export interface ServerState {
       llmConfig: OpenAICompatibleRuntimeConfig;
       cpuStrategy: ClientStartBenchmarkMessage["cpuStrategy"];
       rounds: number;
+      decisionIntervalTicks?: number;
       recordReplay: boolean;
       concurrency?: number;
       debug?: ClientStartBenchmarkMessage["debug"];
@@ -1002,6 +1006,21 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      if (
+        message.decisionIntervalTicks !== undefined
+        && (
+          !Number.isInteger(message.decisionIntervalTicks)
+          || message.decisionIntervalTicks < MIN_CPU_DECISION_INTERVAL_TICKS
+          || message.decisionIntervalTicks > MAX_CPU_DECISION_INTERVAL_TICKS
+        )
+      ) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: `CPU 决策间隔必须是 ${MIN_CPU_DECISION_INTERVAL_TICKS} 到 ${MAX_CPU_DECISION_INTERVAL_TICKS} 之间的整数。`,
+        } satisfies ServerMessage));
+        return;
+      }
+
       const llmConfig = await state.presetStore.getRuntimeConfig(message.presetId);
       if (llmConfig.providerType !== "openai-compatible") {
         throw new Error("BENCHMARK_PRESET_INVALID");
@@ -1015,6 +1034,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           llmConfig,
           cpuStrategy: message.cpuStrategy,
           rounds: message.rounds,
+          decisionIntervalTicks: message.decisionIntervalTicks
+            ?? DEFAULT_CPU_DECISION_INTERVAL_TICKS,
           recordReplay: message.recordReplay ?? true,
           concurrency: message.concurrency,
           debug: message.debug,

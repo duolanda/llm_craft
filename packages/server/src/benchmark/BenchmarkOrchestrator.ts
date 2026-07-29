@@ -1,6 +1,7 @@
 import {
   BuiltinCPURuntimeConfig,
   CPUStrategyType,
+  DEFAULT_CPU_DECISION_INTERVAL_TICKS,
   MatchDebugOptions,
   OpenAICompatibleRuntimeConfig,
   ServerBenchmarkCompleteMessage,
@@ -35,6 +36,7 @@ export interface BenchmarkConfig {
   cpuStrategy: CPUStrategyType;
   rounds: number;
   recordReplay: boolean;
+  decisionIntervalTicks?: number;
   concurrency?: number;
   debug?: MatchDebugOptions;
 }
@@ -111,6 +113,8 @@ export class BenchmarkOrchestrator {
       },
       runtime: {
         matchDefinition: createDefaultMatchDefinition(),
+        decisionIntervalTicks: this.config.decisionIntervalTicks
+          ?? DEFAULT_CPU_DECISION_INTERVAL_TICKS,
         recordDir: BENCHMARK_RECORDS_DIR,
       },
     };

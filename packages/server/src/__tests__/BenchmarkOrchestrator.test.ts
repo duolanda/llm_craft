@@ -78,8 +78,8 @@ describe("BenchmarkOrchestrator", () => {
     expect(configs[0]?.player2.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player1.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player2.providerType).toBe("openai-compatible");
-    expect((configs[0] as any)?.runtime?.aiIntervalTicksByPlayer).toBeUndefined();
-    expect((configs[1] as any)?.runtime?.aiIntervalTicksByPlayer).toBeUndefined();
+    expect((configs[0] as any)?.runtime?.decisionIntervalTicks).toBe(10);
+    expect((configs[1] as any)?.runtime?.decisionIntervalTicks).toBe(10);
     expect((configs[0] as any)?.runtime?.recordDir).toContain("benchmark-records");
 
     expect(complete).toMatchObject({

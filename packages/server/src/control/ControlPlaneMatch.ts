@@ -3,11 +3,16 @@ import {
   PlayerId,
   PLAYER_IDS,
   type Command,
+  type GameState,
   type MatchRecordingOptions,
 } from "@llmcraft/shared";
 import { Game } from "../Game";
 import { GameplayController } from "../controller/GameplayController";
 import { BuiltinCPUController } from "../controller/BuiltinCPUController";
+import {
+  isCPUDecisionTick,
+  resolveCPUDecisionIntervalTicks,
+} from "../controller/CPUDecisionSchedule";
 import { MatchRuntime } from "../MatchRuntime";
 import { MatchRecorder } from "../MatchRecorder";
 import path from "node:path";
@@ -31,6 +36,8 @@ export class ControlPlaneMatch {
   private started = false;
   private stopped = false;
   private cpuRun: Promise<void> | null = null;
+  private lastCPUDispatchTick = -1;
+  private readonly cpuDecisionIntervalTicks: number;
   private readonly recording: MatchRecordingOptions;
   private unsubscribeTick: (() => void) | null = null;
   private readonly cpu:
@@ -43,10 +50,14 @@ export class ControlPlaneMatch {
 
   constructor(options?: {
     cpuStrategy?: CPUStrategyType;
+    decisionIntervalTicks?: number;
     recordDir?: string;
     matchId?: string;
     recording?: MatchRecordingOptions;
   }) {
+    this.cpuDecisionIntervalTicks = resolveCPUDecisionIntervalTicks(
+      options?.decisionIntervalTicks,
+    );
     this.matchRuntime = new MatchRuntime({
       matchId: options?.matchId,
     });
@@ -83,6 +94,10 @@ export class ControlPlaneMatch {
 
   getGame(): Game {
     return this.game;
+  }
+
+  getCPUDecisionIntervalTicks(): number | null {
+    return this.cpu ? this.cpuDecisionIntervalTicks : null;
   }
 
   getMatchId(): string {
@@ -173,15 +188,31 @@ export class ControlPlaneMatch {
       for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
         this.submitCommands(playerId, this.gameplayControllerByPlayer[playerId].handleCommittedTick());
       }
-      if (!state.winner && this.cpu && !this.cpuRun) {
-        const run = this.runCpuTick();
-        this.cpuRun = run;
-        void run.finally(() => {
-          if (this.cpuRun === run) this.cpuRun = null;
-        });
-      }
+      this.dispatchCPUForState(state);
     });
     this.matchRuntime.start();
+    this.dispatchCPUForState(this.game.getState());
+  }
+
+  private dispatchCPUForState(state: GameState): void {
+    if (
+      state.winner
+      || !this.cpu
+      || this.cpuRun
+      || !isCPUDecisionTick(
+        state.tick,
+        this.lastCPUDispatchTick,
+        this.cpuDecisionIntervalTicks,
+      )
+    ) {
+      return;
+    }
+    this.lastCPUDispatchTick = state.tick;
+    const run = this.runCpuTick();
+    this.cpuRun = run;
+    void run.finally(() => {
+      if (this.cpuRun === run) this.cpuRun = null;
+    });
   }
 
   private async runCpuTick(): Promise<void> {

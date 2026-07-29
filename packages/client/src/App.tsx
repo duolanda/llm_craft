@@ -607,6 +607,7 @@ function App() {
     presetId: string;
     cpuStrategy: CPUStrategyType;
     rounds: number;
+    decisionIntervalTicks: number;
     recordReplay: boolean;
     concurrency: number;
     debug?: MatchDebugOptions;
@@ -627,6 +628,7 @@ function App() {
       presetId: input.presetId,
       cpuStrategy: input.cpuStrategy,
       rounds: input.rounds,
+      decisionIntervalTicks: input.decisionIntervalTicks,
       recordReplay: input.recordReplay,
       concurrency: input.concurrency,
       debug: input.debug,

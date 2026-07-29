@@ -32,6 +32,10 @@ import type { MatchDefinition } from "./MatchDefinition";
 import type { RegisteredMatchStatus } from "./MatchRegistry";
 import type { DecisionController } from "./controller/DecisionController";
 import { createDecisionController } from "./controller/createDecisionController";
+import {
+  isCPUDecisionTick,
+  resolveCPUDecisionIntervalTicks,
+} from "./controller/CPUDecisionSchedule";
 
 const CURRENT_FILE_PATH = fileURLToPath(import.meta.url);
 const CURRENT_DIR = path.dirname(CURRENT_FILE_PATH);
@@ -57,6 +61,8 @@ export interface AITerminalFeed {
 export interface GameOrchestratorRuntimeOptions {
   recordDir?: string;
   matchDefinition?: MatchDefinition;
+  /** Applies only to built-in CPU controllers. */
+  decisionIntervalTicks?: number;
 }
 
 export type GameOrchestratorConfig = MatchLLMConfig & {
@@ -69,6 +75,7 @@ export class GameOrchestrator {
   private controllerByPlayer: ControllerMap;
   private readonly systemPromptByPlayer: Record<PlayerId, string>;
   private gameplayControllerByPlayer: GameplayControllerMap;
+  private readonly cpuDecisionIntervalTicks: number;
   private lastAIDispatchTick = { player_1: -1, player_2: -1 };
   private isRunningAI = { player_1: false, player_2: false };
   private activeRunControllers: Partial<Record<PlayerId, AbortController>> = {};
@@ -92,6 +99,9 @@ export class GameOrchestrator {
 
   constructor(config: GameOrchestratorConfig) {
     const recordDir = config.runtime?.recordDir ?? RECORDS_DIR;
+    this.cpuDecisionIntervalTicks = resolveCPUDecisionIntervalTicks(
+      config.runtime?.decisionIntervalTicks,
+    );
     this.matchRuntime = new MatchRuntime({
       definition: config.runtime?.matchDefinition,
     });
@@ -376,11 +386,19 @@ export class GameOrchestrator {
     for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
       if (
         !this.isRunningAI[playerId]
-        && this.lastAIDispatchTick[playerId] < state.tick
+        && this.isDecisionDue(playerId, state.tick)
       ) {
         void this.runAI(playerId, sessionId);
       }
     }
+  }
+
+  private isDecisionDue(playerId: PlayerId, tick: number): boolean {
+    const lastDispatchTick = this.lastAIDispatchTick[playerId];
+    if (this.controllerByPlayer[playerId].getDescriptor().kind === "llm") {
+      return lastDispatchTick < tick;
+    }
+    return isCPUDecisionTick(tick, lastDispatchTick, this.cpuDecisionIntervalTicks);
   }
 
   private handleRuntimeEnded(sessionId: number): void {

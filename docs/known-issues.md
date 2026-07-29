@@ -52,12 +52,11 @@
 - **现状**：首次连接时可能短暂记录一次 WebSocket error/disconnect 后自动重连；Three.js 还会报告 `THREE.Clock` 已弃用。
 - **影响**：对局、终局和保存均未受影响，但会给前端诊断增加噪音。
 
-### 10. Benchmark 的 Random 策略随机性不足
+### 10. Benchmark 的 Random 策略随机性不足（CPU 调度间隔回归已解决）
 
-- **现状**：Random 的行为分布不够随机，实测强度与 Rush 相近，部分对局中甚至没有明显更弱。一个已经确认的上游回归是：`bc899cf` 的 runtime 重构删除了 `aiIntervalTicks`、`aiIntervalTicksByPlayer` 和 `state.tick - lastAIDispatchTick >= interval` 整套节流逻辑；此前 Benchmark 前端的 CPU 决策间隔默认是 10 tick，当前 `GameOrchestrator` 和 `ControlPlaneMatch` 中的 CPU 实际接近每 tick 决策一次，现有测试还明确断言 `aiIntervalTicksByPlayer` 为 `undefined`。
-- **影响**：CPU 的反应频率和有效操作密度显著高于原设计，改变了 benchmark 基线的强度与可比性，很可能放大了 Random 的实测强度。除此之外，Random 当前也更像统一采取强攻击行为，而不是随机策略基线；它是否存在独立的策略随机性问题，需要在恢复决策间隔后继续验证。
-- **方向**：先恢复 CPU 专属的 `decisionIntervalTicks`：Benchmark 默认 10 tick 并贯通前端、WebSocket 和调度层，`ControlPlaneMatch` 的 CPU 也使用可配置且默认一致的间隔；不要因此恢复通用 LLM 节流。随后让 Random 至少有概率选择移动、攻击或其他可用行为；选择攻击时，随机选择攻击目标、参与攻击的部队或部队子集，而不是默认全体攻击同一目标。
-- **验收**：Benchmark 和 ControlPlane 分别覆盖 CPU 首次派发、未满间隔不派发、达到间隔再次派发的测试，并移除将缺失 interval 当作预期行为的断言；在恢复 10 tick 间隔后，用相同 seed 记录 Random 的动作类型、参战单位比例和目标选择分布，再与 Rush 的行为分布及胜率对比，判断是否还需要调整 Random 策略本身。
+- **现状**：Random 的行为分布仍不够随机，实测强度与 Rush 相近。`bc899cf` 曾误将“LLM 每个 committed tick 都有决策机会”的规则应用到 built-in CPU，导致 Benchmark 和 ControlPlane CPU 接近每 tick 决策；该调度回归现已修复。
+- **处理**：恢复 CPU 专属的 `decisionIntervalTicks`，由 shared 统一定义默认值 10 和合法范围 1–60。Benchmark 前端、WebSocket、`BenchmarkOrchestrator`、`GameOrchestrator` 与 `ControlPlaneMatch` 使用同一语义；CLI 不维护独立默认值。LLM 仍保持空闲时每 committed tick 可调度，Mission 也仍逐 committed tick 推进。
+- **验证**：Benchmark 和 ControlPlane 测试分别覆盖 CPU 首次派发、未满间隔不派发、达到 10 tick 再次派发，并验证 LLM 同期仍逐 tick 调度。真实短局中，前端 `oc-deepseek-v4-flash` 对 rush CPU 的请求 tick 为 `0/10/20/30`；OpenCode `deepseek-v4-flash` 通过 CLI control session 读状态并提交动作，CLI 启动响应显示服务端采用 `decisionIntervalTicks: 10`，evaluation record 中 CPU 命令 provenance 没有落在 10-tick 网格之外。Random 是否还存在独立的策略分布问题，需要在统一间隔后继续用相同 seed 对比动作类型、参战单位比例、目标选择和胜率。
 
 ### 11. 已解决：无限生产 plan 难以撤销，且不能表达真实生产队列
 

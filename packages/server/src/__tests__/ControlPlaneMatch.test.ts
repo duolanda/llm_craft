@@ -8,6 +8,35 @@ import { CLIControllerAdapter } from "../controller/CLIControllerAdapter";
 import { executeControlTool } from "../ControlHandler";
 
 describe("ControlPlaneMatch", () => {
+  it("dispatches the built-in CPU at ticks 0 and 10 by default", async () => {
+    const match = new ControlPlaneMatch({ cpuStrategy: "rush" });
+    const cpuRun = vi.fn(async (input: { tick: number }) => ({
+      assistantMessages: [],
+      toolCalls: [],
+      plans: [],
+      commands: [],
+      stopReason: "cpu_turn_complete",
+      metrics: { modelRequests: 0, toolCalls: 0 },
+    }));
+    (match as any).cpu.controller.run = cpuRun;
+
+    match.join("player_1");
+    await Promise.resolve();
+    expect(match.getCPUDecisionIntervalTicks()).toBe(10);
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0]);
+
+    for (let tick = 1; tick < 10; tick += 1) {
+      match.advanceOneTick();
+      await Promise.resolve();
+    }
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0]);
+
+    match.advanceOneTick();
+    await Promise.resolve();
+    expect(cpuRun.mock.calls.map(([input]) => input.tick)).toEqual([0, 10]);
+    match.stop();
+  });
+
   it("reports a terminal winner as finished through the lobby status", () => {
     const match = new ControlPlaneMatch();
     match.join("player_1");

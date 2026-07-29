@@ -26,8 +26,8 @@
 - 生命周期：`MatchRegistry + MatchRuntime`，由 WebSocket、HTTP 或 CLI 触发创建、预热、开始、停止、查询和观察。
 - 玩法：`GameplayController`，供 AgentRuntime、CLI adapter 和 built-in CPU 使用同一套观察/动作工具。
 - `DecisionController` 是可由 harness 调度的决策来源；当前实现为 LLM 和 built-in CPU。
-- `GameOrchestrator` 订阅 committed tick。某方空闲且遇到新 tick 时可开始下一次决策；慢方仍运行时只跳过慢方，不阻塞快方。
-- 不存在 100ms AI poll 或固定 5 tick 宏观决策间隔。
+- `GameOrchestrator` 订阅 committed tick。LLM 空闲且遇到新 tick 时可开始下一次决策；慢方仍运行时只跳过慢方，不阻塞快方。
+- 不存在 100ms AI poll 或 LLM 固定宏观决策间隔。built-in CPU 使用统一的 `decisionIntervalTicks`，默认 10 tick；Benchmark WebSocket/UI 可覆盖该值，ControlPlane/CLI 省略时使用同一服务端默认值。
 - `warmup` 只提前执行选中模型的首个真实请求并保留会话结果，不启动游戏时间。`start` 不等待首次决策：时钟立即启动并同时派发双方控制器，因此首次和后续响应耗时都属于实时对局成本。
 - 即时动作失败会在服务端已知时直接返回紧凑恢复候选；计划等待状态同时提供兼容摘要 `waitingReason` 和结构化 `waiting.code/message/details`，避免用额外全图读取猜测失败原因。
 

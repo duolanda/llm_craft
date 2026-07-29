@@ -55,6 +55,8 @@ export interface ClientStartBenchmarkMessage {
   presetId: string;
   cpuStrategy: CPUStrategyType;
   rounds: number;
+  /** Applies only to the built-in CPU. LLM scheduling remains committed-tick driven. */
+  decisionIntervalTicks?: number;
   recordReplay?: boolean;
   concurrency?: number;
   debug?: MatchDebugOptions;

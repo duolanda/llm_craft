@@ -94,19 +94,21 @@ describe("control plane HTTP routes", () => {
     const first = await request(state, {
       method: "POST",
       url: "/api/control/start-game",
-      body: "{}",
+      body: JSON.stringify({ cpu: "rush" }),
     });
     const second = await request(state, {
       method: "POST",
       url: "/api/control/start-game",
-      body: "{}",
+      body: JSON.stringify({ cpu: "rush" }),
     });
 
     expect(first.statusCode).toBe(201);
     expect(second.statusCode).toBe(200);
-    const firstMatchId = first.json<{ data: { matchId: string } }>().data.matchId;
+    const firstPayload = first.json<{ data: { matchId: string; decisionIntervalTicks: number } }>();
+    const firstMatchId = firstPayload.data.matchId;
+    expect(firstPayload.data.decisionIntervalTicks).toBe(10);
     expect(second.json()).toMatchObject({
-      data: { matchId: firstMatchId, reused: true },
+      data: { matchId: firstMatchId, reused: true, decisionIntervalTicks: 10 },
     });
     expect(state.matchRegistry.list()).toHaveLength(1);
     expect(state.matchRegistry.getObservedMatchId()).toBe(firstMatchId);

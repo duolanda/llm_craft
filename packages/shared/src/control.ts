@@ -1,3 +1,7 @@
+export const DEFAULT_CPU_DECISION_INTERVAL_TICKS = 10;
+export const MIN_CPU_DECISION_INTERVAL_TICKS = 1;
+export const MAX_CPU_DECISION_INTERVAL_TICKS = 60;
+
 export const CONTROL_PROVIDER_ONLY_TOOL_NAMES = ["spawn_agent"] as const;
 
 export const CONTROL_READ_TOOL_NAMES = [

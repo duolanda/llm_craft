@@ -1,9 +1,12 @@
 import {
+  ALL_BUILDING_TYPES,
+  ALL_UNIT_TYPES,
+  BUILDING_TYPES,
   CONTROL_PROVIDER_ONLY_TOOL_NAMES,
   CONTROL_READ_TOOL_NAMES,
   OrchestratePlanInput,
 } from "@llmcraft/shared";
-import { GameAgentBridge } from "./GameAgentBridge";
+import { GameplayController } from "../controller/GameplayController";
 
 export interface AgentToolDefinition {
   name: string;
@@ -16,13 +19,130 @@ export interface AgentToolExecution {
   result: unknown;
 }
 
-type ToolExecutor = (bridge: GameAgentBridge, args: any) => AgentToolExecution;
+type ToolExecutor = (gameplayController: GameplayController, args: any) => AgentToolExecution;
+
+const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
+const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
+const BATCH_SHARED_RECOVERY_KEYS = [
+  "availableFriendlyUnits",
+  "availableAttackers",
+  "availableWorkers",
+  "availableEnemyTargets",
+  "availableEnemyTargetCount",
+] as const;
+const getUnitIds = (args: Record<string, unknown>): string[] => {
+  const ids = Array.isArray(args.unitIds)
+    ? args.unitIds.filter((value): value is string => typeof value === "string")
+    : typeof args.unitId === "string"
+      ? [args.unitId]
+      : [];
+  return [...new Set(ids)];
+};
+
+const getBuildingIds = (args: Record<string, unknown>): string[] => {
+  const ids = Array.isArray(args.buildingIds)
+    ? args.buildingIds.filter((value): value is string => typeof value === "string")
+    : typeof args.buildingId === "string"
+      ? [args.buildingId]
+      : [];
+  return [...new Set(ids)];
+};
+
+const executeUnitBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+  execute: (unitId: string) => AgentToolExecution,
+): AgentToolExecution => {
+  const unitIds = getUnitIds(args);
+  if (unitIds.length === 0) {
+    return {
+      effect: "action",
+      result: { ok: false, error: "missing_units", hint: "Pass one or more friendly unit IDs in unitIds." },
+    };
+  }
+  const results: Array<{ unitId: string; ok?: unknown; [key: string]: unknown }> = unitIds.map((unitId) => {
+    const execution = execute(unitId);
+    const result = execution.result && typeof execution.result === "object"
+      ? execution.result as Record<string, unknown>
+      : { value: execution.result };
+    return { unitId, ...result };
+  });
+  const recoveryContext: Record<string, unknown> = {};
+  for (const result of results) {
+    for (const key of BATCH_SHARED_RECOVERY_KEYS) {
+      if (recoveryContext[key] === undefined && result[key] !== undefined) {
+        recoveryContext[key] = result[key];
+      }
+      delete result[key];
+    }
+  }
+  const failures = results.filter((result) => result.ok === false);
+  const errorCodes = [...new Set(failures
+    .map((result) => typeof result.error === "string" ? result.error : "action_failed"))];
+  const error = failures.length === 0
+    ? undefined
+    : failures.length === results.length && errorCodes.length === 1
+      ? errorCodes[0]
+      : "partial_failure";
+  const firstHint = failures.find((result) => typeof result.hint === "string")?.hint;
+  return {
+    effect: "action",
+    result: {
+      tick: results.find((result) => typeof result.tick === "number")?.tick,
+      ok: failures.length === 0,
+      ...(error ? {
+        error,
+        message: `${failures.length} of ${results.length} unit actions failed: ${errorCodes.join(", ")}.`,
+        ...(typeof firstHint === "string" ? { hint: firstHint } : {}),
+        failedUnitIds: failures.map((result) => result.unitId),
+      } : {}),
+      results,
+      ...recoveryContext,
+    },
+  };
+};
+
+const executeBuildingBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+  execute: (buildingId: string) => AgentToolExecution,
+): AgentToolExecution => {
+  const buildingIds = getBuildingIds(args);
+  if (buildingIds.length === 0) {
+    return {
+      effect: "action",
+      result: { ok: false, error: "missing_buildings", hint: "Pass one or more friendly production building IDs in buildingIds." },
+    };
+  }
+  const results: Array<{ buildingId: string; ok?: unknown; error?: unknown; tick?: unknown; [key: string]: unknown }> = buildingIds.map((buildingId) => {
+    const execution = execute(buildingId);
+    const result = execution.result && typeof execution.result === "object"
+      ? execution.result as Record<string, unknown>
+      : { value: execution.result };
+    return { buildingId, ...result };
+  });
+  const failures = results.filter((result) => result.ok === false);
+  const errorCodes = [...new Set(failures.map((result) => typeof result.error === "string" ? result.error : "action_failed"))];
+  return {
+    effect: "action",
+    result: {
+      tick: results.find((result) => typeof result.tick === "number")?.tick,
+      ok: failures.length === 0,
+      ...(failures.length > 0 ? {
+        error: failures.length === results.length && errorCodes.length === 1 ? errorCodes[0] : "partial_failure",
+        message: `${failures.length} of ${results.length} building actions failed: ${errorCodes.join(", ")}.`,
+        failedBuildingIds: failures.map((result) => result.buildingId),
+      } : {}),
+      results,
+    },
+  };
+};
 
 const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "get_map_state",
     description:
-      "Read the full visible battlefield. By default returns a compact no-axis ASCII tactical map plus visible unit/building lists with coordinates. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need the full grid including empty cells.",
+      "Read the full battlefield as structured unit, building, and resource lists. Unit phase is instantaneous, not a durable assignment. Set includeCells=true only when you need terrain cells; set includeEmptyTiles=true only when you explicitly need all grid cells including empty cells.",
     parameters: {
       type: "object",
       properties: {
@@ -31,155 +151,287 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.getMapState({
+    execute: (gameplayController, args) =>
+      gameplayController.getMapState({
         includeCells: args?.includeCells === true,
         includeEmptyTiles: args?.includeEmptyTiles === true,
       }),
   },
   {
     name: "get_my_state",
-    description: "Read my economy, HQ, buildings, and production capability.",
+    description: "Read my economy, HQ, buildings, production queues, technology facts, costs, and legal build-site options.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyState(),
+    execute: (gameplayController) => gameplayController.getMyState(),
   },
   {
     name: "get_my_units",
-    description: "Read my controllable units with state and carry status.",
+    description: "Read my controllable units plus role+intent groups. phase is the instantaneous simulation phase; intent is the durable assignment, so phase=idle with intent=harvest_loop is still assigned.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getMyUnits(),
+    execute: (gameplayController) => gameplayController.getMyUnits(),
+  },
+  {
+    name: "get_army_summary",
+    description:
+      "Read a compact factual combat summary: own/enemy unit mix, ready vs reloading combat units, and the largest nearby group.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: (gameplayController) => gameplayController.getArmySummary(),
   },
   {
     name: "get_active_plans",
-    description: "Read active orchestration plans currently attached to my units.",
+    description: "Read active orchestration plans currently attached to my units, including planId, currentStep, structured waiting diagnostics, and lastAttempt. Pass unwanted plan IDs directly to cancel_plan.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getActivePlansTool(),
+    execute: (gameplayController) => gameplayController.getActivePlansTool(),
+  },
+  {
+    name: "cancel_plan",
+    description: "Immediately stop one or more active orchestration plans by planId. This does not cancel production orders; use cancel_production for production queue orderIds.",
+    parameters: {
+      type: "object",
+      required: ["planIds"],
+      properties: {
+        planIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.cancelPlan({ planIds: args.planIds }),
   },
   {
     name: "get_recent_events",
     description: "Read recent AI-facing command feedback and important events.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: (bridge) => bridge.getRecentEvents(),
+    execute: (gameplayController) => gameplayController.getRecentEvents(),
   },
   {
     name: "move_unit",
     description:
-      "Queue a move command for one unit. Use this for workers or precise repositioning. For combat units, use attack when you know a target id; use attack_move_unit only when you need to cross dangerous ground without a specific target.",
+      "Queue the same move destination for one or more selected units. Blocked destinations are resolved to nearby reachable tiles when possible.",
     parameters: {
       type: "object",
-      required: ["unitId", "x", "y"],
+      required: ["unitIds", "x", "y"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.moveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.moveUnit(unitId, { x: Number(args.x), y: Number(args.y) }),
+    ),
   },
   {
     name: "attack_move_unit",
     description:
-      "Queue a targetless combat move for one combat unit: move toward x/y while automatically attacking enemy units encountered before arrival. Once the unit reaches the destination, this order ends. If an enemy HQ, barracks, or specific unit id is visible, prefer attack instead.",
+      "Queue the same targetless combat advance for one or more selected combat units. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing.",
     parameters: {
       type: "object",
-      required: ["unitId", "x", "y"],
+      required: ["unitIds", "x", "y"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
         priority: {
           type: "array",
-          items: { type: "string", enum: ["soldier", "worker"] },
+          items: { type: "string", enum: ATTACK_TARGET_TYPES },
         },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.attackMoveUnit(String(args.unitId), { x: Number(args.x), y: Number(args.y) }, args.priority),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.attackMoveUnit(unitId, { x: Number(args.x), y: Number(args.y) }, args.priority),
+    ),
   },
   {
     name: "attack",
     description:
-      "Order one combat unit to attack one enemy target id. This is the default combat command whenever a visible target id exists, including far-away HQ or barracks targets: the unit will move toward the target until in range and then keep attacking. If the target has died but was seen before, the unit will move to the target's last known position without attacking. Do not pass coordinates.",
+      "Order one or more selected combat units to attack one enemy target ID. Units move into range and keep attacking while the target exists. If an observed target dies before execution, each attacker immediately retargets a nearby visible enemy when possible; otherwise the result includes compact current alternatives.",
     parameters: {
       type: "object",
-      required: ["unitId", "targetId"],
+      required: ["unitIds", "targetId"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         targetId: { type: "string" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.attackTarget(String(args.unitId), String(args.targetId)),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.attackTarget(unitId, String(args.targetId)),
+    ),
   },
   {
     name: "spawn_unit",
-    description: "Queue a production command for one building.",
+    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick, pauses without losing progress when credits are insufficient, and resumes automatically. Each building may keep at most 100 pending units of each unit type. Use get_production_queue to inspect order IDs and cancel_production to change course.",
     parameters: {
       type: "object",
-      required: ["buildingId", "unitType"],
+      required: ["buildingId", "units"],
       properties: {
         buildingId: { type: "string" },
-        unitType: { type: "string", enum: ["worker", "soldier"] },
+        units: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            required: ["unitType", "count"],
+            properties: {
+              unitType: { type: "string", enum: ALL_UNIT_TYPES },
+              count: { type: "integer", minimum: 1, maximum: 100 },
+            },
+            additionalProperties: false,
+          },
+        },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.spawnUnit(String(args.buildingId), args.unitType),
+    execute: (gameplayController, args) => gameplayController.spawnUnit(
+      String(args.buildingId),
+      Array.isArray(args.units)
+        ? args.units.map((request: Record<string, unknown>) => ({
+            unitType: request.unitType,
+            count: Number(request.count),
+          }))
+        : [],
+    ),
+  },
+  {
+    name: "get_production_queue",
+    description: "Inspect production queues, active per-unit progress/payment status, pending counts, and stable order IDs. Omit buildingIds to inspect every friendly production building.",
+    parameters: {
+      type: "object",
+      properties: {
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.getProductionQueue(
+      Array.isArray(args.buildingIds) ? getBuildingIds(args) : undefined,
+    ),
+  },
+  {
+    name: "cancel_production",
+    description: "Cancel production without waiting. Pass orderIds to cancel selected queued batches, or buildingIds to clear whole building queues. Exactly one mode is allowed. Credits already paid toward each unfinished active unit are refunded; queued units that have not started cost nothing.",
+    parameters: {
+      type: "object",
+      properties: {
+        orderIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => gameplayController.cancelProduction({
+      orderIds: Array.isArray(args.orderIds) ? args.orderIds.map(String) : undefined,
+      buildingIds: Array.isArray(args.buildingIds) ? getBuildingIds(args) : undefined,
+    }),
+  },
+  {
+    name: "set_rally_point",
+    description: "Set one persistent rally destination for one or more production buildings. mode=move gives newly produced units an ordinary move order; mode=attack_move makes combat units fight enemies encountered while traveling. HQ worker rallies only support move. Omit both x and y to clear the rally point.",
+    parameters: {
+      type: "object",
+      required: ["buildingIds"],
+      properties: {
+        buildingIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        x: { type: "integer" },
+        y: { type: "integer" },
+        mode: { type: "string", enum: ["move", "attack_move"], default: "move" },
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => {
+      const hasX = args.x !== undefined;
+      const hasY = args.y !== undefined;
+      if (hasX !== hasY) {
+        return {
+          effect: "action" as const,
+          result: { ok: false, error: "invalid_position", hint: "Pass both x and y to set a rally point, or omit both to clear it." },
+        };
+      }
+      const position = hasX ? { x: Number(args.x), y: Number(args.y) } : undefined;
+      const mode = args.mode === "attack_move" ? "attack_move" : "move";
+      return executeBuildingBatch(
+        gameplayController,
+        args,
+        (buildingId) => gameplayController.setRallyPoint(buildingId, position, mode),
+      );
+    },
   },
   {
     name: "build_structure",
-    description: "Queue a build command for one worker. Barracks must be placed on an empty tile and leave one empty ring around your HQ; if placement fails, the error hint will suggest valid nearby tiles.",
+    description: "Assign one worker to construct a building. Omit x/y to select a legal site automatically; refinery auto-placement favors sites that shorten resource delivery routes. If the worker is not adjacent to the full footprint, it moves there and starts construction when ready. A worker that was harvesting resumes that loop after construction. War factories require a completed barracks first.",
     parameters: {
       type: "object",
-      required: ["unitId", "buildingType", "x", "y"],
+      required: ["unitId", "buildingType"],
       properties: {
         unitId: { type: "string" },
-        buildingType: { type: "string", enum: ["barracks"] },
+        buildingType: { type: "string", enum: BUILDABLE_BUILDING_TYPES },
         x: { type: "integer" },
         y: { type: "integer" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) =>
-      bridge.buildStructure(String(args.unitId), args.buildingType, { x: Number(args.x), y: Number(args.y) }),
+    execute: (gameplayController, args) =>
+      gameplayController.buildStructure(
+        String(args.unitId),
+        args.buildingType,
+        args.x === undefined || args.y === undefined ? undefined : { x: Number(args.x), y: Number(args.y) },
+      ),
   },
   {
     name: "start_harvest_loop",
     description:
-      "Assign one friendly worker to the built-in mining loop. Prefer this for routine economy instead of hand-writing mining with orchestrate_plan. Omit x/y to auto-pick the nearest resource; once accepted, do not repeatedly reissue it unless the worker is idle, blocked, or needs reassignment.",
+      "Assign one or more friendly workers to the built-in mining loop. The worker delivers to the nearest completed HQ or refinery. Omit x/y to auto-select deposits using recurring delivery distance, initial travel, and current assignments; specify x/y only when intentionally assigning every selected worker to one deposit. Multiple workers may share one deposit. A worker with harvest_loop intent is already assigned even when its instantaneous phase is idle; repeated identical calls return already_active without restarting it. Reissue only after path_blocked or for deliberate reassignment.",
     parameters: {
       type: "object",
-      required: ["unitId"],
+      required: ["unitIds"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
         x: { type: "integer" },
         y: { type: "integer" },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => {
+    execute: (gameplayController, args) => {
       const hasX = args?.x !== undefined;
       const hasY = args?.y !== undefined;
       const position = hasX && hasY ? { x: Number(args.x), y: Number(args.y) } : undefined;
       if (hasX !== hasY) {
-        return bridge.startHarvestLoop(String(args.unitId), { x: Number(args.x), y: Number(args.y) });
+        return {
+          effect: "action",
+          result: {
+            ok: false,
+            error: "invalid_resource_target",
+            hint: "Pass both x and y, or omit both for automatic resource selection.",
+          },
+        };
       }
-      return bridge.startHarvestLoop(String(args.unitId), position);
+      return executeUnitBatch(
+        gameplayController,
+        args,
+        (unitId) => gameplayController.startHarvestLoop(unitId, position),
+      );
     },
   },
   {
     name: "hold_unit",
-    description: "Queue a hold-position command for one unit.",
+    description: "Queue hold-position commands for one or more selected units.",
     parameters: {
       type: "object",
-      required: ["unitId"],
+      required: ["unitIds"],
       properties: {
-        unitId: { type: "string" },
+        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.holdUnit(String(args.unitId)),
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.holdUnit(unitId),
+    ),
   },
   {
     name: "spawn_agent",
@@ -242,66 +494,26 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "orchestrate_plan",
     description: [
-      "Register a flat orchestration plan for one or more units using existing action-tool calls, optional until conditions, and looping.",
-      "Prefer this for durable multi-tick intentions that would otherwise require repeated economy, production, move, or attack tool calls.",
+      "Register a durable plan using the same parameter shapes as existing action tools, optional completion conditions, and looping.",
+      "Prefer this for durable multi-tick intentions that would otherwise require repeated economy, move, build, or attack tool calls.",
       "Rules:",
       "- Step shape: { call: existing_action_tool_name, args: {...}, scope: \"per_unit\"|\"global\", when: {...}, until: {...}, retry: true/false, maxTicks: number }.",
-      "- Supported call tools in plans: move_unit, attack_move_unit, attack, spawn_unit, build_structure, start_harvest_loop, hold_unit.",
-      "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for production/building actions.",
+      "- Supported call tools in plans: move_unit, attack_move_unit, attack, build_structure, start_harvest_loop, hold_unit. Production is intentionally managed by spawn_unit/get_production_queue/cancel_production instead of plans.",
+      "- unitIds is only required for per_unit steps. Global building plans may omit it.",
+      "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
-      "- In global production args, buildingId can be \"$hq\" or \"$barracks\" to resolve the current friendly building at execution time.",
-      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, target_in_range, target_destroyed, credits_at_least, building_exists, unit_count_at_least, production_queue_empty.",
+      "- when waits before trying the call; until marks the step complete. Supported conditions: arrived, enemy_in_range, hq_in_range, near_position, worker_adjacent_to_build_footprint, target_in_range, target_destroyed, credits_at_least, building_exists, enemy_building_exists, unit_count_at_least, enemy_unit_count_at_least, production_queue_empty.",
+      "- Plan build_structure steps automatically wait for credits, select a site when x/y are omitted, move the worker, and immediately reselect if the footprint becomes occupied.",
+      "- Multiple active plans share the same-tick available credits. Earlier paid build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
+      "- Use get_active_plans to inspect currentStep, waiting.code/message/details, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",
-      "Opening example: assign two workers to mining, wait for barracks money, build barracks, then train soldiers:",
-      JSON.stringify({
-        unitIds: ["worker_1", "worker_2"],
-        loop: 1,
-        steps: [
-          { call: "start_harvest_loop", args: { unitId: "$unitId" }, scope: "per_unit" },
-          {
-            call: "build_structure",
-            args: { unitId: "worker_1", buildingType: "barracks", x: 4, y: 10 },
-            scope: "global",
-            when: { condition: "credits_at_least", amount: 120 },
-            until: { condition: "building_exists", buildingType: "barracks" },
-            retry: true,
-          },
-          {
-            call: "spawn_unit",
-            args: { buildingId: "$barracks", unitType: "soldier" },
-            scope: "global",
-            when: { condition: "production_queue_empty", buildingType: "barracks" },
-            until: { condition: "unit_count_at_least", unitType: "soldier", count: 4 },
-            retry: true,
-          },
-        ],
-      }),
-      "Combat assault example: move-attack a squad near the enemy HQ, then focus the HQ:",
-      JSON.stringify({
-        unitIds: ["soldier_1", "soldier_2"],
-        loop: 1,
-        steps: [
-          {
-            call: "attack_move_unit",
-            args: { unitId: "$unitId", x: 18, y: 10 },
-            until: { condition: "near_position", x: 18, y: 10, distance: 2 },
-            maxTicks: 40,
-          },
-          {
-            call: "attack",
-            args: { unitId: "$unitId", targetId: "building_enemy_hq" },
-            until: { condition: "target_destroyed", targetId: "building_enemy_hq" },
-            retry: true,
-          },
-        ],
-      }),
     ].join("\n"),
     parameters: {
       type: "object",
-      required: ["unitIds", "steps"],
+      required: ["steps"],
       properties: {
         unitIds: { type: "array", items: { type: "string" } },
         replaceExisting: { type: "boolean" },
@@ -315,7 +527,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             properties: {
               call: {
                 type: "string",
-                enum: ["move_unit", "attack_move_unit", "attack", "spawn_unit", "build_structure", "start_harvest_loop", "hold_unit"],
+                enum: ["move_unit", "attack_move_unit", "attack", "build_structure", "start_harvest_loop", "hold_unit"],
               },
               scope: { type: "string", enum: ["global", "per_unit"] },
               args: {
@@ -323,14 +535,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                 properties: {
                   unitId: { type: "string" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   x: { type: "integer" },
                   y: { type: "integer" },
                   targetId: { type: "string" },
                   priority: {
                     type: "array",
-                    items: { type: "string", enum: ["soldier", "worker"] },
+                    items: { type: "string", enum: ATTACK_TARGET_TYPES },
                   },
                 },
                 additionalProperties: false,
@@ -346,11 +558,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "enemy_in_range",
                       "hq_in_range",
                       "near_position",
+                      "worker_adjacent_to_build_footprint",
                       "target_in_range",
                       "target_destroyed",
                       "credits_at_least",
                       "building_exists",
+                      "enemy_building_exists",
                       "unit_count_at_least",
+                      "enemy_unit_count_at_least",
                       "production_queue_empty",
                     ],
                   },
@@ -360,8 +575,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                   targetId: { type: "string" },
                   amount: { type: "integer" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   count: { type: "integer" },
                 },
                 additionalProperties: false,
@@ -377,11 +592,14 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                       "enemy_in_range",
                       "hq_in_range",
                       "near_position",
+                      "worker_adjacent_to_build_footprint",
                       "target_in_range",
                       "target_destroyed",
                       "credits_at_least",
                       "building_exists",
+                      "enemy_building_exists",
                       "unit_count_at_least",
+                      "enemy_unit_count_at_least",
                       "production_queue_empty",
                     ],
                   },
@@ -391,8 +609,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                   targetId: { type: "string" },
                   amount: { type: "integer" },
                   buildingId: { type: "string" },
-                  buildingType: { type: "string", enum: ["hq", "barracks"] },
-                  unitType: { type: "string", enum: ["worker", "soldier"] },
+                  buildingType: { type: "string", enum: ALL_BUILDING_TYPES },
+                  unitType: { type: "string", enum: ALL_UNIT_TYPES },
                   count: { type: "integer" },
                 },
                 additionalProperties: false,
@@ -406,7 +624,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       },
       additionalProperties: false,
     },
-    execute: (bridge, args) => bridge.orchestratePlan(args as OrchestratePlanInput),
+    execute: (gameplayController, args) => gameplayController.orchestratePlan(args as OrchestratePlanInput),
   },
 ];
 
@@ -429,10 +647,14 @@ export function getControlReadToolNames(): string[] {
   return getControlAgentToolNames().filter((name) => readToolNames.has(name));
 }
 
-export function executeAgentTool(bridge: GameAgentBridge, name: string, args: unknown): AgentToolExecution {
+export function getControlActionToolNames(): string[] {
+  return getControlAgentToolNames().filter((name) => !readToolNames.has(name) && name !== "orchestrate_plan");
+}
+
+export function executeAgentTool(gameplayController: GameplayController, name: string, args: unknown): AgentToolExecution {
   const tool = tools.find((candidate) => candidate.name === name);
   if (!tool) {
     throw new Error(`Unknown tool: ${name}`);
   }
-  return tool.execute(bridge, args);
+  return tool.execute(gameplayController, args);
 }

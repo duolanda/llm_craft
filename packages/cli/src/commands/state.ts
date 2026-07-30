@@ -26,6 +26,45 @@ function toSelectionResponse(
   };
 }
 
+function renderAsciiMap(data: Record<string, unknown>): string {
+  const width = typeof data.width === "number" ? data.width : 0;
+  const height = typeof data.height === "number" ? data.height : 0;
+  const grid = Array.from({ length: height }, () => Array.from({ length: width }, () => "."));
+  const place = (x: unknown, y: unknown, symbol: string) => {
+    if (typeof x !== "number" || typeof y !== "number" || y < 0 || y >= height || x < 0 || x >= width) {
+      return;
+    }
+    grid[y]![x] = symbol;
+  };
+  for (const cell of (data.cells as Array<Record<string, unknown>> | undefined) ?? []) {
+    if (cell.tile === "obstacle") place(cell.x, cell.y, "#");
+    if (cell.tile === "resource") place(cell.x, cell.y, "*");
+  }
+  for (const resource of (data.resources as Array<Record<string, unknown>> | undefined) ?? []) {
+    place(resource.x, resource.y, "*");
+  }
+  const symbolFor = (type: unknown, relation: unknown) => {
+    const symbol =
+      type === "hq" ? "H" :
+        type === "barracks" ? "B" :
+          type === "war_factory" ? "F" :
+            type === "refinery" ? "D" :
+              type === "light_tank" ? "T" :
+                type === "rocket_soldier" ? "R" :
+                  type === "rifleman" ? "I" :
+                    type === "soldier" ? "S" :
+                      type === "worker" ? "W" : "?";
+    return relation === "enemy" ? symbol.toLowerCase() : symbol;
+  };
+  for (const building of (data.buildings as Array<Record<string, unknown>> | undefined) ?? []) {
+    place(building.x, building.y, symbolFor(building.type, building.relation));
+  }
+  for (const unit of (data.units as Array<Record<string, unknown>> | undefined) ?? []) {
+    place(unit.x, unit.y, symbolFor(unit.type, unit.relation));
+  }
+  return grid.map((row) => row.join("")).join("\n");
+}
+
 export async function handleState(
   client: ControlClient,
   sessionId: string,
@@ -34,27 +73,6 @@ export async function handleState(
   const opts = getFlags(flags);
 
   if (opts.compact || opts.ascii) {
-    if (!opts.cells && !opts.emptyTiles) {
-      const stateResp = await client.getState(sessionId);
-      if (!stateResp.ok) {
-        exit(ExitCode.BackendFailure, stateResp.error?.message ?? "Failed to get state");
-      }
-      const data = stateResp.data as Record<string, unknown>;
-      printJson({
-        ok: true,
-        tick: stateResp.tick,
-        kind: "selection",
-        data: {
-          asciiMap: data.asciiMap,
-          winner: data.winner ?? null,
-          ...(data.status ? { status: data.status } : {}),
-          ...(data.ready ? { ready: data.ready } : {}),
-        },
-      });
-      return;
-    }
-
-    // Compact: only asciiMap + tick
     const mapResp = await client.callTool(sessionId, "get_map_state", {
       includeCells: opts.cells || false,
       includeEmptyTiles: opts.emptyTiles || false,
@@ -70,7 +88,7 @@ export async function handleState(
       tick: mapResp.tick,
       kind: "selection",
       data: {
-        asciiMap: data.asciiMap,
+        asciiMap: renderAsciiMap(data),
         ...(opts.cells && data.cells ? { cells: data.cells } : {}),
         winner: stateData.winner ?? null,
         ...(stateData.status ? { status: stateData.status } : {}),

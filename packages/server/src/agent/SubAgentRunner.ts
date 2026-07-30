@@ -5,6 +5,7 @@ import {
   SubAgentParentContext,
 } from "../LLMProvider";
 import { SYSTEM_PROMPT } from "../SystemPrompt";
+import type { ModelCompletionResult } from "../model/ModelTransport";
 
 const SUB_AGENT_CONSTRAINTS = `
 ## 你是子 Agent（执行 worker）
@@ -31,7 +32,7 @@ type CreateSubAgentCompletion = (
     maxTokens: number;
   },
   signal: AbortSignal,
-) => Promise<any>;
+) => Promise<ModelCompletionResult>;
 
 function parseToolArgs(raw: string): unknown {
   try {
@@ -39,6 +40,36 @@ function parseToolArgs(raw: string): unknown {
   } catch {
     return {};
   }
+}
+
+function findLeaseViolation(
+  args: unknown,
+  assignedUnits: ReadonlySet<string>,
+  assignedBuildings: ReadonlySet<string>,
+): { kind: "unit" | "building"; id: string } | null {
+  if (!args || typeof args !== "object") return null;
+  if (Array.isArray(args)) {
+    for (const value of args) {
+      const violation = findLeaseViolation(value, assignedUnits, assignedBuildings);
+      if (violation) return violation;
+    }
+    return null;
+  }
+  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+    if (key === "unitId" && typeof value === "string" && !assignedUnits.has(value)) {
+      return { kind: "unit", id: value };
+    }
+    if (key === "unitIds" && Array.isArray(value)) {
+      const unitId = value.map(String).find((id) => !assignedUnits.has(id));
+      if (unitId) return { kind: "unit", id: unitId };
+    }
+    if (key === "buildingId" && typeof value === "string" && !assignedBuildings.has(value)) {
+      return { kind: "building", id: value };
+    }
+    const violation = findLeaseViolation(value, assignedUnits, assignedBuildings);
+    if (violation) return violation;
+  }
+  return null;
 }
 
 function formatSubAgentUserMessage(
@@ -138,6 +169,8 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
   ];
 
   const assistantTexts: string[] = [];
+  const leasedUnits = new Set(assignedUnits ?? []);
+  const leasedBuildings = new Set(assignedBuildings ?? []);
   let modelRequests = 0;
 
   while (true) {
@@ -160,8 +193,7 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
       return formatNotificationXML(taskId, description, "failed", objective, "Sub-agent exceeded maximum model requests.");
     }
 
-    const choice = response.choices[0];
-    const assistantMessage = choice?.message;
+    const assistantMessage = response.message;
     if (!assistantMessage) {
       return formatNotificationXML(taskId, description, "failed", objective, "Sub-agent received empty response.");
     }
@@ -175,7 +207,7 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
 
     const toolCalls = assistantMessage.tool_calls ?? [];
     if (toolCalls.length === 0) {
-      const finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+      const finishReason = response.finishReason;
       const status = finishReason === "stop" ? "completed" : "failed";
       return formatNotificationXML(taskId, description, status, objective, assistantTexts.join("\n") || "(no text output)");
     }
@@ -184,7 +216,26 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
       const args = parseToolArgs(toolCall.function.arguments);
       let execution: AgentToolExecutionResult;
       try {
-        execution = await parentContext.executeTool(toolCall.function.name, args);
+        const violation = findLeaseViolation(args, leasedUnits, leasedBuildings);
+        if (violation) {
+          execution = {
+            effect: "read",
+            result: {
+              ok: false,
+              error: "resource_not_leased",
+              resourceType: violation.kind,
+              resourceId: violation.id,
+            },
+          };
+        } else {
+          execution = await parentContext.executeTool(toolCall.function.name, args, {
+            toolCallId: toolCall.id,
+            controllerId: `subagent:${taskId}`,
+            parentControllerId: parentContext.controllerId,
+            turnId: parentContext.turnId,
+            source: "subagent",
+          });
+        }
       } catch (error) {
         execution = {
           effect: "read",

@@ -27,6 +27,34 @@ function cloneState<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function cloneReplayFrameState(state: GameState): GameState {
+  return {
+    ...state,
+    players: state.players.map((player) => ({
+      ...player,
+      resources: { ...player.resources },
+      units: player.units.map((unit) => ({
+        ...unit,
+        intent: unit.intent ? { ...unit.intent } : undefined,
+        pathTarget: unit.pathTarget ? { ...unit.pathTarget } : undefined,
+        constructingBuildingId: unit.constructingBuildingId,
+      })),
+      buildings: player.buildings.map((building) => ({
+        ...building,
+        rallyPoint: building.rallyPoint ? { ...building.rallyPoint } : undefined,
+        productionQueue: building.productionQueue.map((order) => ({ ...order })),
+        productionProgress: building.productionProgress ? { ...building.productionProgress } : undefined,
+        constructionProgress: building.constructionProgress ? { ...building.constructionProgress } : undefined,
+      })),
+    })),
+    // Replay application replaces log arrays instead of mutating them, and tiles are immutable in 历史记录.
+    // Sharing these immutable structures avoids duplicating the complete log history and map for every frame.
+    logs: state.logs,
+    tiles: state.tiles,
+    projectiles: state.projectiles?.map((projectile) => ({ ...projectile })),
+  };
+}
+
 function clearTransientIntentState(state: GameState) {
   for (const player of state.players) {
     for (const unit of player.units) {
@@ -55,13 +83,14 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
       state: change.state ?? "idle",
-      my: false,
       playerId: player.id,
       exists: true,
       attackRange: change.attackRange ?? 0,
       carryingCredits: change.carryingCredits ?? 0,
       carryCapacity: change.carryCapacity ?? 0,
+      heading: change.heading,
       intent: change.intent ?? undefined,
+      constructingBuildingId: change.constructingBuildingId ?? undefined,
     };
     player.units.push(createdUnit);
     return;
@@ -79,7 +108,11 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     attackRange: change.attackRange ?? current.attackRange,
     carryingCredits: change.carryingCredits ?? current.carryingCredits,
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
+    heading: change.heading ?? current.heading,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
+    constructingBuildingId: "constructingBuildingId" in change
+      ? change.constructingBuildingId ?? undefined
+      : current.constructingBuildingId,
   };
 }
 
@@ -101,10 +134,12 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       y: change.y ?? 0,
       hp: change.hp ?? 0,
       maxHp: change.maxHp ?? change.hp ?? 0,
-      my: false,
       playerId: player.id,
       exists: true,
+      rallyPoint: change.rallyPoint ?? undefined,
       productionQueue: change.productionQueue ?? [],
+      productionProgress: change.productionProgress ?? undefined,
+      constructionProgress: change.constructionProgress ?? undefined,
     };
     player.buildings.push(createdBuilding);
     return;
@@ -118,7 +153,10 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
     y: change.y ?? current.y,
     hp: change.hp ?? current.hp,
     maxHp: change.maxHp ?? current.maxHp,
+    rallyPoint: "rallyPoint" in change ? change.rallyPoint ?? undefined : current.rallyPoint,
     productionQueue: change.productionQueue ?? current.productionQueue,
+    productionProgress: change.productionProgress === null ? undefined : change.productionProgress ?? current.productionProgress,
+    constructionProgress: change.constructionProgress === null ? undefined : change.constructionProgress ?? current.constructionProgress,
   };
 }
 
@@ -363,7 +401,7 @@ function buildReplayTurnEvents(turns: SavedAITurnRecord[]): AITerminalEvent[] {
 export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const currentState = cloneState(record.initialState);
   const currentAIOutputs: Record<string, string> = {};
-  const replayTurns = [...record.aiTurns].sort((a, b) => {
+  const replayTurns = [...(record.aiTurns ?? [])].sort((a, b) => {
     if (a.executeTick !== b.executeTick) {
       return a.executeTick - b.executeTick;
     }
@@ -376,7 +414,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   let replayTurnIndex = 0;
   clearTransientIntentState(currentState);
   const commandResultsByTick = new Map<number, GameLog[]>();
-  for (const result of record.commandResults) {
+  for (const result of record.commandResults ?? []) {
     if (result.type !== LOG_TYPES.COMMAND_RESULT) continue;
     const bucket = commandResultsByTick.get(result.tick) ?? [];
     bucket.push(result);
@@ -385,7 +423,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
   const frames: ReplayFrame[] = [
     {
       tick: currentState.tick,
-      state: cloneState(currentState),
+      state: cloneReplayFrameState(currentState),
       aiOutputs: {},
       terminalEvents: [],
     },
@@ -434,7 +472,7 @@ export function buildReplayFrames(record: GameRecord): ReplayFrame[] {
 
     frames.push({
       tick: delta.tick,
-      state: cloneState(currentState),
+      state: cloneReplayFrameState(currentState),
       aiOutputs: { ...currentAIOutputs },
       terminalEvents: buildReplayTurnEvents(currentTerminalTurns),
     });
@@ -451,8 +489,8 @@ export function buildReplaySnapshots(frames: ReplayFrame[]): GameSnapshot[] {
   }));
 }
 
-export function formatTickTime(tick: number) {
-  const totalSeconds = Math.floor((tick * 500) / 1000);
+export function formatTickTime(tick: number, tickIntervalMs = 500) {
+  const totalSeconds = Math.floor((tick * tickIntervalMs) / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;

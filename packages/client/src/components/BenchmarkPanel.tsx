@@ -1,5 +1,12 @@
 import { FormEvent, useEffect, useState } from "react";
-import { CPUStrategyType, LLMPresetSummary, MatchDebugOptions } from "@llmcraft/shared";
+import {
+  CPUStrategyType,
+  DEFAULT_CPU_DECISION_INTERVAL_TICKS,
+  LLMPresetSummary,
+  MAX_CPU_DECISION_INTERVAL_TICKS,
+  MatchDebugOptions,
+  MIN_CPU_DECISION_INTERVAL_TICKS,
+} from "@llmcraft/shared";
 
 interface BenchmarkPanelProps {
   presets: LLMPresetSummary[];
@@ -9,8 +16,8 @@ interface BenchmarkPanelProps {
     presetId: string;
     cpuStrategy: CPUStrategyType;
     rounds: number;
-    recordReplay: boolean;
     decisionIntervalTicks: number;
+    recordReplay: boolean;
     concurrency: number;
     debug?: MatchDebugOptions;
   }) => void;
@@ -21,7 +28,9 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
   const [presetId, setPresetId] = useState(initialPresetId);
   const [cpuStrategy, setCpuStrategy] = useState<CPUStrategyType>("random");
   const [rounds, setRounds] = useState("1");
-  const [decisionIntervalTicks, setDecisionIntervalTicks] = useState("10");
+  const [decisionIntervalTicks, setDecisionIntervalTicks] = useState(
+    String(DEFAULT_CPU_DECISION_INTERVAL_TICKS),
+  );
   const [concurrency, setConcurrency] = useState("1");
   const [recordReplay, setRecordReplay] = useState(true);
   const [recordLLMTranscript, setRecordLLMTranscript] = useState(false);
@@ -53,15 +62,21 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       return;
     }
 
-    const parsedDecisionInterval = Number(decisionIntervalTicks);
-    if (!Number.isInteger(parsedDecisionInterval) || parsedDecisionInterval <= 0 || parsedDecisionInterval > 60) {
-      setError("决策间隔必须是 1 到 60 之间的整数。");
-      return;
-    }
-
     const parsedConcurrency = Number(concurrency);
     if (!Number.isInteger(parsedConcurrency) || parsedConcurrency <= 0 || parsedConcurrency > 10) {
       setError("并发数必须是 1 到 10 之间的整数。");
+      return;
+    }
+
+    const parsedDecisionIntervalTicks = Number(decisionIntervalTicks);
+    if (
+      !Number.isInteger(parsedDecisionIntervalTicks)
+      || parsedDecisionIntervalTicks < MIN_CPU_DECISION_INTERVAL_TICKS
+      || parsedDecisionIntervalTicks > MAX_CPU_DECISION_INTERVAL_TICKS
+    ) {
+      setError(
+        `CPU 决策间隔必须是 ${MIN_CPU_DECISION_INTERVAL_TICKS} 到 ${MAX_CPU_DECISION_INTERVAL_TICKS} 之间的整数。`,
+      );
       return;
     }
 
@@ -70,10 +85,10 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
       presetId,
       cpuStrategy,
       rounds: parsedRounds,
+      decisionIntervalTicks: parsedDecisionIntervalTicks,
       recordReplay,
-      decisionIntervalTicks: parsedDecisionInterval,
       concurrency: parsedConcurrency,
-      debug: recordLLMTranscript ? { recordLLMTranscript: true } : undefined,
+      debug: recordLLMTranscript ? { includeTranscript: true } : undefined,
     });
   };
 
@@ -137,17 +152,18 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
         </label>
 
         <label className="settings-field">
-          <span>决策间隔</span>
+          <span>CPU 决策间隔（tick）</span>
           <input
             className="settings-input benchmark-number-input"
             type="number"
-            min={1}
-            max={60}
+            min={MIN_CPU_DECISION_INTERVAL_TICKS}
+            max={MAX_CPU_DECISION_INTERVAL_TICKS}
             value={decisionIntervalTicks}
             onChange={(event) => setDecisionIntervalTicks(event.target.value)}
             disabled={running}
           />
         </label>
+
       </div>
 
       <div className="benchmark-toggle-group">
@@ -168,7 +184,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
             onChange={(event) => setRecordLLMTranscript(event.target.checked)}
             disabled={running}
           />
-          <span>LLM Debug</span>
+          <span>记录完整 transcript</span>
         </label>
       </div>
 

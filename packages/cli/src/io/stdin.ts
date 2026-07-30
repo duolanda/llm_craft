@@ -27,11 +27,17 @@ export async function readStdin(): Promise<StdinInput> {
     return null;
   }
 
-  if (!isStdinInput(parsed)) {
-    return null;
+  if (isStdinInput(parsed)) return parsed;
+  if (typeof parsed === "object" && parsed !== null) {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.actions)) {
+      return { kind: "actions", tick: typeof obj.tick === "number" ? obj.tick : 0, data: obj };
+    }
+    if (Array.isArray(obj.unitIds) && Array.isArray(obj.steps)) {
+      return { kind: "plan", tick: typeof obj.tick === "number" ? obj.tick : 0, data: obj };
+    }
   }
-
-  return parsed;
+  return null;
 }
 
 function isStdinInput(value: unknown): value is NonNullable<StdinInput> {

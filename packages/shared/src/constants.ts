@@ -1,6 +1,38 @@
 export const TICK_INTERVAL_MS = 500;
-export const MAP_WIDTH = 21;
-export const MAP_HEIGHT = 21;
+export const MAP_WIDTH = 144;
+export const MAP_HEIGHT = 96;
+
+export interface MapCoordinate {
+  x: number;
+  y: number;
+}
+
+export const DEFAULT_MAP_LAYOUT = {
+  centerX: 72,
+  centerY: 48,
+  player1Hq: { x: 14, y: 48 },
+  player2Hq: { x: 129, y: 48 },
+  player1Workers: [
+    { x: 18, y: 44 },
+    { x: 18, y: 46 },
+    { x: 18, y: 50 },
+    { x: 18, y: 52 },
+  ],
+  player2Workers: [
+    { x: 125, y: 44 },
+    { x: 125, y: 46 },
+    { x: 125, y: 50 },
+    { x: 125, y: 52 },
+  ],
+  resources: [
+    { x: 31, y: 35 }, { x: 34, y: 39 }, { x: 31, y: 57 }, { x: 34, y: 61 },
+    { x: 112, y: 35 }, { x: 109, y: 39 }, { x: 112, y: 57 }, { x: 109, y: 61 },
+    { x: 47, y: 18 }, { x: 50, y: 22 },
+    { x: 47, y: 74 }, { x: 50, y: 78 },
+    { x: 96, y: 18 }, { x: 93, y: 22 },
+    { x: 96, y: 74 }, { x: 93, y: 78 },
+  ],
+} as const;
 
 export const RESULT_CODES = {
   OK: 0,
@@ -19,6 +51,9 @@ export type ResultCode = typeof RESULT_CODES[keyof typeof RESULT_CODES];
 export const UNIT_TYPES = {
   WORKER: "worker",
   SOLDIER: "soldier",
+  RIFLEMAN: "rifleman",
+  ROCKET_SOLDIER: "rocket_soldier",
+  LIGHT_TANK: "light_tank",
 } as const;
 
 export type UnitType = typeof UNIT_TYPES[keyof typeof UNIT_TYPES];
@@ -26,15 +61,20 @@ export type UnitType = typeof UNIT_TYPES[keyof typeof UNIT_TYPES];
 export const BUILDING_TYPES = {
   HQ: "hq",
   BARRACKS: "barracks",
+  WAR_FACTORY: "war_factory",
+  REFINERY: "refinery",
 } as const;
 
 export type BuildingType = typeof BUILDING_TYPES[keyof typeof BUILDING_TYPES];
+
+export type AttackTargetType = UnitType | BuildingType;
 
 export const UNIT_STATES = {
   IDLE: "idle",
   MOVING: "moving",
   ATTACKING: "attacking",
   GATHERING: "gathering",
+  BUILDING: "building",
 } as const;
 
 export type UnitState = typeof UNIT_STATES[keyof typeof UNIT_STATES];
@@ -47,21 +87,252 @@ export const TILE_TYPES = {
 
 export type TileType = typeof TILE_TYPES[keyof typeof TILE_TYPES];
 
-export const UNIT_STATS: Record<UnitType, { hp: number; speed: number; attack: number; cost: number; attackRange: number }> = {
-  [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0 },
-  [UNIT_TYPES.SOLDIER]: { hp: 100, speed: 1, attack: 15, cost: 80, attackRange: 1 },
-};
+export const ARMOR_TYPES = {
+  INFANTRY: "infantry",
+  VEHICLE: "vehicle",
+  STRUCTURE: "structure",
+} as const;
 
-export const BUILDING_STATS: Record<BuildingType, { hp: number; cost: number }> = {
-  [BUILDING_TYPES.HQ]: { hp: 1000, cost: 0 },
-  [BUILDING_TYPES.BARRACKS]: { hp: 300, cost: 120 },
-};
+export type ArmorType = typeof ARMOR_TYPES[keyof typeof ARMOR_TYPES];
+
+export const PROJECTILE_TYPES = {
+  INSTANT: "instant",
+  BULLET: "bullet",
+  SHELL: "shell",
+  ROCKET: "rocket",
+} as const;
+
+export type ProjectileType = typeof PROJECTILE_TYPES[keyof typeof PROJECTILE_TYPES];
 
 export const ECONOMY_RULES = {
   WORKER_CARRY_CAPACITY: 100,
   WORKER_GATHER_RATE: 10,
   HQ_DELIVERY_RANGE: 1,
+  REFINERY_DELIVERY_RANGE: 1,
+  RESOURCE_DEPOSIT_CAPACITY: 5000,
 } as const;
+
+export interface RulesetUnitDefinition {
+  hp: number;
+  speed: number;
+  attack: number;
+  cost: number;
+  attackRange: number;
+  visionRange: number;
+  armor: ArmorType;
+  productionTicks: number;
+  damageModifiers?: Partial<Record<ArmorType, number>>;
+  weapon?: RulesetWeaponDefinition;
+}
+
+export interface RulesetWeaponDefinition {
+  damage: number;
+  range: number;
+  minRange?: number;
+  reloadTicks: number;
+  projectileType: ProjectileType;
+  projectileSpeed: number;
+  splashRadius?: number;
+  splashFalloff?: number[];
+  damageModifiers?: Partial<Record<ArmorType, number>>;
+  targetPriority?: AttackTargetType[];
+}
+
+export interface RulesetBuildingDefinition {
+  hp: number;
+  cost: number;
+  constructionTicks: number;
+  visionRange: number;
+  armor: ArmorType;
+  produces: UnitType[];
+  footprint: { width: number; height: number };
+}
+
+export interface GameRuleset {
+  id: string;
+  name: string;
+  units: Record<UnitType, RulesetUnitDefinition>;
+  buildings: Record<BuildingType, RulesetBuildingDefinition>;
+  economy: typeof ECONOMY_RULES;
+}
+
+export const DEFAULT_RULESET = {
+  id: "standard",
+  name: "LLMCraft Standard",
+  units: {
+    [UNIT_TYPES.WORKER]: { hp: 50, speed: 1, attack: 0, cost: 50, attackRange: 0, visionRange: 5, armor: ARMOR_TYPES.INFANTRY, productionTicks: 4 },
+    [UNIT_TYPES.SOLDIER]: {
+      hp: 115,
+      speed: 1,
+      attack: 10,
+      cost: 55,
+      attackRange: 1,
+      visionRange: 5,
+      armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 4,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 1,
+        [ARMOR_TYPES.VEHICLE]: 0.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.35,
+      },
+      weapon: {
+        damage: 10,
+        range: 1,
+        reloadTicks: 3,
+        projectileType: PROJECTILE_TYPES.INSTANT,
+        projectileSpeed: 99,
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 1,
+          [ARMOR_TYPES.VEHICLE]: 0.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.35,
+        },
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.HQ],
+      },
+    },
+    [UNIT_TYPES.RIFLEMAN]: {
+      hp: 95,
+      speed: 1,
+      attack: 9,
+      cost: 70,
+      attackRange: 6,
+      visionRange: 7,
+      armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 6,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 1.45,
+        [ARMOR_TYPES.VEHICLE]: 0.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.35,
+      },
+      weapon: {
+        damage: 9,
+        range: 6,
+        reloadTicks: 2,
+        projectileType: PROJECTILE_TYPES.BULLET,
+        projectileSpeed: 9,
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 1.45,
+          [ARMOR_TYPES.VEHICLE]: 0.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.35,
+        },
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.HQ],
+      },
+    },
+    [UNIT_TYPES.ROCKET_SOLDIER]: {
+      hp: 80,
+      speed: 1,
+      attack: 34,
+      cost: 110,
+      attackRange: 6,
+      visionRange: 7,
+      armor: ARMOR_TYPES.INFANTRY,
+      productionTicks: 8,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 0.35,
+        [ARMOR_TYPES.VEHICLE]: 2.25,
+        [ARMOR_TYPES.STRUCTURE]: 0.9,
+      },
+      weapon: {
+        damage: 34,
+        range: 6,
+        minRange: 2,
+        reloadTicks: 8,
+        projectileType: PROJECTILE_TYPES.ROCKET,
+        projectileSpeed: 4,
+        splashRadius: 1,
+        splashFalloff: [1, 0.35],
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 0.35,
+          [ARMOR_TYPES.VEHICLE]: 2.25,
+          [ARMOR_TYPES.STRUCTURE]: 0.9,
+        },
+        targetPriority: [UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN],
+      },
+    },
+    [UNIT_TYPES.LIGHT_TANK]: {
+      hp: 420,
+      speed: 1,
+      attack: 42,
+      cost: 240,
+      attackRange: 5,
+      visionRange: 7,
+      armor: ARMOR_TYPES.VEHICLE,
+      productionTicks: 14,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 0.8,
+        [ARMOR_TYPES.VEHICLE]: 1,
+        [ARMOR_TYPES.STRUCTURE]: 0.9,
+      },
+      weapon: {
+        damage: 42,
+        range: 5,
+        reloadTicks: 6,
+        projectileType: PROJECTILE_TYPES.SHELL,
+        projectileSpeed: 5,
+        splashRadius: 1,
+        splashFalloff: [1, 0.5],
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 0.8,
+          [ARMOR_TYPES.VEHICLE]: 1,
+          [ARMOR_TYPES.STRUCTURE]: 0.9,
+        },
+        targetPriority: [UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY],
+      },
+    },
+  },
+  buildings: {
+    [BUILDING_TYPES.HQ]: { hp: 1400, cost: 0, constructionTicks: 0, visionRange: 8, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.WORKER], footprint: { width: 7, height: 7 } },
+    [BUILDING_TYPES.BARRACKS]: {
+      hp: 420,
+      cost: 120,
+      constructionTicks: 12,
+      visionRange: 6,
+      armor: ARMOR_TYPES.STRUCTURE,
+      produces: [UNIT_TYPES.SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+      footprint: { width: 5, height: 5 },
+    },
+    [BUILDING_TYPES.WAR_FACTORY]: { hp: 650, cost: 220, constructionTicks: 18, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [UNIT_TYPES.LIGHT_TANK], footprint: { width: 7, height: 5 } },
+    [BUILDING_TYPES.REFINERY]: { hp: 560, cost: 300, constructionTicks: 16, visionRange: 6, armor: ARMOR_TYPES.STRUCTURE, produces: [], footprint: { width: 5, height: 5 } },
+  },
+  economy: ECONOMY_RULES,
+} satisfies GameRuleset;
+
+// Convenient views of the standard ruleset for diagnostics, tests, and UI code.
+export const UNIT_STATS: Record<UnitType, RulesetUnitDefinition> = DEFAULT_RULESET.units;
+
+export const BUILDING_STATS: Record<BuildingType, Omit<RulesetBuildingDefinition, "produces">> = {
+  [BUILDING_TYPES.HQ]: {
+    hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].hp,
+    cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].constructionTicks,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].visionRange,
+    armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.HQ].footprint,
+  },
+  [BUILDING_TYPES.BARRACKS]: {
+    hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].hp,
+    cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].constructionTicks,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].visionRange,
+    armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.BARRACKS].footprint,
+  },
+  [BUILDING_TYPES.WAR_FACTORY]: {
+    hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].hp,
+    cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].constructionTicks,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].visionRange,
+    armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.WAR_FACTORY].footprint,
+  },
+  [BUILDING_TYPES.REFINERY]: {
+    hp: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].hp,
+    cost: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].cost,
+    constructionTicks: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].constructionTicks,
+    visionRange: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].visionRange,
+    armor: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].armor,
+    footprint: DEFAULT_RULESET.buildings[BUILDING_TYPES.REFINERY].footprint,
+  },
+};
 
 /** 对战玩家标识（仅包含实际对局双方） */
 export const PLAYER_IDS = {
@@ -98,4 +369,5 @@ export const GAME_COLORS = {
   resource: "#ffb300",
   hq: "#c45fff",
   barracks: "#2979ff",
+  warFactory: "#ff8840",
 } as const;

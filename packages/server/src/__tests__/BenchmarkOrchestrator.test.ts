@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { BenchmarkOrchestrator } from "../benchmark/BenchmarkOrchestrator";
+import { MatchRegistry } from "../MatchRegistry";
 
 function createFakeRound(params: {
   winner: string | null;
   tick: number;
   recordPath?: string;
-  transcriptPath?: string;
 }) {
   const aiFeed = {
     sessionId: `session-${params.tick}`,
@@ -28,11 +28,12 @@ function createFakeRound(params: {
   };
 
   return {
+    getMatchId: () => `match_round_${params.tick}`,
     start: vi.fn(async () => undefined),
+    waitForEnd: vi.fn(async () => ({ status: "finished", state: game.getState() })),
     stop: vi.fn(() => undefined),
     saveRecord: vi.fn(async () => params.recordPath ?? `logs/records/round-${params.tick}.json`),
     getGame: vi.fn(() => game),
-    getTranscriptFilePath: vi.fn(() => params.transcriptPath ?? null),
     getAITerminalFeed: vi.fn(() => aiFeed),
   };
 }
@@ -42,7 +43,7 @@ describe("BenchmarkOrchestrator", () => {
     const ws = { send: vi.fn() };
     const rounds = [
       createFakeRound({ winner: "player_1", tick: 120, recordPath: "logs/records/round-1.json" }),
-      createFakeRound({ winner: "player_2", tick: 140, recordPath: "logs/records/round-2.json", transcriptPath: "logs/llm-debug/round-2.log" }),
+      createFakeRound({ winner: "player_2", tick: 140, recordPath: "logs/records/round-2.json" }),
       createFakeRound({ winner: null, tick: 180, recordPath: "logs/records/round-3.json" }),
     ];
     const configs: Array<{ player1: { providerType: string }; player2: { providerType: string } }> = [];
@@ -58,7 +59,6 @@ describe("BenchmarkOrchestrator", () => {
         cpuStrategy: "rush",
         rounds: 3,
         recordReplay: true,
-        decisionIntervalTicks: 9,
       },
       ws as any,
       (config) => {
@@ -78,16 +78,9 @@ describe("BenchmarkOrchestrator", () => {
     expect(configs[0]?.player2.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player1.providerType).toBe("builtin-cpu");
     expect(configs[1]?.player2.providerType).toBe("openai-compatible");
-    expect((configs[0] as any)?.runtime?.aiIntervalTicksByPlayer).toMatchObject({
-      player_1: 5,
-      player_2: 9,
-    });
-    expect((configs[1] as any)?.runtime?.aiIntervalTicksByPlayer).toMatchObject({
-      player_1: 9,
-      player_2: 5,
-    });
+    expect((configs[0] as any)?.runtime?.decisionIntervalTicks).toBe(10);
+    expect((configs[1] as any)?.runtime?.decisionIntervalTicks).toBe(10);
     expect((configs[0] as any)?.runtime?.recordDir).toContain("benchmark-records");
-    expect((configs[0] as any)?.runtime?.transcriptDir).toContain("benchmark-llm-debug");
 
     expect(complete).toMatchObject({
       cpuStrategy: "rush",
@@ -104,32 +97,7 @@ describe("BenchmarkOrchestrator", () => {
       round: 2,
       llmSide: "player_2",
       winner: "llm",
-      transcriptPath: "logs/llm-debug/round-2.log",
     });
-  });
-
-  it("proxies AI terminal feed from the current round orchestrator", () => {
-    const round = createFakeRound({ winner: null, tick: 120 });
-    const orchestrator = new BenchmarkOrchestrator(
-      {
-        presetId: "preset-1",
-        llmConfig: {
-          providerType: "openai-compatible",
-          apiKey: "token",
-          baseURL: "https://api.example.test/v1",
-          model: "gpt-4.1-mini",
-        },
-        cpuStrategy: "rush",
-        rounds: 1,
-        recordReplay: false,
-      },
-      null,
-      () => round as any
-    );
-
-    (orchestrator as any).currentOrchestrator = round;
-
-    expect(orchestrator.getAITerminalFeed()).toEqual(round.getAITerminalFeed());
   });
 
   it("limits active benchmark rounds by concurrency", async () => {
@@ -170,17 +138,11 @@ describe("BenchmarkOrchestrator", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     const startupMessages = ws.send.mock.calls.map((call) => JSON.parse(call[0]));
-    const activeProgress = startupMessages.find((message) =>
-      message.type === "benchmark_progress" && message.activeRounds?.length === 2
-    );
+    const activeProgress = startupMessages.find((message) => message.type === "benchmark_progress");
 
-    expect(activeProgress).toMatchObject({
-      viewedRound: 1,
-      activeRounds: [
-        { round: 1 },
-        { round: 2 },
-      ],
-    });
+    expect(activeProgress).toBeDefined();
+    expect(activeProgress).not.toHaveProperty("viewedRound");
+    expect(activeProgress).not.toHaveProperty("activeRounds");
 
     await new Promise((resolve) => setTimeout(resolve, 120));
 
@@ -190,5 +152,68 @@ describe("BenchmarkOrchestrator", () => {
     expect(maxActiveStarts).toBe(2);
     expect(complete).toMatchObject({ completedRounds: 4 });
     expect(complete.rounds.map((round: { round: number }) => round.round)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("registers benchmark rounds as independently queryable matches", async () => {
+    const registry = new MatchRegistry();
+    const round = createFakeRound({ winner: "player_1", tick: 90 });
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "test-model",
+        },
+        cpuStrategy: "random",
+        rounds: 1,
+        recordReplay: false,
+      },
+      null,
+      () => round as any,
+      registry,
+    );
+
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(registry.list()).toEqual([
+      expect.objectContaining({
+        matchId: "match_round_90",
+        kind: "benchmark",
+        label: "Benchmark round 1",
+        observed: true,
+      }),
+    ]);
+  });
+
+  it("does not replace the match selected by the user when benchmark rounds start", async () => {
+    const registry = new MatchRegistry();
+    const selectedMatch = createFakeRound({ winner: null, tick: 50 });
+    registry.register(selectedMatch as any, { kind: "live", observe: true });
+    const round = createFakeRound({ winner: "player_1", tick: 90 });
+    const orchestrator = new BenchmarkOrchestrator(
+      {
+        presetId: "preset-1",
+        llmConfig: {
+          providerType: "openai-compatible",
+          apiKey: "token",
+          baseURL: "https://api.example.test/v1",
+          model: "test-model",
+        },
+        cpuStrategy: "random",
+        rounds: 1,
+        recordReplay: false,
+      },
+      null,
+      () => round as any,
+      registry,
+    );
+
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(registry.getObservedMatchId()).toBe("match_round_50");
   });
 });

@@ -1,5 +1,6 @@
-import { ResultCode, PLAYER_IDS, PlayerId, ActorId, ACTOR_IDS } from "./constants";
-import type { Command } from "./types";
+import { PLAYER_IDS, ACTOR_IDS } from "./constants.js";
+import type { ResultCode, PlayerId, ActorId } from "./constants.js";
+import type { Command, ProductionOrder, RallyPoint } from "./types.js";
 
 // ============================================================
 // 日志等级
@@ -73,6 +74,7 @@ export const RESULT_TYPES = {
   ATTACK_MOVE_SUCCESS: "attack_move_success",
 
   // 建造相关
+  BUILDING_CONSTRUCTION_STARTED: "building_construction_started",
   BUILDING_CONSTRUCTED: "building_constructed",
   BUILD_INVALID_POSITION: "build_invalid_position",
   BUILD_INSUFFICIENT_CREDITS: "build_insufficient_credits",
@@ -80,8 +82,13 @@ export const RESULT_TYPES = {
 
   // 生产相关
   SPAWN_SUCCESS: "spawn_success",
-  SPAWN_INSUFFICIENT_CREDITS: "spawn_insufficient_credits",
   SPAWN_INVALID_BUILDING: "spawn_invalid_building",
+  PRODUCTION_CANCELLED: "production_cancelled",
+  PRODUCTION_INVALID_ORDER: "production_invalid_order",
+
+  // 集结点相关
+  RALLY_POINT_UPDATED: "rally_point_updated",
+  RALLY_INVALID_TARGET: "rally_invalid_target",
 
   // 暂停相关
   HOLD_SUCCESS: "hold_success",
@@ -90,6 +97,7 @@ export const RESULT_TYPES = {
   // 通用错误
   INVALID_UNIT: "invalid_unit",
   COMMAND_CRASHED: "command_crashed",
+  COMMAND_INVALID: "command_invalid",
 } as const;
 
 export type ResultType = typeof RESULT_TYPES[keyof typeof RESULT_TYPES];
@@ -126,6 +134,14 @@ export interface CommandResultExtraDataMap {
     hint: string;
   };
   [RESULT_TYPES.ATTACK_MOVE_SUCCESS]: Record<string, never>;
+  [RESULT_TYPES.BUILDING_CONSTRUCTION_STARTED]: {
+    buildingId: string;
+    buildingType: string;
+    x: number;
+    y: number;
+    workerId: string;
+    constructionTicks: number;
+  };
   [RESULT_TYPES.BUILDING_CONSTRUCTED]: {
     buildingId: string;
     buildingType: string;
@@ -150,19 +166,29 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.SPAWN_SUCCESS]: {
     buildingId: string;
-    unitType: string;
-  };
-  [RESULT_TYPES.SPAWN_INSUFFICIENT_CREDITS]: {
-    buildingId: string;
-    unitType: string;
-    requiredCredits: number;
-    currentCredits: number;
-    hint: string;
+    orders: ProductionOrder[];
+    queue: ProductionOrder[];
   };
   [RESULT_TYPES.SPAWN_INVALID_BUILDING]: {
     buildingId: string;
     buildingType: string;
     unitType: string;
+    hint: string;
+  };
+  [RESULT_TYPES.PRODUCTION_CANCELLED]: {
+    buildingIds: string[];
+    cancelledOrderIds: string[];
+    refundCredits: number;
+  };
+  [RESULT_TYPES.PRODUCTION_INVALID_ORDER]: {
+    hint: string;
+  };
+  [RESULT_TYPES.RALLY_POINT_UPDATED]: {
+    buildingId: string;
+    rallyPoint: RallyPoint | null;
+  };
+  [RESULT_TYPES.RALLY_INVALID_TARGET]: {
+    buildingId: string;
     hint: string;
   };
   [RESULT_TYPES.HOLD_SUCCESS]: {
@@ -178,6 +204,13 @@ export interface CommandResultExtraDataMap {
   };
   [RESULT_TYPES.COMMAND_CRASHED]: {
     error: string;
+  };
+  [RESULT_TYPES.COMMAND_INVALID]: {
+    hint: string;
+    reason?: "command_failed";
+    failedCommandId?: string;
+    failedResultCode?: ResultCode;
+    failedResultType?: ResultType;
   };
 }
 
@@ -203,6 +236,18 @@ export interface AIExecutionErrorData {
   errorType: string;
 }
 
+export interface PerfWarningData {
+  scope: "game_tick" | "state_broadcast" | "ai_runtime";
+  phase?: string;
+  elapsedMs?: number;
+  expectedMs?: number;
+  tick?: number;
+  requestTick?: number;
+  playerId?: PlayerId;
+  bytes?: number;
+  details?: Record<string, unknown>;
+}
+
 // ============================================================
 // LOG_TYPES：日志类型名称的简单映射
 // ============================================================
@@ -219,7 +264,9 @@ export const LOG_TYPES = {
 
   // 单位系统
   UNIT_SPAWNED: "unit_spawned",
+  UNIT_DESTROYED: "unit_destroyed",
   SPAWN_FAILED: "spawn_failed",
+  BUILDING_COMPLETED: "building_completed",
 
   // 命令执行结果（统一）
   COMMAND_RESULT: "command_result",
@@ -230,6 +277,9 @@ export const LOG_TYPES = {
 
   // Tick 错误
   TICK_ERROR: "tick_error",
+
+  // 性能诊断
+  PERF_WARNING: "perf_warning",
 } as const;
 
 export type LogType = typeof LOG_TYPES[keyof typeof LOG_TYPES];
@@ -253,12 +303,24 @@ export interface GameLogDataMap {
     amount: number;
     credits: number;
   };
-  [LOG_TYPES.UNIT_SPAWNED]: { unitType: string };
+  [LOG_TYPES.UNIT_SPAWNED]: { unitId: string; unitType: string };
+  [LOG_TYPES.UNIT_DESTROYED]: { unitId: string; unitType: string };
   [LOG_TYPES.SPAWN_FAILED]: { unitType: string };
+  [LOG_TYPES.BUILDING_COMPLETED]: {
+    buildingId: string;
+    buildingType: string;
+    workerId: string;
+  };
   [LOG_TYPES.COMMAND_RESULT]: CommandResultData;
   [LOG_TYPES.AI_GENERATION_ERROR]: undefined;
   [LOG_TYPES.AI_EXECUTION_ERROR]: AIExecutionErrorData;
-  [LOG_TYPES.TICK_ERROR]: { error: string };
+  [LOG_TYPES.TICK_ERROR]: {
+    error: string;
+    attemptedTick?: number;
+    committedTick?: number;
+    committed?: boolean;
+  };
+  [LOG_TYPES.PERF_WARNING]: PerfWarningData;
 }
 
 // ============================================================
@@ -293,11 +355,14 @@ export const LOG_META_DEFAULTS: Record<LogType, LogMetaDefault> = {
   [LOG_TYPES.RESOURCE_GATHERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.CREDITS_DELIVERED]: { level: LOG_LEVELS.DEBUG },
   [LOG_TYPES.UNIT_SPAWNED]: {},
+  [LOG_TYPES.UNIT_DESTROYED]: {},
   [LOG_TYPES.SPAWN_FAILED]: { level: LOG_LEVELS.WARNING, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
+  [LOG_TYPES.BUILDING_COMPLETED]: {},
   [LOG_TYPES.COMMAND_RESULT]: {},
   [LOG_TYPES.AI_GENERATION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.AI_EXECUTION_ERROR]: { level: LOG_LEVELS.ERROR, feedbackTarget: AI_FEEDBACK_TARGETS.BOTH },
   [LOG_TYPES.TICK_ERROR]: { level: LOG_LEVELS.ERROR },
+  [LOG_TYPES.PERF_WARNING]: { level: LOG_LEVELS.WARNING, displayTarget: LOG_DISPLAY_TARGETS.BACKEND },
 };
 
 // ============================================================

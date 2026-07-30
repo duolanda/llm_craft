@@ -1,6 +1,6 @@
-import OpenAI from "openai";
 import {
   AgentRunInput,
+  AgentModelRequestRecord,
   AgentToolCallRecord,
 } from "@llmcraft/shared";
 import {
@@ -17,13 +17,18 @@ import {
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 import { runSubAgentTask } from "./agent/SubAgentRunner";
+import type { ModelTransport } from "./model/ModelTransport";
+import { OpenAICompatibleModelTransport } from "./model/OpenAICompatibleModelTransport";
+import { ContextWindowLimiter } from "./agent/ContextWindowLimiter";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
 const CONNECTION_TEST_MAX_TOKENS = 8;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
-const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
+const PROVIDER_SYNC_WARNING_MS = 100;
+const PROVIDER_LARGE_PAYLOAD_WARNING_BYTES = 250_000;
+const MODEL_REQUEST_MAX_ATTEMPTS = 3;
 const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_map_state",
   "get_my_state",
@@ -32,31 +37,33 @@ const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_recent_events",
 ]);
 
-interface PreparedTurn {
+interface WarmedTurn {
   input: AgentRunInput;
   assistantMessage: any;
   assistantText: string;
   finishReason: string;
+  modelRequestRecord: AgentModelRequestRecord;
 }
 
-export class OpenAICompatibleProvider implements LLMProvider {
-  private client: OpenAI;
-  private model: string;
-  private baseURL?: string;
-  private reasoningEffort?: OpenAIProviderConfig["reasoningEffort"];
-  private extraRequestParams?: Record<string, unknown> | null;
-  private history: any[] = [];
-  private preparedTurn: PreparedTurn | null = null;
+export interface OpenAIAgentSessionOptions {
+  systemPrompt?: string;
+  contextWindowLimiter?: ContextWindowLimiter;
+}
 
-  constructor(config: OpenAIProviderConfig) {
-    this.client = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL,
-    });
-    this.model = config.model || "gpt-4o-mini";
-    this.baseURL = config.baseURL;
-    this.reasoningEffort = config.reasoningEffort ?? null;
-    this.extraRequestParams = config.extraRequestParams ?? null;
+export class OpenAIAgentSession implements LLMProvider {
+  private history: any[] = [];
+  private warmedTurn: WarmedTurn | null = null;
+  private readonly seenRuntimeEventSignatures = new Set<string>();
+  private readonly systemPrompt: string;
+  private readonly contextWindowLimiter: ContextWindowLimiter;
+
+  constructor(
+    config: OpenAIProviderConfig,
+    private readonly transport: ModelTransport = new OpenAICompatibleModelTransport(config),
+    options: OpenAIAgentSessionOptions = {},
+  ) {
+    this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
+    this.contextWindowLimiter = options.contextWindowLimiter ?? new ContextWindowLimiter();
   }
 
   async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
@@ -65,48 +72,49 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
 
     const messages: any[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: this.systemPrompt },
       ...this.history,
       { role: "user", content: JSON.stringify(input, null, 2) },
     ];
     const persistentHistory = messages.slice(1);
-    this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), null);
+    const modelRequestRecords: AgentModelRequestRecord[] = [];
+    this.injectUrgentRuntimeAlert(messages, persistentHistory, options.getRuntimeState(), null);
 
     try {
-      const response = await this.createAgentCompletion(messages, options);
-      const choice = response.choices[0];
-      const assistantMessage = choice?.message;
+      const response = await this.createAgentCompletion(messages, options, modelRequestRecords, "warmup");
+      const assistantMessage = response.message;
       if (!assistantMessage) {
-        this.history = persistentHistory;
-        this.preparedTurn = null;
+        const contextWindow = this.limitContextWindow(persistentHistory);
+        this.warmedTurn = null;
         return {
           assistantMessages: [],
           stopReason: "empty_response",
           hasPendingToolCalls: false,
-          metrics: { modelRequests: 1 },
+          metrics: { modelRequests: 1, modelRequestRecords, contextWindow },
         };
       }
 
       messages.push(assistantMessage);
       persistentHistory.push(assistantMessage);
-      this.history = persistentHistory;
+      const contextWindow = this.limitContextWindow(persistentHistory);
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
       if (assistantText) {
         options.onAssistantMessage?.(assistantText);
       }
-      const finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
-      this.preparedTurn = {
+      const finishReason = response.finishReason;
+      this.warmedTurn = {
         input,
         assistantMessage,
         assistantText,
         finishReason,
+        modelRequestRecord: modelRequestRecords[0]!,
       };
 
       return {
         assistantMessages: assistantText ? [assistantText] : [],
         stopReason: finishReason,
         hasPendingToolCalls: (assistantMessage.tool_calls ?? []).length > 0,
-        metrics: { modelRequests: 1 },
+        metrics: { modelRequests: 1, modelRequestRecords, contextWindow },
       };
     } catch (error) {
       if (this.isAbortError(error, options.signal)) {
@@ -117,25 +125,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 
   async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
-    const response = await this.client.chat.completions.create(
-      {
-        model: this.model,
-        messages: [
-          {
-            role: "user",
-            content: "Reply with exactly: OK",
-          },
-        ],
-        temperature: 0,
-        max_tokens: CONNECTION_TEST_MAX_TOKENS,
-        ...this.buildOptionalRequestParams(),
-      } as any,
-      { signal },
-    );
-    const text = response.choices
-      .map((choice) => typeof choice.message?.content === "string" ? choice.message.content : "")
-      .join("\n")
-      .trim();
+    const response = await this.transport.complete({
+      messages: [{ role: "user", content: "Reply with exactly: OK" }],
+      temperature: 0,
+      maxTokens: CONNECTION_TEST_MAX_TOKENS,
+      signal,
+    });
+    const text = typeof response.message?.content === "string"
+      ? response.message.content.trim()
+      : "";
 
     return {
       responseText: text,
@@ -143,23 +141,34 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 
   async runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult> {
-    const preparedTurn = this.takePreparedTurn(input);
-    const messages: any[] = preparedTurn
-      ? [{ role: "system", content: SYSTEM_PROMPT }, ...this.history]
+    const warmedTurn = this.takeWarmedTurn(input);
+    const inputStringifyStartedAt = Date.now();
+    const inputContent = warmedTurn ? null : JSON.stringify(input);
+    this.maybeEmitProviderWarning(options, "input_stringify", Date.now() - inputStringifyStartedAt, {
+      bytes: inputContent ? Buffer.byteLength(inputContent, "utf8") : 0,
+      details: {
+        warmedTurn: Boolean(warmedTurn),
+      },
+    });
+    const messages: any[] = warmedTurn
+      ? [{ role: "system", content: this.systemPrompt }, ...this.history]
       : [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: "system", content: this.systemPrompt },
           ...this.history,
-          { role: "user", content: JSON.stringify(input, null, 2) },
+          { role: "user", content: inputContent },
         ];
     const persistentHistory = messages.slice(1);
-    const assistantMessages: string[] = preparedTurn?.assistantText ? [preparedTurn.assistantText] : [];
+    const assistantMessages: string[] = warmedTurn?.assistantText ? [warmedTurn.assistantText] : [];
     const toolCalls: AgentToolCallRecord[] = [];
-    let modelRequests = 0;
+    const modelRequestRecords: AgentModelRequestRecord[] = warmedTurn
+      ? [warmedTurn.modelRequestRecord]
+      : [];
     let consecutiveReadOnlyToolCalls = 0;
     let stopReason = "model_stopped";
     let lastRuntimeAlertSignature: string | null = null;
-    let pendingAssistantMessage = preparedTurn?.assistantMessage ?? null;
-    let pendingFinishReason = preparedTurn?.finishReason ?? null;
+    let latestObservationTick = input.tick;
+    let pendingAssistantMessage = warmedTurn?.assistantMessage ?? null;
+    let pendingFinishReason = warmedTurn?.finishReason ?? null;
 
     while (true) {
       if (options.signal?.aborted) {
@@ -178,11 +187,37 @@ export class OpenAICompatibleProvider implements LLMProvider {
         pendingFinishReason = null;
       } else {
         this.injectSubAgentNotifications(messages, persistentHistory, options);
-        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(messages, options.getRuntimeState(), lastRuntimeAlertSignature);
+        const runtimeStateStartedAt = Date.now();
+        const runtimeState = options.getRuntimeState();
+        this.maybeEmitProviderWarning(options, "get_runtime_state", Date.now() - runtimeStateStartedAt, {
+          details: {
+            messages: messages.length,
+          },
+        });
+        const urgentAlertStartedAt = Date.now();
+        lastRuntimeAlertSignature = this.injectUrgentRuntimeAlert(
+          messages,
+          persistentHistory,
+          runtimeState,
+          lastRuntimeAlertSignature,
+        );
+        this.maybeEmitProviderWarning(options, "inject_urgent_alert", Date.now() - urgentAlertStartedAt, {
+          details: {
+            messages: messages.length,
+            hasAlert: Boolean(lastRuntimeAlertSignature),
+          },
+        });
 
         let response;
         try {
-          response = await this.createAgentCompletion(messages, options);
+          const completionStartedAt = Date.now();
+          response = await this.createAgentCompletion(messages, options, modelRequestRecords, "turn");
+          this.maybeEmitProviderWarning(options, "create_completion", Date.now() - completionStartedAt, {
+            details: {
+              messages: messages.length,
+              modelRequests: modelRequestRecords.length,
+            },
+          });
         } catch (error) {
           if (this.isAbortError(error, options.signal)) {
             stopReason = ABORT_STOP_REASON;
@@ -190,15 +225,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
           }
           throw error;
         }
-        modelRequests++;
-
-        const choice = response.choices[0];
-        assistantMessage = choice?.message;
+        assistantMessage = response.message;
         if (!assistantMessage) {
           stopReason = "empty_response";
           break;
         }
-        finishReason = choice?.finish_reason ? String(choice.finish_reason) : "model_stopped";
+        finishReason = response.finishReason;
 
         messages.push(assistantMessage);
         persistentHistory.push(assistantMessage);
@@ -207,7 +239,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       const assistantText = typeof assistantMessage.content === "string" ? assistantMessage.content : "";
       if (assistantText && shouldEmitAssistant) {
         assistantMessages.push(assistantText);
+        const assistantCallbackStartedAt = Date.now();
         options.onAssistantMessage?.(assistantText);
+        this.maybeEmitProviderWarning(options, "assistant_callback", Date.now() - assistantCallbackStartedAt, {
+          bytes: Buffer.byteLength(assistantText, "utf8"),
+        });
       }
 
       const requestedToolCalls = assistantMessage.tool_calls ?? [];
@@ -217,20 +253,46 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
 
       let shouldStopForStall = false;
-      for (const toolCall of requestedToolCalls) {
+      for (let toolCallIndex = 0; toolCallIndex < requestedToolCalls.length; toolCallIndex++) {
+        const toolCall = requestedToolCalls[toolCallIndex];
+        const toolStartedAtMs = Date.now();
+        const toolStartedAt = new Date(toolStartedAtMs).toISOString();
+        const parseArgsStartedAt = Date.now();
         const args = this.parseToolArgs(toolCall.function.arguments);
+        this.maybeEmitProviderWarning(options, "parse_tool_args", Date.now() - parseArgsStartedAt, {
+          bytes: Buffer.byteLength(String(toolCall.function.arguments ?? ""), "utf8"),
+          details: {
+            toolName: toolCall.function.name,
+          },
+        });
         let execution: AgentToolExecutionResult;
         if (toolCall.function.name === "spawn_agent") {
           if (options.spawnSubAgent) {
+            const spawnRuntimeStateStartedAt = Date.now();
+            const runtimeState = options.getRuntimeState();
+            this.maybeEmitProviderWarning(options, "spawn_get_runtime_state", Date.now() - spawnRuntimeStateStartedAt, {
+              details: {
+                messages: messages.length,
+                toolName: toolCall.function.name,
+              },
+            });
             const parentContext: SubAgentParentContext = {
               playerId: input.playerId,
+              controllerId: options.runContext?.controllerId,
+              turnId: options.runContext?.turnId,
               input,
               messages: [...messages],
-              runtimeState: options.getRuntimeState(),
+              runtimeState,
               tools: options.tools,
               executeTool: options.executeTool,
             };
+            const spawnStartedAt = Date.now();
             execution = options.spawnSubAgent(args, parentContext);
+            this.maybeEmitProviderWarning(options, "spawn_agent", Date.now() - spawnStartedAt, {
+              details: {
+                messages: messages.length,
+              },
+            });
           } else {
             execution = {
               effect: "read",
@@ -239,7 +301,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
           }
         } else {
           try {
-            execution = await options.executeTool(toolCall.function.name, args);
+            const executeToolStartedAt = Date.now();
+            execution = await options.executeTool(toolCall.function.name, args, {
+              toolCallId: toolCall.id,
+              controllerId: options.runContext?.controllerId,
+              parentControllerId: options.runContext?.parentControllerId,
+              turnId: options.runContext?.turnId,
+              source: "macro_tool",
+            });
+            this.maybeEmitProviderWarning(options, "execute_tool", Date.now() - executeToolStartedAt, {
+              details: {
+                toolName: toolCall.function.name,
+                effect: execution.effect,
+              },
+            });
           } catch (error) {
             execution = {
               effect: "read",
@@ -250,10 +325,24 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
         if (execution.effect === "read") {
           consecutiveReadOnlyToolCalls++;
+          const expireStartedAt = Date.now();
           this.expireSupersededReadToolResults(messages, toolCall.id, toolCall.function.name, args);
+          this.maybeEmitProviderWarning(options, "expire_read_results", Date.now() - expireStartedAt, {
+            details: {
+              toolName: toolCall.function.name,
+              messages: messages.length,
+            },
+          });
         } else {
           consecutiveReadOnlyToolCalls = 0;
         }
+        const resultTick = this.extractResultTick(execution.result);
+        const observationTick = latestObservationTick;
+        if (execution.effect === "read" && resultTick !== undefined) {
+          latestObservationTick = resultTick;
+        }
+        const toolCompletedAtMs = Date.now();
+        const resultBytes = Buffer.byteLength(JSON.stringify(execution.result) ?? "null", "utf8");
         const toolCallRecord = {
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
@@ -262,14 +351,39 @@ export class OpenAICompatibleProvider implements LLMProvider {
           isError: execution.result instanceof Object && "ok" in (execution.result as Record<string, unknown>)
             ? (execution.result as Record<string, unknown>).ok === false
             : false,
+          turnId: options.runContext?.turnId,
+          controllerId: options.runContext?.controllerId,
+          modelRequestIndex: modelRequestRecords.length,
+          startedAt: toolStartedAt,
+          completedAt: new Date(toolCompletedAtMs).toISOString(),
+          durationMs: toolCompletedAtMs - toolStartedAtMs,
+          observationTick,
+          resultTick,
+          resultBytes,
+          commandIds: this.extractCommandIds(execution.result),
         };
         toolCalls.push(toolCallRecord);
+        const toolCallbackStartedAt = Date.now();
         options.onToolCall?.(toolCallRecord);
+        this.maybeEmitProviderWarning(options, "tool_callback", Date.now() - toolCallbackStartedAt, {
+          details: {
+            toolName: toolCall.function.name,
+          },
+        });
 
+        const toolResultStringifyStartedAt = Date.now();
+        const toolResultContent = JSON.stringify(execution.result);
+        this.maybeEmitProviderWarning(options, "tool_result_stringify", Date.now() - toolResultStringifyStartedAt, {
+          bytes: Buffer.byteLength(toolResultContent, "utf8"),
+          details: {
+            toolName: toolCall.function.name,
+            effect: execution.effect,
+          },
+        });
         const toolMessage = {
           role: "tool",
           tool_call_id: toolCall.id,
-          content: JSON.stringify(execution.result),
+          content: toolResultContent,
           name: toolCall.function.name,
         };
         messages.push(toolMessage);
@@ -278,6 +392,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
         if (consecutiveReadOnlyToolCalls > MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS) {
           stopReason = "stall_detected";
           shouldStopForStall = true;
+          for (const skippedToolCall of requestedToolCalls.slice(toolCallIndex + 1)) {
+            const skippedToolMessage = {
+              role: "tool",
+              tool_call_id: skippedToolCall.id,
+              content: JSON.stringify({
+                ok: false,
+                error: "stall_detected",
+                hint: "This tool call was not executed because the read-only tool loop exceeded its safety limit.",
+              }),
+              name: skippedToolCall.function.name,
+            };
+            messages.push(skippedToolMessage);
+            persistentHistory.push(skippedToolMessage);
+          }
           break;
         }
       }
@@ -287,16 +415,18 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
     }
 
-    this.history = persistentHistory;
+    const contextWindow = this.limitContextWindow(persistentHistory);
     return {
       assistantMessages,
       toolCalls,
       plans: [],
       stopReason,
       metrics: {
-        modelRequests,
+        modelRequests: modelRequestRecords.length,
         toolCalls: toolCalls.length,
         stallDetected: stopReason === "stall_detected",
+        modelRequestRecords,
+        contextWindow,
       },
     };
   }
@@ -304,35 +434,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
   async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
     return await runSubAgentTask({
       ...input,
+      systemPrompt: this.systemPrompt,
       createCompletion: async (request, signal) =>
-        await this.client.chat.completions.create(
-          {
-            model: this.model,
-            messages: request.messages,
-            tools: request.tools.map((tool) => ({
-              type: "function",
-              function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              },
-            })),
-            tool_choice: "auto",
-            temperature: request.temperature,
-            max_tokens: request.maxTokens,
-            ...this.buildOptionalRequestParams(),
-          } as any,
-          { signal },
-        ),
+        await this.transport.complete({
+          messages: request.messages,
+          tools: request.tools,
+          toolChoice: "auto",
+          temperature: request.temperature,
+          maxTokens: request.maxTokens,
+          signal,
+        }),
     });
   }
 
   getModel(): string {
-    return this.model;
+    return this.transport.getDescriptor().model;
   }
 
   getBaseURL(): string | undefined {
-    return this.baseURL;
+    return this.transport.getDescriptor().baseURL;
   }
 
   private parseToolArgs(raw: string): unknown {
@@ -343,53 +463,138 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
   }
 
-  private buildOptionalRequestParams(): Record<string, unknown> {
-    const params: Record<string, unknown> = {};
-    if (this.reasoningEffort) {
-      params.reasoning_effort = this.reasoningEffort;
-    }
+  private extractResultTick(result: unknown): number | undefined {
+    if (!result || typeof result !== "object") return undefined;
+    const tick = (result as { tick?: unknown }).tick;
+    return typeof tick === "number" && Number.isFinite(tick) ? tick : undefined;
+  }
 
-    if (this.extraRequestParams) {
-      for (const [key, value] of Object.entries(this.extraRequestParams)) {
-        if (!FORBIDDEN_EXTRA_REQUEST_PARAMS.has(key)) {
-          params[key] = value;
-        }
+  private extractCommandIds(result: unknown): string[] {
+    if (!result || typeof result !== "object") return [];
+    const record = result as Record<string, unknown>;
+    const ids = new Set<string>();
+    if (typeof record.commandId === "string") ids.add(record.commandId);
+    if (Array.isArray(record.commandIds)) {
+      for (const id of record.commandIds) if (typeof id === "string") ids.add(id);
+    }
+    if (Array.isArray(record.results)) {
+      for (const nested of record.results) {
+        for (const id of this.extractCommandIds(nested)) ids.add(id);
       }
     }
-
-    return params;
+    return [...ids];
   }
 
-  private async createAgentCompletion(messages: any[], options: RunAgentOptions) {
-    return await this.client.chat.completions.create(
-      {
-        model: this.model,
-        messages,
-        tools: options.tools.map((tool) => ({
-          type: "function",
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          },
-        })),
-        tool_choice: "auto",
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        ...this.buildOptionalRequestParams(),
-      } as any,
-      { signal: options.signal },
-    );
+  private limitContextWindow(history: readonly unknown[]) {
+    const result = this.contextWindowLimiter.limit(history);
+    this.history = result.history;
+    return result.record;
   }
 
-  private takePreparedTurn(input: AgentRunInput): PreparedTurn | null {
-    if (!this.preparedTurn || this.preparedTurn.input.playerId !== input.playerId) {
+  private async createAgentCompletion(
+    messages: any[],
+    options: RunAgentOptions,
+    records: AgentModelRequestRecord[],
+    phase: AgentModelRequestRecord["phase"],
+  ) {
+    const messagesSnapshot = structuredClone(messages) as unknown[];
+    const firstRequestIndex = records.length + 1;
+    for (let attempt = 1; attempt <= MODEL_REQUEST_MAX_ATTEMPTS; attempt++) {
+      const startedAtMs = Date.now();
+      try {
+        const result = await this.transport.complete({
+          messages,
+          tools: options.tools,
+          toolChoice: "auto",
+          temperature: DEFAULT_TEMPERATURE,
+          maxTokens: DEFAULT_MAX_TOKENS,
+          signal: options.signal,
+        });
+        const record: AgentModelRequestRecord = {
+          requestIndex: records.length + 1,
+          phase,
+          requestId: result.requestId,
+          model: result.responseModel ?? this.transport.getDescriptor().model,
+          finishReason: result.finishReason,
+          latencyMs: result.timing?.latencyMs ?? Date.now() - startedAtMs,
+          messageCount: messages.length,
+          toolCount: options.tools.length,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+          totalTokens: result.usage.totalTokens,
+          reasoningTokens: result.usage.reasoningTokens,
+          cachedInputTokens: result.usage.cachedInputTokens,
+          status: "success",
+          attempt,
+          ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
+          messages: messagesSnapshot,
+        };
+        records.push(record);
+        options.onModelRequest?.(record);
+        return result;
+      } catch (error) {
+        const record: AgentModelRequestRecord = {
+          requestIndex: records.length + 1,
+          phase,
+          model: this.transport.getDescriptor().model,
+          finishReason: "request_error",
+          latencyMs: Date.now() - startedAtMs,
+          messageCount: messages.length,
+          toolCount: options.tools.length,
+          status: "error",
+          attempt,
+          ...(attempt > 1 ? { retryOfRequestIndex: firstRequestIndex } : {}),
+          error: error instanceof Error ? error.message : String(error),
+          messages: messagesSnapshot,
+        };
+        records.push(record);
+        options.onModelRequest?.(record);
+        if (this.isAbortError(error, options.signal) || attempt === MODEL_REQUEST_MAX_ATTEMPTS || !this.isRetryableModelError(error)) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
+    throw new Error("Model request retry loop exhausted unexpectedly.");
+  }
+
+  private isRetryableModelError(error: unknown): boolean {
+    const status = typeof error === "object" && error && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+    return status === undefined || status === 408 || status === 409 || status === 429 || status >= 500;
+  }
+
+  private maybeEmitProviderWarning(
+    options: RunAgentOptions,
+    phase: string,
+    elapsedMs: number,
+    input?: {
+      bytes?: number;
+      details?: Record<string, unknown>;
+    }
+  ): void {
+    const bytes = input?.bytes;
+    if (elapsedMs <= PROVIDER_SYNC_WARNING_MS && (bytes ?? 0) <= PROVIDER_LARGE_PAYLOAD_WARNING_BYTES) {
+      return;
+    }
+
+    options.onPerformanceWarning?.({
+      phase,
+      elapsedMs,
+      bytes,
+      details: input?.details,
+    });
+  }
+
+  private takeWarmedTurn(input: AgentRunInput): WarmedTurn | null {
+    if (!this.warmedTurn || this.warmedTurn.input.playerId !== input.playerId) {
       return null;
     }
 
-    const preparedTurn = this.preparedTurn;
-    this.preparedTurn = null;
-    return preparedTurn;
+    const warmedTurn = this.warmedTurn;
+    this.warmedTurn = null;
+    return warmedTurn;
   }
 
   private injectSubAgentNotifications(messages: any[], persistentHistory: any[], options: RunAgentOptions): void {
@@ -404,20 +609,61 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
   }
 
-  private injectUrgentRuntimeAlert(messages: any[], runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>, previousSignature: string | null): string | null {
+  private injectUrgentRuntimeAlert(
+    messages: any[],
+    persistentHistory: any[],
+    runtimeState: ReturnType<RunAgentOptions["getRuntimeState"]>,
+    previousSignature: string | null,
+  ): string | null {
     const alert = getHQUnderAttackAlertFromRuntimeState(runtimeState);
-    if (!alert) {
-      return null;
+    const notices: string[] = [];
+    if (alert && alert !== previousSignature) {
+      notices.push(alert);
     }
 
-    if (alert !== previousSignature) {
-      messages.push({
-        role: "user",
-        content: alert,
-      });
+    const recentEvents = runtimeState.recentEvents as {
+      events?: Array<{
+        tick?: number;
+        type?: string;
+        data?: Record<string, unknown>;
+      }>;
+    } | null;
+    const buildingCompletions: string[] = [];
+    const readyUnits = new Map<string, number>();
+    const lostUnits = new Map<string, number>();
+    for (const event of recentEvents?.events ?? []) {
+      if (!["building_completed", "unit_spawned", "unit_destroyed"].includes(event.type ?? "")) continue;
+      const signature = JSON.stringify([
+        event.tick,
+        event.type,
+        event.data?.buildingId,
+        event.data?.unitId,
+        event.data?.buildingType,
+        event.data?.unitType,
+      ]);
+      if (this.seenRuntimeEventSignatures.has(signature)) continue;
+      this.seenRuntimeEventSignatures.add(signature);
+      if (event.type === "building_completed") {
+        buildingCompletions.push(`${String(event.data?.buildingType ?? "building")} ${String(event.data?.buildingId ?? "")}`.trim());
+      } else if (event.type === "unit_spawned") {
+        const type = String(event.data?.unitType ?? "unit");
+        readyUnits.set(type, (readyUnits.get(type) ?? 0) + 1);
+      } else if (event.type === "unit_destroyed") {
+        const type = String(event.data?.unitType ?? "unit");
+        lostUnits.set(type, (lostUnits.get(type) ?? 0) + 1);
+      }
+    }
+    if (buildingCompletions.length > 0) notices.push(`EVA: Building complete: ${buildingCompletions.join(", ")}.`);
+    if (readyUnits.size > 0) notices.push(`EVA: Unit ready: ${[...readyUnits].map(([type, count]) => `${count} ${type}`).join(", ")}.`);
+    if (lostUnits.size > 0) notices.push(`EVA: Unit lost: ${[...lostUnits].map(([type, count]) => `${count} ${type}`).join(", ")}.`);
+
+    if (notices.length > 0) {
+      const noticeMessage = { role: "user", content: notices.join("\n") };
+      messages.push(noticeMessage);
+      persistentHistory.push(noticeMessage);
     }
 
-    return alert;
+    return alert ?? null;
   }
 
   private expireSupersededReadToolResults(messages: any[], currentToolCallId: string, toolName: string, args: unknown): void {
@@ -550,7 +796,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       hasPendingToolCalls: false,
       metrics: {
         modelRequests: 0,
+        modelRequestRecords: [],
       },
     };
   }
 }
+
+/** @deprecated Prefer OpenAIAgentSession; retained for external imports during migration. */
+export class OpenAICompatibleProvider extends OpenAIAgentSession {}

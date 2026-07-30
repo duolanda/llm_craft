@@ -3,21 +3,23 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
+    "dev": "node scripts/dev.mjs",
+    "dev:shared": "pnpm --filter @llmcraft/shared dev",
+    "dev:record": "pnpm --filter @llmcraft/record dev",
     "dev:server": "pnpm --filter @llmcraft/server dev",
     "dev:client": "pnpm --filter @llmcraft/client dev",
     "dev:cli": "pnpm --filter @llmcraft/cli dev",
     "cli": "node scripts/run-cli.mjs",
-    "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build",
+    "build": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/record build && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build",
     "build:shared": "pnpm --filter @llmcraft/shared build",
     "build:cli": "pnpm --filter @llmcraft/cli build",
     "test": "pnpm --filter @llmcraft/server test",
-    "typecheck": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/shared typecheck && pnpm --filter @llmcraft/server typecheck && pnpm --filter @llmcraft/client typecheck && pnpm --filter @llmcraft/cli typecheck",
+    "typecheck": "pnpm --filter @llmcraft/shared build && pnpm --filter @llmcraft/record build && pnpm --filter @llmcraft/shared typecheck && pnpm --filter @llmcraft/record typecheck && pnpm --filter @llmcraft/server typecheck && pnpm --filter @llmcraft/client typecheck && pnpm --filter @llmcraft/cli typecheck",
     "verify": "pnpm typecheck && pnpm --filter @llmcraft/server test && pnpm --filter @llmcraft/server build && pnpm --filter @llmcraft/client build && pnpm --filter @llmcraft/cli build"
   },
   "devDependencies": {
     "@llmcraft/cli": "workspace:*",
-    "concurrently": "^8.2.2",
     "typescript": "^5.9.0"
-  }
+  },
+  "packageManager": "pnpm@11.13.0+sha512.88d94724d8f2e6c186744a5584c6e59ecac869ec7ba15e9cb4cd628e8dc7066820b2481d8ee3b51ea8da323a7378068aa58c556a3720d32b7c20a051d088363a"
 }

@@ -1,5 +1,5 @@
-import { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId } from "./constants";
-import type { GameLog } from "./logs";
+import type { UnitType, BuildingType, UnitState, TileType, ResultCode, PlayerId, AttackTargetType, ProjectileType } from "./constants.js";
+import type { GameLog } from "./logs.js";
 
 export type LLMProviderType = "openai-compatible";
 
@@ -25,7 +25,8 @@ export interface BuiltinCPURuntimeConfig {
 export type MatchPlayerLLMConfig = OpenAICompatibleRuntimeConfig | BuiltinCPURuntimeConfig;
 
 export interface MatchDebugOptions {
-  recordLLMTranscript?: boolean;
+  recordingProfile?: MatchRecordingProfile;
+  includeTranscript?: boolean;
 }
 
 export interface MatchWarmupOptions {
@@ -112,21 +113,21 @@ export type UnitIntent =
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "attack";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "attack_move";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "harvest_loop";
@@ -139,21 +140,27 @@ export type UnitIntent =
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "gather";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
     }
   | {
       type: "deposit";
       targetX?: number;
       targetY?: number;
       targetId?: string;
-      targetPriority?: string[];
+      targetPriority?: AttackTargetType[];
+    }
+  | {
+      type: "build";
+      targetX?: number;
+      targetY?: number;
+      targetId?: string;
     };
 
 export interface Unit extends GameObject {
@@ -161,11 +168,12 @@ export interface Unit extends GameObject {
   hp: number;
   maxHp: number;
   state: UnitState;
-  my: boolean;
   playerId: PlayerId;
   attackRange: number;
   carryingCredits: number;
   carryCapacity: number;
+  /** Authoritative body heading in simulation XY radians; zero points toward +X. */
+  heading?: number;
   // 意图显示
   intent?: UnitIntent;
   // 寻路路径缓存
@@ -174,15 +182,56 @@ export interface Unit extends GameObject {
   pathTarget?: { x: number; y: number };
   // 防止同一 tick 重复攻击
   lastAttackTick?: number;
+  // 下一次可开火的 tick，用于武器装填/冷却
+  nextAttackTick?: number;
+  // 当前正在施工的建筑 ID；施工时 worker 被占用
+  constructingBuildingId?: string;
+}
+
+export type RallyMode = "move" | "attack_move";
+
+export interface RallyPoint extends Position {
+  mode: RallyMode;
+}
+
+export interface ProductionBatchRequest {
+  unitType: UnitType;
+  count: number;
+}
+
+export interface ProductionOrder extends ProductionBatchRequest {
+  orderId: string;
+  /** Units from this order that have not spawned yet, including the active unit. */
+  remainingCount: number;
+}
+
+export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn";
+
+export interface ProductionProgress {
+  orderId: string;
+  unitType: UnitType;
+  remainingTicks: number;
+  totalTicks: number;
+  paidCredits: number;
+  totalCost: number;
+  status: ProductionStatus;
 }
 
 export interface Building extends GameObject {
   type: BuildingType;
   hp: number;
   maxHp: number;
-  my: boolean;
   playerId: PlayerId;
-  productionQueue: UnitType[];
+  /** Persistent destination and travel order assigned to newly produced units. */
+  rallyPoint?: RallyPoint;
+  productionQueue: ProductionOrder[];
+  productionProgress?: ProductionProgress;
+  constructionProgress?: {
+    workerId: string;
+    remainingTicks: number;
+    totalTicks: number;
+    resumeWorkerOrder?: UnitIntent;
+  };
 }
 
 export interface Resources {
@@ -200,6 +249,26 @@ export interface Tile {
   x: number;
   y: number;
   type: TileType;
+  resourceRemaining?: number;
+}
+
+export interface ActiveProjectile {
+  id: string;
+  playerId: PlayerId;
+  attackerId: string;
+  attackerType: UnitType;
+  projectileType: ProjectileType;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  targetX: number;
+  targetY: number;
+  launchedTick: number;
+  impactTick: number;
+  targetId?: string;
+  targetKind?: "unit" | "building";
+  splashRadius?: number;
 }
 
 export interface GameState {
@@ -208,6 +277,7 @@ export interface GameState {
   tiles: Tile[][];
   winner: PlayerId | null;
   logs: GameLog[];
+  projectiles?: ActiveProjectile[];
 }
 
 export interface Command {
@@ -216,11 +286,107 @@ export interface Command {
   unitId?: string;
   buildingId?: string;
   targetId?: string;
-  targetPriority?: string[];
+  targetPriority?: AttackTargetType[];
   position?: Position;
   unitType?: UnitType;
+  productionRequests?: ProductionBatchRequest[];
+  productionOrderIds?: string[];
   buildingType?: BuildingType;
+  rallyMode?: RallyMode;
+  resumeWorkerOrder?: UnitIntent;
   playerId: PlayerId;
+  provenance?: CommandProvenance;
+}
+
+export interface CommandProvenance {
+  controllerId: string;
+  source: "macro_tool" | "mission" | "tactical" | "external" | "subagent" | "cpu";
+  turnId?: string;
+  toolCallId?: string;
+  missionId?: string;
+  parentControllerId?: string;
+}
+
+export interface CommandEnvelope {
+  matchId: string;
+  actorId: string;
+  baseTick: number;
+  applyAtTick: number;
+  sequence: number;
+  clientRequestId: string;
+  commands: Command[];
+}
+
+export type CommandEnvelopeRejectCode =
+  | "invalid_envelope"
+  | "wrong_match"
+  | "invalid_tick"
+  | "unauthorized_actor"
+  | "duplicate_command_id"
+  | "idempotency_conflict";
+
+export type CommandEnvelopeSubmissionResult =
+  | {
+      accepted: true;
+      duplicate: boolean;
+      matchId: string;
+      clientRequestId: string;
+      applyAtTick: number;
+    }
+  | {
+      accepted: false;
+      duplicate: false;
+      matchId: string;
+      clientRequestId: string;
+      code: CommandEnvelopeRejectCode;
+      message: string;
+    };
+
+export interface MatchPlayerDefinition {
+  id: PlayerId;
+  startingCredits: number;
+}
+
+export interface MapStartingUnit {
+  type: UnitType;
+  position: Position;
+}
+
+export interface MapStartingBuilding {
+  type: BuildingType;
+  position: Position;
+}
+
+export interface MapPlayerStart {
+  playerId: PlayerId;
+  units: MapStartingUnit[];
+  buildings: MapStartingBuilding[];
+}
+
+export interface MapDefinition {
+  id: string;
+  width: number;
+  height: number;
+  resources: Position[];
+  obstacles: Position[];
+  playerStarts: [MapPlayerStart, MapPlayerStart];
+}
+
+export interface MatchDefinition {
+  rulesetId: string;
+  tickIntervalMs: number;
+  map: MapDefinition;
+  players: [MatchPlayerDefinition, MatchPlayerDefinition];
+  victoryCondition: {
+    type: "eliminate_all_buildings";
+  };
+}
+
+export type MatchRecordingProfile = "off" | "replay" | "evaluation";
+
+export interface MatchRecordingOptions {
+  profile: MatchRecordingProfile;
+  includeTranscript: boolean;
 }
 
 export interface GameSnapshot {
@@ -263,6 +429,16 @@ export interface AgentToolCallRecord {
   args: unknown;
   result: unknown;
   isError: boolean;
+  turnId?: string;
+  controllerId?: string;
+  modelRequestIndex?: number;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  observationTick?: number;
+  resultTick?: number;
+  resultBytes?: number;
+  commandIds?: string[];
 }
 
 export interface AgentMapStateUnit {
@@ -272,7 +448,8 @@ export interface AgentMapStateUnit {
   y: number;
   hp: number;
   maxHp: number;
-  state: UnitState;
+  /** Instantaneous simulation phase; intent remains the authoritative durable assignment. */
+  phase: UnitState;
   relation: "self" | "enemy";
 }
 
@@ -284,24 +461,45 @@ export interface AgentMapStateBuilding {
   hp: number;
   maxHp: number;
   relation: "self" | "enemy";
+  rallyPoint?: RallyPoint;
+  constructionProgress?: Building["constructionProgress"];
 }
 
 export interface AgentMapStateCell {
   x: number;
   y: number;
   tile: TileType;
+  resourceRemaining?: number;
   unit?: AgentMapStateUnit;
   building?: AgentMapStateBuilding;
+}
+
+export interface AgentMapStateResource {
+  x: number;
+  y: number;
+  remaining: number;
 }
 
 export interface AgentMapState {
   tick: number;
   width: number;
   height: number;
-  asciiMap: string;
   units: AgentMapStateUnit[];
   buildings: AgentMapStateBuilding[];
+  resources: AgentMapStateResource[];
   cells?: AgentMapStateCell[];
+}
+
+export type AgentUnitGroupRole = "worker" | "combat";
+
+export interface AgentUnitGroup {
+  role: AgentUnitGroupRole;
+  intent: string;
+  count: number;
+  unitIds: string[];
+  types: Partial<Record<UnitType, number>>;
+  center?: Position;
+  hasActivePlanCount: number;
 }
 
 interface AITerminalEventBase {
@@ -335,7 +533,6 @@ export type PlanCallToolName =
   | "move_unit"
   | "attack_move_unit"
   | "attack"
-  | "spawn_unit"
   | "build_structure"
   | "start_harvest_loop"
   | "hold_unit";
@@ -347,11 +544,14 @@ export type PlanStepCondition =
   | { condition: "enemy_in_range" }
   | { condition: "hq_in_range" }
   | { condition: "near_position"; x: number; y: number; distance?: number }
+  | { condition: "worker_adjacent_to_build_footprint"; buildingType: BuildingType; x: number; y: number }
   | { condition: "target_in_range"; targetId: string }
   | { condition: "target_destroyed"; targetId: string }
   | { condition: "credits_at_least"; amount: number }
-  | { condition: "building_exists"; buildingType: BuildingType; count?: number }
+  | { condition: "building_exists"; buildingType: BuildingType; count?: number; x?: number; y?: number }
+  | { condition: "enemy_building_exists"; buildingType: BuildingType; count?: number }
   | { condition: "unit_count_at_least"; unitType: UnitType; count: number }
+  | { condition: "enemy_unit_count_at_least"; unitType: UnitType; count: number }
   | { condition: "production_queue_empty"; buildingId?: string; buildingType?: BuildingType };
 
 export interface PlanStep {
@@ -365,30 +565,92 @@ export interface PlanStep {
 }
 
 export interface OrchestratePlanInput {
-  unitIds: string[];
+  unitIds?: string[];
   replaceExisting?: boolean;
   scope?: PlanStepScope;
   loop?: number;
   steps: PlanStep[];
 }
 
+export interface AgentPlanWaitingDiagnostic {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface AgentPlanAttemptRecord {
+  tick: number;
+  stepIndex: number;
+  call: PlanCallToolName;
+  status: "waiting" | "command_created" | "advanced" | "failed";
+  detail?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
+  commandCount?: number;
+}
+
 export interface AgentPlanRecord {
   planId: string;
+  missionId?: string;
+  controllerId?: string;
+  createdByTurnId?: string;
   unitIds: string[];
   scope?: PlanStepScope;
   loop: number;
   steps: PlanStep[];
   currentStepIndex: number;
   status: "active" | "completed" | "interrupted" | "failed";
+  currentStep?: PlanStep;
+  waitingReason?: string;
+  waiting?: AgentPlanWaitingDiagnostic;
+  lastAttempt?: AgentPlanAttemptRecord;
 }
+
+export type MissionRecord = AgentPlanRecord;
 
 export interface AgentRunMetrics {
   modelRequests: number;
   toolCalls: number;
   stallDetected: boolean;
+  modelRequestRecords?: AgentModelRequestRecord[];
+  contextWindow?: ContextWindowLimitRecord;
+}
+
+export interface ContextWindowLimitRecord {
+  maxMessages: number;
+  maxBytes: number;
+  messagesBefore: number;
+  messagesAfter: number;
+  bytesBefore: number;
+  bytesAfter: number;
+  droppedMessages: number;
+  truncatedMessages: number;
+}
+
+export interface AgentModelRequestRecord {
+  requestIndex: number;
+  phase: "warmup" | "turn" | "subagent";
+  requestId?: string;
+  model?: string;
+  finishReason: string;
+  latencyMs?: number;
+  messageCount: number;
+  toolCount: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  status?: "success" | "error";
+  attempt?: number;
+  retryOfRequestIndex?: number;
+  error?: string;
+  messages?: unknown[];
 }
 
 export interface AITurnRecord {
+  turnId?: string;
+  controllerId?: string;
+  decisionKind?: "macro" | "tactical";
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
@@ -405,6 +667,9 @@ export interface AITurnRecord {
 }
 
 export interface SavedAITurnRecord {
+  turnId?: string;
+  controllerId?: string;
+  decisionKind?: "macro" | "tactical";
   playerId: PlayerId;
   requestTick: number;
   executeTick: number;
@@ -437,7 +702,9 @@ export interface TickDeltaRecord {
       attackRange?: number;
       carryingCredits?: number;
       carryCapacity?: number;
+      heading?: number;
       intent?: UnitIntent | null;
+      constructingBuildingId?: string | null;
     }>;
     buildings: Array<{
       id: string;
@@ -447,7 +714,10 @@ export interface TickDeltaRecord {
       y?: number;
       hp?: number;
       maxHp?: number;
-      productionQueue?: UnitType[];
+      rallyPoint?: RallyPoint | null;
+      productionQueue?: ProductionOrder[];
+      productionProgress?: Building["productionProgress"] | null;
+      constructionProgress?: Building["constructionProgress"] | null;
     }>;
   }>;
   newLogs: GameLog[];
@@ -455,21 +725,58 @@ export interface TickDeltaRecord {
   winner?: PlayerId | null;
 }
 
-export interface GameRecord {
+export interface StateFrameMetadata {
+  frameSequence: number;
+  simulationTick: number;
+  simulationTimeMs: number;
+  tickIntervalMs: number;
+  serverTimeMs: number;
+}
+
+export interface StateProjectionDelta {
+  tick: number;
+  players: Array<{
+    playerId: PlayerId;
+    resources?: Player["resources"];
+    unitUpserts: Unit[];
+    removedUnitIds: string[];
+    buildingUpserts: Building[];
+    removedBuildingIds: string[];
+  }>;
+  tileUpserts: Tile[];
+  projectiles?: ActiveProjectile[];
+  logs: { mode: "append" | "replace"; entries: GameLog[] };
+  winner?: PlayerId | null;
+}
+
+export type StateProjectionFrame =
+  | {
+      kind: "keyframe";
+      metadata: StateFrameMetadata;
+      state: GameState;
+      aiOutputs: Record<string, string>;
+    }
+  | {
+      kind: "delta";
+      metadata: StateFrameMetadata;
+      baseFrameSequence: number;
+      delta: StateProjectionDelta;
+      aiOutputs: Record<string, string>;
+    };
+
+export interface MatchRecord {
+  recordFormat: "match-record";
+  matchId: string;
+  definition: MatchDefinition;
   metadata: {
     startedAt: string;
     savedAt: string;
     endedAt?: string;
-    status: "running" | "stopped" | "finished";
+    status: "running" | "stopped" | "finished" | "failed";
     winner: PlayerId | null;
-    aiIntervalTicks: number;
-    aiContextWindowTurns: number;
-    map: {
-      width: number;
-      height: number;
-    };
-    recordFormat: "compact-v2";
-    systemPrompt: string;
+    recordingProfile: Exclude<MatchRecordingProfile, "off">;
+    includeTranscript: boolean;
+    systemPrompt?: string;
     players: Array<{
       playerId: PlayerId;
       model: string;
@@ -479,9 +786,12 @@ export interface GameRecord {
   initialState: GameState;
   finalState: GameState;
   tickDeltas: TickDeltaRecord[];
-  commandResults: GameLog[];
-  aiTurns: SavedAITurnRecord[];
+  commandResults?: GameLog[];
+  aiTurns?: SavedAITurnRecord[];
 }
+
+/** @deprecated Use MatchRecord. */
+export type GameRecord = MatchRecord;
 
 // --- Control Plane Types ---
 
@@ -520,4 +830,41 @@ export interface CreateControlSessionRequest {
 
 export interface ControlToolCallRequest {
   args?: Record<string, unknown>;
+}
+
+export interface ControlBatchAction {
+  tool: string;
+  args?: Record<string, unknown>;
+}
+
+export interface ControlActionBatchRequest {
+  clientRequestId: string;
+  actions: ControlBatchAction[];
+}
+
+export type MatchRegistryKind = "live" | "control" | "benchmark";
+
+export type MatchRegistryStatus =
+  | "warming_up"
+  | "waiting_for_players"
+  | "running"
+  | "stopped"
+  | "finished"
+  | "failed";
+
+export interface MatchRegistrySummary {
+  matchId: string;
+  kind: MatchRegistryKind;
+  status: MatchRegistryStatus;
+  tick: number;
+  winner: PlayerId | null;
+  createdAt: string;
+  label?: string;
+  parentId?: string;
+  observed: boolean;
+}
+
+export interface MatchRegistryListResponse {
+  matches: MatchRegistrySummary[];
+  observedMatchId: string | null;
 }

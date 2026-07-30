@@ -1,8 +1,29 @@
 import type { ControlClient } from "../client.js";
+import { ALL_BUILDING_TYPES, ALL_UNIT_TYPES, BUILDING_TYPES, type ControlBatchAction } from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
-import { printBatchResult } from "./batch.js";
+
+const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
+const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
+
+function getFlagUnitIds(flags: Map<string, string>): string[] {
+  const values = [flags.get("unit"), flags.get("units")]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
+function getFlagBuildingIds(flags: Map<string, string>): string[] {
+  const values = [flags.get("building"), flags.get("buildings")]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
 
 function parseCoord(raw: string): { x: number; y: number } {
   const parts = raw.split(",");
@@ -30,6 +51,17 @@ async function callAndPrint(
   }
 }
 
+async function callBatchAndPrint(
+  client: ControlClient,
+  sessionId: string,
+  actions: ControlBatchAction[],
+  requestId?: string,
+): Promise<void> {
+  const resp = await client.callActionBatch(sessionId, actions, requestId);
+  printJson(resp);
+  if (!resp.ok) process.exit(ExitCode.BackendFailure);
+}
+
 // --- move ---
 
 export async function handleMove(
@@ -37,12 +69,12 @@ export async function handleMove(
   sessionId: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  const unitId = flags.get("unit");
+  const unitIds = getFlagUnitIds(flags);
   const toRaw = flags.get("to");
 
-  if (unitId && toRaw) {
+  if (unitIds.length > 0 && toRaw) {
     const { x, y } = parseCoord(toRaw);
-    await callAndPrint(client, sessionId, "move_unit", { unitId, x, y });
+    await callAndPrint(client, sessionId, "move_unit", { unitIds, x, y });
     return;
   }
 
@@ -61,16 +93,14 @@ export async function handleMove(
   }
   const to = parseCoord(toRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "move_unit", {
-      unitId: item.id as string,
+  await callBatchAndPrint(client, sessionId, [{
+    tool: "move_unit",
+    args: {
+      unitIds: items.map((item) => item.id as string),
       x: to.x,
       y: to.y,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    },
+  }], flags.get("request-id"));
 }
 
 // --- attack ---
@@ -80,11 +110,11 @@ export async function handleAttack(
   sessionId: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  const unitId = flags.get("unit");
+  const unitIds = getFlagUnitIds(flags);
   const targetId = flags.get("target");
 
-  if (unitId && targetId) {
-    await callAndPrint(client, sessionId, "attack", { unitId, targetId });
+  if (unitIds.length > 0 && targetId) {
+    await callAndPrint(client, sessionId, "attack", { unitIds, targetId });
     return;
   }
 
@@ -100,16 +130,19 @@ export async function handleAttack(
     if (pairs.length === 0) {
       exit(ExitCode.ArgError, "attack: stdin pairing has no pairs");
     }
-    const results: unknown[] = [];
+    const pairsByTarget = new Map<string, string[]>();
     for (const pair of pairs) {
       const enemy = pair.enemy as Record<string, unknown> | undefined;
-      const resp = await client.callTool(sessionId, "attack", {
-        unitId: pair.unitId as string,
-        targetId: enemy?.id as string,
-      });
-      results.push(resp);
+      const pairedTargetId = enemy?.id as string;
+      const ids = pairsByTarget.get(pairedTargetId) ?? [];
+      ids.push(pair.unitId as string);
+      pairsByTarget.set(pairedTargetId, ids);
     }
-    printBatchResult(stdinInput.tick, results);
+    const actions = [...pairsByTarget].map(([pairedTargetId, pairedUnitIds]): ControlBatchAction => ({
+      tool: "attack",
+      args: { unitIds: pairedUnitIds, targetId: pairedTargetId },
+    }));
+    await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
     return;
   }
 
@@ -123,15 +156,10 @@ export async function handleAttack(
     exit(ExitCode.ArgError, "attack with stdin requires --target <id>");
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "attack", {
-      unitId: item.id as string,
-      targetId,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+  await callBatchAndPrint(client, sessionId, [{
+    tool: "attack",
+    args: { unitIds: items.map((item) => item.id as string), targetId },
+  }], flags.get("request-id"));
 }
 
 // --- attack-move ---
@@ -141,24 +169,23 @@ export async function handleAttackMove(
   sessionId: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  const unitId = flags.get("unit");
+  const unitIds = getFlagUnitIds(flags);
   const toRaw = flags.get("to");
   const priorityRaw = flags.get("priority");
-  const validPriorities = ["soldier", "worker"] as const;
 
   let priority: string[] | undefined;
   if (priorityRaw) {
     priority = priorityRaw.split(",").map((s) => s.trim());
     for (const p of priority) {
-      if (!validPriorities.includes(p as typeof validPriorities[number])) {
-        exit(ExitCode.ArgError, `Invalid priority: ${p}. Valid: soldier, worker`);
+      if (!ATTACK_TARGET_TYPES.includes(p as typeof ATTACK_TARGET_TYPES[number])) {
+        exit(ExitCode.ArgError, `Invalid priority: ${p}. Valid: ${ATTACK_TARGET_TYPES.join(", ")}`);
       }
     }
   }
 
-  if (unitId && toRaw) {
+  if (unitIds.length > 0 && toRaw) {
     const { x, y } = parseCoord(toRaw);
-    const args: Record<string, unknown> = { unitId, x, y };
+    const args: Record<string, unknown> = { unitIds, x, y };
     if (priority) args.priority = priority;
     await callAndPrint(client, sessionId, "attack_move_unit", args);
     return;
@@ -179,14 +206,13 @@ export async function handleAttackMove(
   }
   const to = parseCoord(toRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const args: Record<string, unknown> = { unitId: item.id as string, x: to.x, y: to.y };
-    if (priority) args.priority = priority;
-    const resp = await client.callTool(sessionId, "attack_move_unit", args);
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+  const args: Record<string, unknown> = {
+    unitIds: items.map((item) => item.id as string),
+    x: to.x,
+    y: to.y,
+  };
+  if (priority) args.priority = priority;
+  await callBatchAndPrint(client, sessionId, [{ tool: "attack_move_unit", args }], flags.get("request-id"));
 }
 
 // --- gather ---
@@ -196,11 +222,11 @@ export async function handleGather(
   sessionId: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  const unitId = flags.get("unit");
+  const unitIds = getFlagUnitIds(flags);
   const resourceRaw = flags.get("resource");
 
-  if (unitId) {
-    const args: Record<string, unknown> = { unitId };
+  if (unitIds.length > 0) {
+    const args: Record<string, unknown> = { unitIds };
     if (resourceRaw) {
       const { x, y } = parseCoord(resourceRaw);
       args.x = x;
@@ -212,7 +238,7 @@ export async function handleGather(
 
   const stdinInput = await readStdin();
   if (!stdinInput || (stdinInput.kind !== "selection" && stdinInput.kind !== "pairing")) {
-    exit(ExitCode.ArgError, "gather requires --unit <id> or stdin selection/pairing (from units or nearest)");
+    exit(ExitCode.ArgError, "gather requires --unit/--units <ids> or stdin selection/pairing (from units or nearest)");
   }
   const data = stdinInput.data as Record<string, unknown>;
 
@@ -222,15 +248,25 @@ export async function handleGather(
     if (pairs.length === 0) {
       exit(ExitCode.ArgError, "gather: stdin pairing has no pairs");
     }
-    const results: unknown[] = [];
+    const grouped = new Map<string, { unitIds: string[]; resource?: { x: number; y: number } }>();
     for (const pair of pairs) {
       const rsrc = pair.resource as Record<string, number> | undefined;
-      const args: Record<string, unknown> = { unitId: pair.unitId as string };
-      if (rsrc) { args.x = rsrc.x; args.y = rsrc.y; }
-      const resp = await client.callTool(sessionId, "start_harvest_loop", args);
-      results.push(resp);
+      const key = rsrc ? `${rsrc.x},${rsrc.y}` : "auto";
+      const group = grouped.get(key) ?? {
+        unitIds: [],
+        ...(rsrc ? { resource: { x: rsrc.x, y: rsrc.y } } : {}),
+      };
+      group.unitIds.push(String(pair.unitId));
+      grouped.set(key, group);
     }
-    printBatchResult(stdinInput.tick, results);
+    const actions = [...grouped.values()].map((group): ControlBatchAction => ({
+      tool: "start_harvest_loop",
+      args: {
+        unitIds: group.unitIds,
+        ...(group.resource ?? {}),
+      },
+    }));
+    await callBatchAndPrint(client, sessionId, actions, flags.get("request-id"));
     return;
   }
 
@@ -241,14 +277,13 @@ export async function handleGather(
   }
 
   const resourcePos = resourceRaw ? parseCoord(resourceRaw) : undefined;
-  const results: unknown[] = [];
-  for (const item of items) {
-    const args: Record<string, unknown> = { unitId: item.id as string };
-    if (resourcePos) { args.x = resourcePos.x; args.y = resourcePos.y; }
-    const resp = await client.callTool(sessionId, "start_harvest_loop", args);
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+  await callBatchAndPrint(client, sessionId, [{
+    tool: "start_harvest_loop",
+    args: {
+      unitIds: items.map((item) => String(item.id)),
+      ...(resourcePos ?? {}),
+    },
+  }], flags.get("request-id"));
 }
 
 // --- build ---
@@ -263,9 +298,8 @@ export async function handleBuild(
     exit(ExitCode.ArgError, "build requires a building type (e.g., build barracks)");
   }
   const buildingType = subcommand;
-  const validTypes = ["barracks"];
-  if (!validTypes.includes(buildingType)) {
-    exit(ExitCode.ArgError, `Unknown building type: ${buildingType}. Valid: barracks`);
+  if (!BUILDABLE_BUILDING_TYPES.includes(buildingType as typeof BUILDABLE_BUILDING_TYPES[number])) {
+    exit(ExitCode.ArgError, `Unknown building type: ${buildingType}. Valid: ${BUILDABLE_BUILDING_TYPES.join(", ")}`);
   }
 
   const unitId = flags.get("unit");
@@ -295,17 +329,15 @@ export async function handleBuild(
   }
   const { x, y } = parseCoord(atRaw);
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "build_structure", {
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "build_structure",
+    args: {
       unitId: item.id as string,
       buildingType,
       x,
       y,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+    },
+  })), flags.get("request-id"));
 }
 
 // --- train ---
@@ -317,15 +349,21 @@ export async function handleTrain(
   flags: Map<string, string>,
 ): Promise<void> {
   const unitType = subcommand;
-  const validTypes = ["worker", "soldier"];
-  if (!validTypes.includes(unitType)) {
-    exit(ExitCode.ArgError, `train requires unit type (worker or soldier), got: ${subcommand || "(none)"}`);
+  if (!ALL_UNIT_TYPES.includes(unitType as typeof ALL_UNIT_TYPES[number])) {
+    exit(ExitCode.ArgError, `train requires unit type (${ALL_UNIT_TYPES.join(", ")}), got: ${subcommand || "(none)"}`);
   }
 
   const buildingId = flags.get("building");
+  const count = Number(flags.get("count") ?? "1");
+  if (!Number.isInteger(count) || count < 1 || count > 100) {
+    exit(ExitCode.ArgError, "train --count must be an integer from 1 to 100");
+  }
 
   if (buildingId) {
-    await callAndPrint(client, sessionId, "spawn_unit", { buildingId, unitType });
+    await callAndPrint(client, sessionId, "spawn_unit", {
+      buildingId,
+      units: [{ unitType, count }],
+    });
     return;
   }
 
@@ -342,15 +380,13 @@ export async function handleTrain(
     exit(ExitCode.ArgError, `train ${unitType}: stdin selection has no buildings`);
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "spawn_unit", {
+  await callBatchAndPrint(client, sessionId, items.map((item) => ({
+    tool: "spawn_unit",
+    args: {
       buildingId: item.id as string,
-      unitType,
-    });
-    results.push(resp);
-  }
-  printBatchResult(stdinInput.tick, results);
+      units: [{ unitType, count }],
+    },
+  })), flags.get("request-id"));
 }
 
 // --- hold ---
@@ -360,10 +396,10 @@ export async function handleHold(
   sessionId: string,
   flags: Map<string, string>,
 ): Promise<void> {
-  const unitId = flags.get("unit");
+  const unitIds = getFlagUnitIds(flags);
 
-  if (unitId) {
-    await callAndPrint(client, sessionId, "hold_unit", { unitId });
+  if (unitIds.length > 0) {
+    await callAndPrint(client, sessionId, "hold_unit", { unitIds });
     return;
   }
 
@@ -377,12 +413,79 @@ export async function handleHold(
     exit(ExitCode.ArgError, "hold: stdin selection has no units");
   }
 
-  const results: unknown[] = [];
-  for (const item of items) {
-    const resp = await client.callTool(sessionId, "hold_unit", {
-      unitId: item.id as string,
-    });
-    results.push(resp);
+  await callBatchAndPrint(client, sessionId, [{
+    tool: "hold_unit",
+    args: { unitIds: items.map((item) => item.id as string) },
+  }], flags.get("request-id"));
+}
+
+export async function handleProductionQueue(
+  client: ControlClient,
+  sessionId: string,
+  flags: Map<string, string>,
+): Promise<void> {
+  const buildingIds = getFlagBuildingIds(flags);
+  await callAndPrint(client, sessionId, "get_production_queue", {
+    ...(buildingIds.length > 0 ? { buildingIds } : {}),
+  });
+}
+
+export async function handleCancelProduction(
+  client: ControlClient,
+  sessionId: string,
+  flags: Map<string, string>,
+): Promise<void> {
+  const buildingIds = getFlagBuildingIds(flags);
+  const orderIds = [flags.get("order"), flags.get("orders")]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if ((buildingIds.length === 0) === (orderIds.length === 0)) {
+    exit(ExitCode.ArgError, "cancel-production requires either --building/--buildings or --order/--orders");
   }
-  printBatchResult(stdinInput.tick, results);
+  await callAndPrint(client, sessionId, "cancel_production", {
+    ...(buildingIds.length > 0 ? { buildingIds } : { orderIds: [...new Set(orderIds)] }),
+  });
+}
+
+// --- rally ---
+
+export async function handleRally(
+  client: ControlClient,
+  sessionId: string,
+  flags: Map<string, string>,
+): Promise<void> {
+  const flagBuildingIds = getFlagBuildingIds(flags);
+  const toRaw = flags.get("to");
+  const position = toRaw ? parseCoord(toRaw) : undefined;
+  const rawMode = flags.get("mode") ?? "move";
+  const mode = rawMode === "attack-move" ? "attack_move" : rawMode;
+  if (mode !== "move" && mode !== "attack_move") {
+    exit(ExitCode.ArgError, "rally --mode must be move or attack-move");
+  }
+
+  if (flagBuildingIds.length > 0) {
+    await callAndPrint(client, sessionId, "set_rally_point", {
+      buildingIds: flagBuildingIds,
+      ...(position ?? {}),
+      ...(position ? { mode } : {}),
+    });
+    return;
+  }
+
+  const stdinInput = await readStdin();
+  if (!stdinInput || stdinInput.kind !== "selection") {
+    exit(ExitCode.ArgError, "rally requires --building <id> [--to x,y] [--mode move|attack-move] or stdin selection; omit --to to clear");
+  }
+  const data = stdinInput.data as Record<string, unknown>;
+  const items = (data.buildings as Array<Record<string, unknown>>) ?? [];
+  if (items.length === 0) {
+    exit(ExitCode.ArgError, "rally: stdin selection has no buildings");
+  }
+  await callAndPrint(client, sessionId, "set_rally_point", {
+    buildingIds: items.map((item) => String(item.id)),
+    ...(position ?? {}),
+    ...(position ? { mode } : {}),
+  });
 }

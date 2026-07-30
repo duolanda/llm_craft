@@ -1,17 +1,26 @@
 import { randomUUID } from "node:crypto";
 import {
+  ControlActionBatchRequest,
   ControlResponse,
   ControlError,
   PlayerId,
 } from "@llmcraft/shared";
-import { GameAgentBridge } from "./agent/GameAgentBridge";
-import { executeAgentTool, AgentToolExecution } from "./agent/AgentTools";
+import { GameplayController } from "./controller/GameplayController";
+import { CLIControllerAdapter } from "./controller/CLIControllerAdapter";
+import {
+  executeAgentTool,
+  getControlActionToolNames,
+  type AgentToolExecution,
+} from "./agent/AgentTools";
+
+const CONTROL_ACTION_TOOL_NAMES = new Set(getControlActionToolNames());
 
 export interface ControlSessionState {
   id: string;
   gameId: string;
   playerId: PlayerId;
-  bridge: GameAgentBridge;
+  gameplayController: GameplayController;
+  controller: CLIControllerAdapter;
   createdAt: string;
   lastUsedAt: string;
 }
@@ -19,14 +28,15 @@ export interface ControlSessionState {
 export class ControlSessionManager {
   private sessions = new Map<string, ControlSessionState>();
 
-  create(bridge: GameAgentBridge, gameId: string, playerId: PlayerId): ControlSessionState {
+  create(gameplayController: GameplayController, gameId: string, playerId: PlayerId): ControlSessionState {
     const id = `cs_${randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
     const session: ControlSessionState = {
       id,
       gameId,
       playerId,
-      bridge,
+      gameplayController,
+      controller: new CLIControllerAdapter(playerId, gameplayController, id),
       createdAt: now,
       lastUsedAt: now,
     };
@@ -55,13 +65,15 @@ export class ControlSessionManager {
 }
 
 export function executeControlTool(
-  bridge: GameAgentBridge,
+  target: GameplayController | CLIControllerAdapter,
   toolName: string,
   args: Record<string, unknown>
 ): AgentToolExecution {
-  bridge.beginToolCall();
+  const gameplayController = target instanceof CLIControllerAdapter ? target.gameplayController : target;
+  if (target instanceof CLIControllerAdapter) target.beginExternalCall();
+  else gameplayController.beginToolCall({ controllerId: "external:control", source: "external" });
   try {
-    return executeAgentTool(bridge, toolName, args);
+    return executeAgentTool(gameplayController, toolName, args);
   } catch (error) {
     return {
       effect: "read",
@@ -74,6 +86,82 @@ export function executeControlTool(
   }
 }
 
+export function executeControlActionBatch(
+  target: GameplayController | CLIControllerAdapter,
+  request: ControlActionBatchRequest,
+  tick: number,
+): ControlResponse {
+  const gameplayController = target instanceof CLIControllerAdapter ? target.gameplayController : target;
+  if (target instanceof CLIControllerAdapter) target.beginExternalCall(request.clientRequestId);
+  else gameplayController.beginToolCall({ controllerId: "external:control", source: "external", turnId: request.clientRequestId });
+  const batch = gameplayController.runIdempotentBatch({
+    clientRequestId: request.clientRequestId,
+    fingerprint: canonicalizeBatchActions(request.actions),
+  }, () => {
+    const results: ControlResponse[] = [];
+    for (const action of request.actions) {
+      if (!CONTROL_ACTION_TOOL_NAMES.has(action.tool)) {
+        results.push({
+          ok: false,
+          tick,
+          kind: "action_result",
+          data: {},
+          error: {
+            code: "invalid_batch_tool",
+            message: `Batch actions only support action tools; received ${action.tool}.`,
+          },
+        });
+        continue;
+      }
+      let execution: AgentToolExecution;
+      try {
+        execution = executeAgentTool(gameplayController, action.tool, action.args ?? {});
+      } catch (error) {
+        results.push({
+          ok: false,
+          tick,
+          kind: "action_result",
+          data: {},
+          error: {
+            code: "tool_execution_error",
+            message: error instanceof Error ? error.message : "Tool execution failed",
+          },
+        });
+        continue;
+      }
+      const response = buildControlResponse(execution, "action_result");
+      results.push(response);
+    }
+    return results;
+  });
+
+  const failed = batch.value.find((result) => !result.ok);
+  return {
+    ok: !failed,
+    tick,
+    kind: "batch_result",
+    data: {
+      clientRequestId: request.clientRequestId,
+      duplicate: batch.duplicate,
+      partialSuccess: Boolean(failed) && batch.value.some((result) => result.ok),
+      results: batch.value,
+    },
+    ...(failed ? { error: failed.error } : {}),
+  };
+}
+
+function canonicalizeBatchActions(actions: ControlActionBatchRequest["actions"]): string {
+  const canonicalize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalize(item)]));
+  };
+  return JSON.stringify(canonicalize(actions));
+}
+
 export function buildControlResponse(
   result: AgentToolExecution,
   overrideKind?: ControlResponse["kind"]
@@ -82,16 +170,18 @@ export function buildControlResponse(
   const tick = (data.tick as number) ?? 0;
 
   if (data.ok === false) {
+    const code = (data.error as string) ?? "unknown";
+    const hint = data.hint as string | undefined;
     const error: ControlError = {
-      code: (data.error as string) ?? "unknown",
-      message: (data.message as string) ?? "Unknown error",
-      hint: data.hint as string | undefined,
+      code,
+      message: (data.message as string) ?? hint ?? `Tool failed with error: ${code}.`,
+      hint,
     };
     return {
       ok: false,
       tick,
       kind: overrideKind ?? kindFromEffect(result.effect),
-      data: {},
+      data,
       error,
     };
   }

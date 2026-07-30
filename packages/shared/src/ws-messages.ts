@@ -1,5 +1,5 @@
-import { PlayerId } from "./constants";
-import { AITerminalEvent, CPUStrategyType, GameState, GameSnapshot, MatchDebugOptions, MatchWarmupOptions } from "./types";
+import type { PlayerId } from "./constants.js";
+import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchRegistryKind, MatchWarmupOptions, StateProjectionFrame } from "./types.js";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -16,9 +16,9 @@ export interface ClientStartMatchMessage {
   debug?: MatchDebugOptions;
 }
 
-/** 赛前准备指定 AI：发送首个真实 agent 请求，但不启动游戏 tick */
-export interface ClientPrepareMatchMessage {
-  type: "prepare";
+/** 预热指定 AI：发送首个真实 agent 请求并保留会话结果，但不启动游戏 tick */
+export interface ClientWarmupMatchMessage {
+  type: "warmup";
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
@@ -41,6 +41,13 @@ export interface ClientStopMessage {
 /** 保存当前对局记录 */
 export interface ClientSaveRecordMessage {
   type: "save_record";
+  matchId: string;
+}
+
+export interface ClientLoadTerminalHistoryMessage {
+  type: "load_terminal_history";
+  beforeSequence?: number;
+  limit?: number;
 }
 
 /** 开始 LLM 对 CPU 的 benchmark */
@@ -49,8 +56,9 @@ export interface ClientStartBenchmarkMessage {
   presetId: string;
   cpuStrategy: CPUStrategyType;
   rounds: number;
-  recordReplay?: boolean;
+  /** Applies only to the built-in CPU. LLM scheduling remains committed-tick driven. */
   decisionIntervalTicks?: number;
+  recordReplay?: boolean;
   concurrency?: number;
   debug?: MatchDebugOptions;
 }
@@ -58,10 +66,11 @@ export interface ClientStartBenchmarkMessage {
 /** 所有客户端发送的消息联合类型 */
 export type ClientMessage =
   | ClientStartMatchMessage
-  | ClientPrepareMatchMessage
+  | ClientWarmupMatchMessage
   | ClientResetMatchMessage
   | ClientStopMessage
   | ClientSaveRecordMessage
+  | ClientLoadTerminalHistoryMessage
   | ClientStartBenchmarkMessage;
 
 /** 客户端消息类型字符串（用于路由） */
@@ -73,8 +82,23 @@ export type ClientMessageType = ClientMessage["type"];
 export interface ServerStateMessage {
   type: "state";
   state: GameState | null;
+  frame?: StateProjectionFrame;
+  aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  observedMatch: {
+    matchId: string;
+    kind: MatchRegistryKind;
+    recordingEnabled: boolean;
+  } | null;
+  matchStatus:
+    | "warming_up"
+    | "waiting_for_players"
+    | "running"
+    | "stopped"
+    | "finished"
+    | "failed"
+    | null;
 }
 
 export interface ServerAITerminalEventsMessage {
@@ -82,6 +106,14 @@ export interface ServerAITerminalEventsMessage {
   sessionId: string | null;
   reset: boolean;
   events: AITerminalEvent[];
+  hasMore?: boolean;
+}
+
+export interface ServerTerminalHistoryPageMessage {
+  type: "terminal_history_page";
+  sessionId: string;
+  events: AITerminalEvent[];
+  hasMore: boolean;
 }
 
 /** 错误通知 */
@@ -104,8 +136,6 @@ export interface ServerBenchmarkProgressMessage {
   llmWins: number;
   cpuWins: number;
   draws: number;
-  viewedRound?: number;
-  activeRounds: ServerBenchmarkActiveRound[];
 }
 
 export interface ServerBenchmarkRoundResult {
@@ -115,12 +145,6 @@ export interface ServerBenchmarkRoundResult {
   durationTicks: number;
   recordPath?: string;
   transcriptPath?: string;
-}
-
-export interface ServerBenchmarkActiveRound {
-  round: number;
-  llmSide: "player_1" | "player_2";
-  tick: number;
 }
 
 export interface ServerBenchmarkCompleteMessage {
@@ -134,15 +158,19 @@ export interface ServerBenchmarkCompleteMessage {
   draws: number;
   llmWinRate: number;
   averageDurationTicks: number;
+  medianDurationTicks?: number;
+  p90DurationTicks?: number;
+  llmWinRateConfidence95?: { low: number; high: number };
+  positionBias?: number;
   stopped: boolean;
   rounds: ServerBenchmarkRoundResult[];
 }
 
-export type MatchPrepareState = "idle" | "preparing" | "ready" | "error";
+export type MatchWarmupState = "idle" | "warming_up" | "ready" | "error";
 
-export interface ServerPrepareStatusMessage {
-  type: "prepare_status";
-  statuses: Partial<Record<PlayerId, MatchPrepareState>>;
+export interface ServerWarmupStatusMessage {
+  type: "warmup_status";
+  statuses: Partial<Record<PlayerId, MatchWarmupState>>;
   message?: string;
 }
 
@@ -150,11 +178,12 @@ export interface ServerPrepareStatusMessage {
 export type ServerMessage =
   | ServerStateMessage
   | ServerAITerminalEventsMessage
+  | ServerTerminalHistoryPageMessage
   | ServerErrorMessage
   | ServerRecordSavedMessage
   | ServerBenchmarkProgressMessage
   | ServerBenchmarkCompleteMessage
-  | ServerPrepareStatusMessage;
+  | ServerWarmupStatusMessage;
 
 /** 服务端消息类型字符串（用于路由） */
 export type ServerMessageType = ServerMessage["type"];

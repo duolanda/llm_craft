@@ -3,27 +3,38 @@ import {
   AITerminalEvent,
   ClientMessage,
   GameState,
-  GameSnapshot,
-  MatchPrepareState,
+  MatchWarmupState,
   PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
+  ServerStateMessage,
   isServerMessage,
 } from "@llmcraft/shared";
+import { SimulationFrameBuffer } from "@llmcraft/record";
 
-export function useWebSocket(url: string) {
+const MAX_LIVE_TERMINAL_EVENTS = 500;
+
+export function useWebSocket(url: string, enabled = true) {
   const [state, setState] = useState<GameState | null>(null);
-  const [snapshots, setSnapshots] = useState<GameSnapshot[]>([]);
+  const [aiOutputs, setAIOutputs] = useState<Record<string, string>>({});
   const [aiTerminalEvents, setAiTerminalEvents] = useState<AITerminalEvent[]>([]);
+  const [terminalHistoryEvents, setTerminalHistoryEvents] = useState<AITerminalEvent[]>([]);
+  const [terminalHistoryHasMore, setTerminalHistoryHasMore] = useState(false);
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
+  const [observedMatch, setObservedMatch] = useState<ServerStateMessage["observedMatch"]>(null);
+  const [matchStatus, setMatchStatus] = useState<
+    "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed" | null
+  >(null);
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
   const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
-  const [prepareStatuses, setPrepareStatuses] = useState<Partial<Record<PlayerId, MatchPrepareState>>>({});
-  const [prepareMessage, setPrepareMessage] = useState<string | null>(null);
+  const [warmupStatuses, setWarmupStatuses] = useState<Partial<Record<PlayerId, MatchWarmupState>>>({});
+  const [warmupMessage, setWarmupMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const terminalSessionIdRef = useRef<string | null>(null);
+  const frameBufferRef = useRef(new SimulationFrameBuffer());
 
   const send = useCallback((message: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -41,6 +52,9 @@ export function useWebSocket(url: string) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -61,13 +75,40 @@ export function useWebSocket(url: string) {
         switch (parsed.type) {
           case "state":
             setServerMessage(null);
-            setState(parsed.state);
-            setSnapshots(parsed.snapshots);
+            if (parsed.frame) {
+              const projected = frameBufferRef.current.ingest(parsed.frame);
+              if (projected) setState(projected);
+              setAIOutputs(parsed.frame.aiOutputs);
+            } else {
+              frameBufferRef.current.clear();
+              setState(parsed.state);
+              setAIOutputs(parsed.aiOutputs);
+            }
             setLiveEnabled(parsed.liveEnabled);
+            setObservedMatch(parsed.observedMatch);
+            setMatchStatus(parsed.matchStatus);
             break;
 
           case "ai_terminal_events":
-            setAiTerminalEvents((current) => (parsed.reset ? parsed.events : current.concat(parsed.events)));
+            terminalSessionIdRef.current = parsed.sessionId;
+            if (parsed.reset) {
+              setTerminalHistoryEvents([]);
+              setAiTerminalEvents(parsed.events.slice(-MAX_LIVE_TERMINAL_EVENTS));
+            } else {
+              setAiTerminalEvents((current) => current.concat(parsed.events).slice(-MAX_LIVE_TERMINAL_EVENTS));
+            }
+            setTerminalHistoryHasMore(Boolean(parsed.hasMore));
+            break;
+
+          case "terminal_history_page":
+            if (parsed.sessionId !== terminalSessionIdRef.current) {
+              break;
+            }
+            setTerminalHistoryEvents((current) => {
+              const knownIds = new Set(current.map((event) => event.id));
+              return parsed.events.filter((event) => !knownIds.has(event.id)).concat(current);
+            });
+            setTerminalHistoryHasMore(parsed.hasMore);
             break;
 
           case "error":
@@ -87,12 +128,12 @@ export function useWebSocket(url: string) {
             setBenchmarkResult(parsed);
             break;
 
-          case "prepare_status":
-            setPrepareStatuses((current) => ({
+          case "warmup_status":
+            setWarmupStatuses((current) => ({
               ...current,
               ...parsed.statuses,
             }));
-            setPrepareMessage(parsed.message ?? null);
+            setWarmupMessage(parsed.message ?? null);
             break;
         }
       } catch (e) {
@@ -112,22 +153,46 @@ export function useWebSocket(url: string) {
     return () => {
       ws.close();
     };
-  }, [url]);
+  }, [enabled, url]);
+
+  const loadEarlierTerminalEvents = useCallback(() => {
+    const sequenceOf = (event: AITerminalEvent | undefined) => (
+      event ? Number(event.id.replace(/^evt_/, "")) : undefined
+    );
+    const historyNewestSequence = sequenceOf(terminalHistoryEvents.at(-1));
+    const liveOldestSequence = sequenceOf(aiTerminalEvents[0]);
+    const hasGap = historyNewestSequence !== undefined
+      && liveOldestSequence !== undefined
+      && historyNewestSequence + 1 < liveOldestSequence;
+    const beforeSequence = hasGap
+      ? liveOldestSequence
+      : sequenceOf(terminalHistoryEvents[0] ?? aiTerminalEvents[0]);
+    send({
+      type: "load_terminal_history",
+      beforeSequence: Number.isFinite(beforeSequence) ? beforeSequence : undefined,
+      limit: 100,
+    });
+  }, [aiTerminalEvents, send, terminalHistoryEvents]);
 
   return {
     state,
-    snapshots,
-    aiTerminalEvents,
+    frameBuffer: frameBufferRef.current,
+    aiOutputs,
+    aiTerminalEvents: terminalHistoryEvents.concat(aiTerminalEvents),
+    terminalHistoryHasMore,
+    loadEarlierTerminalEvents,
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    observedMatch,
+    matchStatus,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
-    prepareStatuses,
-    prepareMessage,
-    setPrepareStatuses,
-    setPrepareMessage,
+    warmupStatuses,
+    warmupMessage,
+    setWarmupStatuses,
+    setWarmupMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,

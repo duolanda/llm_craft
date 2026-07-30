@@ -5,7 +5,7 @@ import { ExitCode, exit } from "./io/errors.js";
 import { printJson, printError } from "./io/json.js";
 import { handleState, handleMap, handleMe, handleEvents, handlePlans } from "./commands/state.js";
 import { handleUnits, handleBuildings, handleEnemies, handleResources } from "./commands/select.js";
-import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold } from "./commands/actions.js";
+import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold, handleRally, handleProductionQueue, handleCancelProduction } from "./commands/actions.js";
 import { handleNearest, handleTarget } from "./commands/transform.js";
 import { handlePlan, handleOrchestrate } from "./commands/plan.js";
 import { handlePlay } from "./commands/play.js";
@@ -77,7 +77,7 @@ function printHelp(): void {
     "Usage: llmcraft [global-flags] <command> [subcommand] [flags]",
     "",
     "Global flags:",
-    "  --base-url <url>   Server base URL (env: LLMCRAFT_SERVER, default: http://localhost:3001)",
+    "  --base-url <url>   Server base URL (env: LLMCRAFT_SERVER, default: http://localhost:3101)",
     "  --session <id>     Control session ID (env: LLMCRAFT_SESSION)",
     "  --player <id>      Player ID: player_1 or player_2 (env: LLMCRAFT_PLAYER)",
     "  --json             Force JSON output (default)",
@@ -87,6 +87,10 @@ function printHelp(): void {
     "Commands:",
     "  session use        Create or bind a control session",
     "  session show       Display current session info",
+    "  matches list       List registered live/control/benchmark matches",
+    "  matches observe    Select the match shown by Web UI (--game <matchId>)",
+    "  matches stop       Quiesce, stop, and save one match without affecting others",
+    "  record save        Save a Match Record (--game <matchId>)",
     "  state              Read full game state (map + player)",
     "  map                Show ASCII battlefield map",
     "  me                 Show my economy, HQ, and production",
@@ -100,13 +104,16 @@ function printHelp(): void {
     "  attack             Attack a target with a unit",
     "  attack-move        Combat move toward coordinates",
     "  gather             Assign worker to harvest loop",
-    "  build              Build a structure (build barracks)",
-    "  train              Train a unit (train worker/soldier)",
+    "  build              Build a structure (build barracks/war_factory)",
+    "  train              Train a unit (worker/soldier/rifleman/rocket_soldier/light_tank)",
+    "  production-queue   Inspect finite production queues and progress",
+    "  cancel-production  Cancel batches by order ID or clear building queues",
+    "  rally              Set or clear move/attack-move production rally points",
     "  hold               Hold position",
     "  nearest            Find nearest resource/enemy for each unit",
     "  target             Pair units with enemy-hq or weakest enemy",
-    "  plan               Generate a plan (economy/defend/attack-hq/custom)",
-    "  orchestrate        Execute a plan or batch of actions from stdin",
+    "  plan               Generate a plan (economy/tech/defend/attack-hq/custom)",
+    "  orchestrate        Execute a batch of tool-shaped actions from stdin",
     "  play               Start a CPU or PVP control-plane game",
     "",
     "Plan flags:",
@@ -115,18 +122,26 @@ function printHelp(): void {
     "Orchestrate flags:",
     "  --dry-run          Validate only, do not submit",
     "  --max-actions <n>  Limit number of actions executed",
+    "  --request-id <id>  Stable idempotency key for a batched action submission",
     "",
     "Action flags:",
     "  --unit <id>        Unit ID",
+    "  --units <list>     Comma-separated unit IDs for move/attack/attack-move/hold",
     "  --to <x,y>         Target coordinates",
     "  --target <id>      Target ID",
     "  --resource <x,y>   Resource coordinates",
     "  --at <x,y>         Build location",
     "  --building <id>    Building ID",
-    "  --priority <list>  Target priority (soldier,worker)",
+    "  --buildings <list> Comma-separated production building IDs for rally",
+    "  --count <n>        Units to append with train (1-100)",
+    "  --order <id>       Production order ID to cancel",
+    "  --orders <list>    Comma-separated production order IDs to cancel",
+    "  --mode <mode>      Rally travel mode: move or attack-move",
+    "  --priority <list>  Target priority (soldier,rifleman,rocket_soldier,light_tank,worker,hq,barracks,war_factory)",
+    "  --request-id <id>  Stable idempotency key when stdin expands to multiple actions",
     "",
     "Selector flags (units, buildings, enemies, resources):",
-    "  --type <t>         Filter by type (worker, soldier, hq, barracks)",
+    "  --type <t>         Filter by type (worker, soldier, rifleman, rocket_soldier, light_tank, hq, barracks, war_factory)",
     "  --idle             Only idle units",
     "  --planned          Only units with an active plan",
     "  --unplanned        Only units without an active plan",
@@ -146,8 +161,11 @@ function printHelp(): void {
     "Examples:",
     "  llmcraft play --vs random",
     "  llmcraft play --mode pvp",
-    "  llmcraft session use --player player_1 --base-url http://localhost:3001",
+    "  llmcraft session use --player player_1 --base-url http://localhost:3101",
     "  llmcraft session show",
+    "  llmcraft matches list",
+    "  llmcraft matches observe --game match_xxx",
+    "  llmcraft record save --game match_xxx",
     "  llmcraft state --compact",
     "  llmcraft units --type worker --idle",
     "  llmcraft enemies --type hq",
@@ -155,15 +173,17 @@ function printHelp(): void {
     "  llmcraft move --unit worker_1 --to 5,8",
     "  llmcraft attack --unit soldier_1 --target enemy_hq",
     "  llmcraft units --idle --type worker | llmcraft gather",
-    "  llmcraft buildings --type barracks --ready | llmcraft train soldier",
+    "  llmcraft buildings --type barracks --ready | llmcraft train rifleman",
+    "  llmcraft rally --building building_4 --to 40,30 --mode attack-move  # omit --to to clear",
     "  llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather",
-    "  llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack",
+    "  llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack",
     "  llmcraft plan economy | llmcraft orchestrate",
+    "  llmcraft plan tech | llmcraft orchestrate",
     "  llmcraft plan attack-hq | llmcraft orchestrate",
-    "  llmcraft orchestrate --dry-run < actions.json",
+    "  llmcraft orchestrate --dry-run < actions.json  # accepts { actions: [...] }",
     "  llmcraft units --idle --type worker | llmcraft gather",
     "",
-    "PowerShell: quote coordinates, e.g. --at '5,10' or --to '18,10'.",
+    "PowerShell: quote comma-separated values, e.g. --at '5,10' or --units 'unit_1,unit_2'.",
     "",
     "Exit codes:",
     "  0  Success",
@@ -185,7 +205,7 @@ function gameOverKindForCommand(command: string): CommandKind | null {
   if (["units", "buildings", "enemies", "resources", "nearest", "target"].includes(command)) {
     return "selection";
   }
-  if (["move", "attack", "attack-move", "gather", "build", "train", "hold"].includes(command)) {
+  if (["move", "attack", "attack-move", "gather", "build", "train", "production-queue", "cancel-production", "rally", "hold"].includes(command)) {
     return "action_result";
   }
   if (["plan", "orchestrate"].includes(command)) {
@@ -358,6 +378,44 @@ async function main(): Promise<void> {
     exit(ExitCode.ArgError, `Unknown session subcommand: ${parsed.subcommand || "(none)"}`);
   }
 
+  if (parsed.command === "matches") {
+    const client = new ControlClient(globalBaseUrl);
+    try {
+      if (parsed.subcommand === "list") {
+        printJson(await client.listMatches());
+        return;
+      }
+      const matchId = parsed.flags.get("game") || parsed.flags.get("game-id");
+      if (!matchId) exit(ExitCode.ArgError, `${parsed.subcommand} requires --game <matchId>`);
+      if (parsed.subcommand === "observe") {
+        printJson(await client.observeMatch(matchId));
+        return;
+      }
+      if (parsed.subcommand === "stop") {
+        printJson(await client.stopMatch(matchId));
+        return;
+      }
+      exit(ExitCode.ArgError, `Unknown matches subcommand: ${parsed.subcommand || "(none)"}`);
+    } catch (error) {
+      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (parsed.command === "record") {
+    if (parsed.subcommand !== "save") {
+      exit(ExitCode.ArgError, `Unknown record subcommand: ${parsed.subcommand || "(none)"}`);
+    }
+    const savedSession = loadSession();
+    const matchId = parsed.flags.get("game") || parsed.flags.get("game-id") || savedSession?.gameId;
+    if (!matchId) exit(ExitCode.ArgError, "record save requires --game <matchId> or a saved session");
+    try {
+      printJson(await new ControlClient(globalBaseUrl).saveMatchRecord(matchId));
+      return;
+    } catch (error) {
+      exit(ExitCode.ConnectionFailure, error instanceof Error ? error.message : String(error));
+    }
+  }
+
   // Play command: start a game vs CPU
   if (parsed.command === "play") {
     const client = new ControlClient(globalBaseUrl);
@@ -439,6 +497,18 @@ async function main(): Promise<void> {
   }
   if (parsed.command === "train") {
     await handleTrain(client, sessionId, parsed.subcommand, parsed.flags);
+    return;
+  }
+  if (parsed.command === "production-queue") {
+    await handleProductionQueue(client, sessionId, parsed.flags);
+    return;
+  }
+  if (parsed.command === "cancel-production") {
+    await handleCancelProduction(client, sessionId, parsed.flags);
+    return;
+  }
+  if (parsed.command === "rally") {
+    await handleRally(client, sessionId, parsed.flags);
     return;
   }
   if (parsed.command === "hold") {

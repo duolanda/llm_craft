@@ -2,22 +2,36 @@ import {
   PlayerId,
   Building,
   BuildingType,
+  ProductionBatchRequest,
+  ProductionOrder,
   UnitType,
-  BUILDING_TYPES,
-  BUILDING_STATS,
+  canBuildingProduce,
+  getBuildingFootprintCells,
+  getDistanceToBuildingFootprint,
+  getBuildingStats,
 } from "@llmcraft/shared";
+
+export const MAX_PENDING_PRODUCTION_PER_UNIT_TYPE = 100;
+
+export interface ProductionCancellation {
+  cancelledOrderIds: string[];
+  refundCredits: number;
+}
 
 export class BuildingManager {
   private buildings: Map<string, Building> = new Map();
   private idCounter = 0;
+  private productionOrderCounter = 0;
 
+  /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createBuilding(
     type: BuildingType,
     x: number,
     y: number,
-    playerId: PlayerId
+    playerId: PlayerId,
+    options?: { constructionProgress?: Building["constructionProgress"] }
   ): Building {
-    const stats = BUILDING_STATS[type];
+    const stats = getBuildingStats(type);
     const building: Building = {
       id: `building_${++this.idCounter}`,
       type,
@@ -25,10 +39,10 @@ export class BuildingManager {
       y,
       hp: stats.hp,
       maxHp: stats.hp,
-      my: true,
       playerId,
       exists: true,
       productionQueue: [],
+      constructionProgress: options?.constructionProgress,
     };
     this.buildings.set(building.id, building);
     return building;
@@ -48,11 +62,23 @@ export class BuildingManager {
     return Array.from(this.buildings.values()).filter((b) => b.exists);
   }
 
+  iterateStoredBuildings(): IterableIterator<Building> {
+    return this.buildings.values();
+  }
+
+  /** @internal Authoritative runtime destruction goes through EntityRegistry/WorldState. */
+  removeBuilding(id: string): boolean {
+    const building = this.buildings.get(id);
+    if (!building) return false;
+    building.exists = false;
+    return true;
+  }
+
   hasBuildingAt(x: number, y: number, excludeBuildingId?: string): boolean {
     for (const building of this.buildings.values()) {
       if (!building.exists) continue;
       if (excludeBuildingId && building.id === excludeBuildingId) continue;
-      if (building.x === x && building.y === y) return true;
+      if (getBuildingFootprintCells(building.type, building.x, building.y).some((cell) => cell.x === x && cell.y === y)) return true;
     }
     return false;
   }
@@ -62,30 +88,62 @@ export class BuildingManager {
     for (const building of this.buildings.values()) {
       if (!building.exists) continue;
       if (excludeBuildingId && building.id === excludeBuildingId) continue;
-      positions.add(`${building.x},${building.y}`);
+      for (const cell of getBuildingFootprintCells(building.type, building.x, building.y)) {
+        positions.add(`${cell.x},${cell.y}`);
+      }
     }
     return positions;
   }
 
-  spawnUnit(building: Building, unitType: UnitType): boolean {
-    if (!building.exists) {
-      return false;
+  enqueueProduction(building: Building, requests: readonly ProductionBatchRequest[]): ProductionOrder[] {
+    if (!building.exists || building.constructionProgress) {
+      return [];
     }
 
-    building.productionQueue.push(unitType);
-    return true;
+    const orders = requests.map((request) => ({
+      orderId: `production_${++this.productionOrderCounter}`,
+      unitType: request.unitType,
+      count: request.count,
+      remainingCount: request.count,
+    }));
+    building.productionQueue.push(...orders);
+    return orders;
+  }
+
+  getPendingCount(building: Building, unitType: UnitType): number {
+    return building.productionQueue.reduce(
+      (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+      0,
+    );
+  }
+
+  cancelProduction(building: Building, orderIds?: ReadonlySet<string>): ProductionCancellation {
+    const cancelAll = orderIds === undefined;
+    const cancelledOrderIds = building.productionQueue
+      .filter((order) => cancelAll || orderIds.has(order.orderId))
+      .map((order) => order.orderId);
+    if (cancelledOrderIds.length === 0) {
+      return { cancelledOrderIds: [], refundCredits: 0 };
+    }
+
+    const cancelled = new Set(cancelledOrderIds);
+    const activeCancelled = Boolean(
+      building.productionProgress && cancelled.has(building.productionProgress.orderId),
+    );
+    const refundCredits = activeCancelled ? building.productionProgress?.paidCredits ?? 0 : 0;
+    building.productionQueue = building.productionQueue.filter((order) => !cancelled.has(order.orderId));
+    if (activeCancelled) {
+      building.productionProgress = undefined;
+    }
+    return { cancelledOrderIds, refundCredits };
   }
 
   canProduce(building: Building, unitType: UnitType): boolean {
-    if (building.type === BUILDING_TYPES.HQ) {
-      return unitType === "worker";
-    }
+    return building.exists && !building.constructionProgress && canBuildingProduce(building.type, unitType);
+  }
 
-    if (building.type === BUILDING_TYPES.BARRACKS) {
-      return unitType === "soldier";
-    }
-
-    return false;
+  getDistanceToBuilding(building: Building, x: number, y: number): number {
+    return getDistanceToBuildingFootprint(building.type, building.x, building.y, x, y);
   }
 
   takeDamage(building: Building, damage: number): boolean {
@@ -97,28 +155,10 @@ export class BuildingManager {
 
     if (building.hp <= 0) {
       building.hp = 0;
-      building.exists = false;
       return true; // Building destroyed
     }
 
     return false; // Building still alive
   }
 
-  processProductionQueues(): Map<PlayerId, UnitType[]> {
-    const completedUnits = new Map<PlayerId, UnitType[]>();
-
-    for (const building of this.buildings.values()) {
-      if (building.exists && building.productionQueue.length > 0) {
-        // For simplicity, complete the first unit in queue each tick
-        const completedType = building.productionQueue.shift();
-        if (completedType) {
-          const playerCompleted = completedUnits.get(building.playerId) || [];
-          playerCompleted.push(completedType);
-          completedUnits.set(building.playerId, playerCompleted);
-        }
-      }
-    }
-
-    return completedUnits;
-  }
 }

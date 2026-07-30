@@ -11,6 +11,8 @@ type AlertUnit = {
 };
 
 type AlertHQ = {
+  id?: string;
+  type?: string;
   x: number;
   y: number;
 };
@@ -37,6 +39,7 @@ export function getHQUnderAttackAlertFromRuntimeState(runtimeState: {
 }): string | null {
   const myState = runtimeState.myState as {
     hq?: AlertHQ | null;
+    buildings?: AlertHQ[];
   } | null;
   const mapState = runtimeState.mapState as {
     units?: AlertUnit[];
@@ -47,8 +50,12 @@ export function getHQUnderAttackAlertFromRuntimeState(runtimeState: {
     }>;
   } | null;
 
-  const hq = myState?.hq;
-  if (!hq) {
+  const buildings = Array.isArray(myState?.buildings)
+    ? myState.buildings
+    : myState?.hq
+      ? [myState.hq]
+      : [];
+  if (buildings.length === 0) {
     return null;
   }
 
@@ -63,7 +70,11 @@ export function getHQUnderAttackAlertFromRuntimeState(runtimeState: {
           attackRange: cell.unit?.attackRange,
         }))
     : (mapState?.units ?? []).filter((unit) => unit?.relation === "enemy");
-  return isHQUnderAttack(hq, enemyUnits) ? HQ_UNDER_ATTACK_ALERT : null;
+  const threatened = buildings.find((building) => isHQUnderAttack(building, enemyUnits));
+  if (!threatened) return null;
+  if (threatened.type === "hq" || threatened === myState?.hq) return HQ_UNDER_ATTACK_ALERT;
+  return `Alert: our ${threatened.type ?? "base building"} ${threatened.id ?? ""} is under attack at (${threatened.x},${threatened.y}).`
+    .replace("  ", " ");
 }
 
 function isHQUnderAttack(hq: AlertHQ, enemyUnits: AlertUnit[]): boolean {

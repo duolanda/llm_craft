@@ -1,5 +1,10 @@
-import React, { ChangeEvent, useMemo, useState } from "react";
+import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
+import type { AgentModelRequestRecord, MatchRecord, SavedAITurnRecord } from "@llmcraft/shared";
+import { detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
+import { readLocalRecordText } from "./lib/readRecordFile";
+import { API_BASE_URL } from "./lib/serverConnection";
+import { buildMatchDiagnosticReport, type MatchDiagnosticReport } from "./diagnostics";
 import "./transcriptViewer.css";
 
 type ChatRole = "system" | "user" | "assistant";
@@ -20,7 +25,7 @@ type TranscriptMessage = {
 type TranscriptEntry = {
   id: string;
   playerId: string;
-  mode: "full" | "delta";
+  mode: "full" | "delta" | "record";
   requestTick: number;
   executeTick: number | null;
   model: string;
@@ -30,6 +35,15 @@ type TranscriptEntry = {
   providerError: string;
   commands: string;
   sandbox: string;
+  source: "match-record" | "legacy-log";
+  modelRequests: AgentModelRequestRecord[];
+};
+
+type RecordListEntry = {
+  fileName: string;
+  size: number;
+  modifiedAt: string;
+  encoding?: "identity" | "gzip";
 };
 
 type ContextTurn = {
@@ -74,11 +88,53 @@ function parseRequestMessages(raw: string): TranscriptMessage[] {
   });
 }
 
+function parseStreamedEntry(chunk: string, index: number): TranscriptEntry | null {
+  const header = chunk.match(
+    /^\[(?<timestamp>[^\]]+)\] transcript=(?<transcriptId>\S+) player=(?<playerId>\S+) requestTick=(?<requestTick>\d+) model=(?<model>.+)$/m,
+  );
+  if (!header?.groups) return null;
+  const request = chunk.match(/--- request ---\n(?<value>[\s\S]*?)\n--- summary ---/)?.groups?.value ?? "";
+  const assistantMessages = Array.from(chunk.matchAll(
+    /\[assistant transcript=[^\]]+\]\n([\s\S]*?)(?=\n\[(?:assistant|tool_call|result) transcript=|$)/g,
+  )).map((match) => match[1]!.trim()).filter(Boolean);
+  const toolCalls = Array.from(chunk.matchAll(
+    /\[tool_call transcript=[^\]]+\]\n([\s\S]*?)(?=\n\[(?:assistant|tool_call|result) transcript=|$)/g,
+  )).map((match) => match[1]!.trim()).filter(Boolean);
+  const result = chunk.match(
+    /--- result ---\nexecuteTick=(?<executeTick>\d+)\nstopReason=(?<stopReason>[^\n]+)\n--- commands ---\n(?<commands>[\s\S]*?)\n--- plans ---\n(?<plans>[\s\S]*?)\n--- metrics ---\n(?<metrics>[\s\S]*)$/,
+  );
+  return {
+    id: `${header.groups.transcriptId}-${index}`,
+    playerId: header.groups.playerId,
+    mode: "record",
+    requestTick: Number(header.groups.requestTick),
+    executeTick: result?.groups ? Number(result.groups.executeTick) : null,
+    model: header.groups.model.trim(),
+    requestMessages: parseRequestMessages(request.trim()),
+    response: assistantMessages.join("\n\n"),
+    parsedCode: stringify(assistantMessages),
+    providerError: result?.groups?.stopReason ? `stopReason=${result.groups.stopReason}` : "",
+    commands: result?.groups?.commands.trim() ?? "(none)",
+    sandbox: stringify({
+      toolCalls: toolCalls.map((raw) => {
+        try { return JSON.parse(raw) as unknown; } catch { return raw; }
+      }),
+      plans: result?.groups?.plans.trim() ?? "(none)",
+      metrics: result?.groups?.metrics.trim() ?? "(none)",
+    }),
+    source: "legacy-log",
+    modelRequests: [],
+  };
+}
+
 function parseEntry(chunk: string, index: number): TranscriptEntry | null {
   const trimmed = chunk.trim();
   if (!trimmed) {
     return null;
   }
+
+  const streamed = parseStreamedEntry(trimmed, index);
+  if (streamed) return streamed;
 
   const headerMatch = trimmed.match(
     /^\[(?<timestamp>[^\]]+)\] player=(?<playerId>\S+) mode=(?<mode>full|delta) requestTick=(?<requestTick>\d+) executeTick=(?<executeTick>\d+|n\/a) model=(?<model>.+)$/m
@@ -107,6 +163,8 @@ function parseEntry(chunk: string, index: number): TranscriptEntry | null {
     providerError: sectionMatch.groups.provider.trim(),
     commands: sectionMatch.groups.commands.trim(),
     sandbox: sectionMatch.groups.sandbox.trim(),
+    source: "legacy-log",
+    modelRequests: [],
   };
 }
 
@@ -115,6 +173,89 @@ function parseTranscript(text: string): TranscriptEntry[] {
     .split("==========")
     .map((chunk, index) => parseEntry(chunk, index))
     .filter((entry): entry is TranscriptEntry => entry !== null);
+}
+
+function stringify(value: unknown, empty = "(none)"): string {
+  if (value === undefined || value === null) return empty;
+  if (Array.isArray(value) && value.length === 0) return empty;
+  return JSON.stringify(value, null, 2);
+}
+
+function mapRecordTurns(record: MatchRecord): TranscriptEntry[] {
+  const systemPrompt = record.metadata.systemPrompt?.trim() ?? "";
+  const turns = record.aiTurns ?? [];
+  return turns.map((turn, index) => mapRecordTurn(
+    turn,
+    index,
+    systemPrompt,
+  ));
+}
+
+function mapRecordTurn(
+  turn: SavedAITurnRecord,
+  index: number,
+  systemPrompt: string,
+): TranscriptEntry {
+  const runInput = turn.runInput ?? {
+    playerId: turn.playerId,
+    tick: turn.requestTick,
+    summary: "Match Record did not persist this run input.",
+  };
+  const modelRequests = turn.metrics.modelRequestRecords ?? [];
+  const exactMessages = modelRequests.at(-1)?.messages;
+  const requestMessages: TranscriptMessage[] = exactMessages
+    ? exactMessages.flatMap((message) => {
+        if (!message || typeof message !== "object") return [];
+        const record = message as { role?: unknown; content?: unknown };
+        if (record.role !== "system" && record.role !== "user" && record.role !== "assistant") return [];
+        const content = typeof record.content === "string" ? record.content : stringify(record.content);
+        return [{ role: record.role, content, payload: record.role === "user" ? parsePayload(content) : null }];
+      })
+    : [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt, payload: null }] : []),
+    {
+      role: "user" as const,
+      content: stringify(runInput),
+      payload: parsePayload(stringify(runInput)),
+    },
+    ];
+  return {
+    id: `record-${turn.playerId}-${turn.requestTick}-${index}`,
+    playerId: turn.playerId,
+    mode: "record",
+    requestTick: turn.requestTick,
+    executeTick: turn.executeTick,
+    model: turn.model,
+    requestMessages,
+    response: turn.assistantMessages.join("\n\n"),
+    parsedCode: stringify(turn.assistantMessages),
+    providerError: [
+      `stopReason=${turn.stopReason}`,
+      `modelRequests=${modelRequests.length}`,
+      ...modelRequests.map((request) => `#${request.requestIndex} ${request.status ?? "success"} ${request.latencyMs ?? "?"}ms finish=${request.finishReason} tokens=${request.inputTokens ?? "?"}/${request.outputTokens ?? "?"} retryOf=${request.retryOfRequestIndex ?? "-"}`),
+    ].join("\n"),
+    commands: stringify(turn.commands),
+    sandbox: stringify({
+      toolCalls: turn.toolCalls,
+      plans: turn.plans,
+      metrics: turn.metrics,
+      createdAt: turn.createdAt,
+    }),
+    source: "match-record",
+    modelRequests,
+  };
+}
+
+function parseTranscriptSource(text: string): TranscriptEntry[] {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (detectRecordFormat(value) !== "unknown") {
+      return mapRecordTurns(projectRecordToMatchRecord(value));
+    }
+  } catch (error) {
+    if (text.trimStart().startsWith("{")) throw error;
+  }
+  return parseTranscript(text);
 }
 
 function buildContextTurns(messages: TranscriptMessage[]): ContextTurn[] {
@@ -175,6 +316,11 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playerFilter, setPlayerFilter] = useState<"all" | "player_1" | "player_2">("all");
+  const [records, setRecords] = useState<RecordListEntry[]>([]);
+  const [selectedRecordFile, setSelectedRecordFile] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<MatchDiagnosticReport | null>(null);
+  const [sourceName, setSourceName] = useState("");
 
   const filteredEntries = useMemo(() => {
     if (playerFilter === "all") {
@@ -188,6 +334,64 @@ function App() {
 
   const selectedSummary = selectedEntry ? summarizeContext(selectedEntry) : null;
 
+  function commitSource(text: string, sourceName: string) {
+    let parsed: TranscriptEntry[];
+    try {
+      const value: unknown = JSON.parse(text);
+      if (detectRecordFormat(value) !== "unknown") {
+        const record = projectRecordToMatchRecord(value);
+        parsed = mapRecordTurns(record);
+        setDiagnostic(buildMatchDiagnosticReport(record, sourceName));
+      } else {
+        parsed = parseTranscriptSource(text);
+        setDiagnostic(null);
+      }
+    } catch (parseError) {
+      if (text.trimStart().startsWith("{")) throw parseError;
+      parsed = parseTranscriptSource(text);
+      setDiagnostic(null);
+    }
+    if (parsed.length === 0) {
+      throw new Error(`${sourceName} 没有可展示的 AI turn；可能未启用 evaluation 记录或 transcript。`);
+    }
+    setEntries(parsed);
+    setSelectedId(parsed[0]!.id);
+    setError(null);
+    setSourceName(sourceName);
+  }
+
+  async function fetchRecords() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/replay/records`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json() as { records: RecordListEntry[] };
+      setRecords(payload.records);
+      setSelectedRecordFile((current) => current || payload.records[0]?.fileName || "");
+    } catch (fetchError) {
+      setError(`获取 Match Record 列表失败：${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
+    }
+  }
+
+  async function loadSelectedRecord() {
+    if (!selectedRecordFile) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/replay/records/${encodeURIComponent(selectedRecordFile)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      commitSource(await response.text(), selectedRecordFile);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      setEntries([]);
+      setSelectedId(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void fetchRecords();
+  }, []);
+
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) {
@@ -195,18 +399,7 @@ function App() {
     }
 
     try {
-      const text = await file.text();
-      const parsed = parseTranscript(text);
-      if (parsed.length === 0) {
-        setError("没能从这个文件里解析出 transcript entry。确认它是 `llm-debug` 日志。");
-        setEntries([]);
-        setSelectedId(null);
-        return;
-      }
-
-      setEntries(parsed);
-      setSelectedId(parsed[0].id);
-      setError(null);
+      commitSource(await readLocalRecordText(file), file.name);
     } catch (readError) {
       setError(readError instanceof Error ? readError.message : String(readError));
       setEntries([]);
@@ -221,15 +414,30 @@ function App() {
       <header className="tv-header">
         <div>
           <p className="tv-eyebrow">LLMCraft Debug Tool</p>
-          <h1>Transcript Viewer</h1>
+          <h1>Match Explorer</h1>
           <p className="tv-subtitle">
-            上传 `packages/server/logs/llm-debug/*.log`，把每次真正发给 LLM 的上下文拆成人能看懂的结构。
+            用同一 Match Record 对齐战场 tick、Agent request waterfall、工具调用和命令。
           </p>
         </div>
         <div className="tv-toolbar">
+          <select
+            value={selectedRecordFile}
+            onChange={(event) => setSelectedRecordFile(event.target.value)}
+            aria-label="选择服务端 Match Record"
+          >
+            {records.length === 0 ? <option value="">没有可用 Match Record</option> : null}
+            {records.map((record) => (
+              <option value={record.fileName} key={record.fileName}>
+                {record.fileName} · {(record.size / 1024).toFixed(1)} KiB
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={() => void loadSelectedRecord()} disabled={!selectedRecordFile || loading}>
+            {loading ? "读取中" : "打开 Match Record"}
+          </button>
           <label className="tv-upload">
-            <input type="file" accept=".log,.txt" onChange={handleFileChange} />
-            选择 Transcript 日志
+            <input type="file" accept=".json,.gz,.log,.txt,application/json,application/gzip" onChange={handleFileChange} />
+            导入本地文件
           </label>
           <div className="tv-filter">
             <button
@@ -267,8 +475,8 @@ function App() {
           </div>
           {filteredEntries.length === 0 ? (
             <div className="tv-empty">
-              <p>先上传一份 transcript 日志。</p>
-              <p>这个面板会列出每次模型调用的 `player / mode / requestTick`。</p>
+              <p>先打开一份 Match Record，或导入旧 transcript 日志。</p>
+              <p>这个面板会列出每次 AI turn 的 `player / source / requestTick`。</p>
             </div>
           ) : (
             <div className="tv-turn-list">
@@ -285,7 +493,7 @@ function App() {
                   </div>
                   <div className="tv-turn-main">requestTick {entry.requestTick}</div>
                   <div className="tv-turn-meta">
-                    executeTick {entry.executeTick ?? "n/a"} · {entry.model}
+                    executeTick {entry.executeTick ?? "n/a"} · {entry.model} · {entry.source}
                   </div>
                 </button>
               ))}
@@ -296,7 +504,12 @@ function App() {
         <section className="tv-panel">
           <div className="tv-panel-header">
             <strong>Request Breakdown</strong>
-            <span>{selectedEntry ? `${selectedEntry.playerId} @ ${selectedEntry.requestTick}` : "未选择"}</span>
+            <span>
+              {selectedEntry ? `${selectedEntry.playerId} @ ${selectedEntry.requestTick}` : "未选择"}
+              {selectedEntry && sourceName ? (
+                <> · <a href={`/?replay=${encodeURIComponent(sourceName)}&tick=${selectedEntry.requestTick}`}>battlefield tick</a></>
+              ) : null}
+            </span>
           </div>
           {!selectedEntry || !selectedSummary ? (
             <div className="tv-empty">
@@ -347,6 +560,39 @@ function App() {
                         : "无"}
                     </strong>
                   </div>
+                </div>
+              </section>
+
+              {diagnostic ? (
+                <section className="tv-card">
+                  <div className="tv-card-header"><h2>Diagnostics</h2><span>{diagnostic.durationSeconds.toFixed(1)}s</span></div>
+                  <div className="tv-note-grid">
+                    {diagnostic.players.map((player) => (
+                      <div className="tv-note" key={player.playerId}>
+                        <span>{player.playerId}</span>
+                        <strong>{player.tags.length > 0 ? player.tags.join(", ") : "no detector findings"}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              <section className="tv-card">
+                <div className="tv-card-header">
+                  <h2>Internal Request Waterfall</h2>
+                  <span>{selectedEntry.modelRequests.length} requests</span>
+                </div>
+                <div className="tv-waterfall">
+                  {selectedEntry.modelRequests.length === 0 ? <p>(span unavailable)</p> : selectedEntry.modelRequests.map((request) => (
+                    <div className={`tv-waterfall-row ${request.status ?? "success"}`} key={request.requestIndex}>
+                      <strong>#{request.requestIndex}</strong>
+                      <span>{request.phase}</span>
+                      <span>{request.latencyMs ?? "?"} ms</span>
+                      <span>{request.finishReason}</span>
+                      <span>in {request.inputTokens ?? "?"} / out {request.outputTokens ?? "?"}</span>
+                      <span>{request.retryOfRequestIndex ? `retry of #${request.retryOfRequestIndex}` : ""}</span>
+                    </div>
+                  ))}
                 </div>
               </section>
 
@@ -410,13 +656,13 @@ function App() {
                 </section>
               </details>
               <details className="tv-disclosure">
-                <summary>Parsed Code</summary>
+                <summary>Assistant Messages</summary>
                 <section className="tv-raw-section">
                   <pre>{selectedEntry.parsedCode || "(empty)"}</pre>
                 </section>
               </details>
               <details className="tv-disclosure">
-                <summary>Provider Error</summary>
+                <summary>Stop / Record Detail</summary>
                 <section className="tv-raw-section">
                   <pre>{selectedEntry.providerError || "(none)"}</pre>
                 </section>
@@ -428,7 +674,7 @@ function App() {
                 </section>
               </details>
               <details className="tv-disclosure">
-                <summary>Sandbox</summary>
+                <summary>Tool Calls / Plans / Metrics</summary>
                 <section className="tv-raw-section">
                   <pre>{selectedEntry.sandbox || "(none)"}</pre>
                 </section>

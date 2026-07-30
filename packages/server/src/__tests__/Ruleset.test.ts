@@ -1,0 +1,124 @@
+import { describe, expect, it } from "vitest";
+import {
+  BUILDING_STATS,
+  BUILDING_TYPES,
+  UNIT_STATS,
+  UNIT_TYPES,
+  canBuildingProduce,
+  getAttackDamageAgainstBuilding,
+  getAttackDamageAgainstUnit,
+  getBuildingCost,
+  getBuildingStats,
+  getDefaultAttackMovePriority,
+  getProductionOptions,
+  getUnitCost,
+  getUnitStats,
+  getUnitProductionTicks,
+  getUnitWeapon,
+  getBuildingVisionRange,
+  getUnitVisionRange,
+  unitCanAttack,
+} from "@llmcraft/shared";
+
+describe("default ruleset", () => {
+  it("keeps convenience stats aligned with ruleset unit definitions", () => {
+    expect(getUnitStats(UNIT_TYPES.WORKER)).toEqual(UNIT_STATS.worker);
+    expect(getUnitStats(UNIT_TYPES.SOLDIER)).toEqual(UNIT_STATS.soldier);
+    expect(getUnitStats(UNIT_TYPES.RIFLEMAN)).toEqual(UNIT_STATS.rifleman);
+    expect(getUnitStats(UNIT_TYPES.ROCKET_SOLDIER)).toEqual(UNIT_STATS.rocket_soldier);
+    expect(getUnitStats(UNIT_TYPES.LIGHT_TANK)).toEqual(UNIT_STATS.light_tank);
+    expect(getUnitCost(UNIT_TYPES.WORKER)).toBe(50);
+    expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(55);
+    expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(70);
+    expect(getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)).toBe(110);
+    expect(getUnitCost(UNIT_TYPES.LIGHT_TANK)).toBe(240);
+    expect(unitCanAttack(UNIT_TYPES.WORKER)).toBe(false);
+    expect(unitCanAttack(UNIT_TYPES.SOLDIER)).toBe(true);
+    expect(unitCanAttack(UNIT_TYPES.RIFLEMAN)).toBe(true);
+    expect(unitCanAttack(UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
+    expect(unitCanAttack(UNIT_TYPES.LIGHT_TANK)).toBe(true);
+    expect(getUnitProductionTicks(UNIT_TYPES.SOLDIER)).toBe(4);
+    expect(getUnitProductionTicks(UNIT_TYPES.LIGHT_TANK)).toBe(14);
+  });
+
+  it("defines vision ranges for units and buildings", () => {
+    expect(getUnitVisionRange(UNIT_TYPES.WORKER)).toBe(5);
+    expect(getUnitVisionRange(UNIT_TYPES.RIFLEMAN)).toBe(7);
+    expect(getUnitVisionRange(UNIT_TYPES.ROCKET_SOLDIER)).toBe(7);
+    expect(getUnitVisionRange(UNIT_TYPES.LIGHT_TANK)).toBe(7);
+    expect(getBuildingVisionRange(BUILDING_TYPES.HQ)).toBe(8);
+    expect(getBuildingVisionRange(BUILDING_TYPES.BARRACKS)).toBe(6);
+    expect(getBuildingVisionRange(BUILDING_TYPES.REFINERY)).toBe(6);
+  });
+
+  it("applies armor-based damage modifiers", () => {
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.SOLDIER, UNIT_TYPES.SOLDIER)).toBe(10);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER)).toBe(13);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.RIFLEMAN, UNIT_TYPES.LIGHT_TANK)).toBe(2);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK)).toBe(77);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ)).toBe(31);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS)).toBe(38);
+  });
+
+  it("keeps the large-map HQ time-to-kill above a reaction window after reload timing", () => {
+    const hqHp = getBuildingStats(BUILDING_TYPES.HQ).hp;
+    const singleTankReloadTicksToKillHQ =
+      Math.ceil(hqHp / getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.HQ)) *
+      getUnitWeapon(UNIT_TYPES.LIGHT_TANK).reloadTicks;
+    const fourRocketReloadTicksToKillHQ =
+      Math.ceil(hqHp / (getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ) * 4)) *
+      getUnitWeapon(UNIT_TYPES.ROCKET_SOLDIER).reloadTicks;
+
+    expect(singleTankReloadTicksToKillHQ).toBeGreaterThanOrEqual(180);
+    expect(fourRocketReloadTicksToKillHQ).toBeGreaterThanOrEqual(80);
+  });
+
+  it("uses role-aware default attack target priorities", () => {
+    expect(getDefaultAttackMovePriority(UNIT_TYPES.RIFLEMAN).slice(0, 4)).toEqual([
+      UNIT_TYPES.ROCKET_SOLDIER,
+      UNIT_TYPES.RIFLEMAN,
+      UNIT_TYPES.SOLDIER,
+      UNIT_TYPES.WORKER,
+    ]);
+    expect(getDefaultAttackMovePriority(UNIT_TYPES.ROCKET_SOLDIER).slice(0, 3)).toEqual([
+      UNIT_TYPES.LIGHT_TANK,
+      BUILDING_TYPES.WAR_FACTORY,
+      BUILDING_TYPES.BARRACKS,
+    ]);
+    expect(getDefaultAttackMovePriority(UNIT_TYPES.LIGHT_TANK).slice(0, 3)).toEqual([
+      UNIT_TYPES.LIGHT_TANK,
+      UNIT_TYPES.ROCKET_SOLDIER,
+      UNIT_TYPES.RIFLEMAN,
+    ]);
+  });
+
+  it("keeps convenience stats aligned with ruleset building definitions", () => {
+    expect(getBuildingStats(BUILDING_TYPES.HQ)).toMatchObject(BUILDING_STATS.hq);
+    expect(getBuildingStats(BUILDING_TYPES.BARRACKS)).toMatchObject(BUILDING_STATS.barracks);
+    expect(getBuildingStats(BUILDING_TYPES.WAR_FACTORY)).toMatchObject(BUILDING_STATS.war_factory);
+    expect(getBuildingStats(BUILDING_TYPES.REFINERY)).toMatchObject(BUILDING_STATS.refinery);
+    expect(getBuildingCost(BUILDING_TYPES.HQ)).toBe(0);
+    expect(getBuildingCost(BUILDING_TYPES.BARRACKS)).toBe(120);
+    expect(getBuildingCost(BUILDING_TYPES.WAR_FACTORY)).toBe(220);
+    expect(getBuildingCost(BUILDING_TYPES.REFINERY)).toBe(300);
+  });
+
+  it("centralizes current production rules in the default ruleset", () => {
+    expect(getProductionOptions(BUILDING_TYPES.HQ)).toEqual([UNIT_TYPES.WORKER]);
+    expect(getProductionOptions(BUILDING_TYPES.BARRACKS)).toEqual([
+      UNIT_TYPES.SOLDIER,
+      UNIT_TYPES.RIFLEMAN,
+      UNIT_TYPES.ROCKET_SOLDIER,
+    ]);
+    expect(getProductionOptions(BUILDING_TYPES.WAR_FACTORY)).toEqual([UNIT_TYPES.LIGHT_TANK]);
+    expect(getProductionOptions(BUILDING_TYPES.REFINERY)).toEqual([]);
+    expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.WORKER)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.SOLDIER)).toBe(false);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.SOLDIER)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.RIFLEMAN)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.LIGHT_TANK)).toBe(false);
+    expect(canBuildingProduce(BUILDING_TYPES.WAR_FACTORY, UNIT_TYPES.LIGHT_TANK)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.WORKER)).toBe(false);
+  });
+});

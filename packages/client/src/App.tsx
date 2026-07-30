@@ -186,6 +186,7 @@ function App() {
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    observedMatch,
     matchStatus,
     serverMessage,
     benchmarkProgress,
@@ -239,7 +240,7 @@ function App() {
   } | null>(null);
   const [hasLiveMatchStarted, setHasLiveMatchStarted] = useState(false);
   const [showcaseTick, setShowcaseTick] = useState(0);
-  const lastAutoSavedWinnerRef = useRef<string | null>(null);
+  const lastAutoSavedMatchIdRef = useRef<string | null>(null);
 
   const refreshRegisteredMatches = useCallback(async (showLoading = true) => {
     if (showLoading) {
@@ -283,24 +284,31 @@ function App() {
   }, [matchesOpen, mode, refreshRegisteredMatches]);
 
   useEffect(() => {
-    if (mode !== "live" || benchmarkRunning || benchmarkResult) {
+    if (
+      mode !== "live"
+      || benchmarkRunning
+      || benchmarkResult
+      || observedMatch?.kind !== "live"
+      || !observedMatch.recordingEnabled
+    ) {
+      lastAutoSavedMatchIdRef.current = null;
       return;
     }
 
     if (state?.winner) {
       setWinnerOverlayDismissed(false);
       setIsPlaying(false);
-      if (lastAutoSavedWinnerRef.current !== state.winner) {
-        send({ type: "save_record" });
-        lastAutoSavedWinnerRef.current = state.winner;
+      if (lastAutoSavedMatchIdRef.current !== observedMatch.matchId) {
+        send({ type: "save_record", matchId: observedMatch.matchId });
+        lastAutoSavedMatchIdRef.current = observedMatch.matchId;
       }
     } else {
-      lastAutoSavedWinnerRef.current = null;
+      lastAutoSavedMatchIdRef.current = null;
     }
-  }, [benchmarkResult, benchmarkRunning, mode, send, state?.winner]);
+  }, [benchmarkResult, benchmarkRunning, mode, observedMatch, send, state?.winner]);
 
   useEffect(() => {
-    if (mode !== "live" || benchmarkRunning || benchmarkResult || matchStatus === null) {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult || observedMatch?.kind !== "live" || matchStatus === null) {
       return;
     }
     setIsPlaying(matchStatus === "running");
@@ -308,10 +316,10 @@ function App() {
       setStartPending(false);
       setHasLiveMatchStarted(true);
     }
-  }, [benchmarkResult, benchmarkRunning, matchStatus, mode]);
+  }, [benchmarkResult, benchmarkRunning, matchStatus, mode, observedMatch?.kind]);
 
   useEffect(() => {
-    if (mode !== "live" || benchmarkRunning || benchmarkResult || !state?.winner || winnerOverlayDismissed) {
+    if (mode !== "live" || benchmarkRunning || benchmarkResult || observedMatch?.kind !== "live" || !state?.winner || winnerOverlayDismissed) {
       return;
     }
 
@@ -325,7 +333,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [benchmarkResult, benchmarkRunning, mode, state?.winner, winnerOverlayDismissed]);
+  }, [benchmarkResult, benchmarkRunning, mode, observedMatch?.kind, state?.winner, winnerOverlayDismissed]);
 
   useEffect(() => {
     if (!startPending) {
@@ -583,7 +591,8 @@ function App() {
   };
 
   const handleSaveRecord = () => {
-    send({ type: "save_record" });
+    if (observedMatch?.kind !== "live" || !observedMatch.recordingEnabled) return;
+    send({ type: "save_record", matchId: observedMatch.matchId });
   };
 
   const handleObserveMatch = async (match: MatchRegistrySummary) => {
@@ -712,7 +721,8 @@ function App() {
     && !isPlaying
     && !startPending
     && !benchmarkRunning
-    && recordingProfile !== "off"
+    && observedMatch?.kind === "live"
+    && observedMatch.recordingEnabled
     && hasLiveMatchStarted;
   const isWarmingUp = warmupStatuses.player_1 === "warming_up" || warmupStatuses.player_2 === "warming_up";
   const benchmarkStatusVisible = Boolean(benchmarkProgress || (benchmarkRunning && benchmarkRunSummary));
@@ -1164,7 +1174,7 @@ function App() {
           )}
         </SettingsOverlay>
 
-        {mode === "live" && !benchmarkRunning && !benchmarkResult && state?.winner && !winnerOverlayDismissed && (
+        {mode === "live" && !benchmarkRunning && !benchmarkResult && observedMatch?.kind === "live" && state?.winner && !winnerOverlayDismissed && (
           <div className="winner-overlay" onClick={() => setWinnerOverlayDismissed(true)}>
             <div className="winner-card" onClick={(event) => event.stopPropagation()}>
               <div className="winner-label">Simulation Complete</div>

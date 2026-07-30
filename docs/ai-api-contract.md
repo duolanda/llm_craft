@@ -175,9 +175,12 @@ interface TestLLMPresetResponse {
 
 ```json
 {
-  "type": "save_record"
+  "type": "save_record",
+  "matchId": "match_..."
 }
 ```
+
+`save_record` 只接受明确指定的 live match；服务端不会再根据当前观察对象隐式选择 benchmark 或 control match。关闭录制的 live match 会被拒绝，且不会调用 MatchRecorder。
 
 ### 0.10 WebSocket `state`
 
@@ -189,11 +192,16 @@ interface ServerStateMessage {
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  observedMatch: {
+    matchId: string;
+    kind: "live" | "control" | "benchmark";
+    recordingEnabled: boolean;
+  } | null;
   matchStatus: "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed" | null;
 }
 ```
 
-`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。`frame` 是实时投影的权威载体；兼容字段 `state` 始终为 `null`，`snapshots` 始终为空数组，不再通过 WebSocket 重复发送完整状态。客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。`frame` 是实时投影的权威载体；兼容字段 `state` 始终为 `null`，`snapshots` 始终为空数组，不再通过 WebSocket 重复发送完整状态。客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
 
 客户端的有界 `SimulationFrameBuffer` 同时服务 Live 和 Replay；它按 simulation time 取前后帧，包到达时间只用于估算带缓冲延迟的当前模拟时间，不再决定单位移动速度。
 

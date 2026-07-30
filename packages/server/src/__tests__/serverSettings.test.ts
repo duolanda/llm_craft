@@ -744,6 +744,11 @@ describe("server settings", () => {
 
     expect(listSpy).not.toHaveBeenCalled();
     expect(payload.liveEnabled).toBe(true);
+    expect(payload.observedMatch).toEqual({
+      matchId: "match_payload",
+      kind: "live",
+      recordingEnabled: true,
+    });
     expect(payload.matchStatus).toBeNull();
     expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
     expect(payload.state).toBeNull();
@@ -754,6 +759,67 @@ describe("server settings", () => {
         frameSequence: 1,
         simulationTick: 24,
       }),
+    }));
+  });
+
+  it("saves the explicitly identified live match instead of the observed benchmark", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+    const liveSaveRecord = vi.fn(async () => "logs/records/live.match.json");
+    const benchmarkSaveRecord = vi.fn(async () => "logs/records/benchmark.match.json");
+    const game = { getState: () => createMockGameState(42) };
+    state.matchRegistry.register({
+      getMatchId: () => "match_live",
+      getGame: () => game,
+      stop: vi.fn(),
+      saveRecord: liveSaveRecord,
+    }, { kind: "live", terminalPolicy: "save" });
+    state.matchRegistry.register({
+      getMatchId: () => "match_benchmark",
+      getGame: () => game,
+      stop: vi.fn(),
+      saveRecord: benchmarkSaveRecord,
+    }, { kind: "benchmark", terminalPolicy: "save", observe: true });
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({ type: "save_record", matchId: "match_live" }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(liveSaveRecord).toHaveBeenCalledTimes(1);
+    expect(benchmarkSaveRecord).not.toHaveBeenCalled();
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+      type: "record_saved",
+      filePath: "logs/records/live.match.json",
+    }));
+  });
+
+  it("rejects save requests for a non-recorded benchmark before calling its recorder", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+    const saveRecord = vi.fn(async () => {
+      throw new Error("MATCH_RECORDING_DISABLED");
+    });
+    state.matchRegistry.register({
+      getMatchId: () => "match_benchmark_off",
+      getGame: () => ({ getState: () => createMockGameState(90) }),
+      stop: vi.fn(),
+      saveRecord,
+    }, { kind: "benchmark", terminalPolicy: "none", observe: true });
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({ type: "save_record", matchId: "match_benchmark_off" }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(saveRecord).not.toHaveBeenCalled();
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
+      type: "error",
+      message: "指定的实时对局不存在。",
     }));
   });
 });

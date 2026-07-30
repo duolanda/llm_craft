@@ -15,6 +15,7 @@ import {
   GameState,
   MatchDebugOptions,
   MatchLLMConfig,
+  MatchRegistryKind,
   MatchWarmupState,
   MatchWarmupOptions,
   OpenAICompatibleRuntimeConfig,
@@ -242,6 +243,11 @@ type StateMessagePayload = {
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  observedMatch: {
+    matchId: string;
+    kind: MatchRegistryKind;
+    recordingEnabled: boolean;
+  } | null;
   matchStatus: RegisteredMatchStatus | null;
 };
 
@@ -309,6 +315,13 @@ export function buildStateMessagePayload(
     aiOutputs,
     snapshots: [],
     liveEnabled: Boolean(state.liveEnabled),
+    observedMatch: currentMatch
+      ? {
+          matchId: currentMatch.matchId,
+          kind: currentMatch.kind,
+          recordingEnabled: currentMatch.terminalPolicy !== "none",
+        }
+      : null,
     matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
   };
 }
@@ -961,16 +974,23 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
     }
 
     if (message.type === "save_record") {
-      const currentMatch = state.matchRegistry.getObserved();
-      if (!currentMatch) {
+      const targetMatch = message.matchId ? state.matchRegistry.get(message.matchId) : undefined;
+      if (!targetMatch || targetMatch.kind !== "live") {
         ws.send(JSON.stringify({
           type: "error",
-          message: "当前没有可保存的实时对局。",
+          message: "指定的实时对局不存在。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (targetMatch.terminalPolicy === "none") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "该实时对局已关闭录制，无法保存记录。",
         } satisfies ServerMessage));
         return;
       }
 
-      const filePath = await state.matchRegistry.save(currentMatch.matchId);
+      const filePath = await state.matchRegistry.save(targetMatch.matchId);
       ws.send(JSON.stringify({
         type: "record_saved",
         filePath,

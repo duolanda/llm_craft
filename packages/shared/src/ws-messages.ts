@@ -1,5 +1,5 @@
 import type { PlayerId } from "./constants.js";
-import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchWarmupOptions, StateProjectionFrame } from "./types.js";
+import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchRegistryKind, MatchWarmupOptions, StateProjectionFrame } from "./types.js";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -41,6 +41,7 @@ export interface ClientStopMessage {
 /** 保存当前对局记录 */
 export interface ClientSaveRecordMessage {
   type: "save_record";
+  matchId: string;
 }
 
 export interface ClientLoadTerminalHistoryMessage {
@@ -85,6 +86,11 @@ export interface ServerStateMessage {
   aiOutputs: Record<string, string>;
   snapshots: GameSnapshot[];
   liveEnabled: boolean;
+  observedMatch: {
+    matchId: string;
+    kind: MatchRegistryKind;
+    recordingEnabled: boolean;
+  } | null;
   matchStatus:
     | "warming_up"
     | "waiting_for_players"

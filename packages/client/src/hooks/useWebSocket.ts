@@ -7,6 +7,7 @@ import {
   PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
+  ServerStateMessage,
   isServerMessage,
 } from "@llmcraft/shared";
 import { SimulationFrameBuffer } from "@llmcraft/record";
@@ -22,6 +23,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [connected, setConnected] = useState(false);
   const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
+  const [observedMatch, setObservedMatch] = useState<ServerStateMessage["observedMatch"]>(null);
   const [matchStatus, setMatchStatus] = useState<
     "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed" | null
   >(null);
@@ -83,6 +85,7 @@ export function useWebSocket(url: string, enabled = true) {
               setAIOutputs(parsed.aiOutputs);
             }
             setLiveEnabled(parsed.liveEnabled);
+            setObservedMatch(parsed.observedMatch);
             setMatchStatus(parsed.matchStatus);
             break;
 
@@ -181,6 +184,7 @@ export function useWebSocket(url: string, enabled = true) {
     connected,
     lastSavedRecordPath,
     liveEnabled,
+    observedMatch,
     matchStatus,
     serverMessage,
     benchmarkProgress,

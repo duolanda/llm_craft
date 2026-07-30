@@ -964,7 +964,7 @@ function UnitBatches({
           url={batch.url}
           palette={batch.palette}
           transforms={batch.transforms}
-          castShadow={units.length <= 60}
+          castShadow
           frameBuffer={frameBuffer}
           dimensions={dimensions}
           simulationTimeMs={simulationTimeMs}
@@ -1138,8 +1138,7 @@ function CombatEffects({
           progress,
           totalTicks,
         };
-      })
-      .slice(0, 96);
+      });
     if (activeProjectileShots.length > 0) {
       return activeProjectileShots;
     }
@@ -1164,8 +1163,7 @@ function CombatEffects({
           scale: getProjectileVisualScale(projectileType),
           phase: deterministicNoise(unit.x, unit.y, tick + index) * 0.9,
         }];
-      })
-      .slice(0, 48);
+      });
   }, [buildings, dimensions, projectiles, tick, units]);
 
   useEffect(() => {
@@ -1449,7 +1447,7 @@ function DestructionEffects({
     if (destroyed.length === 0) {
       return;
     }
-    setBursts((currentBursts) => [...currentBursts, ...destroyed].slice(-24));
+    setBursts((currentBursts) => [...currentBursts, ...destroyed]);
     const ids = new Set(destroyed.map((burst) => burst.id));
     window.setTimeout(() => {
       setBursts((currentBursts) => currentBursts.filter((burst) => !ids.has(burst.id)));

@@ -56,7 +56,7 @@ const ANIMATION_LAB_MODE: AnimationLabMode = new URLSearchParams(window.location
 const LOCAL_SHOWCASE = MASS_BATTLE_SHOWCASE || ANIMATION_LAB_SHOWCASE;
 const requestedShowcaseUnits = Number(new URLSearchParams(window.location.search).get("units"));
 const MASS_BATTLE_UNIT_COUNT = Number.isFinite(requestedShowcaseUnits) && requestedShowcaseUnits > 0
-  ? Math.min(240, Math.floor(requestedShowcaseUnits))
+  ? Math.floor(requestedShowcaseUnits)
   : 200;
 
 interface LivePresetSelection {

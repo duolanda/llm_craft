@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AITerminalEvent,
   ClientMessage,
@@ -12,7 +12,7 @@ import {
 } from "@llmcraft/shared";
 import { SimulationFrameBuffer } from "@llmcraft/record";
 
-const MAX_LIVE_TERMINAL_EVENTS = 500;
+const MAX_LIVE_TERMINAL_EVENTS = 100;
 
 export function useWebSocket(url: string, enabled = true) {
   const [state, setState] = useState<GameState | null>(null);
@@ -34,6 +34,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [warmupMessage, setWarmupMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const terminalSessionIdRef = useRef<string | null>(null);
+  const observedMatchIdRef = useRef<string | null>(null);
   const frameBufferRef = useRef(new SimulationFrameBuffer());
 
   const send = useCallback((message: ClientMessage) => {
@@ -55,6 +56,8 @@ export function useWebSocket(url: string, enabled = true) {
     if (!enabled) {
       return;
     }
+    observedMatchIdRef.current = null;
+    frameBufferRef.current.clear();
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -75,6 +78,10 @@ export function useWebSocket(url: string, enabled = true) {
         switch (parsed.type) {
           case "state":
             setServerMessage(null);
+            if (parsed.observedMatch?.matchId !== observedMatchIdRef.current) {
+              frameBufferRef.current.clear();
+              observedMatchIdRef.current = parsed.observedMatch?.matchId ?? null;
+            }
             if (parsed.frame) {
               const projected = frameBufferRef.current.ingest(parsed.frame);
               if (projected) setState(projected);
@@ -174,11 +181,22 @@ export function useWebSocket(url: string, enabled = true) {
     });
   }, [aiTerminalEvents, send, terminalHistoryEvents]);
 
+  const combinedTerminalEvents = useMemo(() => {
+    const knownIds = new Set<string>();
+    const combined: AITerminalEvent[] = [];
+    for (const event of terminalHistoryEvents.concat(aiTerminalEvents)) {
+      if (knownIds.has(event.id)) continue;
+      knownIds.add(event.id);
+      combined.push(event);
+    }
+    return combined;
+  }, [aiTerminalEvents, terminalHistoryEvents]);
+
   return {
     state,
     frameBuffer: frameBufferRef.current,
     aiOutputs,
-    aiTerminalEvents: terminalHistoryEvents.concat(aiTerminalEvents),
+    aiTerminalEvents: combinedTerminalEvents,
     terminalHistoryHasMore,
     loadEarlierTerminalEvents,
     connected,

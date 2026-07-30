@@ -1042,10 +1042,19 @@ body {
   flex: 1;
   overflow: auto;
   padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   min-height: 0;
+  overflow-anchor: none;
+}
+
+.ai-terminal-virtual-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.ai-terminal-virtual-row {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 100%;
 }
 
 .ai-terminal-divider {

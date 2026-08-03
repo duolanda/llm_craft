@@ -769,7 +769,7 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
 - 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory、拆 refinery 应使用 `attack`
-- 显式 `priority` 会严格限制可攻击目标类型，不会 fallback 到未列出的建筑或单位
+- 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`
 
 #### `attack`
 

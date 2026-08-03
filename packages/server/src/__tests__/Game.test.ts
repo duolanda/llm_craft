@@ -921,7 +921,7 @@ describe("Game", () => {
     expect(enemyHq.hp).toBe(enemyHq.maxHp);
   });
 
-  it("attack_in_range does not fall back to buildings when priority is explicit", () => {
+  it("attack_in_range falls back to default targets after explicit priorities", () => {
     const unitManager = game.getUnitManager();
     const buildingManager = game.getBuildingManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
@@ -936,9 +936,32 @@ describe("Game", () => {
     });
 
     game.processCommands();
+    advanceTicks(1);
 
-    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
-    expect(enemyHq.hp).toBe(enemyHq.maxHp);
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
+    expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
+  });
+
+  it("attack_move keeps omitted buildings as fallback targets", () => {
+    const unitManager = game.getUnitManager();
+    const buildingManager = game.getBuildingManager();
+    const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const enemyHq = buildingManager.createBuilding(BUILDING_TYPES.HQ, 12, 5, "player_2");
+
+    game.queueCommand({
+      id: "attack_move_priority_fallback",
+      type: "attack_move",
+      unitId: attacker.id,
+      position: { x: 20, y: 5 },
+      targetPriority: [UNIT_TYPES.SOLDIER],
+      playerId: "player_1",
+    });
+
+    game.start();
+    for (let tick = 0; tick < 6; tick++) game.tickUpdate();
+    game.stop();
+
+    expect(enemyHq.hp).toBeLessThan(enemyHq.maxHp);
   });
 
   it("attack_in_range fails cleanly when nothing is in range", () => {

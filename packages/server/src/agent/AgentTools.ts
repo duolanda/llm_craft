@@ -224,7 +224,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_unit",
     description:
-      "Queue the same targetless combat advance for one or more selected combat units. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing.",
+      "Queue the same targetless combat advance for one or more selected combat units. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing. Optional priority entries move those target types ahead of the unit's defaults; omitted target types remain valid fallback targets.",
     parameters: {
       type: "object",
       required: ["unitIds", "x", "y"],
@@ -234,6 +234,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
         y: { type: "integer" },
         priority: {
           type: "array",
+          description: "Target ordering override. Listed types are tried first; omitted types retain their default relative order and remain attackable.",
           items: { type: "string", enum: ATTACK_TARGET_TYPES },
         },
       },
@@ -542,6 +543,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
                   targetId: { type: "string" },
                   priority: {
                     type: "array",
+                    description: "Target ordering override. Listed types are tried first; omitted types remain valid fallback targets.",
                     items: { type: "string", enum: ATTACK_TARGET_TYPES },
                   },
                 },

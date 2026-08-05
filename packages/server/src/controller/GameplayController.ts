@@ -38,6 +38,7 @@ import {
   getUnitVisionRange,
   getUnitCost,
   getProductionOptions,
+  getRetiredProductionUnitTypes,
   isBuildableBuildingType,
   isBuildingType,
   isUnitType,
@@ -780,6 +781,7 @@ export class GameplayController {
         canQueueRifleman: canQueueUnit(UNIT_TYPES.RIFLEMAN),
         canQueueRocketSoldier: canQueueUnit(UNIT_TYPES.ROCKET_SOLDIER),
         canQueueLightTank: canQueueUnit(UNIT_TYPES.LIGHT_TANK),
+        retiredProductionUnitTypes: getRetiredProductionUnitTypes(),
         economyStatus: {
           workers: workers.length,
           assignedHarvesters: assignedHarvesters.length,

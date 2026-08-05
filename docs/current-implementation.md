@@ -49,6 +49,8 @@
 
 shared constants 是内置 `standard` 规则和地图模板的定义处；`createDefaultMatchDefinition()` 会把地图布局复制进单局定义。运行中的地图尺寸、矿脉、障碍物、开局实体和 tick 时长读取该局 MatchDefinition；单位数值、造价和生产关系通过其 `rulesetId` 对应的 shared ruleset helper 读取。前者是“这一局采用什么”，后者是“内置 standard 具体是什么”，不是两套相互竞争的配置。
 
+`soldier` 已从 standard 的当前生产关系中退役，兵营只生产 `rifleman` 和 `rocket_soldier`，基础步兵定位由 rifleman 承担。为保证历史 Match Record、旧状态投影和战斗目标兼容，`soldier` 的类型、数值、渲染与战斗行为继续保留；ruleset helper、Game 命令、GameplayController、CLI 和 built-in CPU 都不会在新对局中生产它。前端实时统计默认隐藏该行，但回放中实际存在 soldier 时会重新显示。
+
 ## 4. Agent runtime
 
 - 模型通过 OpenAI-compatible tool calling 观察和控制游戏，不生成可执行 JavaScript。

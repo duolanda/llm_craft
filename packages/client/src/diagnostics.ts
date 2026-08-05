@@ -61,7 +61,7 @@ export interface PlayerDiagnostic {
   spawnedCombatUnderPressure: number;
   spawnedCombatDeathsUnderPressure: number;
   finalWorkers: number;
-  finalSoldiers: number;
+  finalCombatUnits: number;
   finalCredits: number;
   tags: DiagnosticTag[];
 }
@@ -189,7 +189,7 @@ function createPlayerMetrics(playerIds: PlayerId[]) {
         spawnedCombatDeathsUnderPressure: 0,
       },
     ])
-  ) as Record<PlayerId, Omit<PlayerDiagnostic, "playerId" | "finalWorkers" | "finalSoldiers" | "finalCredits" | "tags">>;
+  ) as Record<PlayerId, Omit<PlayerDiagnostic, "playerId" | "finalWorkers" | "finalCombatUnits" | "finalCredits" | "tags">>;
 }
 
 function createWorldState(state: GameState): WorldState {
@@ -439,14 +439,14 @@ function applyCommandDiagnostics(
 
       if (
         data.type === RESULT_TYPES.SPAWN_SUCCESS &&
-        data.result_data.orders.some((order) => order.unitType === "soldier")
+        data.result_data.orders.some((order) => isCombatUnitType(order.unitType))
       ) {
         metric.spawnedCombatUnderPressure += 1;
         timeline.push({
           tick: log.tick,
           playerId,
           type: "spawn",
-          label: `${playerLabel(playerId)}在总部受压时生产士兵`,
+          label: `${playerLabel(playerId)}在总部受压时生产作战单位`,
           detail: data.result_data.buildingId,
           severity: "info",
         });
@@ -517,7 +517,7 @@ function applySpawnTrapDiagnostics(
   timeline: DiagnosticTimelineEvent[]
 ) {
   for (const lifecycle of lifecycles.values()) {
-    if (lifecycle.type !== "soldier" || lifecycle.removedTick === null) {
+    if (!isCombatUnitType(lifecycle.type) || lifecycle.removedTick === null) {
       continue;
     }
     const pressureTick = metrics[lifecycle.playerId]?.enemyNearHqTickByRadius[5];
@@ -567,7 +567,7 @@ function finalizePlayerDiagnostic(
     playerId,
     ...metric,
     finalWorkers: finalPlayer?.units.filter((unit) => unit.exists && unit.type === "worker").length ?? 0,
-    finalSoldiers: finalPlayer?.units.filter((unit) => unit.exists && unit.type === "soldier").length ?? 0,
+    finalCombatUnits: finalPlayer?.units.filter((unit) => unit.exists && isCombatUnitType(unit.type)).length ?? 0,
     finalCredits: finalPlayer?.resources.credits ?? 0,
     tags,
   };
@@ -654,9 +654,23 @@ function unitTypeLabel(unitType: string) {
     return "工人";
   }
   if (unitType === "soldier") {
-    return "士兵";
+    return "旧版士兵";
+  }
+  if (unitType === "rifleman") {
+    return "步兵";
+  }
+  if (unitType === "rocket_soldier") {
+    return "火箭兵";
+  }
+  if (unitType === "light_tank") {
+    return "轻型坦克";
   }
   return unitType;
+}
+
+function isCombatUnitType(unitType: string): boolean {
+  const stats = UNIT_STATS[unitType as keyof typeof UNIT_STATS];
+  return Boolean(stats && stats.attack > 0);
 }
 
 function commandTypeLabel(commandType: string) {

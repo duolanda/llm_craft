@@ -406,13 +406,13 @@ interface AgentRunInput {
 
 当前规则由 shared 的 `standard` ruleset 描述：
 
-- 单位类型是 `worker | soldier | rifleman | rocket_soldier | light_tank`
+- 单位类型仍是 `worker | soldier | rifleman | rocket_soldier | light_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
 - 建筑类型是 `hq | barracks | war_factory | refinery`
 - `hq` 可生产 `worker`
-- `barracks` 可生产 `soldier | rifleman | rocket_soldier`
+- `barracks` 可生产 `rifleman | rocket_soldier`
 - `war_factory` 可生产 `light_tank`
 - `refinery` 是 worker 的采矿卸载点，不生产单位
-- 当前采用 144x96 三战线大战场尺度：`soldier` 115 HP / 10 damage / range 1 / vision 5 / cost 55 / reload 3；`rifleman` 95 HP / 9 damage / range 6 / vision 7 / cost 70 / reload 2；`rocket_soldier` 80 HP / 34 damage / range 6 / vision 7 / cost 110 / reload 8；`light_tank` 420 HP / 42 damage / range 5 / vision 7 / cost 240 / reload 6
+- 当前采用 144x96 三战线大战场尺度：兼容单位 `soldier` 保留 115 HP / 10 damage / range 1 / vision 5 / cost 55 / reload 3；`rifleman` 95 HP / 9 damage / range 6 / vision 7 / cost 70 / reload 2；`rocket_soldier` 80 HP / 34 damage / range 6 / vision 7 / cost 110 / reload 8；`light_tank` 420 HP / 42 damage / range 5 / vision 7 / cost 240 / reload 6
 - 伤害按目标 armor 计算：`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x
 - 攻击结算为 weapon/projectile/warhead 模型：命令成功会生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `light_tank` 有 1 格 splash；`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
@@ -420,7 +420,7 @@ interface AgentRunInput {
 - 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
 - `UNIT_STATS` / `BUILDING_STATS` 是 `standard` ruleset 的便捷只读视图，供 UI、诊断和测试使用
 
-服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、生产关系、成本和攻击能力判断；工具 schema 已接受新增 unit/building 类型。
+服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、当前生产关系、成本和攻击能力判断；standard 的生产 helper 会过滤兼容性退役单位，即使底层 legacy ruleset 数据仍保留其历史数值和建筑关联。工具 schema 已接受新增 unit/building 类型。
 
 ### 1.2 服务端命令交付契约
 
@@ -569,10 +569,11 @@ interface CommandProvenance {
   canBuildWarFactory: boolean;
   canBuildRefinery: boolean;
   canQueueWorker: boolean;
-  canQueueSoldier: boolean;
+  canQueueSoldier: boolean; // 兼容字段；standard 恒为 false
   canQueueRifleman: boolean;
   canQueueRocketSoldier: boolean;
   canQueueLightTank: boolean;
+  retiredProductionUnitTypes: UnitType[]; // standard 当前为 ["soldier"]
   economyStatus: {
     workers: number;
     assignedHarvesters: number;
@@ -795,13 +796,13 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 {
   buildingId: string;
   units: Array<{
-    unitType: "worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank";
+    unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank";
     count: number; // 1..100
   }>;
 }
 ```
 
-`units` 是追加到该建筑的有限批次，严格按数组顺序生产。每座建筑每种单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；当期 credits 不够时当前单位暂停且不丢进度，有收入后自动继续。单位真正完成时累计扣款恰好等于其完整造价。
+`units` 是追加到该建筑的有限批次，严格按数组顺序生产。standard 中请求 `soldier` 会返回 `invalid_spawn_request`，旧录像或已有状态中的 soldier 仍可正常观察、移动、攻击和回放。每座建筑每种可生产单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；当期 credits 不够时当前单位暂停且不丢进度，有收入后自动继续。单位真正完成时累计扣款恰好等于其完整造价。
 
 ```ts
 interface ProductionOrder {

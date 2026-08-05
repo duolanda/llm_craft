@@ -17,6 +17,10 @@ import type {
 export const ALL_UNIT_TYPES = Object.values(UNIT_TYPES) as UnitType[];
 export const ALL_BUILDING_TYPES = Object.values(BUILDING_TYPES) as BuildingType[];
 
+const STANDARD_RETIRED_PRODUCTION_UNIT_TYPES = new Set<UnitType>([
+  UNIT_TYPES.SOLDIER,
+]);
+
 export function isUnitType(value: unknown): value is UnitType {
   return typeof value === "string" && (ALL_UNIT_TYPES as string[]).includes(value);
 }
@@ -104,7 +108,18 @@ export function getProductionOptions(
   buildingType: BuildingType,
   ruleset: GameRuleset = DEFAULT_RULESET,
 ): UnitType[] {
-  return [...getBuildingStats(buildingType, ruleset).produces];
+  const produces = getBuildingStats(buildingType, ruleset).produces;
+  return ruleset.id === DEFAULT_RULESET.id
+    ? produces.filter((unitType) => !STANDARD_RETIRED_PRODUCTION_UNIT_TYPES.has(unitType))
+    : [...produces];
+}
+
+export function getRetiredProductionUnitTypes(
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): UnitType[] {
+  return ruleset.id === DEFAULT_RULESET.id
+    ? [...STANDARD_RETIRED_PRODUCTION_UNIT_TYPES]
+    : [];
 }
 
 export function canBuildingProduce(
@@ -112,7 +127,7 @@ export function canBuildingProduce(
   unitType: UnitType,
   ruleset: GameRuleset = DEFAULT_RULESET,
 ): boolean {
-  return getBuildingStats(buildingType, ruleset).produces.includes(unitType);
+  return getProductionOptions(buildingType, ruleset).includes(unitType);
 }
 
 export function unitCanAttack(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): boolean {

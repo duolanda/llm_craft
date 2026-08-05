@@ -203,7 +203,6 @@ export async function runBuiltinCPUStrategy(options: {
   const canBuildWarFactory = credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY);
   const canBuildRefinery = credits >= getBuildingCost(BUILDING_TYPES.REFINERY);
   const canSpawnWorker = credits >= getUnitCost(UNIT_TYPES.WORKER);
-  const canSpawnSoldier = credits >= getUnitCost(UNIT_TYPES.SOLDIER);
   const canSpawnRifleman = credits >= getUnitCost(UNIT_TYPES.RIFLEMAN);
   const canSpawnRocketSoldier = credits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER);
   const canSpawnLightTank = credits >= getUnitCost(UNIT_TYPES.LIGHT_TANK);
@@ -212,9 +211,7 @@ export async function runBuiltinCPUStrategy(options: {
   const enemyHasVehicles = enemyUnits.some((unit: any) => unit.type === UNIT_TYPES.LIGHT_TANK);
   const preferredBarracksUnit = enemyHasVehicles && canSpawnRocketSoldier
     ? UNIT_TYPES.ROCKET_SOLDIER
-    : canSpawnRifleman
-      ? UNIT_TYPES.RIFLEMAN
-      : UNIT_TYPES.SOLDIER;
+    : UNIT_TYPES.RIFLEMAN;
   const rushInfrastructureReserve = !hasStartedBarracks
     ? getBuildingCost(BUILDING_TYPES.BARRACKS)
     : hasBarracks && !hasStartedRefinery
@@ -227,9 +224,7 @@ export async function runBuiltinCPUStrategy(options: {
     ? UNIT_TYPES.ROCKET_SOLDIER
     : rushProductionCredits >= getUnitCost(UNIT_TYPES.RIFLEMAN)
       ? UNIT_TYPES.RIFLEMAN
-      : rushProductionCredits >= getUnitCost(UNIT_TYPES.SOLDIER)
-        ? UNIT_TYPES.SOLDIER
-        : null;
+      : null;
 
   const callTool = options.callTool;
   const reservedWorkerIds = new Set<string>();
@@ -338,7 +333,7 @@ export async function runBuiltinCPUStrategy(options: {
       if (hasBarracks && !hasStartedRefinery && canBuildRefinery && availableWorkers[0] && hq) {
         candidatePlans.push("build-refinery");
       }
-      if (hasBarracks && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
+      if (hasBarracks && (canSpawnRifleman || canSpawnRocketSoldier)) {
         candidatePlans.push("spawn-infantry");
       }
       if (hasWarFactory && canSpawnLightTank) {
@@ -380,7 +375,7 @@ export async function runBuiltinCPUStrategy(options: {
         }
       } else if (selectedPlan === "attack") {
         const shouldAttackThisTurn = Math.random() > 0.75;
-        if (combatUnits.length === 0 && barracksBuildings.length > 0 && (canSpawnRifleman || canSpawnRocketSoldier || canSpawnSoldier)) {
+        if (combatUnits.length === 0 && barracksBuildings.length > 0 && (canSpawnRifleman || canSpawnRocketSoldier)) {
           for (const barracks of barracksBuildings) {
             await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: preferredBarracksUnit, count: 1 }] });
           }

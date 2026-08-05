@@ -424,25 +424,41 @@ describe("Game", () => {
     expect((feedbackData?.result_data as any)?.type).toBe("build_too_close_to_hq");
   });
 
-  it("requires barracks before soldiers can be queued", () => {
+  it("requires barracks before riflemen can be queued", () => {
     const player1 = game.getState().players[0];
     const hq = player1.buildings.find((b) => b.type === BUILDING_TYPES.HQ)!;
 
     game.queueCommand({
-      id: "soldier_without_barracks",
+      id: "rifleman_without_barracks",
       type: "spawn",
       buildingId: hq.id,
-      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
+      productionRequests: [{ unitType: UNIT_TYPES.RIFLEMAN, count: 1 }],
       playerId: "player_1",
     });
 
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
-    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(0);
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.RIFLEMAN)).toHaveLength(0);
   });
 
-  it("spawns a soldier from barracks after it is built", () => {
+  it("rejects retired soldiers from a completed barracks", () => {
+    const barracks = game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 30, 48, "player_1");
+
+    game.queueCommand({
+      id: "spawn_retired_soldier",
+      type: "spawn",
+      buildingId: barracks.id,
+      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
+      playerId: "player_1",
+    });
+    game.processCommands();
+
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
+    expect(game.getBuildingManager().getBuilding(barracks.id)?.productionQueue).toHaveLength(0);
+  });
+
+  it("spawns a rifleman from barracks after it is built", () => {
     const worker = game
       .getState()
       .players[0]
@@ -466,20 +482,20 @@ describe("Game", () => {
       .buildings.find((b) => b.type === BUILDING_TYPES.BARRACKS)!;
 
     game.queueCommand({
-      id: "spawn_soldier",
+      id: "spawn_rifleman",
       type: "spawn",
       buildingId: barracks.id,
-      productionRequests: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
+      productionRequests: [{ unitType: UNIT_TYPES.RIFLEMAN, count: 1 }],
       playerId: "player_1",
     });
     game.processCommands();
     game.start();
-    for (let tick = 0; tick < getUnitProductionTicks(UNIT_TYPES.SOLDIER); tick++) {
+    for (let tick = 0; tick < getUnitProductionTicks(UNIT_TYPES.RIFLEMAN); tick++) {
       game.tickUpdate();
     }
     game.stop();
 
-    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.SOLDIER)).toHaveLength(1);
+    expect(game.getState().players[0].units.filter((u) => u.type === UNIT_TYPES.RIFLEMAN)).toHaveLength(1);
   });
 
   it("requires a completed barracks before workers can build a war factory", () => {

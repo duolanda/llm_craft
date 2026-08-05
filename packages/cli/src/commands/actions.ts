@@ -1,11 +1,19 @@
 import type { ControlClient } from "../client.js";
-import { ALL_BUILDING_TYPES, ALL_UNIT_TYPES, BUILDING_TYPES, type ControlBatchAction } from "@llmcraft/shared";
+import {
+  ALL_BUILDING_TYPES,
+  ALL_UNIT_TYPES,
+  BUILDING_TYPES,
+  getProductionOptions,
+  type ControlBatchAction,
+  type UnitType,
+} from "@llmcraft/shared";
 import { ExitCode, exit } from "../io/errors.js";
 import { printJson } from "../io/json.js";
 import { readStdin } from "../io/stdin.js";
 
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
+const TRAINABLE_UNIT_TYPES = [...new Set(ALL_BUILDING_TYPES.flatMap((buildingType) => getProductionOptions(buildingType)))] as UnitType[];
 
 function getFlagUnitIds(flags: Map<string, string>): string[] {
   const values = [flags.get("unit"), flags.get("units")]
@@ -349,8 +357,8 @@ export async function handleTrain(
   flags: Map<string, string>,
 ): Promise<void> {
   const unitType = subcommand;
-  if (!ALL_UNIT_TYPES.includes(unitType as typeof ALL_UNIT_TYPES[number])) {
-    exit(ExitCode.ArgError, `train requires unit type (${ALL_UNIT_TYPES.join(", ")}), got: ${subcommand || "(none)"}`);
+  if (!TRAINABLE_UNIT_TYPES.includes(unitType as UnitType)) {
+    exit(ExitCode.ArgError, `train requires a currently producible unit type (${TRAINABLE_UNIT_TYPES.join(", ")}), got: ${subcommand || "(none)"}`);
   }
 
   const buildingId = flags.get("building");

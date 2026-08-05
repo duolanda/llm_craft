@@ -28,8 +28,8 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 地图为 ${definition.map.width}x${definition.map.height}，我方 HQ 在 ${formatPoint(myHQ)}，敌方 HQ 在 ${formatPoint(enemyHQ)}
 - 地图较大，可以根据战场局势自主选择集中进攻、多方向进攻、分兵骚扰或兵团作战
 - 状态读取工具提供完整战场信息；单位执行无目标推进时的自动索敌仍受自身 visionRange 限制
-- 建筑有 hq、barracks、war_factory、refinery；单位有 worker、soldier、rifleman、rocket_soldier、light_tank
-- HQ 生产 worker，barracks 生产步兵，war_factory 生产 light_tank
+- 建筑有 hq、barracks、war_factory、refinery；当前可生产单位有 worker、rifleman、rocket_soldier、light_tank
+- HQ 生产 worker，barracks 生产 rifleman 和 rocket_soldier，war_factory 生产 light_tank
 - worker 负责采集有限矿藏和建造建筑；多个 worker 可共用同一矿点，分配数不是硬性容量上限
 - refinery 是矿物交付点，不直接提高采集速度；它的价值在于缩短矿点到交付点的往返路线，因此建在 HQ 旁边通常收益很小
 - 采矿时省略矿点坐标会按交付路程、worker 初始路程和当前分配自动选择；只在需要刻意指定矿点时传坐标
@@ -39,8 +39,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 ## 单位定位
 
 - worker：负责采集和建造，没有战斗能力
-- soldier：廉价、生产快的近距离步兵，适合快速形成数量和贴身作战；射程很短，对载具和建筑效果较差
-- rifleman：远程反步兵单位，适合对抗普通步兵和缺少保护的反载具步兵；对载具和建筑效果较差
+- rifleman：基础远程反步兵单位，适合对抗其他步兵和缺少保护的反载具步兵；对载具和建筑效果较差
 - rocket_soldier：远程反载具单位，对 light_tank 和建筑效果较好；攻击慢、有最小射程，对普通步兵效果很差，需要其他单位保护
 - light_tank：高生命值的装甲单位，适合正面推进并能造成范围伤害；普通步兵难以有效伤害它，但 rocket_soldier 对它威胁很大
 - 克制关系会显著影响交战结果，但不能代替对数量、阵型、位置和战场时机的判断

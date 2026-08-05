@@ -24,7 +24,6 @@ import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
 import { StatsPanel } from "./components/StatsPanel";
-import { LegendPanel } from "./components/LegendPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
@@ -1111,15 +1110,6 @@ function App() {
               </div>
               <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
             </div>
-
-            <details className="hud-panel legend-collapsible" style={{ marginTop: 12 }}>
-              <div className="hud-panel-top-corners" />
-              <div className="hud-panel-bottom-corners" />
-              <summary className="panel-header legend-summary">
-                <span className="panel-header-accent accent-red">战术图例</span>
-              </summary>
-              <LegendPanel />
-            </details>
           </div>
 
           <div className="tactical-col">

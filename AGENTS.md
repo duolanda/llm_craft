@@ -279,7 +279,7 @@ game.start();
 |-------------|---------------|
 | `shared/src/types.ts` 或 `shared/src/constants.ts` | `docs/ai-api-contract.md` —— AI API 契约是权威参考 |
 | 游戏机制、单位属性、建筑逻辑 | `docs/current-implementation.md` —— 让开发者能够掌握最新现状 |
-| 修复 bug 或发现新问题 | `docs/known-issues.md` —— 问题追踪闭环 |
+| 修复 bug、确认问题已解决或得出明确结论 | 若 `docs/known-issues.md` 已有对应条目，必须在同次改动中更新或归档；原本未记录的 bug 无需为保留修复历史而刻意新增条目 |
 | 架构边界、控制面、Agent 运行时分层 | `AGENTS.md` 核心架构模式与关键文件 |
 
 ### 📦 只读历史，不要更新

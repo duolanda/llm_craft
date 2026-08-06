@@ -11,7 +11,7 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
 } from "@llmcraft/shared";
-import { PathFinder } from "./PathFinder";
+import { PathFinder, type IntegrationField, type NavigationField } from "./PathFinder";
 import type { WorldUnit as Unit } from "./WorldUnit";
 import { getCollisionBoundingRadius, getMovementProfile } from "./navigation/MovementProfile";
 import { UnitSpatialIndex } from "./navigation/UnitSpatialIndex";
@@ -36,6 +36,8 @@ const CONGESTION_ESCAPE_ANGLES = [-120, 120, -150, 150, 180] as const;
 const LOCAL_AVOIDANCE_DISTANCE_FACTORS = [1, 0.75, 0.5, 0.25] as const;
 const MOVEMENT_PROGRESS_EPSILON = 0.05;
 const CONGESTION_ESCAPE_TICKS = 4;
+const MAX_TARGET_PROJECTION_RADIUS = 24;
+const MAX_INTEGRATION_FIELD_CACHE_ENTRIES = 64;
 // Eight fixed samples keep translation + rotation work bounded while limiting
 // a 180-degree turn to 22.5-degree collision intervals.
 const COLLISION_SWEEP_SAMPLES = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1] as const;
@@ -87,6 +89,12 @@ export class UnitManager {
   private idCounter = 0;
   private readonly blockedTicks = new Map<string, number>();
   private readonly lastMovementOrigins = new Map<string, { x: number; y: number }>();
+  private navigationTiles: TileType[][] | null = null;
+  private navigationTopologySignature = "";
+  private readonly navigationFields = new Map<UnitType, NavigationField>();
+  private readonly integrationFields = new Map<string, IntegrationField | null>();
+  private navigationFieldBuilds = 0;
+  private integrationFieldBuilds = 0;
 
   /** @internal Authoritative runtime creation goes through EntityRegistry/WorldState. */
   createUnit(type: UnitType, x: number, y: number, playerId: PlayerId): Unit {
@@ -118,6 +126,19 @@ export class UnitManager {
     return Array.from(this.units.values()).filter(
       (u) => u.playerId === playerId && u.exists
     );
+  }
+
+  /** @internal Stable counters for navigation regression tests. */
+  getNavigationCacheStats(): {
+    navigationFieldBuilds: number;
+    integrationFieldBuilds: number;
+    integrationFieldEntries: number;
+  } {
+    return {
+      navigationFieldBuilds: this.navigationFieldBuilds,
+      integrationFieldBuilds: this.integrationFieldBuilds,
+      integrationFieldEntries: this.integrationFields.size,
+    };
   }
 
   getAllUnits(): Unit[] {
@@ -335,7 +356,7 @@ export class UnitManager {
       if (unit.order?.type === "move") {
         unit.order = undefined;
       }
-      return RESULT_CODES.OK;
+      return alreadyAtResolvedTarget ? RESULT_CODES.OK : RESULT_CODES.ERR_POSITION_OCCUPIED;
     }
 
     unit.path = path;
@@ -653,9 +674,19 @@ export class UnitManager {
     reservedTargets: readonly ReservedEndpoint[],
   ): { x: number; y: number } | null {
     const startCell = getPathCell(unit.x, unit.y);
-    const candidates: Array<{ x: number; y: number; radius: number; pathLength: number; unitDistance: number }> = [];
+    const integration = this.getIntegrationField(
+      unit.type,
+      requestedX,
+      requestedY,
+      tiles,
+      staticBlockedPositions,
+    );
+    if (!integration || PathFinder.getStartIntegrationDistance(integration, startCell.x, startCell.y) < 0) {
+      return null;
+    }
+    const candidates: Array<{ x: number; y: number; radius: number; unitDistance: number }> = [];
 
-    for (let radius = 0; radius <= MAP_WIDTH + MAP_HEIGHT; radius++) {
+    for (let radius = 0; radius <= MAX_TARGET_PROJECTION_RADIUS; radius++) {
       for (let y = Math.max(0, requestedY - radius); y <= Math.min(MAP_HEIGHT - 1, requestedY + radius); y++) {
         for (let x = Math.max(0, requestedX - radius); x <= Math.min(MAP_WIDTH - 1, requestedX + radius); x++) {
           if (Math.abs(x - requestedX) + Math.abs(y - requestedY) !== radius) {
@@ -671,22 +702,10 @@ export class UnitManager {
           );
           const candidateShape = getUnitCollisionShape(unit, x, y, candidateHeading);
           if (
-            isShapeBlockedByGrid(candidateShape, tiles, staticBlockedPositions)
-            || reservedTargets.some((reserved) => getCollisionManifold(candidateShape, reserved.shape))
+            PathFinder.getIntegrationDistance(integration, x, y) < 0 ||
+            isShapeBlockedByGrid(candidateShape, tiles, staticBlockedPositions) ||
+            reservedTargets.some((reserved) => getCollisionManifold(candidateShape, reserved.shape))
           ) {
-            continue;
-          }
-
-          const path = PathFinder.findPath(
-            startCell.x,
-            startCell.y,
-            x,
-            y,
-            tiles,
-            staticBlockedPositions,
-            getMovementProfile(unit.type).navigationRadius,
-          );
-          if (path.length === 0 && (startCell.x !== x || startCell.y !== y)) {
             continue;
           }
 
@@ -694,7 +713,6 @@ export class UnitManager {
             x,
             y,
             radius,
-            pathLength: path.length,
             unitDistance: Math.abs(unit.x - x) + Math.abs(unit.y - y),
           });
         }
@@ -703,7 +721,6 @@ export class UnitManager {
       if (candidates.length > 0) {
         candidates.sort((a, b) =>
           a.radius - b.radius ||
-          a.pathLength - b.pathLength ||
           a.unitDistance - b.unitDistance ||
           a.y - b.y ||
           a.x - b.x
@@ -714,6 +731,59 @@ export class UnitManager {
     }
 
     return null;
+  }
+
+  private getIntegrationField(
+    unitType: UnitType,
+    requestedX: number,
+    requestedY: number,
+    tiles: TileType[][],
+    staticBlockedPositions: ReadonlySet<string>,
+  ): IntegrationField | null {
+    this.refreshNavigationTopology(tiles, staticBlockedPositions);
+    let navigation = this.navigationFields.get(unitType);
+    if (!navigation) {
+      navigation = PathFinder.buildNavigationField(
+        tiles,
+        staticBlockedPositions,
+        getMovementProfile(unitType).navigationRadius,
+      );
+      this.navigationFields.set(unitType, navigation);
+      this.navigationFieldBuilds++;
+    }
+
+    const key = `${unitType}:${requestedX},${requestedY}`;
+    if (this.integrationFields.has(key)) {
+      const cached = this.integrationFields.get(key) ?? null;
+      this.integrationFields.delete(key);
+      this.integrationFields.set(key, cached);
+      return cached;
+    }
+    const integration = PathFinder.buildIntegrationField(
+      navigation,
+      requestedX,
+      requestedY,
+      MAX_TARGET_PROJECTION_RADIUS,
+    );
+    this.integrationFields.set(key, integration);
+    if (this.integrationFields.size > MAX_INTEGRATION_FIELD_CACHE_ENTRIES) {
+      const oldestKey = this.integrationFields.keys().next().value;
+      if (oldestKey !== undefined) this.integrationFields.delete(oldestKey);
+    }
+    this.integrationFieldBuilds++;
+    return integration;
+  }
+
+  private refreshNavigationTopology(
+    tiles: TileType[][],
+    staticBlockedPositions: ReadonlySet<string>,
+  ): void {
+    const topologySignature = [...staticBlockedPositions].sort().join(";");
+    if (tiles === this.navigationTiles && topologySignature === this.navigationTopologySignature) return;
+    this.navigationTiles = tiles;
+    this.navigationTopologySignature = topologySignature;
+    this.navigationFields.clear();
+    this.integrationFields.clear();
   }
 
   private hasUnitCollisionAt(

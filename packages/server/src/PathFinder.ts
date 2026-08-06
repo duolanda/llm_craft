@@ -1,6 +1,29 @@
 import { TileType, MAP_WIDTH, MAP_HEIGHT } from "@llmcraft/shared";
 import { isDiscBlockedByGrid } from "./navigation/NavigationGrid";
 
+const CARDINAL_DIRECTIONS = [
+  { x: 1, y: 0 },
+  { x: -1, y: 0 },
+  { x: 0, y: 1 },
+  { x: 0, y: -1 },
+] as const;
+
+export interface NavigationField {
+  readonly width: number;
+  readonly height: number;
+  readonly passable: Uint8Array;
+  readonly domains: Int32Array;
+  readonly domainCount: number;
+}
+
+export interface IntegrationField {
+  readonly navigation: NavigationField;
+  readonly requestedGoal: { x: number; y: number };
+  readonly projectedGoalCount: number;
+  readonly distances: Int32Array;
+  readonly visitedNodes: number;
+}
+
 interface Node {
   x: number;
   y: number;
@@ -53,6 +76,134 @@ class MinHeap {
 
 export class PathFinder {
   /**
+   * Builds the static cost/island layer for one movement footprint. Buildings
+   * and terrain belong here; moving units remain a local-avoidance concern.
+   */
+  static buildNavigationField(
+    tiles: TileType[][],
+    occupiedPositions: ReadonlySet<string> | undefined,
+    clearanceRadius: number,
+  ): NavigationField {
+    const width = tiles[0]?.length ?? 0;
+    const height = tiles.length;
+    const nodeCount = width * height;
+    const passable = new Uint8Array(nodeCount);
+    const domains = new Int32Array(nodeCount);
+    domains.fill(-1);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        passable[index] = isDiscBlockedByGrid(
+          x,
+          y,
+          clearanceRadius,
+          tiles,
+          occupiedPositions,
+        ) ? 0 : 1;
+      }
+    }
+
+    const queue = new Int32Array(nodeCount);
+    let domainCount = 0;
+    for (let startIndex = 0; startIndex < nodeCount; startIndex++) {
+      if (passable[startIndex] === 0 || domains[startIndex] !== -1) continue;
+      let head = 0;
+      let tail = 0;
+      queue[tail++] = startIndex;
+      domains[startIndex] = domainCount;
+      while (head < tail) {
+        const currentIndex = queue[head++]!;
+        const x = currentIndex % width;
+        const y = Math.floor(currentIndex / width);
+        for (const direction of CARDINAL_DIRECTIONS) {
+          const nextX = x + direction.x;
+          const nextY = y + direction.y;
+          if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) continue;
+          const nextIndex = nextY * width + nextX;
+          if (passable[nextIndex] === 0 || domains[nextIndex] !== -1) continue;
+          domains[nextIndex] = domainCount;
+          queue[tail++] = nextIndex;
+        }
+      }
+      domainCount++;
+    }
+
+    return { width, height, passable, domains, domainCount };
+  }
+
+  /**
+   * Builds a shared reverse integration field for a bounded goal region. All
+   * passable candidates are seeded so callers on another navigation island do
+   * not fail merely because the first equally-near projection was disconnected.
+   */
+  static buildIntegrationField(
+    navigation: NavigationField,
+    requestedX: number,
+    requestedY: number,
+    maxProjectionRadius: number,
+  ): IntegrationField | null {
+    const { width, height, passable } = navigation;
+    const distances = new Int32Array(width * height);
+    distances.fill(-1);
+    const queue = new Int32Array(width * height);
+    let head = 0;
+    let tail = 0;
+    for (let y = Math.max(0, requestedY - maxProjectionRadius); y <= Math.min(height - 1, requestedY + maxProjectionRadius); y++) {
+      for (let x = Math.max(0, requestedX - maxProjectionRadius); x <= Math.min(width - 1, requestedX + maxProjectionRadius); x++) {
+        if (Math.abs(x - requestedX) + Math.abs(y - requestedY) > maxProjectionRadius) continue;
+        const index = y * width + x;
+        if (passable[index] === 0) continue;
+        distances[index] = 0;
+        queue[tail++] = index;
+      }
+    }
+    const projectedGoalCount = tail;
+    if (projectedGoalCount === 0) return null;
+
+    while (head < tail) {
+      const currentIndex = queue[head++]!;
+      const x = currentIndex % width;
+      const y = Math.floor(currentIndex / width);
+      const nextDistance = distances[currentIndex]! + 1;
+      for (const direction of CARDINAL_DIRECTIONS) {
+        const nextX = x + direction.x;
+        const nextY = y + direction.y;
+        if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) continue;
+        const nextIndex = nextY * width + nextX;
+        if (passable[nextIndex] === 0 || distances[nextIndex] !== -1) continue;
+        distances[nextIndex] = nextDistance;
+        queue[tail++] = nextIndex;
+      }
+    }
+
+    return {
+      navigation,
+      requestedGoal: { x: requestedX, y: requestedY },
+      projectedGoalCount,
+      distances,
+      visitedNodes: tail,
+    };
+  }
+
+  static getIntegrationDistance(field: IntegrationField, x: number, y: number): number {
+    if (x < 0 || x >= field.navigation.width || y < 0 || y >= field.navigation.height) return -1;
+    return field.distances[y * field.navigation.width + x] ?? -1;
+  }
+
+  /** Allows a unit embedded by a new static footprint to escape through an adjacent navigable cell. */
+  static getStartIntegrationDistance(field: IntegrationField, x: number, y: number): number {
+    const direct = this.getIntegrationDistance(field, x, y);
+    if (direct >= 0) return direct;
+    let nearest = -1;
+    for (const direction of CARDINAL_DIRECTIONS) {
+      const distance = this.getIntegrationDistance(field, x + direction.x, y + direction.y);
+      if (distance >= 0 && (nearest < 0 || distance < nearest)) nearest = distance;
+    }
+    return nearest;
+  }
+
+  /**
    * A* 寻路算法
    * @param startX 起点 X
    * @param startY 起点 Y
@@ -68,7 +219,7 @@ export class PathFinder {
     targetX: number,
     targetY: number,
     tiles: TileType[][],
-    occupiedPositions?: Set<string>,
+    occupiedPositions?: ReadonlySet<string>,
     clearanceRadius = 0,
   ): Array<{ x: number; y: number }> {
     const width = MAP_WIDTH;
@@ -168,12 +319,10 @@ export class PathFinder {
     x: number,
     y: number
   ): Array<{ x: number; y: number }> {
-    return [
-      { x: x + 1, y }, // 右
-      { x: x - 1, y }, // 左
-      { x, y: y + 1 }, // 下
-      { x, y: y - 1 }, // 上
-    ];
+    return CARDINAL_DIRECTIONS.map((direction) => ({
+      x: x + direction.x,
+      y: y + direction.y,
+    }));
   }
 
   /**
@@ -217,7 +366,7 @@ export class PathFinder {
     targetX: number,
     targetY: number,
     tiles: TileType[][],
-    occupiedPositions?: Set<string>
+    occupiedPositions?: ReadonlySet<string>
   ): { x: number; y: number } | null {
     const path = this.findPath(
       startX,

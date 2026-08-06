@@ -47,6 +47,11 @@
 
 ## 已解决或已有明确结论
 
+### 已解决：不可达编队命令阻塞模拟 tick
+
+- **实战证据**：`match-2026-08-06T14-55-08-134Z-9e6493f9` 在 tick 349 后处理 tick 350 用时 3017ms，在 tick 378 后处理 tick 379 用时 2823ms。对应批次分别有 22/9 条 `attack_move`；两辆位于生产建筑夹缝的轻坦持续不可达。旧终点解析会从目标向全图扩圈，并对每个候选点重复执行 A*，因此 UI 实际是在等待权威 tick，而不是视觉插值漏帧。
+- **处理与验证**：静态导航拓扑现按移动 footprint 建立 connected domains，同目标请求共享有界 integration field；目标投影限制在 24 格，每个单位只对最终候选执行一次 A*，缓存固定为 64 项并在建筑拓扑变化时失效。由原 Record 还原的 20 个可移动步兵 + 2 辆被困轻坦红测从 1534ms 降至 180ms 内，且连续两 tick 均保持 20 个成功、2 个 `MOVE_BLOCKED`，第二 tick 不重建共享场；40/80/160 单位规模检查完整接单且原阈值不变。
+
 ### 已解决：晚到状态帧回跳与 500ms tick 停走
 
 - **根因与处理**：问题先后存在三层。旧客户端会从最新到达帧重新锚定 smoothstep；第一轮 FrameBuffer 修复没有接入 Live，Replay 又固定使用整数 tick 时间；第二轮虽然让 sampler 连续，却仍在 `useFrame` 中 `setDisplayUnits`，把每帧结果交给 React scheduler、重建 `Unit[]/ModelTransform[]`，最终 GPU 实例矩阵并不具备稳定逐帧更新保证。现已删除整条 `useSampledUnits` 和 fallback easing：`VisualWorld` 每帧只采样一次，模型 batch 直接写 `InstancedMesh`，血条、地面环、intent 与战斗提示读取同帧 transform。单位动作的 30fps 限流已删除。Live 使用 2 tick 显示缓冲避免周期性吃完外推后等待；Replay 正常播放不再每 tick clear buffer，整数 frame index 不再驱动模型位置。

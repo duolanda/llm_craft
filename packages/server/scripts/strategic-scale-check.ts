@@ -70,9 +70,12 @@ function benchmarkScale(combinedUnits: number): { combinedUnits: number; maxTick
   });
   const playerOneController = new GameplayController(benchmarkGame, "player_1");
   const playerTwoController = new GameplayController(benchmarkGame, "player_2");
-  playerOneController.attackMoveGroup(playerOneIds, { x: 55, y: 48 }, "line");
-  playerTwoController.attackMoveGroup(playerTwoIds, { x: 88, y: 48 }, "line");
+  executeAgentTool(playerOneController, "attack_move_unit", { unitIds: playerOneIds, x: 55, y: 48 });
+  executeAgentTool(playerTwoController, "attack_move_unit", { unitIds: playerTwoIds, x: 88, y: 48 });
   benchmarkGame.start();
+  for (const controller of [playerOneController, playerTwoController]) {
+    for (const command of controller.handleCommittedTick()) benchmarkGame.queueCommand(command);
+  }
   let maxTickMs = 0;
   const orderedUnitIds = new Set<string>();
   for (let tick = 0; tick < 2; tick++) {
@@ -94,6 +97,9 @@ for (let index = 0; index < TICKS && !game.getWinner(); index++) {
   if (index % 5 === 0) {
     await runCpu("player_1");
     await runCpu("player_2");
+  }
+  for (const controller of gameplayControllers.values()) {
+    for (const command of controller.handleCommittedTick()) game.queueCommand(command);
   }
   const startedAt = performance.now();
   game.tickUpdate();

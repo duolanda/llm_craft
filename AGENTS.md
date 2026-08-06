@@ -258,7 +258,7 @@ game.start();
 
 ### `packages/client/src/`
 - 使用 `useWebSocket` 钩子进行通信，禁止直接调用 fetch
-- 战场使用 React Three Fiber；高频实例矩阵更新留在渲染循环，避免逐帧重建大型 React state 数组
+- 战场使用 React Three Fiber；`VisualWorld` 在每个 render frame 只读 `SimulationVisualTimeline`，模型与附着视觉直接 mutation Three.js 对象/实例矩阵。禁止在 `useFrame` 中 setState、逐帧克隆 `Unit[]`，或让 replay tick index 成为模型位置时钟
 - 状态更新通过 `GameState` 类型约束，不要扩展未定义字段
 
 ### `packages/shared/src/`

@@ -2,6 +2,7 @@ import {
   AgentRunInput,
   AgentModelRequestRecord,
   AgentToolCallRecord,
+  ContextWindowLimitRecord,
 } from "@llmcraft/shared";
 import {
   AgentToolExecutionResult,
@@ -169,6 +170,7 @@ export class OpenAIAgentSession implements LLMProvider {
     let latestObservationTick = input.tick;
     let pendingAssistantMessage = warmedTurn?.assistantMessage ?? null;
     let pendingFinishReason = warmedTurn?.finishReason ?? null;
+    let contextWindowRecord: ContextWindowLimitRecord | undefined;
 
     while (true) {
       if (options.signal?.aborted) {
@@ -207,6 +209,11 @@ export class OpenAIAgentSession implements LLMProvider {
             hasAlert: Boolean(lastRuntimeAlertSignature),
           },
         });
+
+        contextWindowRecord = this.mergeContextWindowRecords(
+          contextWindowRecord,
+          this.limitActiveContextWindow(messages, persistentHistory),
+        );
 
         let response;
         try {
@@ -410,12 +417,22 @@ export class OpenAIAgentSession implements LLMProvider {
         }
       }
 
+      // Persist assistant tool declarations and every matching tool result as
+      // one valid checkpoint before another provider request can fail.
+      contextWindowRecord = this.mergeContextWindowRecords(
+        contextWindowRecord,
+        this.limitActiveContextWindow(messages, persistentHistory),
+      );
+
       if (shouldStopForStall) {
         break;
       }
     }
 
-    const contextWindow = this.limitContextWindow(persistentHistory);
+    const contextWindow = this.mergeContextWindowRecords(
+      contextWindowRecord,
+      this.limitActiveContextWindow(messages, persistentHistory),
+    );
     return {
       assistantMessages,
       toolCalls,
@@ -489,6 +506,31 @@ export class OpenAIAgentSession implements LLMProvider {
     const result = this.contextWindowLimiter.limit(history);
     this.history = result.history;
     return result.record;
+  }
+
+  private limitActiveContextWindow(messages: any[], persistentHistory: any[]): ContextWindowLimitRecord {
+    const result = this.contextWindowLimiter.limit(persistentHistory);
+    persistentHistory.splice(0, persistentHistory.length, ...result.history);
+    messages.splice(1, messages.length - 1, ...result.history);
+    this.history = structuredClone(result.history);
+    return result.record;
+  }
+
+  private mergeContextWindowRecords(
+    current: ContextWindowLimitRecord | undefined,
+    next: ContextWindowLimitRecord,
+  ): ContextWindowLimitRecord {
+    if (!current) return next;
+    return {
+      maxMessages: next.maxMessages,
+      maxBytes: next.maxBytes,
+      messagesBefore: Math.max(current.messagesBefore, next.messagesBefore),
+      messagesAfter: next.messagesAfter,
+      bytesBefore: Math.max(current.bytesBefore, next.bytesBefore),
+      bytesAfter: next.bytesAfter,
+      droppedMessages: current.droppedMessages + next.droppedMessages,
+      truncatedMessages: current.truncatedMessages + next.truncatedMessages,
+    };
   }
 
   private async createAgentCompletion(

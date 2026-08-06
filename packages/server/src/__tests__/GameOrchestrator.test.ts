@@ -159,6 +159,25 @@ describe("GameOrchestrator", () => {
     orchestrator.stop();
   });
 
+  it("backs off one repeatedly failing LLM without blocking the other side or the match clock", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const failingRun = vi.fn(async () => {
+      throw new Error("Connection error");
+    });
+    const healthyRun = vi.fn(async () => createRunResult());
+    (orchestrator as any).controllerByPlayer.player_1.run = failingRun;
+    (orchestrator as any).controllerByPlayer.player_2.run = healthyRun;
+
+    await orchestrator.start();
+    await vi.advanceTimersByTimeAsync(TICK_INTERVAL_MS * 8);
+
+    expect(orchestrator.getGame().getTick()).toBe(8);
+    expect(healthyRun).toHaveBeenCalledTimes(9);
+    expect(failingRun.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(failingRun.mock.calls.length).toBeGreaterThanOrEqual(2);
+    orchestrator.stop();
+  });
+
   it("warms up a selected first model request before starting the game clock", async () => {
     const orchestrator = new GameOrchestrator(createMatchConfig());
     const gameStartSpy = vi.spyOn(orchestrator.getGame(), "start");

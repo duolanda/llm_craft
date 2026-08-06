@@ -13,7 +13,13 @@ import {
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
 } from "@llmcraft/shared";
-import { projectRecordToMatchRecord, SimulationFrameBuffer } from "@llmcraft/record";
+import {
+  LiveSimulationClock,
+  projectRecordToMatchRecord,
+  ReplaySimulationClock,
+  SimulationFrameBuffer,
+  SimulationVisualTimeline,
+} from "@llmcraft/record";
 import { Battlefield3D } from "./components/Battlefield3D";
 import { AIOutputPanel } from "./components/AIOutputPanel";
 import { GameLog } from "./components/GameLog";
@@ -175,6 +181,23 @@ function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
   }
 }
 
+function findReplayFrameIndex(frames: ReplayFrame[], simulationTimeMs: number, tickIntervalMs: number): number {
+  let low = 0;
+  let high = frames.length - 1;
+  let result = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const frameTimeMs = (frames[middle]?.tick ?? 0) * tickIntervalMs;
+    if (frameTimeMs <= simulationTimeMs) {
+      result = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return result;
+}
+
 function App() {
   const {
     state,
@@ -212,6 +235,19 @@ function App() {
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const replayFrameBuffer = useMemo(() => new SimulationFrameBuffer(4), []);
+  const liveVisualTimeline = useMemo(
+    () => new SimulationVisualTimeline(frameBuffer, new LiveSimulationClock(frameBuffer)),
+    [frameBuffer],
+  );
+  const replayClock = useMemo(() => new ReplaySimulationClock(), []);
+  const replayVisualTimeline = useMemo(
+    () => new SimulationVisualTimeline(replayFrameBuffer, replayClock),
+    [replayClock, replayFrameBuffer],
+  );
+  const replayBufferWindowRef = useRef<{ frames: ReplayFrame[] | null; index: number }>({
+    frames: null,
+    index: -1,
+  });
   const replayQueryLoaded = useRef(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
   const [presets, setPresets] = useState<LLMPresetSummary[]>([]);
@@ -377,24 +413,28 @@ function App() {
   }, [benchmarkRunning, serverMessage]);
 
   useEffect(() => {
-    if (mode !== "replay" || !replayPlaying || replayFrames.length <= 1) {
-      return;
-    }
+    const now = performance.now();
+    const tickIntervalMs = activeReplayRecord?.definition.tickIntervalMs ?? 500;
+    const maximumMs = (replayFrames.at(-1)?.tick ?? 0) * tickIntervalMs;
+    replayClock.setBounds(0, maximumMs, now);
+    replayClock.setRate(replaySpeed, now);
+    replayClock.setPlaying(mode === "replay" && replayPlaying, now);
+    if (mode !== "replay" || !replayPlaying || replayFrames.length <= 1) return;
 
-    const interval = window.setInterval(() => {
-      setReplayFrameIndex((current) => {
-        if (current >= replayFrames.length - 1) {
-          setReplayPlaying(false);
-          return current;
-        }
-        return current + 1;
-      });
-    }, Math.max(50, (activeReplayRecord?.definition.tickIntervalMs ?? 500) / replaySpeed));
-
-    return () => {
-      window.clearInterval(interval);
+    let animationFrame = 0;
+    const updateReplayPlayhead = (renderNowMs: number) => {
+      const simulationTimeMs = replayClock.getSimulationTimeMs(renderNowMs);
+      const nextIndex = findReplayFrameIndex(replayFrames, simulationTimeMs, tickIntervalMs);
+      setReplayFrameIndex((current) => current === nextIndex ? current : nextIndex);
+      if (replayClock.isAtEnd()) {
+        setReplayPlaying(false);
+        return;
+      }
+      animationFrame = window.requestAnimationFrame(updateReplayPlayhead);
     };
-  }, [activeReplayRecord?.definition.tickIntervalMs, mode, replayFrames.length, replayPlaying, replaySpeed]);
+    animationFrame = window.requestAnimationFrame(updateReplayPlayhead);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [activeReplayRecord?.definition.tickIntervalMs, mode, replayClock, replayFrames, replayPlaying, replaySpeed]);
 
   const fetchRecordEntries = async () => {
     setRecordsLoading(true);
@@ -462,6 +502,11 @@ function App() {
 
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
+    const tickIntervalMs = record.definition.tickIntervalMs;
+    const now = performance.now();
+    replayClock.setPlaying(false, now);
+    replayClock.setBounds(0, (frames.at(-1)?.tick ?? 0) * tickIntervalMs, now);
+    replayClock.seek((frames[0]?.tick ?? 0) * tickIntervalMs, now);
     setActiveReplayRecord(record);
     setReplayFrames(frames);
     setReplayFrameIndex(0);
@@ -483,7 +528,9 @@ function App() {
         loadReplayRecord(record, REQUESTED_REPLAY_FILE);
         if (REQUESTED_REPLAY_TICK !== null && Number.isFinite(REQUESTED_REPLAY_TICK)) {
           const index = frames.findIndex((frame) => frame.tick >= REQUESTED_REPLAY_TICK);
-          setReplayFrameIndex(index >= 0 ? index : Math.max(0, frames.length - 1));
+          const resolvedIndex = index >= 0 ? index : Math.max(0, frames.length - 1);
+          replayClock.seek((frames[resolvedIndex]?.tick ?? 0) * record.definition.tickIntervalMs, performance.now());
+          setReplayFrameIndex(resolvedIndex);
         }
       })
       .catch((error) => setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`));
@@ -669,9 +716,14 @@ function App() {
     ? replayTickIntervalMs
     : frameBuffer.getLatestFrame()?.metadata.tickIntervalMs ?? 500;
   useEffect(() => {
-    replayFrameBuffer.clear();
+    const previousWindow = replayBufferWindowRef.current;
+    const sequentialAdvance = previousWindow.frames === replayFrames
+      && replayFrameIndex >= previousWindow.index
+      && replayFrameIndex <= previousWindow.index + 1;
+    if (!sequentialAdvance) replayFrameBuffer.clear();
     const start = Math.max(0, replayFrameIndex - 1);
-    for (let index = start; index <= replayFrameIndex; index++) {
+    const end = Math.min(replayFrames.length - 1, replayFrameIndex + 2);
+    for (let index = start; index <= end; index++) {
       const frame = replayFrames[index];
       if (!frame) continue;
       replayFrameBuffer.ingest({
@@ -685,8 +737,9 @@ function App() {
         },
         state: frame.state,
         aiOutputs: frame.aiOutputs,
-      });
+      }, frame.tick * replayTickIntervalMs);
     }
+    replayBufferWindowRef.current = { frames: replayFrames, index: replayFrameIndex };
   }, [replayFrameBuffer, replayFrameIndex, replayFrames, replayTickIntervalMs]);
   const sourceDisplayState: GameState | null = mode === "replay" ? replayFrame?.state ?? null : state;
   const displayState = useMemo(
@@ -1001,6 +1054,7 @@ function App() {
                   className="hud-btn hud-btn-ghost"
                   onClick={() => {
                     setReplayPlaying(false);
+                    replayClock.seek((replayFrames[0]?.tick ?? 0) * replayTickIntervalMs, performance.now());
                     setReplayFrameIndex(0);
                   }}
                   disabled={replayFrames.length === 0}
@@ -1032,7 +1086,9 @@ function App() {
                 value={Math.min(replayFrameIndex, Math.max(replayFrames.length - 1, 0))}
                 onChange={(event) => {
                   setReplayPlaying(false);
-                  setReplayFrameIndex(Number(event.target.value));
+                  const index = Number(event.target.value);
+                  replayClock.seek((replayFrames[index]?.tick ?? 0) * replayTickIntervalMs, performance.now());
+                  setReplayFrameIndex(index);
                 }}
                 disabled={replayFrames.length <= 1}
               />
@@ -1080,8 +1136,7 @@ function App() {
               <div className="viewport">
                 <Battlefield3D
                   state={displayState}
-                  frameBuffer={mode === "replay" ? replayFrameBuffer : undefined}
-                  simulationTimeMs={mode === "replay" ? (replayFrame?.tick ?? 0) * replayTickIntervalMs : undefined}
+                  timeline={mode === "replay" ? replayVisualTimeline : liveVisualTimeline}
                 />
               </div>
             </div>

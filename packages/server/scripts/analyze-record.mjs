@@ -192,6 +192,7 @@ console.log("");
 
 for (const playerId of players) {
   const entry = metrics[playerId];
+  const agentReport = registryReport.agents.find((agent) => agent.playerId === playerId);
   const flags = registryReport.findings
     .filter((finding) => finding.scopeId === playerId)
     .map((finding) => finding.detectorId);
@@ -211,6 +212,14 @@ for (const playerId of players) {
   } else {
     console.log(`  agent: modelRequests=${entry.modelRequests}, toolCalls=${entry.toolCalls}`);
     console.log(`  tools: ${formatCounter(entry.toolNames)}`);
+    if (agentReport) {
+      console.log(`  requests: status=${formatCounter(agentReport.statusCounts)}; finish=${formatCounter(agentReport.finishReasonCounts)}`);
+      console.log(`  errors: total=${agentReport.errorCount}; longestSame=${agentReport.longestSameErrorStreak.count} (${agentReport.longestSameErrorStreak.error ?? "none"}); zeroOutput=${agentReport.zeroOutputCount}; emptyMaxToken=${agentReport.emptyMaxTokenCount}`);
+      console.log(`  latencyMs: p50=${agentReport.latencyMs.p50}, p90=${agentReport.latencyMs.p90}, max=${agentReport.latencyMs.max}`);
+      console.log(`  tokens: input=${agentReport.tokens.input}, output=${agentReport.tokens.output}, reasoning=${agentReport.tokens.reasoning}, cache=${agentReport.tokens.cachedInput}`);
+      console.log(`  context: dropped=${agentReport.contextDroppedMessages}, truncated=${agentReport.contextTruncatedMessages}`);
+      console.log(`  progress: tools=${agentReport.successfulToolCalls}/${agentReport.toolCalls} successful; turnsWithTools=${agentReport.turnsWithTools}; commands=${agentReport.commandsSubmitted}; turnsWithCommands=${agentReport.turnsWithCommands}; commandResults=${agentReport.successfulCommandResults}/${agentReport.commandResults} successful`);
+    }
   }
   console.log(`  commands: ${formatCounter(entry.commands)}`);
   console.log(`  results: ${formatCounter(entry.commandResults)}`);
@@ -232,6 +241,7 @@ function isAgentMetricsUnavailable(playerId) {
 
 if (options.timeline) {
   printTimeline(analysis.timeline, options.focusPlayer);
+  printAgentRequestTimeline(registryReport.agents, options.focusPlayer);
 }
 
 if (options.snapshotTicks.length > 0) {
@@ -586,6 +596,38 @@ function printTimeline(timeline, focusPlayer) {
     }
     console.log(`  T${event.tick} ${event.playerId} ${event.type}: ${event.label}`);
   }
+  console.log("");
+}
+
+function printAgentRequestTimeline(agents, focusPlayer) {
+  console.log("Agent request timeline:");
+  let printed = false;
+  for (const agent of agents) {
+    if (focusPlayer && agent.playerId !== focusPlayer) continue;
+    let streak = null;
+    const flush = () => {
+      if (!streak || streak.count < 2) return;
+      printed = true;
+      console.log(`  T${streak.firstTick}-${streak.lastTick} ${agent.playerId} error_streak x${streak.count}: ${streak.error}`);
+    };
+    for (const request of agent.requests) {
+      if (request.status !== "error") {
+        flush();
+        streak = null;
+        continue;
+      }
+      const error = request.error ?? request.finishReason;
+      if (streak?.error === error) {
+        streak.count += 1;
+        streak.lastTick = request.executeTick;
+      } else {
+        flush();
+        streak = { error, count: 1, firstTick: request.requestTick, lastTick: request.executeTick };
+      }
+    }
+    flush();
+  }
+  if (!printed) console.log("  no repeated request errors");
   console.log("");
 }
 

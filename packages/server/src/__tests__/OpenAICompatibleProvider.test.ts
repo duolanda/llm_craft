@@ -40,6 +40,57 @@ function createProviderWithResponses(responses: unknown[]) {
 }
 
 describe("OpenAICompatibleProvider", () => {
+  it("persists completed tool results before a later request failure so the next turn has no orphan tool calls", async () => {
+    const provider = new OpenAICompatibleProvider({
+      providerType: "openai-compatible",
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      model: "test-model",
+    });
+    const connectionError = new Error("Connection error");
+    const create = vi.fn()
+      .mockResolvedValueOnce({
+        choices: [{
+          finish_reason: "tool_calls",
+          message: {
+            role: "assistant",
+            content: "read first",
+            tool_calls: [{ id: "call-1", function: { name: "get_my_state", arguments: "{}" } }],
+          },
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      })
+      .mockRejectedValueOnce(connectionError)
+      .mockRejectedValueOnce(connectionError)
+      .mockRejectedValueOnce(connectionError)
+      .mockResolvedValueOnce({
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "recovered", tool_calls: [] } }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      });
+    (provider as any).transport.client = { chat: { completions: { create } } };
+    const options = {
+      tools: [{ name: "get_my_state", description: "read", parameters: { type: "object" } }],
+      executeTool: async () => ({ effect: "read" as const, result: { ok: true, tick: 42 } }),
+      getRuntimeState: () => ({ mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null }),
+    };
+
+    await provider.warmupAgent(createInput(), options);
+    await expect(provider.runAgent(createInput(), options)).rejects.toThrow("Connection error");
+    await expect(provider.runAgent({ ...createInput(), tick: 43 }, options)).resolves.toMatchObject({
+      stopReason: "stop",
+    });
+
+    const recoveryRequest = (create.mock.calls[4]?.[0] as { messages?: Array<Record<string, any>> } | undefined)?.messages ?? [];
+    const assistantIndex = recoveryRequest.findIndex((message) => (
+      message.role === "assistant"
+      && Array.isArray(message.tool_calls)
+      && message.tool_calls.some((call: { id?: string }) => call.id === "call-1")
+    ));
+    const matchingToolIndex = recoveryRequest.findIndex((message) => message.role === "tool" && message.tool_call_id === "call-1");
+    expect(assistantIndex).toBeGreaterThanOrEqual(0);
+    expect(matchingToolIndex).toBeGreaterThan(assistantIndex);
+  });
+
   it("records explicit retries and the exact message snapshot for each model attempt", async () => {
     const provider = new OpenAICompatibleProvider({
       providerType: "openai-compatible",

@@ -35,8 +35,52 @@ export interface RecordAnalysisReport {
     durationTicks: number;
     durationSeconds: number;
   };
+  agents: AgentAnalysisReport[];
   metrics: MetricValue[];
   findings: DetectorFinding[];
+}
+
+export interface AgentRequestDiagnostic {
+  turnId?: string;
+  requestTick: number;
+  executeTick: number;
+  requestIndex: number;
+  status: "success" | "error";
+  finishReason: string;
+  error?: string;
+  latencyMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  messageCount: number;
+  toolCount: number;
+}
+
+export interface AgentAnalysisReport {
+  playerId: PlayerId;
+  requestCount: number;
+  requests: AgentRequestDiagnostic[];
+  statusCounts: Record<string, number>;
+  finishReasonCounts: Record<string, number>;
+  errorCount: number;
+  errorCounts: Record<string, number>;
+  longestSameErrorStreak: { count: number; error: string | null };
+  zeroOutputCount: number;
+  emptyMaxTokenCount: number;
+  latencyMs: { p50: number; p90: number; max: number };
+  tokens: { input: number; output: number; reasoning: number; cachedInput: number };
+  contextDroppedMessages: number;
+  contextTruncatedMessages: number;
+  toolCalls: number;
+  successfulToolCalls: number;
+  invalidToolCalls: number;
+  turnsWithTools: number;
+  commandsSubmitted: number;
+  turnsWithCommands: number;
+  commandResults: number;
+  successfulCommandResults: number;
+  requestTickRange: { first: number | null; last: number | null };
 }
 
 const DETECTORS: readonly DetectorDefinition[] = [
@@ -44,6 +88,8 @@ const DETECTORS: readonly DetectorDefinition[] = [
   { id: "slow_model_p90", ruleset: "*", metricId: "agent.request_latency_p90", operator: ">=", threshold: 5000, severity: "warning" },
   { id: "noisy_tools", ruleset: "*", metricId: "agent.invalid_tool_ratio", operator: ">", threshold: 0.25, severity: "warning" },
   { id: "low_command_success", ruleset: "*", metricId: "agent.command_success_ratio", operator: "<", threshold: 0.75, severity: "warning" },
+  { id: "request_error_storm", ruleset: "*", metricId: "agent.longest_same_error_streak", operator: ">=", threshold: 5, severity: "warning" },
+  { id: "empty_max_token_response", ruleset: "*", metricId: "agent.empty_max_token_requests", operator: ">=", threshold: 1, severity: "warning" },
 ] as const;
 
 export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
@@ -54,6 +100,7 @@ export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
     value("match.duration_ticks", "match", durationTicks),
     value("match.duration_seconds", "match", durationTicks * tickIntervalMs / 1000),
   ];
+  const agents: AgentAnalysisReport[] = [];
   for (const initialPlayer of record.initialState.players) {
     const playerId = initialPlayer.id;
     const finalPlayer = record.finalState.players.find((player) => player.id === playerId) ?? initialPlayer;
@@ -82,6 +129,8 @@ export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
       const data = result.data as { success?: boolean; result_code?: number } | undefined;
       return data?.success === true || data?.result_code === RESULT_CODES.OK;
     }).length;
+    const agent = buildAgentAnalysis(playerId, turns, commandFacts, commandSuccesses);
+    agents.push(agent);
     metrics.push(
       value("economy.final_credits", playerId, finalPlayer.resources.credits),
       value("economy.peak_credits", playerId, peakCredits),
@@ -91,12 +140,22 @@ export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
       value("agent.model_requests", playerId, requests.length || turns.reduce((sum, turn) => sum + (turn.metrics?.modelRequests ?? 0), 0)),
       value("agent.request_latency_median", playerId, percentile(latencies, 0.5)),
       value("agent.request_latency_p90", playerId, percentile(latencies, 0.9)),
+      value("agent.request_latency_max", playerId, agent.latencyMs.max),
       value("agent.input_tokens", playerId, sum(requests.map((request) => request.inputTokens))),
       value("agent.output_tokens", playerId, sum(requests.map((request) => request.outputTokens))),
+      value("agent.reasoning_tokens", playerId, agent.tokens.reasoning),
       value("agent.cached_input_tokens", playerId, sum(requests.map((request) => request.cachedInputTokens))),
+      value("agent.request_errors", playerId, agent.errorCount),
+      value("agent.longest_same_error_streak", playerId, agent.longestSameErrorStreak.count),
+      value("agent.zero_output_requests", playerId, agent.zeroOutputCount),
+      value("agent.empty_max_token_requests", playerId, agent.emptyMaxTokenCount),
+      value("agent.context_dropped_messages", playerId, agent.contextDroppedMessages),
+      value("agent.context_truncated_messages", playerId, agent.contextTruncatedMessages),
       value("agent.tool_calls", playerId, tools.length),
       value("agent.invalid_tool_ratio", playerId, tools.length === 0 ? 0 : tools.filter((tool) => tool.isError).length / tools.length),
       value("mission.registered", playerId, turns.reduce((sum, turn) => sum + (turn.plans?.length ?? 0), 0)),
+      value("agent.commands_submitted", playerId, agent.commandsSubmitted),
+      value("agent.command_results", playerId, agent.commandResults),
     );
     if (commandFacts.length > 0) {
       metrics.push(value("agent.command_success_ratio", playerId, commandSuccesses / commandFacts.length));
@@ -117,9 +176,116 @@ export function analyzeMatchRecord(record: MatchRecord): RecordAnalysisReport {
       durationTicks,
       durationSeconds: durationTicks * tickIntervalMs / 1000,
     },
+    agents,
     metrics,
     findings: runDetectors(metrics, rulesetId),
   };
+}
+
+function buildAgentAnalysis(
+  playerId: PlayerId,
+  turns: NonNullable<MatchRecord["aiTurns"]>,
+  commandFacts: NonNullable<MatchRecord["commandResults"]>,
+  commandSuccesses: number,
+): AgentAnalysisReport {
+  const requests: AgentRequestDiagnostic[] = turns.flatMap((turn) => (
+    (turn.metrics?.modelRequestRecords ?? []).map((request) => ({
+      turnId: turn.turnId,
+      requestTick: turn.requestTick,
+      executeTick: turn.executeTick,
+      requestIndex: request.requestIndex,
+      status: requestStatus(request),
+      finishReason: request.finishReason,
+      ...(request.error ? { error: request.error } : {}),
+      ...(request.latencyMs !== undefined ? { latencyMs: request.latencyMs } : {}),
+      ...(request.inputTokens !== undefined ? { inputTokens: request.inputTokens } : {}),
+      ...(request.outputTokens !== undefined ? { outputTokens: request.outputTokens } : {}),
+      ...(request.reasoningTokens !== undefined ? { reasoningTokens: request.reasoningTokens } : {}),
+      ...(request.cachedInputTokens !== undefined ? { cachedInputTokens: request.cachedInputTokens } : {}),
+      messageCount: request.messageCount,
+      toolCount: request.toolCount,
+    }))
+  ));
+  const statusCounts = countStrings(requests.map((request) => request.status));
+  const finishReasonCounts = countStrings(requests.map((request) => request.finishReason));
+  const errorRequests = requests.filter((request) => request.status === "error");
+  const errorCounts = countStrings(errorRequests.map((request) => request.error?.trim() || request.finishReason));
+  const longestSameErrorStreak = longestErrorStreak(requests);
+  const latencies = requests.map((request) => request.latencyMs).filter((entry): entry is number => entry !== undefined);
+  const tools = turns.flatMap((turn) => turn.toolCalls ?? []);
+  const commands = turns.flatMap((turn) => turn.commands ?? []);
+  const requestTicks = turns
+    .filter((turn) => (turn.metrics?.modelRequestRecords?.length ?? turn.metrics?.modelRequests ?? 0) > 0)
+    .map((turn) => turn.requestTick);
+  return {
+    playerId,
+    requestCount: requests.length || turns.reduce((total, turn) => total + (turn.metrics?.modelRequests ?? 0), 0),
+    requests,
+    statusCounts,
+    finishReasonCounts,
+    errorCount: errorRequests.length,
+    errorCounts,
+    longestSameErrorStreak,
+    zeroOutputCount: requests.filter((request) => request.status === "success" && request.outputTokens === 0).length,
+    emptyMaxTokenCount: requests.filter((request) => (
+      request.status === "success"
+      && request.outputTokens === 0
+      && (request.finishReason === "length" || request.finishReason === "max_tokens")
+    )).length,
+    latencyMs: {
+      p50: percentile(latencies, 0.5),
+      p90: percentile(latencies, 0.9),
+      max: latencies.length > 0 ? Math.max(...latencies) : 0,
+    },
+    tokens: {
+      input: sum(requests.map((request) => request.inputTokens)),
+      output: sum(requests.map((request) => request.outputTokens)),
+      reasoning: sum(requests.map((request) => request.reasoningTokens)),
+      cachedInput: sum(requests.map((request) => request.cachedInputTokens)),
+    },
+    contextDroppedMessages: sum(turns.map((turn) => turn.metrics?.contextWindow?.droppedMessages)),
+    contextTruncatedMessages: sum(turns.map((turn) => turn.metrics?.contextWindow?.truncatedMessages)),
+    toolCalls: tools.length || turns.reduce((total, turn) => total + (turn.metrics?.toolCalls ?? 0), 0),
+    successfulToolCalls: tools.filter((tool) => !tool.isError).length,
+    invalidToolCalls: tools.filter((tool) => tool.isError).length,
+    turnsWithTools: turns.filter((turn) => (turn.toolCalls?.length ?? 0) > 0).length,
+    commandsSubmitted: commands.length,
+    turnsWithCommands: turns.filter((turn) => (turn.commands?.length ?? 0) > 0).length,
+    commandResults: commandFacts.length,
+    successfulCommandResults: commandSuccesses,
+    requestTickRange: {
+      first: requestTicks.length > 0 ? Math.min(...requestTicks) : null,
+      last: requestTicks.length > 0 ? Math.max(...requestTicks) : null,
+    },
+  };
+}
+
+function requestStatus(request: NonNullable<NonNullable<MatchRecord["aiTurns"]>[number]["metrics"]["modelRequestRecords"]>[number]): "success" | "error" {
+  if (request.status) return request.status;
+  return request.error || request.finishReason === "request_error" ? "error" : "success";
+}
+
+function countStrings(values: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entry of values) counts[entry] = (counts[entry] ?? 0) + 1;
+  return counts;
+}
+
+function longestErrorStreak(requests: AgentRequestDiagnostic[]): { count: number; error: string | null } {
+  let longest = { count: 0, error: null as string | null };
+  let current = { count: 0, error: null as string | null };
+  for (const request of requests) {
+    if (request.status !== "error") {
+      current = { count: 0, error: null };
+      continue;
+    }
+    const error = request.error?.trim() || request.finishReason;
+    current = current.error === error
+      ? { count: current.count + 1, error }
+      : { count: 1, error };
+    if (current.count > longest.count) longest = { ...current };
+  }
+  return longest;
 }
 
 export function runDetectors(metrics: readonly MetricValue[], rulesetId = "standard"): DetectorFinding[] {

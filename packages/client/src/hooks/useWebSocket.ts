@@ -7,6 +7,7 @@ import {
   PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
+  ServerMessage,
   ServerStateMessage,
   isServerMessage,
 } from "@llmcraft/shared";
@@ -58,24 +59,17 @@ export function useWebSocket(url: string, enabled = true) {
     }
     observedMatchIdRef.current = null;
     frameBufferRef.current.clear();
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log("WebSocket 已连接");
-      setConnected(true);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-
-        if (!isServerMessage(parsed)) {
-          console.warn("收到未知的服务端消息:", parsed);
-          return;
-        }
-
-        switch (parsed.type) {
+    const delayedStateTimers = new Set<number>();
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    const requestedStateJitterMs = import.meta.env.DEV
+      ? Number(new URLSearchParams(window.location.search).get("stateJitterMs") ?? 0)
+      : 0;
+    const stateJitterMs = Number.isFinite(requestedStateJitterMs)
+      ? Math.max(0, Math.min(1_000, requestedStateJitterMs))
+      : 0;
+    const processServerMessage = (parsed: ServerMessage) => {
+      switch (parsed.type) {
           case "state":
             setServerMessage(null);
             if (parsed.observedMatch?.matchId !== observedMatchIdRef.current) {
@@ -142,23 +136,74 @@ export function useWebSocket(url: string, enabled = true) {
             }));
             setWarmupMessage(parsed.message ?? null);
             break;
-        }
-      } catch (e) {
-        console.error("消息解析错误:", e);
       }
     };
 
-    ws.onclose = () => {
-      console.log("WebSocket 已断开");
-      setConnected(false);
+    const connect = () => {
+      if (disposed) return;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("WebSocket 已连接");
+        setConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+
+          if (!isServerMessage(parsed)) {
+            console.warn("收到未知的服务端消息:", parsed);
+            return;
+          }
+
+          if (parsed.type === "state" && parsed.frame && stateJitterMs > 0) {
+            // DEV-only deterministic +/- jitter around a positive delay. The
+            // alternating delay intentionally makes some frames arrive late.
+            const delayMs = parsed.frame.metadata.frameSequence % 2 === 0 ? stateJitterMs * 2 : 0;
+            const timer = window.setTimeout(() => {
+              delayedStateTimers.delete(timer);
+              processServerMessage(parsed);
+            }, delayMs);
+            delayedStateTimers.add(timer);
+            return;
+          }
+
+          processServerMessage(parsed);
+        } catch (e) {
+          console.error("消息解析错误:", e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket 已断开");
+        if (wsRef.current === ws) wsRef.current = null;
+        setConnected(false);
+        observedMatchIdRef.current = null;
+        frameBufferRef.current.clear();
+        if (!disposed && reconnectTimer === null) {
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 1_000);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket 错误:", error);
+      };
     };
 
-    ws.onerror = (error) => {
-      console.error("WebSocket 错误:", error);
-    };
+    connect();
 
     return () => {
-      ws.close();
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      for (const timer of delayedStateTimers) window.clearTimeout(timer);
+      delayedStateTimers.clear();
+      wsRef.current?.close();
+      wsRef.current = null;
     };
   }, [enabled, url]);
 

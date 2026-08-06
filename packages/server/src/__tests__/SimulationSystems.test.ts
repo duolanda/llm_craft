@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, getUnitStats, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { WorldState } from "../WorldState";
 import { ConstructionSystem } from "../simulation/ConstructionSystem";
@@ -86,6 +86,28 @@ describe("simulation systems", () => {
     expect(result).toBe(RESULT_CODES.OK);
     new MovementSystem().step(world);
     expect({ x: worker.x, y: worker.y }).not.toEqual(start);
+  });
+
+  it("moves an isolated unit monotonically along a straight target without lateral drift or overspeed", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const soldier = world.createUnit(UNIT_TYPES.SOLDIER, 50, 30, "player_1");
+    soldier.path = Array.from({ length: 8 }, (_, index) => ({ x: 51 + index, y: 30 }));
+    soldier.pathTarget = { x: 58, y: 30 };
+    const positions = [{ x: soldier.x, y: soldier.y }];
+
+    for (let tick = 0; tick < 6; tick++) {
+      new MovementSystem().step(world);
+      positions.push({ x: soldier.x, y: soldier.y });
+    }
+
+    const maxStep = getUnitStats(soldier.type).speed;
+    for (let index = 1; index < positions.length; index++) {
+      const previous = positions[index - 1]!;
+      const current = positions[index]!;
+      expect(current.x).toBeGreaterThan(previous.x);
+      expect(current.y).toBeCloseTo(30, 8);
+      expect(Math.hypot(current.x - previous.x, current.y - previous.y)).toBeLessThanOrEqual(maxStep + 1e-8);
+    }
   });
 
   it("updates a tank's authoritative hull heading when it turns", () => {

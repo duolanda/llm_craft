@@ -5,6 +5,7 @@ import {
   type MatchDefinition,
   type StateProjectionDelta,
   type StateProjectionFrame,
+  type Unit,
 } from "@llmcraft/shared";
 
 export * from "./analysis.js";
@@ -102,21 +103,188 @@ export function applyStateProjectionDelta(
   return next;
 }
 
+export const SIMULATION_FRAME_SNAP_DISTANCE = 10;
+
+export interface SampledEntityTransform {
+  x: number;
+  y: number;
+  heading?: number;
+}
+
+export interface SimulationClock {
+  getSimulationTimeMs(nowMs: number): number;
+}
+
+export class LiveSimulationClock implements SimulationClock {
+  constructor(private readonly frameBuffer: SimulationFrameBuffer) {}
+
+  getSimulationTimeMs(nowMs: number): number {
+    return this.frameBuffer.getRenderSimulationTime(nowMs);
+  }
+}
+
+export class ReplaySimulationClock implements SimulationClock {
+  private playheadMs = 0;
+  private minimumMs = 0;
+  private maximumMs = 0;
+  private rate = 1;
+  private playing = false;
+  private lastNowMs: number | null = null;
+
+  getSimulationTimeMs(nowMs: number): number {
+    if (this.lastNowMs !== null && this.playing && nowMs > this.lastNowMs) {
+      this.playheadMs = clampSimulationTime(
+        this.playheadMs + (nowMs - this.lastNowMs) * this.rate,
+        this.minimumMs,
+        this.maximumMs,
+      );
+    }
+    this.lastNowMs = this.lastNowMs === null ? nowMs : Math.max(this.lastNowMs, nowMs);
+    return this.playheadMs;
+  }
+
+  setBounds(minimumMs: number, maximumMs: number, nowMs: number): void {
+    this.getSimulationTimeMs(nowMs);
+    this.minimumMs = Math.min(minimumMs, maximumMs);
+    this.maximumMs = Math.max(minimumMs, maximumMs);
+    this.playheadMs = clampSimulationTime(this.playheadMs, this.minimumMs, this.maximumMs);
+  }
+
+  seek(simulationTimeMs: number, nowMs: number): void {
+    this.playheadMs = clampSimulationTime(simulationTimeMs, this.minimumMs, this.maximumMs);
+    this.lastNowMs = nowMs;
+  }
+
+  setPlaying(playing: boolean, nowMs: number): void {
+    this.getSimulationTimeMs(nowMs);
+    this.playing = playing;
+    this.lastNowMs = nowMs;
+  }
+
+  setRate(rate: number, nowMs: number): void {
+    this.getSimulationTimeMs(nowMs);
+    this.rate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    this.lastNowMs = nowMs;
+  }
+
+  isAtEnd(): boolean {
+    return this.playheadMs >= this.maximumMs;
+  }
+}
+
+export class SimulationVisualTimeline {
+  constructor(
+    private readonly frameBuffer: SimulationFrameBuffer,
+    private readonly clock: SimulationClock,
+  ) {}
+
+  getSimulationTimeMs(nowMs: number): number {
+    return this.clock.getSimulationTimeMs(nowMs);
+  }
+
+  sampleEntityTransform(entityId: string, nowMs: number): SampledEntityTransform | null {
+    return this.sampleEntityTransformAtSimulationTime(entityId, this.getSimulationTimeMs(nowMs));
+  }
+
+  sampleEntityTransformAtSimulationTime(
+    entityId: string,
+    simulationTimeMs: number,
+  ): SampledEntityTransform | null {
+    return this.frameBuffer.sampleEntityTransform(entityId, simulationTimeMs);
+  }
+
+  sampleEntityPosition(entityId: string, nowMs: number): { x: number; y: number } | null {
+    const transform = this.sampleEntityTransform(entityId, nowMs);
+    return transform ? { x: transform.x, y: transform.y } : null;
+  }
+}
+
+export interface VisualTimelineSampler {
+  getSimulationTimeMs(nowMs: number): number;
+  sampleEntityTransformAtSimulationTime(
+    entityId: string,
+    simulationTimeMs: number,
+  ): SampledEntityTransform | null;
+}
+
+export interface VisualUnitTransform extends SampledEntityTransform {
+  bodyHeading: number;
+  aimHeading: number;
+}
+
+/** Mutable render-only entity world, updated once per visual frame. */
+export class VisualWorld {
+  private readonly transforms = new Map<string, VisualUnitTransform>();
+  private readonly liveIds = new Set<string>();
+  private simulationTimeMs = 0;
+  private frame = 0;
+
+  step(units: readonly Unit[], timeline: VisualTimelineSampler | undefined, nowMs: number): void {
+    this.frame += 1;
+    this.simulationTimeMs = timeline?.getSimulationTimeMs(nowMs) ?? nowMs;
+
+    this.liveIds.clear();
+    for (const unit of units) {
+      this.liveIds.add(unit.id);
+      const sampled = timeline?.sampleEntityTransformAtSimulationTime(unit.id, this.simulationTimeMs);
+      const transform = this.transforms.get(unit.id) ?? {
+        x: unit.x,
+        y: unit.y,
+        heading: unit.heading,
+        bodyHeading: 0,
+        aimHeading: 0,
+      };
+      transform.x = sampled?.x ?? unit.x;
+      transform.y = sampled?.y ?? unit.y;
+      transform.heading = sampled?.heading ?? unit.heading;
+      this.transforms.set(unit.id, transform);
+    }
+
+    for (const entityId of this.transforms.keys()) {
+      if (!this.liveIds.has(entityId)) this.transforms.delete(entityId);
+    }
+
+    for (const unit of units) {
+      const transform = this.transforms.get(unit.id)!;
+      transform.bodyHeading = getVisualBodyHeading(unit, transform);
+      transform.aimHeading = getVisualAimHeading(unit, transform, this.transforms);
+    }
+  }
+
+  getTransform(entityId: string): VisualUnitTransform | undefined {
+    return this.transforms.get(entityId);
+  }
+
+  getSimulationTimeMs(): number {
+    return this.simulationTimeMs;
+  }
+
+  getFrame(): number {
+    return this.frame;
+  }
+}
+
 type BufferedSimulationFrame = {
   frame: StateProjectionFrame;
   state: GameState;
   receivedAtMs: number;
-  positions: Map<string, { x: number; y: number }>;
+  transforms: Map<string, SampledEntityTransform>;
 };
 
 /** Bounded simulation-time buffer shared by live rendering and record playback. */
 export class SimulationFrameBuffer {
   private frames: BufferedSimulationFrame[] = [];
+  private renderSimulationTimeMs: number | null = null;
+  private lastRenderNowMs: number | null = null;
+  private arrivalOffsetsMs: number[] = [];
 
   constructor(private readonly capacity = 8) {}
 
   clear(): void {
     this.frames = [];
+    this.renderSimulationTimeMs = null;
+    this.lastRenderNowMs = null;
+    this.arrivalOffsetsMs = [];
   }
 
   ingest(frame: StateProjectionFrame, receivedAtMs = performance.now()): GameState | null {
@@ -129,8 +297,12 @@ export class SimulationFrameBuffer {
       if (!latest || frame.baseFrameSequence !== latest.frame.metadata.frameSequence) return null;
       state = applyStateProjectionDelta(latest.state, frame.delta);
     }
-    this.frames.push({ frame, state, receivedAtMs, positions: indexEntityPositions(state) });
+    this.frames.push({ frame, state, receivedAtMs, transforms: indexEntityTransforms(state) });
+    this.arrivalOffsetsMs.push(receivedAtMs - frame.metadata.simulationTimeMs);
     if (this.frames.length > this.capacity) this.frames.splice(0, this.frames.length - this.capacity);
+    if (this.arrivalOffsetsMs.length > this.capacity) {
+      this.arrivalOffsetsMs.splice(0, this.arrivalOffsetsMs.length - this.capacity);
+    }
     return state;
   }
 
@@ -145,17 +317,59 @@ export class SimulationFrameBuffer {
   getRenderSimulationTime(nowMs = performance.now()): number {
     const latest = this.frames.at(-1);
     if (!latest) return 0;
-    const delayMs = latest.frame.metadata.tickIntervalMs * 1.1;
-    const extrapolated = latest.frame.metadata.simulationTimeMs + (nowMs - latest.receivedAtMs) - delayMs;
-    const earliestTime = this.frames[0]?.frame.metadata.simulationTimeMs ?? extrapolated;
-    return Math.max(earliestTime, Math.min(latest.frame.metadata.simulationTimeMs, extrapolated));
+    // Stay two authoritative ticks behind live simulation. This costs one
+    // second at the default cadence, but keeps a known frame on both sides of
+    // the render playhead through ordinary arrival jitter instead of consuming
+    // 0.8 tick of extrapolation and visibly waiting for every next snapshot.
+    const delayMs = latest.frame.metadata.tickIntervalMs * 2;
+    const earliestTime = this.frames[0]?.frame.metadata.simulationTimeMs ?? latest.frame.metadata.simulationTimeMs;
+    const minimumArrivalOffsetMs = Math.min(...this.arrivalOffsetsMs);
+    const desiredTimeMs = nowMs - minimumArrivalOffsetMs - delayMs;
+
+    if (this.renderSimulationTimeMs === null || this.lastRenderNowMs === null) {
+      this.renderSimulationTimeMs = Math.max(
+        earliestTime,
+        Math.min(latest.frame.metadata.simulationTimeMs, desiredTimeMs),
+      );
+      this.lastRenderNowMs = nowMs;
+      return this.renderSimulationTimeMs;
+    }
+
+    const elapsedMs = Math.max(0, nowMs - this.lastRenderNowMs);
+    const currentTimeMs = this.renderSimulationTimeMs;
+    let nextTimeMs = currentTimeMs;
+    if (desiredTimeMs > currentTimeMs) {
+      // Normal playback follows wall time exactly. After a resync, close a large
+      // lag gradually instead of jumping or starting another easing transition.
+      nextTimeMs = Math.min(desiredTimeMs, currentTimeMs + elapsedMs * 1.25);
+    } else if (currentTimeMs > earliestTime && latest.frame.metadata.simulationTimeMs > currentTimeMs) {
+      // Never reverse for a late frame. A slightly slower clock lets a changed
+      // network offset converge without a visible freeze.
+      nextTimeMs = currentTimeMs + elapsedMs * 0.75;
+    }
+
+    const extrapolationLimitMs = latest.frame.metadata.tickIntervalMs * 0.8;
+    nextTimeMs = Math.min(nextTimeMs, latest.frame.metadata.simulationTimeMs + extrapolationLimitMs);
+    this.renderSimulationTimeMs = Math.max(currentTimeMs, nextTimeMs);
+    this.lastRenderNowMs = Math.max(this.lastRenderNowMs, nowMs);
+    return this.renderSimulationTimeMs;
   }
 
-  sampleEntityPosition(
+  sampleEntityTransform(
     entityId: string,
     simulationTimeMs = this.getRenderSimulationTime(),
-  ): { x: number; y: number } | null {
+  ): SampledEntityTransform | null {
     if (this.frames.length === 0) return null;
+
+    for (let index = 1; index < this.frames.length; index++) {
+      const previous = this.frames[index - 1]!;
+      const current = this.frames[index]!;
+      if (current.frame.metadata.simulationTimeMs <= simulationTimeMs) continue;
+      const from = previous.transforms.get(entityId);
+      const to = current.transforms.get(entityId);
+      if (from && to && transformDistance(from, to) > SIMULATION_FRAME_SNAP_DISTANCE) return { ...to };
+    }
+
     let before = this.frames[0]!;
     let after = this.frames.at(-1)!;
     for (const candidate of this.frames) {
@@ -165,15 +379,50 @@ export class SimulationFrameBuffer {
         break;
       }
     }
-    const from = before.positions.get(entityId) ?? null;
-    const to = after.positions.get(entityId) ?? null;
-    if (!from) return to;
-    if (!to) return from;
+    const from = before.transforms.get(entityId) ?? null;
+    const to = after.transforms.get(entityId) ?? null;
+    if (!from) return to ? { ...to } : null;
+    if (!to) return { ...from };
+
+    if (before === after && simulationTimeMs > before.frame.metadata.simulationTimeMs) {
+      const previous = this.frames.at(-2);
+      const previousTransform = previous?.transforms.get(entityId);
+      const durationMs = previous
+        ? before.frame.metadata.simulationTimeMs - previous.frame.metadata.simulationTimeMs
+        : 0;
+      if (
+        previousTransform
+        && durationMs > 0
+        && transformDistance(previousTransform, from) <= SIMULATION_FRAME_SNAP_DISTANCE
+      ) {
+        const extrapolationMs = Math.min(
+          simulationTimeMs - before.frame.metadata.simulationTimeMs,
+          before.frame.metadata.tickIntervalMs * 0.8,
+        );
+        const progress = extrapolationMs / durationMs;
+        return interpolateTransform(from, {
+          x: from.x + (from.x - previousTransform.x),
+          y: from.y + (from.y - previousTransform.y),
+          heading: extrapolateHeading(previousTransform.heading, from.heading),
+        }, progress);
+      }
+      return { ...from };
+    }
+
+    if (transformDistance(from, to) > SIMULATION_FRAME_SNAP_DISTANCE) return { ...to };
     const duration = after.frame.metadata.simulationTimeMs - before.frame.metadata.simulationTimeMs;
     const progress = duration <= 0 ? 1 : Math.max(0, Math.min(1,
       (simulationTimeMs - before.frame.metadata.simulationTimeMs) / duration,
     ));
-    return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress };
+    return interpolateTransform(from, to, progress);
+  }
+
+  sampleEntityPosition(
+    entityId: string,
+    simulationTimeMs = this.getRenderSimulationTime(),
+  ): { x: number; y: number } | null {
+    const transform = this.sampleEntityTransform(entityId, simulationTimeMs);
+    return transform ? { x: transform.x, y: transform.y } : null;
   }
 }
 
@@ -318,13 +567,73 @@ function inferDefinition(legacy: LegacyRecord): MatchDefinition {
   };
 }
 
-function indexEntityPositions(state: GameState): Map<string, { x: number; y: number }> {
-  const positions = new Map<string, { x: number; y: number }>();
+function indexEntityTransforms(state: GameState): Map<string, SampledEntityTransform> {
+  const transforms = new Map<string, SampledEntityTransform>();
   for (const player of state.players) {
-    for (const unit of player.units) positions.set(unit.id, { x: unit.x, y: unit.y });
-    for (const building of player.buildings) positions.set(building.id, { x: building.x, y: building.y });
+    for (const unit of player.units) transforms.set(unit.id, { x: unit.x, y: unit.y, heading: unit.heading });
+    for (const building of player.buildings) transforms.set(building.id, { x: building.x, y: building.y });
   }
-  return positions;
+  return transforms;
+}
+
+function transformDistance(left: SampledEntityTransform, right: SampledEntityTransform): number {
+  return Math.max(Math.abs(left.x - right.x), Math.abs(left.y - right.y));
+}
+
+function interpolateTransform(
+  from: SampledEntityTransform,
+  to: SampledEntityTransform,
+  progress: number,
+): SampledEntityTransform {
+  return {
+    x: from.x + (to.x - from.x) * progress,
+    y: from.y + (to.y - from.y) * progress,
+    heading: interpolateHeading(from.heading, to.heading, progress),
+  };
+}
+
+function getVisualBodyHeading(unit: Unit, transform: SampledEntityTransform): number {
+  if (unit.type === "light_tank" && transform.heading !== undefined) {
+    return Math.PI - transform.heading;
+  }
+  const targetX = unit.intent?.targetX;
+  const targetY = unit.intent?.targetY;
+  if (targetX === undefined || targetY === undefined) {
+    return unit.playerId === "player_1" ? Math.PI / 2 : -Math.PI / 2;
+  }
+  return Math.atan2(targetX - transform.x, targetY - transform.y);
+}
+
+function getVisualAimHeading(
+  unit: Unit,
+  transform: VisualUnitTransform,
+  transforms: ReadonlyMap<string, VisualUnitTransform>,
+): number {
+  const target = unit.intent?.targetId ? transforms.get(unit.intent.targetId) : undefined;
+  if (target) {
+    return Math.atan2(target.x - transform.x, target.y - transform.y) + Math.PI / 2;
+  }
+  const targetX = unit.intent?.targetX;
+  const targetY = unit.intent?.targetY;
+  if (targetX !== undefined && targetY !== undefined) {
+    return Math.atan2(targetX - transform.x, targetY - transform.y) + Math.PI / 2;
+  }
+  return transform.bodyHeading;
+}
+
+function interpolateHeading(from: number | undefined, to: number | undefined, progress: number): number | undefined {
+  if (from === undefined) return to;
+  if (to === undefined) return from;
+  return from + Math.atan2(Math.sin(to - from), Math.cos(to - from)) * progress;
+}
+
+function extrapolateHeading(previous: number | undefined, current: number | undefined): number | undefined {
+  if (previous === undefined || current === undefined) return current;
+  return current + Math.atan2(Math.sin(current - previous), Math.cos(current - previous));
+}
+
+function clampSimulationTime(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

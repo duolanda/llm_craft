@@ -46,6 +46,7 @@ const AI_RUNTIME_TOTAL_WARNING_MS = 5000;
 const AI_RUNTIME_SYNC_PHASE_WARNING_MS = 150;
 const AI_RUNTIME_WARNING_THROTTLE_MS = 2000;
 const MAX_TERMINAL_EVENTS = 500;
+const AI_FAILURE_BACKOFF_MAX_TICKS = 64;
 
 type ControllerMap = Record<PlayerId, DecisionController>;
 type GameplayControllerMap = Record<PlayerId, GameplayController>;
@@ -77,6 +78,8 @@ export class GameOrchestrator {
   private gameplayControllerByPlayer: GameplayControllerMap;
   private readonly cpuDecisionIntervalTicks: number;
   private lastAIDispatchTick = { player_1: -1, player_2: -1 };
+  private consecutiveAIFailures = { player_1: 0, player_2: 0 };
+  private nextAIDispatchTick = { player_1: 0, player_2: 0 };
   private isRunningAI = { player_1: false, player_2: false };
   private activeRunControllers: Partial<Record<PlayerId, AbortController>> = {};
   private warmupController: AbortController | null = null;
@@ -248,6 +251,8 @@ export class GameOrchestrator {
         drainSubAgentNotifications: () => this.subAgentTaskRegistry.drainNotifications(playerId),
       }, controller.signal);
       timings.runtimeMs = performance.now() - runtimeStartedAt;
+      this.consecutiveAIFailures[playerId] = 0;
+      this.nextAIDispatchTick[playerId] = 0;
       timings.callbackSyncMs = callbackSyncMs;
       runtimeResult = result;
       const latestStateStartedAt = performance.now();
@@ -311,6 +316,12 @@ export class GameOrchestrator {
         runtimeResult
       );
       const errorMessage = error instanceof Error ? error.message : String(error);
+      if (this.isStarted && sessionId === this.runSession) {
+        const failureCount = this.consecutiveAIFailures[playerId] + 1;
+        this.consecutiveAIFailures[playerId] = failureCount;
+        const backoffTicks = Math.min(AI_FAILURE_BACKOFF_MAX_TICKS, 2 ** Math.min(failureCount, 6));
+        this.nextAIDispatchTick[playerId] = this.game.getState().tick + backoffTicks;
+      }
       if (requestTick !== undefined && runInput && turnId && controllerDescriptor) {
         this.savedAITurns.push({
           turnId,
@@ -396,7 +407,7 @@ export class GameOrchestrator {
   private isDecisionDue(playerId: PlayerId, tick: number): boolean {
     const lastDispatchTick = this.lastAIDispatchTick[playerId];
     if (this.controllerByPlayer[playerId].getDescriptor().kind === "llm") {
-      return lastDispatchTick < tick;
+      return lastDispatchTick < tick && tick >= this.nextAIDispatchTick[playerId];
     }
     return isCPUDecisionTick(tick, lastDispatchTick, this.cpuDecisionIntervalTicks);
   }

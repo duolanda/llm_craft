@@ -1,6 +1,7 @@
 import { memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Billboard, Line, OrbitControls, useGLTF, useTexture } from "@react-three/drei";
+import { Billboard, OrbitControls, useGLTF, useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import {
   Building,
@@ -12,13 +13,12 @@ import {
   Tile,
   Unit,
 } from "@llmcraft/shared";
-import type { SimulationFrameBuffer } from "@llmcraft/record";
+import { type SimulationVisualTimeline, VisualWorld } from "@llmcraft/record";
 
 interface Battlefield3DProps {
   state: GameState | null;
   projectileFxMode?: ProjectileFxMode;
-  frameBuffer?: SimulationFrameBuffer;
-  simulationTimeMs?: number;
+  timeline?: SimulationVisualTimeline;
 }
 
 interface MapDimensions {
@@ -38,6 +38,7 @@ interface CameraFocus {
 
 interface ModelTransform {
   entityId?: string;
+  visualRotation?: "body" | "aim" | "fixed";
   position: Vec3;
   rotation: Vec3;
   scale: number;
@@ -61,6 +62,10 @@ interface InstancedModelPart {
 }
 
 interface CombatShot {
+  sourceEntityId?: string;
+  targetEntityId?: string;
+  sourceElevation?: number;
+  targetElevation?: number;
   projectileType: ActiveProjectile["projectileType"];
   source: Vec3;
   current?: Vec3;
@@ -196,9 +201,6 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const STRUCTURE_VISUAL_SCALE = 1.16;
-const UNIT_INTERPOLATION_DURATION_MS = TICK_INTERVAL_MS * 0.92;
-const UNIT_INTERPOLATION_SNAP_DISTANCE = 10;
-const UNIT_INTERPOLATION_DEADZONE = 0.075;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260620-1";
@@ -379,6 +381,63 @@ function RenderDiagnostics() {
   return null;
 }
 
+function VisualFrameSystem({
+  visualWorld,
+  units,
+  timeline,
+}: {
+  visualWorld: VisualWorld;
+  units: Unit[];
+  timeline?: SimulationVisualTimeline;
+}) {
+  const unitsRef = useRef(units);
+  unitsRef.current = units;
+
+  useLayoutEffect(() => {
+    visualWorld.step(units, timeline, performance.now());
+  }, [timeline, units, visualWorld]);
+
+  useFrame(() => {
+    visualWorld.step(unitsRef.current, timeline, performance.now());
+  }, -100);
+
+  return null;
+}
+
+function VisualUnitAnchor({
+  entityId,
+  visualWorld,
+  dimensions,
+  elevation,
+  scale,
+  children,
+}: {
+  entityId: string;
+  visualWorld: VisualWorld;
+  dimensions: MapDimensions;
+  elevation: number;
+  scale: number;
+  children: ReactNode;
+}) {
+  const groupRef = useRef<THREE.Group>(null);
+  const update = () => {
+    const group = groupRef.current;
+    const transform = visualWorld.getTransform(entityId);
+    if (!group || !transform) return;
+    group.position.set(
+      (transform.x - (dimensions.width - 1) / 2) * CELL_SIZE,
+      elevation,
+      (transform.y - (dimensions.height - 1) / 2) * CELL_SIZE,
+    );
+    group.rotation.set(0, transform.bodyHeading, 0);
+  };
+
+  useLayoutEffect(update, [dimensions, entityId, visualWorld]);
+  useFrame(update, -30);
+
+  return <group ref={groupRef} scale={scale}>{children}</group>;
+}
+
 function ProjectileFxModeMarker({ mode }: { mode: ProjectileFxMode }) {
   const { gl } = useThree();
 
@@ -493,19 +552,16 @@ function InstancedPart({
   part,
   transforms,
   castShadow,
-  frameBuffer,
+  visualWorld,
   dimensions,
-  simulationTimeMs,
 }: {
   part: InstancedModelPart;
   transforms: ModelTransform[];
   castShadow: boolean;
-  frameBuffer?: SimulationFrameBuffer;
+  visualWorld?: VisualWorld;
   dimensions?: MapDimensions;
-  simulationTimeMs?: number;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const lastMotionUpdate = useRef(0);
   const scratch = useMemo(() => ({
     rootMatrix: new THREE.Matrix4(),
     finalMatrix: new THREE.Matrix4(),
@@ -514,8 +570,9 @@ function InstancedPart({
     rotation: new THREE.Euler(),
     scale: new THREE.Vector3(),
   }), []);
-  const hasMotion = useMemo(
+  const isDynamic = useMemo(
     () => transforms.some((transform) =>
+      transform.entityId !== undefined ||
       (transform.motionAmplitude ?? 0) > 0
       || (transform.recoilAmplitude ?? 0) > 0
       || (transform.timedRecoilAmplitude ?? 0) > 0
@@ -550,17 +607,20 @@ function InstancedPart({
         : 0;
       const totalRecoilPulse = recoilPulse + timedRecoilPulse;
       const sway = Math.sin(elapsed * swayFrequency + phase) * (transform.swayAmplitude ?? 0);
-      const heading = transform.rotation[1];
-      const sampled = transform.entityId && frameBuffer && dimensions
-        ? frameBuffer.sampleEntityPosition(transform.entityId, simulationTimeMs ?? frameBuffer.getRenderSimulationTime())
-        : null;
-      const sampledPosition = sampled
-        ? toWorldPosition(sampled.x, sampled.y, dimensions!, transform.position[1])
-        : transform.position;
+      const visual = transform.entityId ? visualWorld?.getTransform(transform.entityId) : undefined;
+      const heading = visual && transform.visualRotation !== "fixed"
+        ? transform.visualRotation === "aim" ? visual.aimHeading : visual.bodyHeading
+        : transform.rotation[1];
+      const positionX = visual && dimensions
+        ? (visual.x - (dimensions.width - 1) / 2) * CELL_SIZE
+        : transform.position[0];
+      const positionZ = visual && dimensions
+        ? (visual.y - (dimensions.height - 1) / 2) * CELL_SIZE
+        : transform.position[2];
       scratch.position.set(
-        sampledPosition[0] - Math.sin(heading) * totalRecoilPulse,
-        sampledPosition[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
-        sampledPosition[2] - Math.cos(heading) * totalRecoilPulse,
+        positionX - Math.sin(heading) * totalRecoilPulse,
+        transform.position[1] + Math.abs(Math.sin(elapsed * motionFrequency + phase)) * motion,
+        positionZ - Math.cos(heading) * totalRecoilPulse,
       );
       scratch.rotation.set(transform.rotation[0], heading, transform.rotation[2] + sway);
       scratch.quaternion.setFromEuler(scratch.rotation);
@@ -570,7 +630,6 @@ function InstancedPart({
       mesh.setMatrixAt(index, scratch.finalMatrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
-    mesh.computeBoundingSphere();
   };
 
   useLayoutEffect(() => {
@@ -578,16 +637,8 @@ function InstancedPart({
   }, [part.localMatrix, transforms]);
 
   useFrame(({ clock }) => {
-    if (!hasMotion && !frameBuffer) {
-      return;
-    }
-    const elapsed = clock.getElapsedTime();
-    if (elapsed - lastMotionUpdate.current < 1 / 30) {
-      return;
-    }
-    lastMotionUpdate.current = elapsed;
-    updateMatrices(elapsed);
-  });
+    if (isDynamic) updateMatrices(clock.getElapsedTime());
+  }, -40);
 
   return (
     <instancedMesh
@@ -595,7 +646,7 @@ function InstancedPart({
       args={[part.geometry, part.material, transforms.length]}
       castShadow={castShadow}
       receiveShadow
-      frustumCulled
+      frustumCulled={!isDynamic}
     />
   );
 }
@@ -605,17 +656,15 @@ function InstancedModelBatch({
   palette,
   transforms,
   castShadow = false,
-  frameBuffer,
+  visualWorld,
   dimensions,
-  simulationTimeMs,
 }: {
   url: string;
   palette: TeamPalette;
   transforms: ModelTransform[];
   castShadow?: boolean;
-  frameBuffer?: SimulationFrameBuffer;
+  visualWorld?: VisualWorld;
   dimensions?: MapDimensions;
-  simulationTimeMs?: number;
 }) {
   const { scene } = useGLTF(url) as { scene: THREE.Object3D };
   const parts = useMemo(() => {
@@ -648,9 +697,8 @@ function InstancedModelBatch({
           part={part}
           transforms={transforms}
           castShadow={castShadow}
-          frameBuffer={frameBuffer}
+          visualWorld={visualWorld}
           dimensions={dimensions}
-          simulationTimeMs={simulationTimeMs}
         />
       ))}
     </>
@@ -894,15 +942,13 @@ function UnitBatches({
   buildings,
   dimensions,
   tick,
-  frameBuffer,
-  simulationTimeMs,
+  visualWorld,
 }: {
   units: Unit[];
   buildings: Building[];
   dimensions: MapDimensions;
   tick: number;
-  frameBuffer?: SimulationFrameBuffer;
-  simulationTimeMs?: number;
+  visualWorld: VisualWorld;
 }) {
   const objectPositions = useMemo(() => new Map(
     [...units, ...buildings].map((object) => [object.id, { x: object.x, y: object.y }]),
@@ -918,6 +964,7 @@ function UnitBatches({
       const previewFxTimedRecoil = getPreviewFxTimedRecoil(unit.id);
       const baseTransform: ModelTransform = {
         entityId: unit.id,
+        visualRotation: "body",
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
         scale: getUnitVisualScale(unit),
@@ -945,6 +992,7 @@ function UnitBatches({
         addToBatch(massBattleLod ? MODEL_URLS.light_tank_body_lod : MODEL_URLS.light_tank_body, baseTransform);
         addToBatch(massBattleLod ? MODEL_URLS.light_tank_turret_lod : MODEL_URLS.light_tank_turret, {
           ...baseTransform,
+          visualRotation: "aim",
           rotation: [0, getAimHeading(unit, objectPositions), 0],
           recoilAmplitude: firing ? 0.09 : 0,
         });
@@ -965,9 +1013,8 @@ function UnitBatches({
           palette={batch.palette}
           transforms={batch.transforms}
           castShadow
-          frameBuffer={frameBuffer}
+          visualWorld={visualWorld}
           dimensions={dimensions}
-          simulationTimeMs={simulationTimeMs}
         />
       ))}
       {units
@@ -975,10 +1022,12 @@ function UnitBatches({
         .map((unit) => {
           const palette = getTeamPalette(unit.playerId);
           return (
-            <group
+            <VisualUnitAnchor
               key={`health-${unit.id}`}
-              position={toWorldPosition(unit.x, unit.y, dimensions, 0.08)}
-              rotation={[0, getBodyHeading(unit), 0]}
+              entityId={unit.id}
+              visualWorld={visualWorld}
+              dimensions={dimensions}
+              elevation={0.08}
               scale={getUnitVisualScale(unit)}
             >
               <HealthBar
@@ -988,7 +1037,7 @@ function UnitBatches({
                 width={unit.type === "light_tank" ? 1.25 : 0.82}
                 y={unit.type === "light_tank" ? 1.28 : 1.34}
               />
-            </group>
+            </VisualUnitAnchor>
           );
         })}
     </>
@@ -999,10 +1048,12 @@ function GroundRingBatch({
   units,
   dimensions,
   color,
+  visualWorld,
 }: {
   units: Unit[];
   dimensions: MapDimensions;
   color: string;
+  visualWorld: VisualWorld;
 }) {
   const geometry = useMemo(() => new THREE.RingGeometry(0.48, 0.64, 24), []);
   const material = useMemo(() => new THREE.MeshBasicMaterial({
@@ -1018,15 +1069,33 @@ function GroundRingBatch({
     localMatrix: new THREE.Matrix4(),
   }), [geometry, material]);
   const transforms = useMemo<ModelTransform[]>(() => units.map((unit) => ({
+    entityId: unit.id,
+    visualRotation: "fixed",
     position: toWorldPosition(unit.x, unit.y, dimensions, 0.035),
     rotation: [-Math.PI / 2, 0, 0],
     scale: unit.type === "light_tank" ? 1.22 : 0.72,
   })), [dimensions, units]);
 
-  return <InstancedPart part={part} transforms={transforms} castShadow={false} />;
+  return (
+    <InstancedPart
+      part={part}
+      transforms={transforms}
+      castShadow={false}
+      visualWorld={visualWorld}
+      dimensions={dimensions}
+    />
+  );
 }
 
-function UnitReadabilityLayer({ units, dimensions }: { units: Unit[]; dimensions: MapDimensions }) {
+function UnitReadabilityLayer({
+  units,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
   const teamGroups = useMemo(() => {
     const groups = new Map<string, Unit[]>();
     for (const unit of units) {
@@ -1045,6 +1114,7 @@ function UnitReadabilityLayer({ units, dimensions }: { units: Unit[]; dimensions
           units={teamUnits}
           dimensions={dimensions}
           color={getPlayerColor(playerId)}
+          visualWorld={visualWorld}
         />
       ))}
     </>
@@ -1097,12 +1167,14 @@ function CombatEffects({
   projectiles,
   dimensions,
   tick,
+  visualWorld,
 }: {
   units: Unit[];
   buildings: Building[];
   projectiles: ActiveProjectile[];
   dimensions: MapDimensions;
   tick: number;
+  visualWorld: VisualWorld;
 }) {
   const { gl } = useThree();
   const projectileRef = useRef<THREE.InstancedMesh>(null);
@@ -1117,6 +1189,7 @@ function CombatEffects({
     quaternion: new THREE.Quaternion(),
     direction: new THREE.Vector3(),
     up: new THREE.Vector3(0, 1, 0),
+    hiddenScale: new THREE.Vector3(0.001, 0.001, 0.001),
   }), []);
   const shots = useMemo(() => {
     const objects = new Map([...units, ...buildings].map((object) => [object.id, object]));
@@ -1155,6 +1228,10 @@ function CombatEffects({
         const targetHeight = "productionQueue" in target ? 1.4 : target.type === "light_tank" ? 0.76 : 0.82;
         const projectileType = getProjectileVisualType(unit.type);
         return [{
+          sourceEntityId: unit.id,
+          targetEntityId: "productionQueue" in target ? undefined : target.id,
+          sourceElevation: sourceHeight,
+          targetElevation: targetHeight,
           projectileType,
           source: toWorldPosition(unit.x, unit.y, dimensions, sourceHeight),
           target: toWorldPosition(target.x, target.y, dimensions, targetHeight),
@@ -1204,16 +1281,27 @@ function CombatEffects({
     const tickFraction = tickFrame.tick === tick
       ? Math.min(0.98, Math.max(0, (performance.now() - tickFrame.observedAtMs) / TICK_INTERVAL_MS))
       : 0;
-    const hiddenScale = new THREE.Vector3(0.001, 0.001, 0.001);
     shots.forEach((shot, index) => {
       const progress = shot.progress !== undefined
         ? Math.min(1, shot.progress + tickFraction / Math.max(1, shot.totalTicks ?? 1))
         : ((elapsed * 1.7 + shot.phase) % 1);
-      scratch.direction.set(
-        shot.target[0] - shot.source[0],
-        shot.target[1] - shot.source[1],
-        shot.target[2] - shot.source[2],
-      ).normalize();
+      const sourceVisual = shot.sourceEntityId ? visualWorld.getTransform(shot.sourceEntityId) : undefined;
+      const targetVisual = shot.targetEntityId ? visualWorld.getTransform(shot.targetEntityId) : undefined;
+      const sourceX = sourceVisual
+        ? (sourceVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE
+        : shot.source[0];
+      const sourceY = sourceVisual ? shot.sourceElevation ?? shot.source[1] : shot.source[1];
+      const sourceZ = sourceVisual
+        ? (sourceVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE
+        : shot.source[2];
+      const targetX = targetVisual
+        ? (targetVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE
+        : shot.target[0];
+      const targetY = targetVisual ? shot.targetElevation ?? shot.target[1] : shot.target[1];
+      const targetZ = targetVisual
+        ? (targetVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE
+        : shot.target[2];
+      scratch.direction.set(targetX - sourceX, targetY - sourceY, targetZ - sourceZ).normalize();
       scratch.quaternion.setFromUnitVectors(scratch.up, scratch.direction);
 
       const arc = shot.projectileType === "shell"
@@ -1222,9 +1310,9 @@ function CombatEffects({
           ? Math.sin(progress * Math.PI) * 0.18
           : 0.02;
       scratch.position.set(
-        THREE.MathUtils.lerp(shot.source[0], shot.target[0], progress),
-        THREE.MathUtils.lerp(shot.source[1], shot.target[1], progress) + arc,
-        THREE.MathUtils.lerp(shot.source[2], shot.target[2], progress),
+        THREE.MathUtils.lerp(sourceX, targetX, progress),
+        THREE.MathUtils.lerp(sourceY, targetY, progress) + arc,
+        THREE.MathUtils.lerp(sourceZ, targetZ, progress),
       );
 
       const projectileLength = shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
@@ -1244,11 +1332,11 @@ function CombatEffects({
 
       const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "rocket" ? 5.2 : 4.6);
       scratch.quaternion.identity();
-      scratch.position.set(...shot.source);
+      scratch.position.set(sourceX, sourceY, sourceZ);
       if (progress < 0.09) {
         scratch.scale.setScalar(muzzleScale);
       } else {
-        scratch.scale.copy(hiddenScale);
+        scratch.scale.copy(scratch.hiddenScale);
       }
       scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
       muzzle.setMatrixAt(index, scratch.matrix);
@@ -1256,7 +1344,7 @@ function CombatEffects({
     projectile.instanceMatrix.needsUpdate = true;
     trail.instanceMatrix.needsUpdate = true;
     muzzle.instanceMatrix.needsUpdate = true;
-  });
+  }, -10);
 
   if (shots.length === 0) {
     return null;
@@ -1541,7 +1629,65 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
   );
 }
 
-function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDimensions }) {
+function VisualIntentSegment({
+  entityIds,
+  targetX,
+  targetY,
+  color,
+  dimensions,
+  visualWorld,
+}: {
+  entityIds: string[];
+  targetX: number;
+  targetY: number;
+  color: string;
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
+  const geometry = useMemo(() => {
+    const next = new THREE.BufferGeometry();
+    next.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    return next;
+  }, []);
+  const update = () => {
+    const positions = geometry.getAttribute("position") as THREE.BufferAttribute;
+    let totalX = 0;
+    let totalY = 0;
+    let count = 0;
+    for (const entityId of entityIds) {
+      const transform = visualWorld.getTransform(entityId);
+      if (!transform) continue;
+      totalX += transform.x;
+      totalY += transform.y;
+      count += 1;
+    }
+    if (count === 0) return;
+    const source = toWorldPosition(totalX / count, totalY / count, dimensions, 0.18);
+    const target = toWorldPosition(targetX, targetY, dimensions, 0.18);
+    positions.setXYZ(0, source[0], source[1], source[2]);
+    positions.setXYZ(1, target[0], target[1], target[2]);
+    positions.needsUpdate = true;
+  };
+
+  useLayoutEffect(update, [dimensions, entityIds, geometry, targetX, targetY, visualWorld]);
+  useFrame(update, -20);
+
+  return (
+    <lineSegments geometry={geometry} frustumCulled={false}>
+      <lineBasicMaterial color={color} transparent opacity={0.38} />
+    </lineSegments>
+  );
+}
+
+function IntentLines({
+  units,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
   const formationLines = useMemo(() => {
     const groups = new Map<string, { units: Unit[]; targetX: number; targetY: number; color: string }>();
 
@@ -1564,159 +1710,44 @@ function IntentLines({ units, dimensions }: { units: Unit[]; dimensions: MapDime
     }
 
     return [...groups.values()].map((group) => {
-      const averageX = group.units.reduce((sum, unit) => sum + unit.x, 0) / group.units.length;
-      const averageY = group.units.reduce((sum, unit) => sum + unit.y, 0) / group.units.length;
       return {
-        source: toWorldPosition(averageX, averageY, dimensions, 0.18),
-        target: toWorldPosition(group.targetX, group.targetY, dimensions, 0.18),
+        entityIds: group.units.map((unit) => unit.id),
+        targetX: group.targetX,
+        targetY: group.targetY,
         color: group.color,
         key: `${group.units[0]?.playerId}:${group.targetX}:${group.targetY}`,
       };
     });
-  }, [dimensions, units]);
+  }, [units]);
 
   return (
     <>
-      {formationLines.map((line) => {
-        return (
-          <Line
-            key={line.key}
-            points={[line.source, line.target]}
-            color={line.color}
-            lineWidth={1.1}
-            transparent
-            opacity={0.38}
-          />
-        );
-      })}
+      {formationLines.map((line) => (
+        <VisualIntentSegment
+          key={line.key}
+          entityIds={line.entityIds}
+          targetX={line.targetX}
+          targetY={line.targetY}
+          color={line.color}
+          dimensions={dimensions}
+          visualWorld={visualWorld}
+        />
+      ))}
     </>
   );
 }
 
-function useInterpolatedUnits(units: Unit[]): Unit[] {
-  const sourceUnits = useRef(units);
-  const visualPositions = useRef(new Map<string, { x: number; y: number; heading?: number }>());
-  const transitions = useRef(new Map<string, {
-    fromX: number;
-    fromY: number;
-    toX: number;
-    toY: number;
-    fromHeading?: number;
-    toHeading?: number;
-    startedAtMs: number;
-  }>());
-  const [displayUnits, setDisplayUnits] = useState(units);
-
-  useEffect(() => {
-    const now = performance.now();
-    sourceUnits.current = units;
-    const liveIds = new Set(units.map((unit) => unit.id));
-    for (const [unitId] of visualPositions.current) {
-      if (!liveIds.has(unitId)) {
-        visualPositions.current.delete(unitId);
-        transitions.current.delete(unitId);
-      }
-    }
-
-    for (const unit of units) {
-      const existing = visualPositions.current.get(unit.id);
-      if (!existing) {
-        visualPositions.current.set(unit.id, { x: unit.x, y: unit.y, heading: unit.heading });
-        continue;
-      }
-      const jumpDistance = Math.max(Math.abs(existing.x - unit.x), Math.abs(existing.y - unit.y));
-      if (jumpDistance > UNIT_INTERPOLATION_SNAP_DISTANCE) {
-        existing.x = unit.x;
-        existing.y = unit.y;
-        existing.heading = unit.heading;
-      }
-      const headingChanged = unit.heading !== undefined && existing.heading !== undefined
-        ? Math.abs(Math.atan2(
-            Math.sin(unit.heading - existing.heading),
-            Math.cos(unit.heading - existing.heading),
-          )) > 0.001
-        : unit.heading !== existing.heading;
-      if (
-        jumpDistance < UNIT_INTERPOLATION_DEADZONE
-        && !headingChanged
-        && unit.state !== "moving"
-      ) {
-        transitions.current.delete(unit.id);
-        continue;
-      }
-      transitions.current.set(unit.id, {
-        fromX: existing.x,
-        fromY: existing.y,
-        toX: unit.x,
-        toY: unit.y,
-        fromHeading: existing.heading,
-        toHeading: unit.heading,
-        startedAtMs: now,
-      });
-    }
-
-    setDisplayUnits(units.map((unit) => {
-      const visual = visualPositions.current.get(unit.id);
-      return visual ? { ...unit, x: visual.x, y: visual.y, heading: visual.heading } : unit;
-    }));
-  }, [units]);
-
-  useFrame(() => {
-    const now = performance.now();
-    let changed = false;
-    for (const [unitId, transition] of transitions.current) {
-      const visual = visualPositions.current.get(unitId);
-      if (!visual) {
-        transitions.current.delete(unitId);
-        continue;
-      }
-
-      const progress = Math.min(1, Math.max(0,
-        (now - transition.startedAtMs) / UNIT_INTERPOLATION_DURATION_MS,
-      ));
-      const easedProgress = progress * progress * (3 - 2 * progress);
-      const nextX = THREE.MathUtils.lerp(transition.fromX, transition.toX, easedProgress);
-      const nextY = THREE.MathUtils.lerp(transition.fromY, transition.toY, easedProgress);
-      const nextHeading = transition.fromHeading !== undefined && transition.toHeading !== undefined
-        ? transition.fromHeading + Math.atan2(
-            Math.sin(transition.toHeading - transition.fromHeading),
-            Math.cos(transition.toHeading - transition.fromHeading),
-          ) * easedProgress
-        : transition.toHeading;
-      if (
-        Math.abs(nextX - visual.x) > 0.001
-        || Math.abs(nextY - visual.y) > 0.001
-        || (nextHeading !== undefined && Math.abs(nextHeading - (visual.heading ?? nextHeading)) > 0.001)
-      ) {
-        changed = true;
-      }
-      visual.x = progress >= 1 ? transition.toX : nextX;
-      visual.y = progress >= 1 ? transition.toY : nextY;
-      visual.heading = progress >= 1 ? transition.toHeading : nextHeading;
-
-      if (progress >= 1) transitions.current.delete(unitId);
-    }
-
-    if (!changed) return;
-    setDisplayUnits(sourceUnits.current.map((unit) => {
-      const visual = visualPositions.current.get(unit.id);
-      return visual ? { ...unit, x: visual.x, y: visual.y, heading: visual.heading } : unit;
-    }));
-  });
-
-  return displayUnits;
+function useVisualWorld(): VisualWorld {
+  return useMemo(() => new VisualWorld(), []);
 }
-
 const BattlefieldScene = memo(function BattlefieldScene({
   state,
   projectileFxMode = "game",
-  frameBuffer,
-  simulationTimeMs,
+  timeline,
 }: {
   state: GameState;
   projectileFxMode?: ProjectileFxMode;
-  frameBuffer?: SimulationFrameBuffer;
-  simulationTimeMs?: number;
+  timeline?: SimulationVisualTimeline;
 }) {
   const dimensions = useMemo(() => getMapDimensions(state), [state]);
   const terrainWidth = dimensions.width * CELL_SIZE;
@@ -1725,6 +1756,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
     () => getInitialCameraFocus(state, dimensions),
     [],
   );
+  const visualWorld = useVisualWorld();
 
   const { resourceTiles, obstacleTiles, units, buildings } = useMemo(() => {
     const resourceTiles: Tile[] = [];
@@ -1747,8 +1779,6 @@ const BattlefieldScene = memo(function BattlefieldScene({
       buildings: state.players.flatMap((player) => player.buildings).filter((building) => building.exists),
     };
   }, [state]);
-  const interpolatedUnits = useInterpolatedUnits(units);
-  const displayUnits = frameBuffer ? units : interpolatedUnits;
   const resourceTransforms = useMemo(
     () => resourceTiles.flatMap((tile) => getResourceClusterTransforms(tile, dimensions)),
     [dimensions, resourceTiles],
@@ -1764,6 +1794,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
     <>
       <ResponsiveCamera initialFocus={initialFocus} />
       <RenderDiagnostics />
+      <VisualFrameSystem visualWorld={visualWorld} units={units} timeline={timeline} />
       <ProjectileFxModeMarker mode={projectileFxMode} />
       <color attach="background" args={["#82989a"]} />
       <fog attach="fog" args={["#82989a", 86, 205]} />
@@ -1797,27 +1828,29 @@ const BattlefieldScene = memo(function BattlefieldScene({
           <BuildingModel key={building.id} building={building} dimensions={dimensions} />
         ))}
         <UnitBatches
-          units={displayUnits}
+          units={units}
           buildings={buildings}
           dimensions={dimensions}
           tick={state.tick}
-          frameBuffer={frameBuffer}
-          simulationTimeMs={simulationTimeMs}
+          visualWorld={visualWorld}
         />
-        <UnitReadabilityLayer units={displayUnits} dimensions={dimensions} />
+        <UnitReadabilityLayer units={units} dimensions={dimensions} visualWorld={visualWorld} />
         {projectileFxMode === "game" ? (
           <CombatEffects
-            units={displayUnits}
+            units={units}
             buildings={buildings}
             projectiles={state.projectiles ?? []}
             dimensions={dimensions}
             tick={state.tick}
+            visualWorld={visualWorld}
           />
         ) : null}
         {projectileFxMode === "preview" ? <ProjectilePreviewEffects dimensions={dimensions} /> : null}
-        <DestructionEffects units={displayUnits} buildings={buildings} dimensions={dimensions} />
+        <DestructionEffects units={units} buildings={buildings} dimensions={dimensions} />
       </Suspense>
-      {SHOW_DEBUG_INTENTS ? <IntentLines units={displayUnits} dimensions={dimensions} /> : null}
+      {SHOW_DEBUG_INTENTS ? (
+        <IntentLines units={units} dimensions={dimensions} visualWorld={visualWorld} />
+      ) : null}
       <OrbitControls
         makeDefault
         target={initialFocus.target}
@@ -1833,7 +1866,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
   );
 });
 
-export function Battlefield3D({ state, projectileFxMode = "game", frameBuffer, simulationTimeMs }: Battlefield3DProps) {
+export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Battlefield3DProps) {
   const dimensions = state ? getMapDimensions(state) : { width: 96, height: 64 };
   const cameraFocus = state
     ? getInitialCameraFocus(state, dimensions)
@@ -1863,8 +1896,7 @@ export function Battlefield3D({ state, projectileFxMode = "game", frameBuffer, s
         <BattlefieldScene
           state={state}
           projectileFxMode={projectileFxMode}
-          frameBuffer={frameBuffer}
-          simulationTimeMs={simulationTimeMs}
+          timeline={timeline}
         />
       </Canvas>
     </div>

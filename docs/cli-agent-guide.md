@@ -260,8 +260,8 @@ Selectors read state and output `kind: "selection"` JSON for piping into actions
 # My idle workers
 llmcraft units --type worker --idle
 
-# My soldiers that are not assigned to an active plan
-llmcraft units --type soldier --unplanned
+# My riflemen that are not assigned to an active plan
+llmcraft units --type rifleman --unplanned
 
 # My ready HQ or barracks, meaning empty production queue
 llmcraft buildings --type hq --ready
@@ -296,7 +296,7 @@ llmcraft gather --unit unit_1
 llmcraft gather --units unit_1,unit_2,unit_3
 llmcraft build barracks --unit unit_1 --at 6,12
 llmcraft train worker --building building_1
-llmcraft train soldier --building building_3
+llmcraft train rifleman --building building_3
 llmcraft rally --building building_3 --to 32,12 --mode attack-move
 llmcraft attack --unit unit_7 --target building_2
 llmcraft attack-move --unit unit_7 --to 32,12
@@ -308,8 +308,10 @@ Actions also accept selector stdin:
 ```bash
 llmcraft units --idle --type worker | llmcraft gather
 llmcraft buildings --type hq --ready | llmcraft train worker
-llmcraft buildings --type barracks --ready | llmcraft train soldier
+llmcraft buildings --type barracks --ready | llmcraft train rifleman
 ```
+
+The standard ruleset no longer produces `soldier`; barracks production starts with `rifleman` and also supports `rocket_soldier`. The `soldier` type remains readable and targetable so older Match Records can still be replayed and inspected.
 
 When piped, the CLI groups compatible selections into array-shaped actions and sends the complete expansion through one HTTP request and one `CommandEnvelope`. Each action is applied independently at the same tick boundary; one failed action does not roll back successful siblings. The output is `kind: "batch_result"`.
 
@@ -332,11 +334,11 @@ Transformers sit between selectors and actions.
 # Pair each idle worker with a nearby resource, then gather
 llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
 
-# Pair each soldier with enemy HQ, then issue target attack
-llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+# Pair each rifleman with enemy HQ, then issue target attack
+llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack
 
-# Pair each soldier with weakest known enemy
-llmcraft units --type soldier | llmcraft target weakest | llmcraft attack
+# Pair each rifleman with weakest known enemy
+llmcraft units --type rifleman | llmcraft target weakest | llmcraft attack
 ```
 
 `target weakest` is a global target helper. Do not use it as a defense heuristic when enemies are already near your HQ; read `enemies --near <hq x,y>` or use an explicit `--target` for the immediate threat.
@@ -355,13 +357,13 @@ Available transformers:
 Use `attack` when you know the target ID. This is the correct way to destroy HQ and barracks:
 
 ```bash
-llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack
 ```
 
 Use `attack-move` when you only want to move toward coordinates and fight enemy units encountered on the way:
 
 ```bash
-llmcraft units --type soldier | llmcraft attack-move --to 32,12
+llmcraft units --type rifleman | llmcraft attack-move --to 32,12
 ```
 
 Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
@@ -398,8 +400,8 @@ llmcraft state --compact
 llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
 llmcraft buildings --type hq --ready | llmcraft train worker
 llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
-llmcraft buildings --type barracks --ready | llmcraft train soldier
-llmcraft units --type soldier | llmcraft target enemy-hq | llmcraft attack
+llmcraft buildings --type barracks --ready | llmcraft train rifleman
+llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack
 ```
 
 For `player_2`, use a right-side barracks coordinate such as `15,10`.

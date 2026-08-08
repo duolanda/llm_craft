@@ -575,8 +575,8 @@ export class GameOrchestrator {
 
     const summaryLines = [
       `tick=${state.tick}, intervalMs=${tickIntervalMs}`,
-      `myCredits=${me.resources.credits}, myWorkers=${me.units.filter((unit) => unit.type === "worker" && unit.exists).length}, mySoldiers=${me.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
-      `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemySoldiers=${enemy.units.filter((unit) => unit.type === "soldier" && unit.exists).length}`,
+      `myCredits=${me.resources.credits}, myWorkers=${me.units.filter((unit) => unit.type === "worker" && unit.exists).length}, myRiflemen=${me.units.filter((unit) => unit.type === "rifleman" && unit.exists).length}, myRocketSoldiers=${me.units.filter((unit) => unit.type === "rocket_soldier" && unit.exists).length}, myLightTanks=${me.units.filter((unit) => unit.type === "light_tank" && unit.exists).length}`,
+      `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemyRiflemen=${enemy.units.filter((unit) => unit.type === "rifleman" && unit.exists).length}, enemyRocketSoldiers=${enemy.units.filter((unit) => unit.type === "rocket_soldier" && unit.exists).length}, enemyLightTanks=${enemy.units.filter((unit) => unit.type === "light_tank" && unit.exists).length}`,
       myHQ ? `myHQHp=${myHQ.hp}/${myHQ.maxHp}` : "myHQMissing=true",
       enemyHQ ? `enemyHQHp=${enemyHQ.hp}/${enemyHQ.maxHp}` : "enemyHQMissing=true",
       `activePlans=${this.gameplayControllerByPlayer[playerId].getActivePlans().length}`,

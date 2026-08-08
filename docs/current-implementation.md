@@ -19,7 +19,7 @@
 
 逐帧视觉状态由 `VisualWorld` 持有。每个 R3F render frame 只读取一次 timeline 和每个实体的 transform，再由稳定的实例 batch 直接调用 Three.js `setMatrixAt` / `instanceMatrix.needsUpdate`；单位坐标不进入 React state，不克隆逐帧 `Unit[]`，也没有 30fps 动作限流。模型、车体/炮塔朝向、血条、地面环、intent 和战斗提示在同一 render frame 读取同一份 mutable transform。React 只负责 Canvas/批次结构、HUD 和 tick 级属性；视觉层只读权威状态，不反向修改模拟。WebSocket 断开后每秒重连，换局或重连时清空旧 live frame buffer。
 
-持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。指定目标攻击无论是在首次调用实时校验时，还是在后续持续攻击过程中发现目标已消失，都会只在攻击者自身视野内确定性地重选附近敌人；没有候选时后续持续攻击转为 hold 并清掉旧追击路径，首次调用则返回目标已消失。大部分无明确点杀目标的推进仍应直接使用 attack-move。
+持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。attack-move 的可选 `priority` 只把指定目标类型提前，未列出的类型继续按兵种默认相对顺序参与兜底索敌，不再充当严格目标白名单。指定目标攻击无论是在首次调用实时校验时，还是在后续持续攻击过程中发现目标已消失，都会只在攻击者自身视野内确定性地重选附近敌人；没有候选时后续持续攻击转为 hold 并清掉旧追击路径，首次调用则返回目标已消失。大部分无明确点杀目标的推进仍应直接使用 attack-move。
 
 采矿循环会向最近的已完成 HQ 或 refinery 交付。省略矿点时，自动选择以反复交付路程为主、worker 初始路程和当前分配为辅；单格矿点最多保留 2 个 worker，超额分配会自动改派，矿点耗尽后也会自动切换路线。满载 worker 进入交付建筑范围即可卸货，即使其仍站在资源格上。Refinery 只缩短交付路线，不增加采集速度；省略建造坐标时会按预计路线节省选址。自动建造任务以 worker 与建筑完整 footprint 实际相邻为移动步骤的完成条件。
 
@@ -48,6 +48,8 @@
 当前只接受内置 `standard` ruleset 和 `standard` map 的完整布局。命令限制、模型调度和记录配置不属于 MatchDefinition。
 
 shared constants 是内置 `standard` 规则和地图模板的定义处；`createDefaultMatchDefinition()` 会把地图布局复制进单局定义。运行中的地图尺寸、矿脉、障碍物、开局实体和 tick 时长读取该局 MatchDefinition；单位数值、造价和生产关系通过其 `rulesetId` 对应的 shared ruleset helper 读取。前者是“这一局采用什么”，后者是“内置 standard 具体是什么”，不是两套相互竞争的配置。
+
+`soldier` 已从 standard 的当前生产关系中退役，兵营只生产 `rifleman` 和 `rocket_soldier`，基础步兵定位由 rifleman 承担。为保证历史 Match Record、旧状态投影和战斗目标兼容，`soldier` 的类型、数值、渲染与战斗行为继续保留；ruleset helper、Game 命令、GameplayController、CLI 和 built-in CPU 都不会在新对局中生产它。前端实时统计默认隐藏该行，但回放中实际存在 soldier 时会重新显示。
 
 ## 4. Agent runtime
 

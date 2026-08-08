@@ -11,6 +11,7 @@ import {
   getBuildingStats,
   getDefaultAttackMovePriority,
   getProductionOptions,
+  getRetiredProductionUnitTypes,
   getUnitCost,
   getUnitStats,
   getUnitProductionTicks,
@@ -106,7 +107,6 @@ describe("default ruleset", () => {
   it("centralizes current production rules in the default ruleset", () => {
     expect(getProductionOptions(BUILDING_TYPES.HQ)).toEqual([UNIT_TYPES.WORKER]);
     expect(getProductionOptions(BUILDING_TYPES.BARRACKS)).toEqual([
-      UNIT_TYPES.SOLDIER,
       UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.ROCKET_SOLDIER,
     ]);
@@ -114,11 +114,12 @@ describe("default ruleset", () => {
     expect(getProductionOptions(BUILDING_TYPES.REFINERY)).toEqual([]);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.WORKER)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.SOLDIER)).toBe(false);
-    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.SOLDIER)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.SOLDIER)).toBe(false);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.LIGHT_TANK)).toBe(false);
     expect(canBuildingProduce(BUILDING_TYPES.WAR_FACTORY, UNIT_TYPES.LIGHT_TANK)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.WORKER)).toBe(false);
+    expect(getRetiredProductionUnitTypes()).toEqual([UNIT_TYPES.SOLDIER]);
   });
 });

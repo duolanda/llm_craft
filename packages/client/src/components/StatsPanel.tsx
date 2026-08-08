@@ -21,9 +21,8 @@ const UNIT_LABELS: Record<string, string> = {
   light_tank: "轻坦",
 };
 
-const DISPLAY_UNIT_TYPES: UnitType[] = [
+const ACTIVE_DISPLAY_UNIT_TYPES: UnitType[] = [
   UNIT_TYPES.WORKER,
-  UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
   UNIT_TYPES.LIGHT_TANK,
@@ -41,11 +40,17 @@ export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
   }
 
   const [player1, player2] = state.players;
+  const hasLegacySoldiers = state.players.some((player) =>
+    player.units.some((unit) => unit.exists && unit.type === UNIT_TYPES.SOLDIER)
+  );
+  const displayUnitTypes = hasLegacySoldiers
+    ? [UNIT_TYPES.WORKER, UNIT_TYPES.SOLDIER, ...ACTIVE_DISPLAY_UNIT_TYPES.slice(1)]
+    : ACTIVE_DISPLAY_UNIT_TYPES;
 
   const getUnitCounts = (player: (typeof state.players)[0]) => {
     const units = player.units.filter((u) => u.exists);
     return Object.fromEntries([
-      ...DISPLAY_UNIT_TYPES.map((unitType) => [unitType, units.filter((unit) => unit.type === unitType).length]),
+      ...displayUnitTypes.map((unitType) => [unitType, units.filter((unit) => unit.type === unitType).length]),
       ["total", units.length],
     ]) as Record<UnitType, number> & { total: number };
   };
@@ -104,14 +109,14 @@ export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
           <span style={{ color: "var(--accent-purple)" }}>◈</span> 单位编制
         </div>
         <div className="unit-legend-bar">
-          {DISPLAY_UNIT_TYPES.map((unitType) => (
+          {displayUnitTypes.map((unitType) => (
             <UnitLegend key={unitType} type={unitType} />
           ))}
         </div>
         <div className="stat-row" style={{ justifyContent: "center", gap: "12px", marginTop: 4 }}>
-          <UnitChips counts={p1Units} align="end" />
+          <UnitChips counts={p1Units} unitTypes={displayUnitTypes} align="end" />
           <span className="stat-vs">VS</span>
-          <UnitChips counts={p2Units} align="start" />
+          <UnitChips counts={p2Units} unitTypes={displayUnitTypes} align="start" />
         </div>
         <div className="stat-row" style={{ justifyContent: "center", marginTop: 4 }}>
           <span className="stat-value-pair">
@@ -159,10 +164,14 @@ function UnitLegend({ type }: { type: string }) {
   );
 }
 
-function UnitChips({ counts, align }: { counts: Record<UnitType, number> & { total: number }; align: "start" | "end" }) {
+function UnitChips({ counts, unitTypes, align }: {
+  counts: Record<UnitType, number> & { total: number };
+  unitTypes: UnitType[];
+  align: "start" | "end";
+}) {
   return (
     <div className="unit-chips" style={{ justifyContent: align === "end" ? "flex-end" : "flex-start" }}>
-      {DISPLAY_UNIT_TYPES.map((unitType) => (
+      {unitTypes.map((unitType) => (
         <Chip key={unitType} type={unitType} count={counts[unitType]} />
       ))}
     </div>

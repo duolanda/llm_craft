@@ -263,10 +263,10 @@ export class CombatSystem {
     playerId: PlayerId,
     targetPriority?: AttackTargetType[],
   ): { kind: "unit"; target: WorldUnit } | { kind: "building"; target: Building } | null {
-    const hasExplicitPriority = Boolean(targetPriority && targetPriority.length > 0);
-    const priority = (
-      hasExplicitPriority ? targetPriority! : getDefaultAttackMovePriority(attacker.type)
-    ).map((value) => String(value).toLowerCase());
+    const priority = [...new Set([
+      ...(targetPriority ?? []),
+      ...getDefaultAttackMovePriority(attacker.type),
+    ])].map((value) => String(value).toLowerCase());
     const acquisitionRange = getUnitVisionRange(attacker.type);
     const friendlyIds = new Set([
       ...world.units.getUnitsByPlayer(playerId).filter((unit) => unit.exists).map((unit) => unit.id),
@@ -298,7 +298,6 @@ export class CombatSystem {
       const building = buildings.find((candidate) => candidate.type === requestedType);
       if (building) return { kind: "building", target: building };
     }
-    if (hasExplicitPriority) return null;
     if (buildings[0]) return { kind: "building", target: buildings[0] };
     if (units[0]) return { kind: "unit", target: units[0] };
     return null;

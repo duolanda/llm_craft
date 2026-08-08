@@ -162,6 +162,19 @@ describe("GameplayController", () => {
 
     expect(executeAgentTool(gameplayController, "spawn_unit", {
       buildingId: barracks.id,
+      units: [{ unitType: UNIT_TYPES.SOLDIER, count: 1 }],
+    }).result).toMatchObject({
+      ok: false,
+      error: "invalid_spawn_request",
+      validUnitTypes: [UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+    });
+    expect(gameplayController.getMyState().result).toMatchObject({
+      canQueueSoldier: false,
+      retiredProductionUnitTypes: [UNIT_TYPES.SOLDIER],
+    });
+
+    expect(executeAgentTool(gameplayController, "spawn_unit", {
+      buildingId: barracks.id,
       units: [
         { unitType: UNIT_TYPES.RIFLEMAN, count: 5 },
         { unitType: UNIT_TYPES.ROCKET_SOLDIER, count: 5 },
@@ -352,10 +365,10 @@ describe("GameplayController", () => {
         },
         {
           call: "spawn_unit" as any,
-          args: { buildingId: "$barracks", unitType: "soldier" },
+          args: { buildingId: "$barracks", unitType: "rifleman" },
           scope: "global",
           when: { condition: "production_queue_empty", buildingType: "barracks" },
-          until: { condition: "unit_count_at_least", unitType: "soldier", count: 1 },
+          until: { condition: "unit_count_at_least", unitType: "rifleman", count: 1 },
           retry: true,
         },
       ],
@@ -386,7 +399,7 @@ describe("GameplayController", () => {
     expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({
         type: "spawn",
-        unitType: "soldier",
+        unitType: "rifleman",
       }),
     ]);
     game.stop();

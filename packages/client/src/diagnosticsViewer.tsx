@@ -530,12 +530,12 @@ function PlayerCard({ player }: { player: PlayerDiagnostic }) {
         <Metric label="受压后模型请求" value={String(player.modelRequestsAfterPressure)} />
         <Metric label="受压后工具调用" value={String(player.toolCallsAfterPressure)} detail={`${player.readToolCallsAfterPressure} 次读取 / ${player.actionToolCallsAfterPressure} 次行动`} />
         <Metric label="受压后失效单位" value={String(player.invalidUnitAfterPressureCount)} />
-        <Metric label="受压后生产士兵" value={String(player.spawnedCombatUnderPressure)} detail={`${player.spawnedCombatDeathsUnderPressure} 个快速阵亡`} />
+        <Metric label="受压后生产作战单位" value={String(player.spawnedCombatUnderPressure)} detail={`${player.spawnedCombatDeathsUnderPressure} 个快速阵亡`} />
       </div>
 
       <div className="dx-final-row">
         <Metric label="最终工人数" value={String(player.finalWorkers)} />
-        <Metric label="最终士兵数" value={String(player.finalSoldiers)} />
+        <Metric label="最终作战单位" value={String(player.finalCombatUnits)} />
         <Metric label="最终资金" value={String(player.finalCredits)} />
       </div>
     </article>

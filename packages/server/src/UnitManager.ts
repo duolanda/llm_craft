@@ -63,6 +63,17 @@ interface LocalMovementCandidate {
   heading: number;
   forwardProgress: number;
   score: number;
+  passThroughUnits: Unit[];
+}
+
+interface MovementCollisionResult {
+  blocked: boolean;
+  passThroughUnits: Unit[];
+}
+
+export interface MovementInteractionPolicy {
+  canPassThrough(mover: Unit, other: Unit): boolean;
+  onPassThrough(mover: Unit, other: Unit): void;
 }
 
 function getDistance(x1: number, y1: number, x2: number, y2: number): number {
@@ -376,6 +387,7 @@ export class UnitManager {
     blockedPositions?: Set<string>,
     spatialIndex?: UnitSpatialIndex,
     movementReservations: readonly MovementReservation[] = [],
+    interactionPolicy?: MovementInteractionPolicy,
   ): ResultCode {
     if (!unit.exists || unit.state === UNIT_STATES.BUILDING || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
@@ -464,6 +476,7 @@ export class UnitManager {
         blockedPositions,
         index,
         movementReservations,
+        interactionPolicy,
       );
       if (!localMove) {
         this.markBlocked(unit.id);
@@ -480,6 +493,11 @@ export class UnitManager {
       moved = true;
       madeForwardProgress ||= localMove.forwardProgress >= MOVEMENT_PROGRESS_EPSILON;
       this.lastMovementOrigins.set(unit.id, movementOrigin);
+      for (const other of localMove.passThroughUnits) {
+        if (!other.exists) continue;
+        interactionPolicy?.onPassThrough(unit, other);
+        if (!other.exists) index.remove(other);
+      }
 
       const distanceAfterMove = getDistance(unit.x, unit.y, nextStep.x, nextStep.y);
       if (
@@ -523,7 +541,11 @@ export class UnitManager {
    * by units × a fixed local-candidate count, and accepted moves update the
    * broad-phase index immediately.
    */
-  processAllPathMovement(tiles: TileType[][], blockedPositions?: Set<string>): void {
+  processAllPathMovement(
+    tiles: TileType[][],
+    blockedPositions?: Set<string>,
+    interactionPolicy?: MovementInteractionPolicy,
+  ): void {
     const units = this.getAllUnits();
     const index = new UnitSpatialIndex(units);
     const movementReservations: MovementReservation[] = [];
@@ -540,8 +562,15 @@ export class UnitManager {
       const startY = unit.y;
       const startHeading = getUnitHeading(unit);
       index.remove(unit);
-      this.processPathMovement(unit, tiles, blockedPositions, index, movementReservations);
-      index.add(unit);
+      this.processPathMovement(
+        unit,
+        tiles,
+        blockedPositions,
+        index,
+        movementReservations,
+        interactionPolicy,
+      );
+      if (unit.exists) index.add(unit);
       if (getDistance(startX, startY, unit.x, unit.y) > ARRIVAL_EPSILON) {
         movementReservations.push({
           unit,
@@ -812,6 +841,7 @@ export class UnitManager {
     blockedPositions: Set<string> | undefined,
     index: UnitSpatialIndex,
     movementReservations: readonly MovementReservation[],
+    interactionPolicy?: MovementInteractionPolicy,
   ): LocalMovementCandidate | null {
     const direction = Math.atan2(preferredY - unit.y, preferredX - unit.x);
     const currentHeading = getUnitHeading(unit);
@@ -850,8 +880,24 @@ export class UnitManager {
           blockedPositions,
         )
       ) return;
-      if (this.hasIndexedUnitCollisionAlongMovement(unit, x, y, heading, index)) return;
-      if (this.hasReservedMovementCollision(unit, x, y, heading, movementReservations)) return;
+      const indexedCollision = this.getIndexedUnitCollisionAlongMovement(
+        unit,
+        x,
+        y,
+        heading,
+        index,
+        interactionPolicy,
+      );
+      if (indexedCollision.blocked) return;
+      const reservedCollision = this.getReservedMovementCollision(
+        unit,
+        x,
+        y,
+        heading,
+        movementReservations,
+        interactionPolicy,
+      );
+      if (reservedCollision.blocked) return;
 
       const turnDelta = Math.abs(Math.atan2(
         Math.sin(heading - currentHeading),
@@ -860,7 +906,13 @@ export class UnitManager {
       const side = Math.sign(angularOffset);
       const sidePreference = side === 0 || side === preferredSide ? 0.25 : 0;
       const score = forwardProgress * 100 + distance * 2 - turnDelta * 3 + sidePreference;
-      const candidate = { x, y, distance, heading, forwardProgress, score };
+      const passThroughById = new Map<string, Unit>();
+      for (const other of [...indexedCollision.passThroughUnits, ...reservedCollision.passThroughUnits]) {
+        passThroughById.set(other.id, other);
+      }
+      const passThroughUnits = [...passThroughById.values()]
+        .sort((left, right) => this.compareUnitIds(left.id, right.id));
+      const candidate = { x, y, distance, heading, forwardProgress, score, passThroughUnits };
       if (!best || candidate.score > best.score) best = candidate;
     };
 
@@ -890,13 +942,15 @@ export class UnitManager {
     return best;
   }
 
-  private hasIndexedUnitCollisionAlongMovement(
+  private getIndexedUnitCollisionAlongMovement(
     unit: Unit,
     targetX: number,
     targetY: number,
     targetHeading: number,
     index: UnitSpatialIndex,
-  ): boolean {
+    interactionPolicy?: MovementInteractionPolicy,
+  ): MovementCollisionResult {
+    const passThroughUnits: Unit[] = [];
     const segmentLength = getDistance(unit.x, unit.y, targetX, targetY);
     const midX = (unit.x + targetX) / 2;
     const midY = (unit.y + targetY) / 2;
@@ -906,6 +960,7 @@ export class UnitManager {
       midY,
       segmentLength / 2 + unitBound + MAX_UNIT_COLLISION_BOUNDING_RADIUS,
     )) {
+      if (!other.exists) continue;
       const otherShape = getUnitCollisionShape(other);
       const startManifold = getCollisionManifold(getUnitCollisionShape(unit), otherShape);
       const endManifold = getCollisionManifold(
@@ -915,6 +970,7 @@ export class UnitManager {
       if (startManifold && (!endManifold || endManifold.depth < startManifold.depth - ARRIVAL_EPSILON)) {
         continue;
       }
+      let collided = false;
       for (const progress of COLLISION_SWEEP_SAMPLES) {
         const shape = getUnitCollisionShape(
           unit,
@@ -922,20 +978,32 @@ export class UnitManager {
           unit.y + (targetY - unit.y) * progress,
           this.interpolateHeading(getUnitHeading(unit), targetHeading, progress),
         );
-        if (getCollisionManifold(shape, otherShape)) return true;
+        if (getCollisionManifold(shape, otherShape)) {
+          collided = true;
+          break;
+        }
       }
+      if (!collided) continue;
+      if (!interactionPolicy?.canPassThrough(unit, other)) {
+        return { blocked: true, passThroughUnits: [] };
+      }
+      passThroughUnits.push(other);
     }
-    return false;
+    return { blocked: false, passThroughUnits };
   }
 
-  private hasReservedMovementCollision(
+  private getReservedMovementCollision(
     unit: Unit,
     endX: number,
     endY: number,
     endHeading: number,
     reservations: readonly MovementReservation[],
-  ): boolean {
+    interactionPolicy?: MovementInteractionPolicy,
+  ): MovementCollisionResult {
+    const passThroughUnits: Unit[] = [];
     for (const reservation of reservations) {
+      if (!reservation.unit.exists) continue;
+      let collided = false;
       for (const progress of COLLISION_SWEEP_SAMPLES) {
         const unitShape = getUnitCollisionShape(
           unit,
@@ -949,10 +1017,18 @@ export class UnitManager {
           reservation.startY + (reservation.endY - reservation.startY) * progress,
           this.interpolateHeading(reservation.startHeading, reservation.endHeading, progress),
         );
-        if (getCollisionManifold(unitShape, reservationShape)) return true;
+        if (getCollisionManifold(unitShape, reservationShape)) {
+          collided = true;
+          break;
+        }
       }
+      if (!collided) continue;
+      if (!interactionPolicy?.canPassThrough(unit, reservation.unit)) {
+        return { blocked: true, passThroughUnits: [] };
+      }
+      passThroughUnits.push(reservation.unit);
     }
-    return false;
+    return { blocked: false, passThroughUnits };
   }
 
   private interpolateHeading(start: number, end: number, progress: number): number {

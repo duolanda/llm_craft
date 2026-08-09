@@ -3,12 +3,12 @@ import { CombatSystem } from "./simulation/CombatSystem";
 import { ConstructionSystem, type ConstructionEvent } from "./simulation/ConstructionSystem";
 import { EconomySystem, type EconomyEvent } from "./simulation/EconomySystem";
 import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
-import { MovementSystem } from "./simulation/MovementSystem";
+import { MovementSystem, type MovementEvent } from "./simulation/MovementSystem";
 import { ProductionSystem, type ProductionEvent } from "./simulation/ProductionSystem";
 import { ProjectileSystem, type ProjectileEvent } from "./simulation/ProjectileSystem";
 import { VictorySystem, type VictoryOutcome } from "./simulation/VictorySystem";
 
-export type SimulationEvent = EconomyEvent | ConstructionEvent | ProductionEvent | ProjectileEvent | VictoryOutcome;
+export type SimulationEvent = MovementEvent | EconomyEvent | ConstructionEvent | ProductionEvent | ProjectileEvent | VictoryOutcome;
 
 export interface SimulationStepResult {
   advanced: true;
@@ -58,7 +58,7 @@ export class SimulationCore {
   step(world: WorldState): SimulationStepResult {
     const events: SimulationEvent[] = [];
 
-    this.systems.movement.step(world);
+    events.push(...this.systems.movement.step(world));
     events.push(...this.systems.projectiles.step(world));
     events.push(...this.systems.economy.step(world));
     this.systems.harvestOrders.step(world);

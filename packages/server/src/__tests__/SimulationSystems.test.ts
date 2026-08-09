@@ -254,6 +254,74 @@ describe("simulation systems", () => {
     }
   });
 
+  it.each([
+    UNIT_TYPES.WORKER,
+    UNIT_TYPES.RIFLEMAN,
+    UNIT_TYPES.ROCKET_SOLDIER,
+  ])("lets a moving light tank crush an enemy %s", (targetType) => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    const target = world.createUnit(targetType, 72, 50, "player_2");
+    tank.path = [{ x: 71, y: 50 }];
+    tank.pathTarget = { x: 71, y: 50 };
+
+    const events = new MovementSystem().step(world);
+
+    expect(tank.x).toBe(71);
+    expect(target.exists).toBe(false);
+    expect(target.hp).toBe(0);
+    expect(events).toEqual([{
+      type: "unit_destroyed",
+      playerId: "player_2",
+      unitId: target.id,
+      unitType: targetType,
+    }]);
+  });
+
+  it.each([
+    ["friendly worker", UNIT_TYPES.WORKER, "player_1"],
+    ["enemy legacy soldier", UNIT_TYPES.SOLDIER, "player_2"],
+    ["enemy light tank", UNIT_TYPES.LIGHT_TANK, "player_2"],
+  ] as const)("does not let a light tank crush a %s", (_label, targetType, playerId) => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    const target = world.createUnit(targetType, 72, 50, playerId);
+    tank.path = [{ x: 71, y: 50 }];
+    tank.pathTarget = { x: 71, y: 50 };
+
+    const events = new MovementSystem().step(world);
+
+    expect(target.exists).toBe(true);
+    expect(events).toEqual([]);
+    expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(target))).toBeNull();
+  });
+
+  it("does not crush enemy infantry merely because stationary bodies overlap", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 71, 50, "player_2");
+
+    const events = new MovementSystem().step(world);
+
+    expect(target.exists).toBe(true);
+    expect(events).toEqual([]);
+    expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(target))).toBeNull();
+  });
+
+  it("reports multiple crushed units in deterministic entity order", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
+    const upper = world.createUnit(UNIT_TYPES.WORKER, 72, 49.4, "player_2");
+    const lower = world.createUnit(UNIT_TYPES.ROCKET_SOLDIER, 72, 50.6, "player_2");
+    tank.path = [{ x: 71, y: 50 }];
+    tank.pathTarget = { x: 71, y: 50 };
+
+    const events = new MovementSystem().step(world);
+
+    expect([upper.exists, lower.exists]).toEqual([false, false]);
+    expect(events.map((event) => event.unitId)).toEqual([upper.id, lower.id]);
+  });
+
   it("attack-moves toward a moving target using an integer grid destination", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const attacker = world.createUnit(UNIT_TYPES.SOLDIER, 60, 48, "player_1");

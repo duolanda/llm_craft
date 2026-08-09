@@ -14,6 +14,8 @@ export interface MovementProfile {
   navigationRadius: number;
   avoidancePriority: number;
   locomotionLayer: "ground";
+  /** Unit types this mover may pass through by crushing during committed movement. */
+  crushes?: readonly UnitType[];
 }
 
 const MOVEMENT_PROFILES: Record<UnitType, MovementProfile> = {
@@ -52,6 +54,7 @@ const MOVEMENT_PROFILES: Record<UnitType, MovementProfile> = {
     navigationRadius: Math.hypot(1.48, 0.98),
     avoidancePriority: 30,
     locomotionLayer: "ground",
+    crushes: [UNIT_TYPES.WORKER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
   },
 };
 
@@ -64,4 +67,8 @@ export function getCollisionBoundingRadius(type: UnitType): number {
   return shape.kind === "circle"
     ? shape.radius
     : Math.hypot(shape.halfLength, shape.halfWidth);
+}
+
+export function canCrushUnit(moverType: UnitType, targetType: UnitType): boolean {
+  return getMovementProfile(moverType).crushes?.includes(targetType) ?? false;
 }

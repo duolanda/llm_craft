@@ -6,7 +6,17 @@ import { WorldState } from "../WorldState";
 
 function createRecordingSystems(phases: string[]): SimulationSystems {
   return {
-    movement: { step: () => { phases.push("movement"); } },
+    movement: {
+      step: () => {
+        phases.push("movement");
+        return [{
+          type: "unit_destroyed",
+          playerId: "player_2",
+          unitId: "unit_crushed",
+          unitType: UNIT_TYPES.WORKER,
+        }];
+      },
+    },
     projectiles: { step: () => { phases.push("projectiles"); return []; } },
     economy: {
       step: () => {
@@ -63,6 +73,7 @@ describe("SimulationCore", () => {
       tick: 7,
       matchEnded: false,
       events: [
+        expect.objectContaining({ type: "unit_destroyed" }),
         expect.objectContaining({ type: "resource_gathered" }),
         expect.objectContaining({ type: "building_completed" }),
         expect.objectContaining({ type: "unit_spawned" }),
@@ -98,6 +109,7 @@ describe("SimulationCore", () => {
       tick: 0,
       matchEnded: true,
       events: [
+        expect.objectContaining({ type: "unit_destroyed" }),
         expect.objectContaining({ type: "resource_gathered" }),
         expect.objectContaining({ type: "building_completed" }),
         expect.objectContaining({ type: "unit_spawned" }),

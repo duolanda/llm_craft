@@ -140,6 +140,8 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       productionQueue: change.productionQueue ?? [],
       productionProgress: change.productionProgress ?? undefined,
       constructionProgress: change.constructionProgress ?? undefined,
+      lastAttackTick: change.lastAttackTick,
+      nextAttackTick: change.nextAttackTick,
     };
     player.buildings.push(createdBuilding);
     return;
@@ -157,6 +159,8 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
     productionQueue: change.productionQueue ?? current.productionQueue,
     productionProgress: change.productionProgress === null ? undefined : change.productionProgress ?? current.productionProgress,
     constructionProgress: change.constructionProgress === null ? undefined : change.constructionProgress ?? current.constructionProgress,
+    lastAttackTick: change.lastAttackTick ?? current.lastAttackTick,
+    nextAttackTick: change.nextAttackTick ?? current.nextAttackTick,
   };
 }
 

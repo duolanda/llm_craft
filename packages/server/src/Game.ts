@@ -106,6 +106,7 @@ export class Game {
     validateMatchDefinition(definition);
     this.definition = structuredClone(definition);
     this.world = new WorldState(this.definition);
+    this.harvestOrderSystem.assignDefaultHarvestOrders(this.world);
     this.addLog(LOG_TYPES.GAME_INIT, "Game initialized successfully");
     this.saveSnapshot();
   }
@@ -1013,7 +1014,7 @@ export class Game {
                 result_code: RESULT_CODES.ERR_INVALID_BUILDING,
                 type: RESULT_TYPES.BUILD_INVALID_BUILDING,
                 result_data: {
-                  hint: "Buildable structures are barracks, war_factory, and refinery. HQ cannot be built.",
+                  hint: "HQ cannot be built; use one of the buildable production, economy, defense, or technology structures.",
                 },
               },
               {
@@ -1025,7 +1026,11 @@ export class Game {
             break;
           }
 
-          if (!this.canStartBuildingType(command.playerId, command.buildingType)) {
+          const missingPrerequisites = this.world.buildings.getMissingBuildingPrerequisites(
+            command.playerId,
+            command.buildingType,
+          );
+          if (missingPrerequisites.length > 0) {
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
               "Build command failed: missing technology prerequisite",
@@ -1034,7 +1039,7 @@ export class Game {
                 result_code: RESULT_CODES.ERR_INVALID_BUILDING,
                 type: RESULT_TYPES.BUILD_INVALID_BUILDING,
                 result_data: {
-                  hint: "Build a completed barracks before starting a war_factory.",
+                  hint: `Build and complete ${missingPrerequisites.join(", ")} before starting ${command.buildingType}.`,
                 },
               },
               {
@@ -1166,19 +1171,6 @@ export class Game {
 
   private getBuildingCost(buildingType: string): number {
     return isBuildingType(buildingType) ? getRulesetBuildingCost(buildingType) : 0;
-  }
-
-  private isBuildingComplete(building: Building): boolean {
-    return building.exists && !building.constructionProgress;
-  }
-
-  private canStartBuildingType(playerId: PlayerId, buildingType: BuildingType): boolean {
-    if (buildingType !== BUILDING_TYPES.WAR_FACTORY) {
-      return true;
-    }
-    return this.world.buildings
-      .getBuildingsByPlayer(playerId)
-      .some((building) => building.type === BUILDING_TYPES.BARRACKS && this.isBuildingComplete(building));
   }
 
   private isWorkerAdjacentToBuildFootprint(unit: Unit, buildingType: BuildingType, x: number, y: number): boolean {

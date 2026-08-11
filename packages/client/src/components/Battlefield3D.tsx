@@ -1,17 +1,19 @@
 import { memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentRef, ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Billboard, OrbitControls, useGLTF, useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import {
   Building,
   ActiveProjectile,
+  ENTITY_GEOMETRY,
   GAME_COLORS,
   GameState,
   PLAYER_COLORS,
   TICK_INTERVAL_MS,
   Tile,
   Unit,
+  UNIT_TYPES,
 } from "@llmcraft/shared";
 import { type SimulationVisualTimeline, VisualWorld } from "@llmcraft/record";
 
@@ -136,14 +138,13 @@ const CELL_SIZE = 1.15;
 const PLAYER_1_COLOR = PLAYER_COLORS.player_1;
 const PLAYER_2_COLOR = PLAYER_COLORS.player_2;
 const NEUTRAL_PALETTE: TeamPalette = { primary: "#ffffff", accent: "#ffffff" };
-const UNIT_VISUAL_SCALE = 1.32;
-const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
-  worker: 1.08,
-  soldier: 1.08,
-  rifleman: 1.06,
-  rocket_soldier: 1.06,
-  light_tank: 1.16,
-};
+const VEHICLE_UNIT_TYPES = new Set<Unit["type"]>([
+  UNIT_TYPES.SCOUT_CAR,
+  UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.HEAVY_TANK,
+  UNIT_TYPES.ARTILLERY,
+]);
+const isVehicleUnit = (unit: Unit): boolean => VEHICLE_UNIT_TYPES.has(unit.type);
 const PREVIEW_FX_SOURCE_X = 63;
 const PREVIEW_FX_TARGET_X = 81;
 const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
@@ -200,10 +201,9 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
   },
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
-const STRUCTURE_VISUAL_SCALE = 1.16;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
-const MODEL_VERSION = "production-20260620-1";
+const MODEL_VERSION = "production-20260811-2";
 const SHOW_DEBUG_INTENTS = new URLSearchParams(window.location.search).has("debug-intents");
 const MASS_BATTLE_LOD_ENABLED = new URLSearchParams(window.location.search).get("lod") === "mass";
 const FAR_READABILITY_VIEW = new URLSearchParams(window.location.search).get("view") === "far";
@@ -223,16 +223,29 @@ const MODEL_URLS = {
   rifleman_lod: modelUrl("rifleman_lod"),
   rocket_soldier: modelUrl("rocket_soldier"),
   rocket_soldier_lod: modelUrl("rocket_soldier_lod"),
-  light_tank: modelUrl("light_tank"),
-  light_tank_lod: modelUrl("light_tank_lod"),
+  scout_car_body: modelUrl("scout_car_body"),
+  scout_car_body_lod: modelUrl("scout_car_body_lod"),
+  scout_car_turret: modelUrl("scout_car_turret"),
+  scout_car_turret_lod: modelUrl("scout_car_turret_lod"),
   light_tank_body: modelUrl("light_tank_body"),
   light_tank_body_lod: modelUrl("light_tank_body_lod"),
   light_tank_turret: modelUrl("light_tank_turret"),
   light_tank_turret_lod: modelUrl("light_tank_turret_lod"),
+  heavy_tank_body: modelUrl("heavy_tank_body"),
+  heavy_tank_body_lod: modelUrl("heavy_tank_body_lod"),
+  heavy_tank_turret: modelUrl("heavy_tank_turret"),
+  heavy_tank_turret_lod: modelUrl("heavy_tank_turret_lod"),
+  artillery_body: modelUrl("artillery_body"),
+  artillery_body_lod: modelUrl("artillery_body_lod"),
+  artillery_turret: modelUrl("artillery_turret"),
+  artillery_turret_lod: modelUrl("artillery_turret_lod"),
   hq: modelUrl("hq"),
   barracks: modelUrl("barracks"),
   war_factory: modelUrl("war_factory"),
   refinery: modelUrl("refinery"),
+  machine_gun_turret: modelUrl("machine_gun_turret"),
+  anti_tank_turret: modelUrl("anti_tank_turret"),
+  tech_center: modelUrl("tech_center"),
   resource: modelUrl("resource"),
   rock: modelUrl("rock"),
 } as const;
@@ -344,6 +357,94 @@ function ResponsiveCamera({
   }, [camera, initialFocus, size.height, size.width]);
 
   return null;
+}
+
+function BoundedCameraControls({
+  resetFocus,
+  dimensions,
+}: {
+  resetFocus: CameraFocus;
+  dimensions: MapDimensions;
+}) {
+  const controlsRef = useRef<ComponentRef<typeof OrbitControls>>(null);
+  const middlePointer = useRef<{ x: number; y: number } | null>(null);
+  const initialized = useRef(false);
+  const { camera, gl } = useThree();
+  const halfWidth = Math.max(0, (dimensions.width - 1) * CELL_SIZE * 0.5);
+  const halfHeight = Math.max(0, (dimensions.height - 1) * CELL_SIZE * 0.5);
+
+  const resetCamera = () => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    controls.target.set(...resetFocus.target);
+    camera.position.set(...resetFocus.position);
+    camera.lookAt(controls.target);
+    camera.updateProjectionMatrix();
+    controls.update();
+  };
+
+  useEffect(() => {
+    if (initialized.current || !controlsRef.current) return;
+    controlsRef.current.target.set(...resetFocus.target);
+    controlsRef.current.update();
+    initialized.current = true;
+  }, [resetFocus]);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 1) return;
+      middlePointer.current = { x: event.clientX, y: event.clientY };
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.button !== 1 || !middlePointer.current) return;
+      const movement = Math.hypot(
+        event.clientX - middlePointer.current.x,
+        event.clientY - middlePointer.current.y,
+      );
+      middlePointer.current = null;
+      if (movement <= 4) resetCamera();
+    };
+    const clearMiddlePointer = () => {
+      middlePointer.current = null;
+    };
+    canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", clearMiddlePointer);
+    return () => {
+      canvas.removeEventListener("pointerdown", handlePointerDown);
+      canvas.removeEventListener("pointerup", handlePointerUp);
+      canvas.removeEventListener("pointercancel", clearMiddlePointer);
+    };
+  }, [camera, gl, resetFocus]);
+
+  useFrame(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    const clampedX = THREE.MathUtils.clamp(controls.target.x, -halfWidth, halfWidth);
+    const clampedZ = THREE.MathUtils.clamp(controls.target.z, -halfHeight, halfHeight);
+    const deltaX = clampedX - controls.target.x;
+    const deltaY = -controls.target.y;
+    const deltaZ = clampedZ - controls.target.z;
+    if (deltaX === 0 && deltaY === 0 && deltaZ === 0) return;
+    controls.target.set(clampedX, 0, clampedZ);
+    camera.position.add(new THREE.Vector3(deltaX, deltaY, deltaZ));
+    controls.update();
+  });
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      makeDefault
+      enableDamping
+      enablePan
+      dampingFactor={0.08}
+      minDistance={10}
+      maxDistance={88}
+      minPolarAngle={Math.PI * 0.18}
+      maxPolarAngle={Math.PI * 0.42}
+    />
+  );
 }
 
 function RenderDiagnostics() {
@@ -468,10 +569,10 @@ function getHeading(object: Unit): number {
 }
 
 function getBodyHeading(unit: Unit): number {
-  if (unit.type === "light_tank" && unit.heading !== undefined) {
+  if (isVehicleUnit(unit) && unit.heading !== undefined) {
     return Math.PI - unit.heading;
   }
-  return getHeading(unit) + (unit.type === "light_tank" ? TANK_FORWARD_OFFSET : 0);
+  return getHeading(unit) + (isVehicleUnit(unit) ? TANK_FORWARD_OFFSET : 0);
 }
 
 function getAimHeading(unit: Unit, objectPositions: Map<string, { x: number; y: number }>): number {
@@ -734,6 +835,21 @@ function HealthBar({
   );
 }
 
+function getUnitHealthBarY(unit: Unit): number {
+  switch (unit.type) {
+    case UNIT_TYPES.SCOUT_CAR:
+      return 1.64;
+    case UNIT_TYPES.LIGHT_TANK:
+      return 2.22;
+    case UNIT_TYPES.HEAVY_TANK:
+      return 2.76;
+    case UNIT_TYPES.ARTILLERY:
+      return 2.86;
+    default:
+      return 1.7;
+  }
+}
+
 function getResourceClusterTransforms(tile: Tile, dimensions: MapDimensions): ModelTransform[] {
   const basePosition = toWorldPosition(tile.x, tile.y, dimensions, 0.02);
   const count = 10;
@@ -835,14 +951,15 @@ function BasePlatform({
   }
 
   const color = getPlayerColor(building.playerId);
+  const hqRadius = ENTITY_GEOMETRY.buildingBodies.hq.width * CELL_SIZE * 0.5;
   return (
     <group position={toWorldPosition(building.x, building.y, dimensions, 0.018)}>
       <mesh receiveShadow>
-        <cylinderGeometry args={[4.2, 4.2, 0.08, 12]} />
+        <cylinderGeometry args={[hqRadius, hqRadius, 0.08, 12]} />
         <meshStandardMaterial color="#1a211e" roughness={0.86} metalness={0.05} />
       </mesh>
       <mesh position={[0, 0.055, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[3.2, 3.52, 12]} />
+        <ringGeometry args={[hqRadius * 0.76, hqRadius * 0.84, 12]} />
         <meshBasicMaterial color={color} transparent opacity={0.38} side={THREE.DoubleSide} />
       </mesh>
     </group>
@@ -850,9 +967,6 @@ function BasePlatform({
 }
 
 function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
-  if (unit.type === "light_tank") {
-    return massBattleLod ? MODEL_URLS.light_tank_lod : MODEL_URLS.light_tank;
-  }
   if (unit.type === "rocket_soldier") {
     return massBattleLod ? MODEL_URLS.rocket_soldier_lod : MODEL_URLS.rocket_soldier;
   }
@@ -865,12 +979,36 @@ function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
   return massBattleLod ? MODEL_URLS.soldier_lod : MODEL_URLS.soldier;
 }
 
-function getUnitVisualScale(unit: Unit): number {
-  return UNIT_VISUAL_SCALE * (UNIT_SCALE_BY_TYPE[unit.type] ?? 1);
+function getVehiclePartModelUrls(
+  unit: Unit,
+  massBattleLod: boolean,
+): { body: string; turret: string } {
+  switch (unit.type) {
+    case UNIT_TYPES.SCOUT_CAR:
+      return {
+        body: massBattleLod ? MODEL_URLS.scout_car_body_lod : MODEL_URLS.scout_car_body,
+        turret: massBattleLod ? MODEL_URLS.scout_car_turret_lod : MODEL_URLS.scout_car_turret,
+      };
+    case UNIT_TYPES.HEAVY_TANK:
+      return {
+        body: massBattleLod ? MODEL_URLS.heavy_tank_body_lod : MODEL_URLS.heavy_tank_body,
+        turret: massBattleLod ? MODEL_URLS.heavy_tank_turret_lod : MODEL_URLS.heavy_tank_turret,
+      };
+    case UNIT_TYPES.ARTILLERY:
+      return {
+        body: massBattleLod ? MODEL_URLS.artillery_body_lod : MODEL_URLS.artillery_body,
+        turret: massBattleLod ? MODEL_URLS.artillery_turret_lod : MODEL_URLS.artillery_turret,
+      };
+    default:
+      return {
+        body: massBattleLod ? MODEL_URLS.light_tank_body_lod : MODEL_URLS.light_tank_body,
+        turret: massBattleLod ? MODEL_URLS.light_tank_turret_lod : MODEL_URLS.light_tank_turret,
+      };
+  }
 }
 
 function getUnitMotionProfile(unit: Unit, moving: boolean, firing: boolean): Pick<ModelTransform, "motionAmplitude" | "motionFrequency" | "swayAmplitude" | "swayFrequency" | "recoilAmplitude"> {
-  if (unit.type === "light_tank") {
+  if (isVehicleUnit(unit)) {
     return {
       motionAmplitude: 0,
       swayAmplitude: 0,
@@ -967,7 +1105,7 @@ function UnitBatches({
         visualRotation: "body",
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
-        scale: getUnitVisualScale(unit),
+        scale: CELL_SIZE,
         motionAmplitude: motionProfile.motionAmplitude,
         motionFrequency: motionProfile.motionFrequency,
         motionPhase: index * 1.73 + (unit.playerId === "player_1" ? 0 : 0.8),
@@ -988,9 +1126,10 @@ function UnitBatches({
         grouped.set(key, batch);
       };
 
-      if (unit.type === "light_tank") {
-        addToBatch(massBattleLod ? MODEL_URLS.light_tank_body_lod : MODEL_URLS.light_tank_body, baseTransform);
-        addToBatch(massBattleLod ? MODEL_URLS.light_tank_turret_lod : MODEL_URLS.light_tank_turret, {
+      if (isVehicleUnit(unit)) {
+        const vehicleModels = getVehiclePartModelUrls(unit, massBattleLod);
+        addToBatch(vehicleModels.body, baseTransform);
+        addToBatch(vehicleModels.turret, {
           ...baseTransform,
           visualRotation: "aim",
           rotation: [0, getAimHeading(unit, objectPositions), 0],
@@ -1028,14 +1167,14 @@ function UnitBatches({
               visualWorld={visualWorld}
               dimensions={dimensions}
               elevation={0.08}
-              scale={getUnitVisualScale(unit)}
+              scale={CELL_SIZE}
             >
               <HealthBar
                 hp={unit.hp}
                 maxHp={unit.maxHp}
                 color={palette.primary}
-                width={unit.type === "light_tank" ? 1.25 : 0.82}
-                y={unit.type === "light_tank" ? 1.28 : 1.34}
+                width={isVehicleUnit(unit) ? 1.25 : 0.82}
+                y={getUnitHealthBarY(unit)}
               />
             </VisualUnitAnchor>
           );
@@ -1073,7 +1212,7 @@ function GroundRingBatch({
     visualRotation: "fixed",
     position: toWorldPosition(unit.x, unit.y, dimensions, 0.035),
     rotation: [-Math.PI / 2, 0, 0],
-    scale: unit.type === "light_tank" ? 1.22 : 0.72,
+    scale: isVehicleUnit(unit) ? 1.22 : 0.72,
   })), [dimensions, units]);
 
   return (
@@ -1125,7 +1264,7 @@ function getProjectileVisualType(unitType: Unit["type"]): ActiveProjectile["proj
   if (unitType === "rocket_soldier") {
     return "rocket";
   }
-  if (unitType === "light_tank") {
+  if (VEHICLE_UNIT_TYPES.has(unitType)) {
     return "shell";
   }
   return "bullet";
@@ -1224,8 +1363,8 @@ function CombatEffects({
         if (!target) {
           return [];
         }
-        const sourceHeight = unit.type === "light_tank" ? 1.02 : 0.96;
-        const targetHeight = "productionQueue" in target ? 1.4 : target.type === "light_tank" ? 0.76 : 0.82;
+        const sourceHeight = isVehicleUnit(unit) ? 1.02 : 0.96;
+        const targetHeight = "productionQueue" in target ? 1.4 : VEHICLE_UNIT_TYPES.has(target.type) ? 0.76 : 0.82;
         const projectileType = getProjectileVisualType(unit.type);
         return [{
           sourceEntityId: unit.id,
@@ -1524,9 +1663,9 @@ function DestructionEffects({
         if (!current.has(id)) {
           destroyed.push({
             id: `${id}-${Date.now()}`,
-            position: toWorldPosition(object.x, object.y, dimensions, object.type === "light_tank" ? 0.58 : 0.42),
+            position: toWorldPosition(object.x, object.y, dimensions, "productionQueue" in object ? 0.86 : VEHICLE_UNIT_TYPES.has(object.type) ? 0.58 : 0.42),
             bornAt: Date.now() / 1000,
-            scale: "productionQueue" in object ? 2.2 : object.type === "light_tank" ? 1.35 : 0.72,
+            scale: "productionQueue" in object ? 2.2 : VEHICLE_UNIT_TYPES.has(object.type) ? 1.35 : 0.72,
           });
         }
       }
@@ -1603,21 +1742,36 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
         ? MODEL_URLS.barracks
         : building.type === "war_factory"
           ? MODEL_URLS.war_factory
-          : MODEL_URLS.refinery;
+          : building.type === "refinery"
+            ? MODEL_URLS.refinery
+            : building.type === "machine_gun_turret"
+              ? MODEL_URLS.machine_gun_turret
+              : building.type === "anti_tank_turret"
+                ? MODEL_URLS.anti_tank_turret
+                : MODEL_URLS.tech_center;
   const presentation = building.type === "hq"
-    ? { scale: 1, healthY: 6.9, healthWidth: 3.4 }
+    ? { healthY: 6.65, healthWidth: 3.4 }
     : building.type === "barracks"
-      ? { scale: 0.92, healthY: 4.35, healthWidth: 2.45 }
+      ? { healthY: 3.85, healthWidth: 2.45 }
       : building.type === "war_factory"
-        ? { scale: 0.92, healthY: 5.15, healthWidth: 3.1 }
-        : { scale: 0.94, healthY: 6.15, healthWidth: 2.7 };
+        ? { healthY: 3.8, healthWidth: 3.1 }
+        : building.type === "refinery"
+          ? { healthY: 3.98, healthWidth: 2.7 }
+          : building.type === "machine_gun_turret"
+            ? { healthY: 2.55, healthWidth: 1.9 }
+            : building.type === "anti_tank_turret"
+              ? { healthY: 2.3, healthWidth: 2.3 }
+              : { healthY: 4.77, healthWidth: 3.0 };
+  const rotation: Vec3 = building.type === "machine_gun_turret" || building.type === "anti_tank_turret"
+    ? [0, building.playerId === "player_1" ? Math.PI : 0, 0]
+    : [0, 0, 0];
 
   return (
     <group
       position={toWorldPosition(building.x, building.y, dimensions, 0)}
-      scale={STRUCTURE_VISUAL_SCALE * presentation.scale}
+      scale={CELL_SIZE}
     >
-      <ModelInstance url={modelUrl} palette={palette} position={[0, 0, 0]} />
+      <ModelInstance url={modelUrl} palette={palette} position={[0, 0, 0]} rotation={rotation} />
       <HealthBar
         hp={building.hp}
         maxHp={building.maxHp}
@@ -1754,7 +1908,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
   const terrainHeight = dimensions.height * CELL_SIZE;
   const initialFocus = useMemo(
     () => getInitialCameraFocus(state, dimensions),
-    [],
+    [dimensions, state],
   );
   const visualWorld = useVisualWorld();
 
@@ -1851,17 +2005,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
       {SHOW_DEBUG_INTENTS ? (
         <IntentLines units={units} dimensions={dimensions} visualWorld={visualWorld} />
       ) : null}
-      <OrbitControls
-        makeDefault
-        target={initialFocus.target}
-        enableDamping
-        enablePan
-        dampingFactor={0.08}
-        minDistance={10}
-        maxDistance={88}
-        minPolarAngle={Math.PI * 0.18}
-        maxPolarAngle={Math.PI * 0.42}
-      />
+      <BoundedCameraControls resetFocus={initialFocus} dimensions={dimensions} />
     </>
   );
 });

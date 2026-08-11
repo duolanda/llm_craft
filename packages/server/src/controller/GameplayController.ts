@@ -8,6 +8,9 @@ import {
   AgentUnitGroup,
   AgentPlanRecord,
   AttackTargetType,
+  ALL_BUILDING_TYPES,
+  ALL_UNIT_TYPES,
+  ARMOR_TYPES,
   BUILDING_TYPES,
   Building,
   BuildingType,
@@ -33,10 +36,14 @@ import {
   getDefaultAttackMovePriority,
   getBuildingCost,
   getBuildingConstructionTicks,
+  getBuildingPrerequisites,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
   getUnitVisionRange,
   getUnitCost,
+  getUnitPrerequisites,
+  getUnitStats,
+  getUnitWeapon,
   getProductionOptions,
   getRetiredProductionUnitTypes,
   isBuildableBuildingType,
@@ -98,6 +105,28 @@ const PLAN_CALL_TOOL_NAMES = [
   "start_harvest_loop",
   "hold_unit",
 ] as const satisfies readonly PlanCallToolName[];
+
+function getCompletedBuildingTypes(buildings: readonly Building[]): Set<BuildingType> {
+  return new Set(
+    buildings
+      .filter((building) => building.exists && isBuildingComplete(building))
+      .map((building) => building.type),
+  );
+}
+
+function getMissingPrerequisites(
+  completedTypes: ReadonlySet<BuildingType>,
+  requiredTypes: readonly BuildingType[],
+): BuildingType[] {
+  return requiredTypes.filter((buildingType) => !completedTypes.has(buildingType));
+}
+
+function getTechTier(buildings: readonly Building[]): 1 | 2 | 3 {
+  const completedTypes = getCompletedBuildingTypes(buildings);
+  if (completedTypes.has(BUILDING_TYPES.TECH_CENTER)) return 3;
+  if (completedTypes.has(BUILDING_TYPES.WAR_FACTORY)) return 2;
+  return 1;
+}
 const PLAN_UNTIL_CONDITIONS = [
   "arrived",
   "enemy_in_range",
@@ -610,14 +639,15 @@ export class GameplayController {
           details: { workerId: worker.id, constructingBuildingId: worker.constructingBuildingId },
         };
       }
-      if (
-        buildingType === BUILDING_TYPES.WAR_FACTORY &&
-        !context.snapshot.myBuildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))
-      ) {
+      const completedBuildingTypes = getCompletedBuildingTypes(context.snapshot.myBuildings);
+      const missingPrerequisites = isBuildingType(buildingType)
+        ? getMissingPrerequisites(completedBuildingTypes, getBuildingPrerequisites(buildingType))
+        : [];
+      if (missingPrerequisites.length > 0) {
         return {
           code: "missing_prerequisite",
-          message: "A completed barracks is required before building a war factory.",
-          details: { buildingType, requiredBuildingType: BUILDING_TYPES.BARRACKS },
+          message: `Build and complete ${missingPrerequisites.join(", ")} before starting ${buildingType}.`,
+          details: { buildingType, missingPrerequisites },
         };
       }
       if (isBuildableBuildingType(buildingType) && !this.isWorkerAdjacentToBuildFootprint(worker, buildingType, position)) {
@@ -671,6 +701,7 @@ export class GameplayController {
     const enemies = state.players.filter((player) => player.id !== this.playerId);
     const myBuildings = me.buildings.filter((building) => building.exists);
     const completedMyBuildings = myBuildings.filter(isBuildingComplete);
+    const completedBuildingTypes = getCompletedBuildingTypes(completedMyBuildings);
     const myUnits = me.units.filter((unit) => unit.exists);
     const enemyBuildings = enemies.flatMap((player) => player.buildings.filter((building) => building.exists));
     const enemyUnits = enemies.flatMap((player) => player.units.filter((unit) => unit.exists));
@@ -678,8 +709,8 @@ export class GameplayController {
     const countUnits = (unitType: UnitType) => myUnits.filter((unit) => unit.type === unitType).length;
     const countBuildings = (buildingType: BuildingType) => completedMyBuildings.filter((building) => building.type === buildingType).length;
     const hasBarracks = countBuildings(BUILDING_TYPES.BARRACKS) > 0;
-    const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY);
-    const enemyVehicleCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.LIGHT_TANK).length;
+    const enemyHasWarFactory = enemyBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY && isBuildingComplete(building));
+    const enemyVehicleCount = enemyUnits.filter((unit) => getUnitStats(unit.type).armor === ARMOR_TYPES.VEHICLE).length;
     const enemyRocketCount = enemyUnits.filter((unit) => unit.type === UNIT_TYPES.ROCKET_SOLDIER).length;
     const workers = myUnits.filter((unit) => unit.type === UNIT_TYPES.WORKER);
     const assignedHarvesters = workers.filter((unit) => unit.intent?.type === "harvest_loop");
@@ -740,29 +771,36 @@ export class GameplayController {
         return a.y - b.y || a.x - b.x;
       });
     const availableBuilders = workers.filter((worker) => !worker.constructingBuildingId);
-    const buildOptions = [
-      BUILDING_TYPES.BARRACKS,
-      BUILDING_TYPES.WAR_FACTORY,
-      BUILDING_TYPES.REFINERY,
-    ].map((buildingType) => {
-      const prerequisiteMet = buildingType !== BUILDING_TYPES.WAR_FACTORY || hasBarracks;
-      const cost = getBuildingCost(buildingType);
-      return {
-        buildingType,
-        cost,
-        constructionTicks: getBuildingConstructionTicks(buildingType),
-        prerequisiteMet,
-        affordable: me.resources.credits >= cost,
-        availableBuilderIds: availableBuilders.map((worker) => worker.id),
-      };
-    });
-    const canQueueUnit = (unitType: UnitType): boolean => myBuildings.some((building) =>
-      isBuildingComplete(building) &&
-      canBuildingProduce(building.type, unitType) &&
-      building.productionQueue.reduce(
-        (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
-        0,
-      ) < MAX_PENDING_PRODUCTION_PER_UNIT_TYPE
+    const buildOptions = ALL_BUILDING_TYPES
+      .filter((buildingType) => buildingType !== BUILDING_TYPES.HQ)
+      .map((buildingType) => {
+        const missingPrerequisites = getMissingPrerequisites(
+          completedBuildingTypes,
+          getBuildingPrerequisites(buildingType),
+        );
+        const cost = getBuildingCost(buildingType);
+        return {
+          buildingType,
+          cost,
+          constructionTicks: getBuildingConstructionTicks(buildingType),
+          prerequisiteMet: missingPrerequisites.length === 0,
+          missingPrerequisites,
+          affordable: me.resources.credits >= cost,
+          availableBuilderIds: availableBuilders.map((worker) => worker.id),
+        };
+      });
+    const canQueueUnit = (unitType: UnitType): boolean =>
+      getMissingPrerequisites(completedBuildingTypes, getUnitPrerequisites(unitType)).length === 0
+      && myBuildings.some((building) =>
+        isBuildingComplete(building) &&
+        canBuildingProduce(building.type, unitType) &&
+        building.productionQueue.reduce(
+          (total, order) => total + (order.unitType === unitType ? order.remainingCount : 0),
+          0,
+        ) < MAX_PENDING_PRODUCTION_PER_UNIT_TYPE
+      );
+    const queueAvailability = Object.fromEntries(
+      ALL_UNIT_TYPES.map((unitType) => [unitType, canQueueUnit(unitType)]),
     );
     return {
       effect: "read",
@@ -776,11 +814,13 @@ export class GameplayController {
         canBuildBarracks: me.resources.credits >= getBuildingCost(BUILDING_TYPES.BARRACKS),
         canBuildWarFactory: hasBarracks && me.resources.credits >= getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
         canBuildRefinery: me.resources.credits >= getBuildingCost(BUILDING_TYPES.REFINERY),
+        canBuildTechCenter: completedBuildingTypes.has(BUILDING_TYPES.WAR_FACTORY) && me.resources.credits >= getBuildingCost(BUILDING_TYPES.TECH_CENTER),
         canQueueWorker: canQueueUnit(UNIT_TYPES.WORKER),
         canQueueSoldier: canQueueUnit(UNIT_TYPES.SOLDIER),
         canQueueRifleman: canQueueUnit(UNIT_TYPES.RIFLEMAN),
         canQueueRocketSoldier: canQueueUnit(UNIT_TYPES.ROCKET_SOLDIER),
         canQueueLightTank: canQueueUnit(UNIT_TYPES.LIGHT_TANK),
+        queueAvailability,
         retiredProductionUnitTypes: getRetiredProductionUnitTypes(),
         economyStatus: {
           workers: workers.length,
@@ -791,40 +831,26 @@ export class GameplayController {
           carryingCredits: workers.reduce((sum, unit) => sum + unit.carryingCredits, 0),
           resourceAssignments,
         },
-        unitCosts: {
-          [UNIT_TYPES.WORKER]: getUnitCost(UNIT_TYPES.WORKER),
-          [UNIT_TYPES.SOLDIER]: getUnitCost(UNIT_TYPES.SOLDIER),
-          [UNIT_TYPES.RIFLEMAN]: getUnitCost(UNIT_TYPES.RIFLEMAN),
-          [UNIT_TYPES.ROCKET_SOLDIER]: getUnitCost(UNIT_TYPES.ROCKET_SOLDIER),
-          [UNIT_TYPES.LIGHT_TANK]: getUnitCost(UNIT_TYPES.LIGHT_TANK),
-        },
-        buildingCosts: {
-          [BUILDING_TYPES.BARRACKS]: getBuildingCost(BUILDING_TYPES.BARRACKS),
-          [BUILDING_TYPES.WAR_FACTORY]: getBuildingCost(BUILDING_TYPES.WAR_FACTORY),
-          [BUILDING_TYPES.REFINERY]: getBuildingCost(BUILDING_TYPES.REFINERY),
-        },
-        buildingConstructionTicks: {
-          [BUILDING_TYPES.BARRACKS]: getBuildingConstructionTicks(BUILDING_TYPES.BARRACKS),
-          [BUILDING_TYPES.WAR_FACTORY]: getBuildingConstructionTicks(BUILDING_TYPES.WAR_FACTORY),
-          [BUILDING_TYPES.REFINERY]: getBuildingConstructionTicks(BUILDING_TYPES.REFINERY),
-        },
+        unitCosts: Object.fromEntries(ALL_UNIT_TYPES.map((unitType) => [unitType, getUnitCost(unitType)])),
+        buildingCosts: Object.fromEntries(buildOptions.map((option) => [option.buildingType, option.cost])),
+        buildingConstructionTicks: Object.fromEntries(buildOptions.map((option) => [option.buildingType, option.constructionTicks])),
         buildOptions,
         techStatus: {
           own: {
+            tier: getTechTier(myBuildings),
             workers: countUnits(UNIT_TYPES.WORKER),
-            combatUnits:
-              countUnits(UNIT_TYPES.SOLDIER) +
-              countUnits(UNIT_TYPES.RIFLEMAN) +
-              countUnits(UNIT_TYPES.ROCKET_SOLDIER) +
-              countUnits(UNIT_TYPES.LIGHT_TANK),
+            combatUnits: myUnits.filter((unit) => unitCanAttack(unit.type)).length,
+            unitsByType: Object.fromEntries(ALL_UNIT_TYPES.map((unitType) => [unitType, countUnits(unitType)])),
             riflemen: countUnits(UNIT_TYPES.RIFLEMAN),
             rocketSoldiers: countUnits(UNIT_TYPES.ROCKET_SOLDIER),
             lightTanks: countUnits(UNIT_TYPES.LIGHT_TANK),
             barracks: countBuildings(BUILDING_TYPES.BARRACKS),
             warFactories: countBuildings(BUILDING_TYPES.WAR_FACTORY),
             refineries: countBuildings(BUILDING_TYPES.REFINERY),
+            techCenters: countBuildings(BUILDING_TYPES.TECH_CENTER),
           },
           enemy: {
+            tier: Math.max(1, ...enemies.map((enemy) => getTechTier(enemy.buildings))) as 1 | 2 | 3,
             hasWarFactory: enemyHasWarFactory,
             lightTanks: enemyVehicleCount,
             rocketSoldiers: enemyRocketCount,
@@ -919,13 +945,7 @@ export class GameplayController {
         .reduce<Record<UnitType, number>>((counts, unit) => {
           counts[unit.type] = (counts[unit.type] ?? 0) + 1;
           return counts;
-        }, {
-          [UNIT_TYPES.WORKER]: 0,
-          [UNIT_TYPES.SOLDIER]: 0,
-          [UNIT_TYPES.RIFLEMAN]: 0,
-          [UNIT_TYPES.ROCKET_SOLDIER]: 0,
-          [UNIT_TYPES.LIGHT_TANK]: 0,
-        });
+        }, Object.fromEntries(ALL_UNIT_TYPES.map((unitType) => [unitType, 0])) as Record<UnitType, number>);
     const myUnits = me.units.filter((unit) => unit.exists);
     const enemyUnits = enemies.flatMap((player) => player.units.filter((unit) => unit.exists));
     const combatUnits = myUnits.filter((unit) => unitCanAttack(unit.type));
@@ -1197,6 +1217,29 @@ export class GameplayController {
       };
     }
 
+    const completedBuildingTypes = getCompletedBuildingTypes(me.buildings);
+    const lockedRequest = requests
+      .map((request) => ({
+        request,
+        missingPrerequisites: getMissingPrerequisites(
+          completedBuildingTypes,
+          getUnitPrerequisites(request.unitType),
+        ),
+      }))
+      .find((entry) => entry.missingPrerequisites.length > 0);
+    if (lockedRequest) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "missing_prerequisite",
+          hint: `Build and complete ${lockedRequest.missingPrerequisites.join(", ")} before producing ${lockedRequest.request.unitType}.`,
+          unitType: lockedRequest.request.unitType,
+          missingPrerequisites: lockedRequest.missingPrerequisites,
+        }),
+      };
+    }
+
     const requestedCounts = new Map<UnitType, number>();
     for (const request of requests) {
       requestedCounts.set(request.unitType, (requestedCounts.get(request.unitType) ?? 0) + request.count);
@@ -1241,6 +1284,7 @@ export class GameplayController {
     const state = this.getReadState();
     this.trackRead(state.tick, true);
     const me = state.players.find((player) => player.id === this.playerId)!;
+    const completedBuildingTypes = getCompletedBuildingTypes(me.buildings);
     const requested = buildingIds ? new Set(buildingIds) : null;
     const queues = me.buildings
       .filter((building) => building.exists && getProductionOptions(building.type).length > 0)
@@ -1260,6 +1304,17 @@ export class GameplayController {
           ]),
         ),
         maxPendingPerUnitType: MAX_PENDING_PRODUCTION_PER_UNIT_TYPE,
+        productionOptions: getProductionOptions(building.type).map((unitType) => {
+          const missingPrerequisites = getMissingPrerequisites(
+            completedBuildingTypes,
+            getUnitPrerequisites(unitType),
+          );
+          return {
+            unitType,
+            unlocked: missingPrerequisites.length === 0,
+            missingPrerequisites,
+          };
+        }),
       }));
     return {
       effect: "read",
@@ -1414,7 +1469,7 @@ export class GameplayController {
         result: this.withActionMetadata({
           ok: false,
           error: "invalid_building",
-          hint: "Buildable structures are barracks, war_factory, and refinery. HQ cannot be built.",
+          hint: "HQ cannot be built; choose a production, economy, defense, or technology structure from buildOptions.",
         }),
       };
     }
@@ -1430,13 +1485,18 @@ export class GameplayController {
       };
     }
 
-    if (buildingType === BUILDING_TYPES.WAR_FACTORY && !me.buildings.some((building) => building.type === BUILDING_TYPES.BARRACKS && isBuildingComplete(building))) {
+    const missingPrerequisites = getMissingPrerequisites(
+      getCompletedBuildingTypes(me.buildings),
+      getBuildingPrerequisites(buildingType),
+    );
+    if (missingPrerequisites.length > 0) {
       return {
         effect: "action",
         result: this.withActionMetadata({
           ok: false,
           error: "missing_prerequisite",
-          hint: "Build and complete a barracks before starting a war_factory.",
+          hint: `Build and complete ${missingPrerequisites.join(", ")} before starting ${buildingType}.`,
+          missingPrerequisites,
         }),
       };
     }
@@ -2003,7 +2063,8 @@ export class GameplayController {
       const distance = isBuildingType(target.type)
         ? getDistanceToBuildingFootprint(target.type, target.x, target.y, attacker.x, attacker.y)
         : Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
-      const inRange = distance <= attacker.attackRange;
+      const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
+      const inRange = distance >= minRange && distance <= attacker.attackRange;
       if (inRange) {
         return {
           ok: true,
@@ -2016,11 +2077,22 @@ export class GameplayController {
         };
       }
 
+      const movePosition = distance < minRange
+        ? this.findMinimumRangeRetreatPosition(attacker, target, minRange)
+        : this.toGridPosition(target, this.getReadState());
+      if (!movePosition) {
+        return {
+          ok: false,
+          error: "no_firing_position",
+          hint: "No reachable map cell is available outside this weapon's minimum range.",
+        };
+      }
+
       return {
         ok: true,
         command: this.createCommand("move", {
           unitId,
-          position: this.toGridPosition(target, this.getReadState()),
+          position: movePosition,
         }),
         mode: "move_to_target",
         completedAfterCommand: false,
@@ -2032,6 +2104,54 @@ export class GameplayController {
       error: "target_missing",
       hint: "No living enemy unit or building matches this targetId; use one of availableEnemyTargets.",
     };
+  }
+
+  private findMinimumRangeRetreatPosition(
+    attacker: Unit,
+    target: Unit | Building,
+    minRange: number,
+  ): Position | null {
+    const state = this.getReadState();
+    const height = state.tiles.length;
+    const width = state.tiles[0]?.length ?? 0;
+    const occupiedBuildings = new Set(
+      state.players.flatMap((player) => player.buildings)
+        .filter((building) => building.exists)
+        .flatMap((building) => getBuildingFootprintCells(building.type, building.x, building.y))
+        .map((cell) => `${cell.x},${cell.y}`),
+    );
+    const occupiedUnits = new Set(
+      state.players.flatMap((player) => player.units)
+        .filter((unit) => unit.exists && unit.id !== attacker.id)
+        .map((unit) => `${Math.round(unit.x)},${Math.round(unit.y)}`),
+    );
+    const candidates: Array<Position & { movementDistance: number; targetDistance: number }> = [];
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (state.tiles[y]?.[x]?.type === TILE_TYPES.OBSTACLE) continue;
+        if (occupiedBuildings.has(`${x},${y}`) || occupiedUnits.has(`${x},${y}`)) continue;
+        const targetDistance = isBuildingType(target.type)
+          ? getDistanceToBuildingFootprint(target.type, target.x, target.y, x, y)
+          : Math.max(Math.abs(target.x - x), Math.abs(target.y - y));
+        if (targetDistance < minRange || targetDistance > attacker.attackRange) continue;
+        candidates.push({
+          x,
+          y,
+          targetDistance,
+          movementDistance: Math.max(Math.abs(attacker.x - x), Math.abs(attacker.y - y)),
+        });
+      }
+    }
+
+    candidates.sort((left, right) =>
+      left.movementDistance - right.movementDistance
+      || left.targetDistance - right.targetDistance
+      || left.y - right.y
+      || left.x - right.x
+    );
+    const candidate = candidates[0];
+    return candidate ? { x: candidate.x, y: candidate.y } : null;
   }
 
   private isAttackReloading(unit: { nextAttackTick?: number } | undefined): boolean {

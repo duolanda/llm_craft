@@ -1,0 +1,22 @@
+{
+  "coordinateUnit": "simulation_cell",
+  "unitBodies": {
+    "worker": { "shape": "circle", "radius": 0.44 },
+    "soldier": { "shape": "circle", "radius": 0.45 },
+    "rifleman": { "shape": "circle", "radius": 0.45 },
+    "rocket_soldier": { "shape": "circle", "radius": 0.46 },
+    "scout_car": { "shape": "obb", "length": 2.5, "width": 1.4 },
+    "light_tank": { "shape": "obb", "length": 3.1, "width": 2.1 },
+    "heavy_tank": { "shape": "obb", "length": 3.6, "width": 2.4 },
+    "artillery": { "shape": "obb", "length": 3.3, "width": 1.85 }
+  },
+  "buildingBodies": {
+    "hq": { "width": 7, "height": 7 },
+    "barracks": { "width": 5, "height": 5 },
+    "war_factory": { "width": 7, "height": 5 },
+    "refinery": { "width": 5, "height": 5 },
+    "machine_gun_turret": { "width": 3, "height": 3 },
+    "anti_tank_turret": { "width": 3, "height": 3 },
+    "tech_center": { "width": 5, "height": 5 }
+  }
+}

@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   BUILDING_STATS,
   BUILDING_TYPES,
+  ENTITY_GEOMETRY,
   UNIT_STATS,
   UNIT_TYPES,
   canBuildingProduce,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
   getBuildingCost,
+  getBuildingFootprint,
   getBuildingStats,
   getDefaultAttackMovePriority,
   getProductionOptions,
@@ -17,17 +19,27 @@ import {
   getUnitProductionTicks,
   getUnitWeapon,
   getBuildingVisionRange,
+  getBuildingPrerequisites,
+  getBuildingWeapon,
+  getUnitPrerequisites,
   getUnitVisionRange,
   unitCanAttack,
 } from "@llmcraft/shared";
 
 describe("default ruleset", () => {
+  it("keeps canonical building model bodies aligned with gameplay footprints", () => {
+    for (const buildingType of Object.values(BUILDING_TYPES)) {
+      expect(ENTITY_GEOMETRY.buildingBodies[buildingType]).toEqual(getBuildingFootprint(buildingType));
+    }
+  });
+
   it("keeps convenience stats aligned with ruleset unit definitions", () => {
     expect(getUnitStats(UNIT_TYPES.WORKER)).toEqual(UNIT_STATS.worker);
     expect(getUnitStats(UNIT_TYPES.SOLDIER)).toEqual(UNIT_STATS.soldier);
     expect(getUnitStats(UNIT_TYPES.RIFLEMAN)).toEqual(UNIT_STATS.rifleman);
     expect(getUnitStats(UNIT_TYPES.ROCKET_SOLDIER)).toEqual(UNIT_STATS.rocket_soldier);
     expect(getUnitStats(UNIT_TYPES.LIGHT_TANK)).toEqual(UNIT_STATS.light_tank);
+    expect(getUnitStats(UNIT_TYPES.HEAVY_TANK)).toEqual(UNIT_STATS.heavy_tank);
     expect(getUnitCost(UNIT_TYPES.WORKER)).toBe(50);
     expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(55);
     expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(70);
@@ -38,6 +50,7 @@ describe("default ruleset", () => {
     expect(unitCanAttack(UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.LIGHT_TANK)).toBe(true);
+    expect(unitCanAttack(UNIT_TYPES.ARTILLERY)).toBe(true);
     expect(getUnitProductionTicks(UNIT_TYPES.SOLDIER)).toBe(4);
     expect(getUnitProductionTicks(UNIT_TYPES.LIGHT_TANK)).toBe(14);
   });
@@ -82,14 +95,14 @@ describe("default ruleset", () => {
       UNIT_TYPES.WORKER,
     ]);
     expect(getDefaultAttackMovePriority(UNIT_TYPES.ROCKET_SOLDIER).slice(0, 3)).toEqual([
+      UNIT_TYPES.HEAVY_TANK,
       UNIT_TYPES.LIGHT_TANK,
-      BUILDING_TYPES.WAR_FACTORY,
-      BUILDING_TYPES.BARRACKS,
+      UNIT_TYPES.ARTILLERY,
     ]);
     expect(getDefaultAttackMovePriority(UNIT_TYPES.LIGHT_TANK).slice(0, 3)).toEqual([
+      UNIT_TYPES.HEAVY_TANK,
       UNIT_TYPES.LIGHT_TANK,
-      UNIT_TYPES.ROCKET_SOLDIER,
-      UNIT_TYPES.RIFLEMAN,
+      UNIT_TYPES.ARTILLERY,
     ]);
   });
 
@@ -98,6 +111,7 @@ describe("default ruleset", () => {
     expect(getBuildingStats(BUILDING_TYPES.BARRACKS)).toMatchObject(BUILDING_STATS.barracks);
     expect(getBuildingStats(BUILDING_TYPES.WAR_FACTORY)).toMatchObject(BUILDING_STATS.war_factory);
     expect(getBuildingStats(BUILDING_TYPES.REFINERY)).toMatchObject(BUILDING_STATS.refinery);
+    expect(getBuildingStats(BUILDING_TYPES.TECH_CENTER)).toMatchObject(BUILDING_STATS.tech_center);
     expect(getBuildingCost(BUILDING_TYPES.HQ)).toBe(0);
     expect(getBuildingCost(BUILDING_TYPES.BARRACKS)).toBe(120);
     expect(getBuildingCost(BUILDING_TYPES.WAR_FACTORY)).toBe(220);
@@ -110,7 +124,12 @@ describe("default ruleset", () => {
       UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.ROCKET_SOLDIER,
     ]);
-    expect(getProductionOptions(BUILDING_TYPES.WAR_FACTORY)).toEqual([UNIT_TYPES.LIGHT_TANK]);
+    expect(getProductionOptions(BUILDING_TYPES.WAR_FACTORY)).toEqual([
+      UNIT_TYPES.SCOUT_CAR,
+      UNIT_TYPES.LIGHT_TANK,
+      UNIT_TYPES.HEAVY_TANK,
+      UNIT_TYPES.ARTILLERY,
+    ]);
     expect(getProductionOptions(BUILDING_TYPES.REFINERY)).toEqual([]);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.WORKER)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.HQ, UNIT_TYPES.SOLDIER)).toBe(false);
@@ -121,5 +140,21 @@ describe("default ruleset", () => {
     expect(canBuildingProduce(BUILDING_TYPES.WAR_FACTORY, UNIT_TYPES.LIGHT_TANK)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.WORKER)).toBe(false);
     expect(getRetiredProductionUnitTypes()).toEqual([UNIT_TYPES.SOLDIER]);
+  });
+
+  it("defines building-gated T2/T3 progression and defensive weapons", () => {
+    expect(getBuildingPrerequisites(BUILDING_TYPES.WAR_FACTORY)).toEqual([BUILDING_TYPES.BARRACKS]);
+    expect(getBuildingPrerequisites(BUILDING_TYPES.TECH_CENTER)).toEqual([BUILDING_TYPES.WAR_FACTORY]);
+    expect(getUnitPrerequisites(UNIT_TYPES.LIGHT_TANK)).toEqual([]);
+    expect(getUnitPrerequisites(UNIT_TYPES.HEAVY_TANK)).toEqual([BUILDING_TYPES.TECH_CENTER]);
+    expect(getUnitPrerequisites(UNIT_TYPES.ARTILLERY)).toEqual([BUILDING_TYPES.TECH_CENTER]);
+    expect(getBuildingWeapon(BUILDING_TYPES.MACHINE_GUN_TURRET)).toMatchObject({
+      projectileType: "bullet",
+      range: 7,
+    });
+    expect(getBuildingWeapon(BUILDING_TYPES.ANTI_TANK_TURRET)).toMatchObject({
+      projectileType: "shell",
+      range: 9,
+    });
   });
 });

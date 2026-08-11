@@ -47,6 +47,18 @@
 
 ## 已解决或已有明确结论
 
+### 已解决：摄像机平移后视角越界且缺少快速复位
+
+- **根因与处理**：OrbitControls 只限制距离和俯仰角，没有限制 target，连续平移可把观察中心推到地图外；Replay/Live 状态切换后，旧初始化焦点也可能继续保留。控制器现将 target 限制在战场边界和地平面，中键短按按当前战术焦点复位；中键拖动仍保留原控制语义。
+
+### 已解决：最小射程单位贴近建筑后反复报告超出射程
+
+- **实战证据与处理**：`match-2026-08-10T15-47-44-296Z-db1781b9` 中 artillery `unit_72` 抵达敌方建筑旁后连续 22 次得到 `attack_out_of_range`。GameplayController 过去只检查最大射程，CombatSystem 的 attack-move 又会继续向目标中心移动。两条路径现在都会识别最小射程并先选择最近的合法射击格；回归测试覆盖贴近建筑的高层攻击和底层持续攻击。
+
+### 已解决：开局、新生产和建造完工后的 worker 无默认采矿任务
+
+- **根因与处理**：采矿循环只会由模型/CPU 显式工具调用创建，ProductionSystem 生成 worker 与 ConstructionSystem 清理 builder 时不会补默认经济任务。模拟层现为开局 worker、无 rally point 的新 worker，以及没有旧任务可恢复的完工 builder 自动选择矿路；显式 rally point、hold 和玩家命令仍优先。
+
 ### 已解决：`attack_move_unit.priority` 被误解为排序、实际却充当目标白名单
 
 - **根因与处理**：工具参数名和自然语义表达“优先顺序”，但战斗系统在显式传值时只搜索列出的类型。`priority: ["soldier"]` 因而让单位完全无视步枪兵、工人和建筑。索敌现在会先使用调用者给出的顺序，再去重追加该兵种完整默认顺序；严格点杀继续使用 `attack(targetId)`。

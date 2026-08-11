@@ -6,6 +6,7 @@ import {
   UNIT_STATES,
   getAttackDamageAgainstUnit,
   getUnitStats,
+  getUnitWeapon,
   RESULT_CODES,
   ResultCode,
   MAP_WIDTH,
@@ -13,7 +14,7 @@ import {
 } from "@llmcraft/shared";
 import { PathFinder, type IntegrationField, type NavigationField } from "./PathFinder";
 import type { WorldUnit as Unit } from "./WorldUnit";
-import { getCollisionBoundingRadius, getMovementProfile } from "./navigation/MovementProfile";
+import { getCollisionBoundingRadius, getMaximumCollisionBoundingRadius, getMovementProfile } from "./navigation/MovementProfile";
 import { UnitSpatialIndex } from "./navigation/UnitSpatialIndex";
 import { isShapeBlockedByGrid } from "./navigation/NavigationGrid";
 import { getCollisionManifold, type CollisionShape } from "./navigation/CollisionShape";
@@ -29,7 +30,7 @@ const ARRIVAL_EPSILON = 0.001;
 const INTERMEDIATE_WAYPOINT_RADIUS = 0.5;
 const SEPARATION_SLOP = 1e-6;
 const SEPARATION_ITERATIONS = 8;
-const MAX_UNIT_COLLISION_BOUNDING_RADIUS = Math.hypot(1.48, 0.98);
+const MAX_UNIT_COLLISION_BOUNDING_RADIUS = getMaximumCollisionBoundingRadius();
 const MAX_MOVEMENT_SUBSTEPS_PER_TICK = 8;
 const LOCAL_AVOIDANCE_ANGLES = [0, -30, 30, -60, 60, -90, 90] as const;
 const CONGESTION_ESCAPE_ANGLES = [-120, 120, -150, 150, 180] as const;
@@ -257,7 +258,8 @@ export class UnitManager {
 
     // Critical: Check attack range
     const distance = getChebyshevDistance(attacker.x, attacker.y, target.x, target.y);
-    if (distance > attacker.attackRange) {
+    const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
+    if (distance > attacker.attackRange || distance < minRange) {
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 

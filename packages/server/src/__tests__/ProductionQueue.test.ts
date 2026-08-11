@@ -129,4 +129,33 @@ describe("finite production queues", () => {
     expect((game.getCommandResults().at(-1)?.data as CommandResultData).result_code).toBe(RESULT_CODES.ERR_INVALID_BUILDING);
     expect(game.getBuildingManager().getBuilding(barracks.id)?.productionQueue).toHaveLength(2);
   });
+
+  it("finishes the active T3 unit, then pauses later units until the tech center is rebuilt", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    world.createBuilding(BUILDING_TYPES.BARRACKS, 24, 48, "player_1");
+    const factory = world.createBuilding(BUILDING_TYPES.WAR_FACTORY, 32, 48, "player_1");
+    const techCenter = world.createBuilding(BUILDING_TYPES.TECH_CENTER, 40, 48, "player_1");
+    world.buildings.enqueueProduction(factory, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 2 }]);
+    const production = new ProductionSystem();
+
+    production.step(world);
+    expect(factory.productionProgress).toMatchObject({ status: "producing" });
+    world.destroyEntity(techCenter.id);
+    for (let tick = 1; tick < getUnitProductionTicks(UNIT_TYPES.HEAVY_TANK); tick++) production.step(world);
+
+    expect(world.units.getUnitsByPlayer("player_1").filter((unit) => unit.type === UNIT_TYPES.HEAVY_TANK)).toHaveLength(1);
+    production.step(world);
+    expect(factory.productionProgress).toMatchObject({
+      status: "waiting_for_prerequisite",
+      paidCredits: 0,
+      missingPrerequisites: [BUILDING_TYPES.TECH_CENTER],
+    });
+
+    world.createBuilding(BUILDING_TYPES.TECH_CENTER, 40, 48, "player_1");
+    production.step(world);
+    expect(factory.productionProgress).toMatchObject({
+      status: "producing",
+      remainingTicks: getUnitProductionTicks(UNIT_TYPES.HEAVY_TANK) - 1,
+    });
+  });
 });

@@ -267,7 +267,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "spawn_unit",
-    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick, pauses without losing progress when credits are insufficient, and resumes automatically. Each building may keep at most 100 pending units of each unit type. Use get_production_queue to inspect order IDs and cancel_production to change course.",
+    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick and pauses without losing progress when credits or a required technology building are unavailable. If technology is destroyed, the active unit completes and later locked units wait for rebuilding. Each building may keep at most 100 pending units of each unit type. Use get_production_queue to inspect unlocks, order IDs, and progress.",
     parameters: {
       type: "object",
       required: ["buildingId", "units"],
@@ -363,7 +363,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "build_structure",
-    description: "Assign one worker to construct a building. Omit x/y to select a legal site automatically; refinery auto-placement favors sites that shorten resource delivery routes. If the worker is not adjacent to the full footprint, it moves there and starts construction when ready. A worker that was harvesting resumes that loop after construction. War factories require a completed barracks first.",
+    description: "Assign one worker to construct a building. Omit x/y to select a legal site automatically; refinery auto-placement favors sites that shorten resource delivery routes. If the worker is not adjacent to the full footprint, it moves there and starts construction when ready. A worker that was harvesting resumes that loop after construction. Build prerequisites are enforced: barracks unlocks the T2 war factory and machine-gun turret; war factory unlocks the anti-tank turret and T3 tech center.",
     parameters: {
       type: "object",
       required: ["unitId", "buildingType"],

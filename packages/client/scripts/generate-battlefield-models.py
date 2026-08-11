@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+import os
+import time
 from pathlib import Path
 
 import bpy
@@ -13,6 +16,10 @@ TEXTURE_DIR = CLIENT_ROOT / "public" / "assets" / "textures" / "battlefield"
 SOURCE_DIR = CLIENT_ROOT / "assets" / "source" / "quaternius"
 HUMAN_SOURCE = SOURCE_DIR / "AnimatedMen-MaleLongSleeve.blend"
 TANK_SOURCE = SOURCE_DIR / "AnimatedTanks-Tank4.blend"
+GEOMETRY_SPEC_PATH = CLIENT_ROOT.parent / "shared" / "src" / "entity-geometry.json"
+ENTITY_GEOMETRY = json.loads(GEOMETRY_SPEC_PATH.read_text(encoding="utf-8"))
+UNIT_BODY_GEOMETRY = ENTITY_GEOMETRY["unitBodies"]
+BUILDING_BODY_GEOMETRY = ENTITY_GEOMETRY["buildingBodies"]
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -48,6 +55,7 @@ def textured_material(
 ) -> bpy.types.Material:
     material = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     material.use_nodes = True
+    material.use_backface_culling = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     nodes.clear()
@@ -90,6 +98,7 @@ def flat_material(
 ) -> bpy.types.Material:
     material = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     material.use_nodes = True
+    material.use_backface_culling = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     nodes.clear()
@@ -214,6 +223,28 @@ def cylinder(
     return finish_mesh(obj, material, bevel=bevel, smooth=True)
 
 
+def cylinder_between(
+    name: str,
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    radius: float,
+    material: bpy.types.Material,
+    *,
+    vertices: int = 16,
+    bevel: float = 0.0,
+) -> bpy.types.Object:
+    start_vector = Vector(start)
+    end_vector = Vector(end)
+    direction = end_vector - start_vector
+    midpoint = (start_vector + end_vector) * 0.5
+    bpy.ops.mesh.primitive_cylinder_add(vertices=vertices, radius=radius, depth=direction.length, location=midpoint)
+    obj = bpy.context.object
+    obj.name = name
+    obj.rotation_mode = "QUATERNION"
+    obj.rotation_quaternion = Vector((0, 0, 1)).rotation_difference(direction.normalized())
+    return finish_mesh(obj, material, bevel=bevel, smooth=True)
+
+
 def cone(
     name: str,
     location: tuple[float, float, float],
@@ -325,6 +356,68 @@ def scale_and_ground(objects: list[bpy.types.Object], scale: float) -> None:
         for corner in obj.bound_box
     )
     for obj in objects:
+        obj.location.z -= minimum_z
+
+
+def horizontal_bounds(objects: list[bpy.types.Object]) -> tuple[float, float]:
+    points = [
+        obj.matrix_world @ Vector(corner)
+        for obj in objects
+        if obj.type == "MESH"
+        for corner in obj.bound_box
+    ]
+    if not points:
+        raise RuntimeError("Cannot measure an empty model body")
+    return (
+        max(point.x for point in points) - min(point.x for point in points),
+        max(point.y for point in points) - min(point.y for point in points),
+    )
+
+
+def apply_uniform_scale(objects: list[bpy.types.Object], scale: float) -> None:
+    for obj in objects:
+        obj.location *= scale
+        obj.scale = tuple(component * scale for component in obj.scale)
+        activate(obj)
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    bpy.context.view_layer.update()
+
+
+def normalize_horizontal_footprint(
+    label: str,
+    objects: list[bpy.types.Object],
+    body_objects: list[bpy.types.Object],
+    target_length: float,
+    target_width: float,
+) -> None:
+    source_length, source_width = horizontal_bounds(body_objects)
+    scale = min(target_length / source_length, target_width / source_width)
+    apply_uniform_scale(objects, scale)
+    actual_length, actual_width = horizontal_bounds(body_objects)
+    tolerance = 0.015
+    if actual_length > target_length + tolerance or actual_width > target_width + tolerance:
+        raise RuntimeError(
+            f"{label} body exceeds its canonical footprint: "
+            f"{actual_length:.3f}x{actual_width:.3f} > {target_length:.3f}x{target_width:.3f}"
+        )
+    if actual_length / target_length < 0.82 or actual_width / target_width < 0.82:
+        raise RuntimeError(
+            f"{label} body under-fills its canonical footprint: "
+            f"{actual_length:.3f}x{actual_width:.3f} vs {target_length:.3f}x{target_width:.3f}"
+        )
+    print(
+        f"GEOMETRY {label}: body={actual_length:.3f}x{actual_width:.3f} cells "
+        f"target={target_length:.3f}x{target_width:.3f} scale={scale:.4f}"
+    )
+
+
+def ground_scene_meshes() -> None:
+    meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    if not meshes:
+        return
+    bpy.context.view_layer.update()
+    minimum_z = min((obj.matrix_world @ Vector(corner)).z for obj in meshes for corner in obj.bound_box)
+    for obj in meshes:
         obj.location.z -= minimum_z
 
 
@@ -455,7 +548,7 @@ def build_tank() -> None:
     scale_and_ground(baked, 0.155)
     replacement = {
         "Main": materials["team"],
-        "Main_Dark": materials["metal"],
+        "Main_Dark": materials["industrial"],
         "Main_Details": materials["accent"],
         "Main_Light": materials["industrial"],
         "Wheels": materials["rubber"],
@@ -469,7 +562,7 @@ def build_tank() -> None:
     for x in (-0.72, 0.72):
         for y in (-0.38, 0.08, 0.52):
             cube(f"reactive_armor_{x}_{y}", (x, y, 0.56), (0.18, 0.32, 0.19), materials["team"], bevel=0.022)
-    cube("rear_engine_grille", (0, 0.72, 0.52), (0.72, 0.06, 0.34), materials["metal"], bevel=0.018)
+    cube("rear_engine_grille", (0, 0.72, 0.52), (0.72, 0.06, 0.34), materials["industrial"], bevel=0.018)
 
     # Quaternius Tank 4 faces local -X and its turret ring is offset from the
     # source origin. Rebase every tank part to the ring so split turret assets
@@ -479,6 +572,195 @@ def build_tank() -> None:
     for obj in [candidate for candidate in bpy.context.scene.objects if candidate.type == "MESH"]:
         obj.location.x -= turret_ring_x
         obj.location.y -= turret_ring_y
+
+
+def add_track_chassis(
+    materials: dict[str, bpy.types.Material],
+    asset_name: str,
+    *,
+    length: float,
+    width: float,
+    hull_height: float,
+    track_width: float,
+) -> None:
+    cube(
+        f"{asset_name}_body_lower_hull",
+        (0.08, 0, 0.42),
+        (length * 0.88, width - track_width * 1.35, hull_height),
+        materials["industrial"],
+        bevel=0.09,
+    )
+    wedge(
+        f"{asset_name}_body_upper_hull",
+        (-length * 0.08, 0, 0.58),
+        length * 0.72,
+        width - track_width * 1.75,
+        hull_height * 0.88,
+        0.72,
+        materials["team"],
+    )
+    for side in (-1, 1):
+        y = side * (width * 0.5 - track_width * 0.5)
+        cube(
+            f"{asset_name}_body_track_{side}",
+            (0.08, y, 0.38),
+            (length, track_width, 0.58),
+            materials["rubber"],
+            bevel=0.13,
+        )
+        cube(
+            f"{asset_name}_body_track_guard_{side}",
+            (-0.02, y, 0.72),
+            (length * 0.86, track_width * 1.08, 0.13),
+            materials["accent"],
+            bevel=0.035,
+        )
+        for x in (-length * 0.31, -length * 0.1, length * 0.12, length * 0.33):
+            cylinder(
+                f"{asset_name}_body_roadwheel_{side}_{x}",
+                (x, y + side * track_width * 0.51, 0.37),
+                0.23,
+                track_width * 0.08,
+                materials["industrial"],
+                vertices=12,
+                rotation=(math.pi / 2, 0, 0),
+            )
+
+
+def build_scout_car() -> None:
+    materials = build_materials()
+    asset_name = "scout_car"
+    # A low six-wheeled wedge reads immediately differently from every tracked vehicle.
+    wedge(f"{asset_name}_body_armored_hull", (0.05, 0, 0.38), 2.75, 1.42, 0.62, 0.72, materials["team"])
+    wedge(f"{asset_name}_body_sloped_nose", (-1.22, 0, 0.43), 0.72, 1.25, 0.5, 0.34, materials["accent"])
+    cube(f"{asset_name}_body_rear_deck", (0.93, 0, 0.52), (0.62, 1.22, 0.38), materials["metal"], bevel=0.065)
+    for side in (-1, 1):
+        y = side * 0.77
+        for index, x in enumerate((-0.88, 0.0, 0.88)):
+            cylinder(
+                f"{asset_name}_body_wheel_{side}_{index}",
+                (x, y, 0.32),
+                0.34,
+                0.24,
+                materials["rubber"],
+                vertices=16,
+                rotation=(math.pi / 2, 0, 0),
+                bevel=0.025,
+            )
+            cylinder(
+                f"{asset_name}_body_hub_{side}_{index}",
+                (x, y + side * 0.13, 0.32),
+                0.14,
+                0.035,
+                materials["accent"],
+                vertices=12,
+                rotation=(math.pi / 2, 0, 0),
+            )
+    cube(f"{asset_name}_body_windscreen", (-0.42, 0, 0.83), (0.08, 0.82, 0.28), materials["glass"], bevel=0.025)
+    for side in (-1, 1):
+        cube(f"{asset_name}_body_headlight_{side}", (-1.49, side * 0.4, 0.43), (0.08, 0.2, 0.12), materials["warning"], bevel=0.018)
+    cylinder(f"{asset_name}_turret_ring", (-0.05, 0, 0.86), 0.38, 0.16, materials["accent"], vertices=16)
+    wedge(f"{asset_name}_turret_cupola", (-0.05, 0, 0.94), 0.72, 0.68, 0.35, 0.72, materials["team"])
+    cylinder_between(f"{asset_name}_turret_autocannon", (-0.24, 0, 1.11), (-1.2, 0, 1.11), 0.055, materials["industrial"], vertices=12)
+    cube(f"{asset_name}_turret_sensor", (-0.14, -0.27, 1.18), (0.25, 0.18, 0.2), materials["glass"], bevel=0.025)
+    for side in (-1, 1):
+        cylinder(f"{asset_name}_turret_antenna_{side}", (0.12, side * 0.22, 1.45), 0.012, 0.72, materials["industrial"], vertices=8)
+
+
+def build_heavy_tank() -> None:
+    materials = build_materials()
+    asset_name = "heavy_tank"
+    add_track_chassis(materials, asset_name, length=3.55, width=2.38, hull_height=0.68, track_width=0.5)
+    wedge(f"{asset_name}_body_glacis", (-1.0, 0, 0.78), 1.45, 1.58, 0.62, 0.62, materials["team"])
+    cube(f"{asset_name}_body_engine_deck", (1.05, 0, 0.86), (1.05, 1.55, 0.32), materials["industrial"], bevel=0.065)
+    for side in (-1, 1):
+        for x in (-0.85, -0.28, 0.3, 0.88):
+            cube(f"{asset_name}_body_reactive_block_{side}_{x}", (x, side * 0.88, 0.94), (0.45, 0.19, 0.28), materials["accent"], bevel=0.035)
+    cylinder(f"{asset_name}_turret_ring", (-0.12, 0, 1.06), 0.74, 0.18, materials["accent"], vertices=20)
+    wedge(f"{asset_name}_turret_heavy_cast", (-0.18, 0, 1.12), 1.62, 1.52, 0.78, 0.68, materials["team"])
+    cube(f"{asset_name}_turret_mantlet", (-0.98, 0, 1.43), (0.32, 0.82, 0.48), materials["accent"], bevel=0.08)
+    cylinder_between(f"{asset_name}_turret_main_gun", (-1.08, 0, 1.44), (-3.45, 0, 1.44), 0.12, materials["industrial"], vertices=18, bevel=0.015)
+    cylinder_between(f"{asset_name}_turret_muzzle_brake", (-3.24, 0, 1.44), (-3.72, 0, 1.44), 0.18, materials["accent"], vertices=16)
+    cube(f"{asset_name}_turret_rear_bustle", (0.7, 0, 1.42), (0.72, 1.28, 0.54), materials["team"], bevel=0.09)
+    for side in (-1, 1):
+        wedge(f"{asset_name}_turret_armor_cheek_{side}", (-0.46, side * 0.7, 1.39), 0.88, 0.2, 0.52, 0.62, materials["accent"])
+    cylinder(f"{asset_name}_turret_commander_hatch", (0.18, -0.42, 1.95), 0.28, 0.18, materials["accent"], vertices=16)
+    cube(f"{asset_name}_turret_optics", (-0.6, 0.48, 1.76), (0.32, 0.24, 0.25), materials["glass"], bevel=0.035)
+    for side in (-1, 1):
+        cylinder(f"{asset_name}_turret_antenna_{side}", (0.5, side * 0.43, 2.18), 0.018, 0.85, materials["industrial"], vertices=8)
+
+
+def build_artillery() -> None:
+    materials = build_materials()
+    asset_name = "artillery"
+    add_track_chassis(materials, asset_name, length=3.25, width=1.82, hull_height=0.46, track_width=0.36)
+    cube(f"{asset_name}_body_front_cabin", (-0.95, 0, 0.96), (0.82, 1.05, 0.62), materials["team"], bevel=0.075)
+    cube(f"{asset_name}_body_front_glass", (-1.39, 0, 1.02), (0.06, 0.62, 0.23), materials["glass"], bevel=0.02)
+    # Rear stabilizers and a very long elevated barrel create an unmistakable artillery silhouette.
+    for side in (-1, 1):
+        cylinder_between(f"{asset_name}_body_rear_spade_arm_{side}", (1.05, side * 0.58, 0.55), (1.92, side * 0.9, 0.18), 0.07, materials["industrial"], vertices=10)
+        cube(f"{asset_name}_body_rear_spade_{side}", (2.02, side * 0.98, 0.16), (0.42, 0.5, 0.18), materials["warning"], bevel=0.035)
+    cylinder(f"{asset_name}_turret_ring", (0.32, 0, 0.85), 0.56, 0.16, materials["accent"], vertices=18)
+    wedge(f"{asset_name}_turret_breech", (0.22, 0, 0.92), 1.05, 1.08, 0.62, 0.68, materials["team"])
+    cube(f"{asset_name}_turret_counterweight", (0.76, 0, 1.16), (0.62, 0.92, 0.58), materials["accent"], bevel=0.07)
+    for side in (-1, 1):
+        wedge(f"{asset_name}_turret_gun_shield_{side}", (0.0, side * 0.47, 1.28), 1.24, 0.12, 0.92, 0.7, materials["team"])
+    cylinder_between(f"{asset_name}_turret_long_barrel", (-0.15, 0, 1.2), (-4.25, 0, 2.42), 0.105, materials["industrial"], vertices=18, bevel=0.012)
+    cylinder_between(f"{asset_name}_turret_muzzle", (-3.98, 0, 2.34), (-4.52, 0, 2.5), 0.17, materials["accent"], vertices=16)
+    for side in (-1, 1):
+        cylinder_between(f"{asset_name}_turret_recoil_rail_{side}", (0.25, side * 0.25, 1.02), (-1.35, side * 0.25, 1.5), 0.055, materials["industrial"], vertices=10)
+    cube(f"{asset_name}_turret_rangefinder", (-0.15, -0.48, 1.42), (0.52, 0.22, 0.26), materials["glass"], bevel=0.035)
+
+
+def build_machine_gun_turret() -> None:
+    materials = build_materials()
+    cylinder("mg_turret_foundation", (0, 0, 0.18), 1.28, 0.36, materials["concrete"], vertices=12, bevel=0.035)
+    cylinder("mg_turret_team_ring", (0, 0, 0.42), 1.02, 0.18, materials["team"], vertices=12)
+    wedge("mg_turret_pedestal", (0, 0, 0.48), 0.82, 0.82, 0.82, 0.62, materials["industrial"])
+    cube("mg_turret_shield", (-0.08, 0, 1.32), (0.32, 1.12, 0.62), materials["team"], bevel=0.065)
+    for side in (-1, 1):
+        cylinder_between(f"mg_turret_barrel_{side}", (-0.18, side * 0.24, 1.38), (-1.42, side * 0.24, 1.38), 0.045, materials["metal"], vertices=12)
+        cylinder_between(f"mg_turret_muzzle_{side}", (-1.32, side * 0.24, 1.38), (-1.58, side * 0.24, 1.38), 0.07, materials["accent"], vertices=12)
+    cube("mg_turret_ammo_box", (0.2, 0, 1.24), (0.42, 0.74, 0.42), materials["warning"], bevel=0.045)
+    cube("mg_turret_optic", (-0.34, 0, 1.72), (0.24, 0.28, 0.2), materials["glass"], bevel=0.025)
+
+
+def build_anti_tank_turret() -> None:
+    materials = build_materials()
+    cylinder("at_turret_foundation", (0, 0, 0.22), 1.62, 0.44, materials["concrete"], vertices=12, bevel=0.05)
+    wedge("at_turret_bunker", (0, 0, 0.38), 2.5, 2.2, 0.86, 0.72, materials["team"])
+    for side in (-1, 1):
+        cube(f"at_turret_side_armor_{side}", (0.05, side * 1.02, 0.84), (1.65, 0.2, 0.54), materials["accent"], bevel=0.055)
+    cylinder("at_turret_traverse_ring", (0, 0, 1.12), 0.78, 0.22, materials["metal"], vertices=18)
+    wedge("at_turret_gunhouse", (-0.12, 0, 1.2), 1.35, 1.48, 0.74, 0.68, materials["industrial"])
+    cube("at_turret_mantlet", (-0.84, 0, 1.54), (0.32, 0.82, 0.52), materials["team"], bevel=0.07)
+    cylinder_between("at_turret_cannon", (-0.95, 0, 1.54), (-3.1, 0, 1.54), 0.12, materials["metal"], vertices=18)
+    cylinder_between("at_turret_muzzle_brake", (-2.88, 0, 1.54), (-3.36, 0, 1.54), 0.19, materials["accent"], vertices=16)
+    cube("at_turret_optic", (-0.45, -0.58, 1.88), (0.34, 0.26, 0.25), materials["glass"], bevel=0.035)
+    for side in (-1, 1):
+        cube(f"at_turret_warning_panel_{side}", (0.65, side * 0.72, 0.78), (0.48, 0.07, 0.28), materials["warning"], bevel=0.025)
+
+
+def build_tech_center() -> None:
+    materials = build_materials()
+    cylinder("tech_foundation", (0, 0, 0.22), 2.95, 0.44, materials["concrete"], vertices=12, bevel=0.06)
+    cylinder("tech_team_plinth", (0, 0, 0.54), 2.55, 0.28, materials["team"], vertices=12)
+    # Three asymmetric research wings frame a bright central reactor and a tall sensor crown.
+    for index, angle in enumerate((0, math.tau / 3, math.tau * 2 / 3)):
+        x = math.cos(angle) * 1.55
+        y = math.sin(angle) * 1.55
+        cube(f"tech_research_wing_{index}", (x, y, 1.15), (1.5, 1.05, 1.35), materials["industrial"], bevel=0.12, rotation=(0, 0, angle))
+        cube(f"tech_team_fin_{index}", (x * 1.15, y * 1.15, 1.42), (0.22, 0.8, 1.58), materials["accent"], bevel=0.055, rotation=(0, 0, angle))
+        cube(f"tech_lab_window_{index}", (x * 0.72, y * 0.72, 1.35), (0.72, 0.12, 0.38), materials["glass"], bevel=0.035, rotation=(0, 0, angle + math.pi / 2))
+    cylinder("tech_reactor_core", (0, 0, 1.68), 0.78, 2.42, materials["glass"], vertices=20)
+    for z, radius in ((0.78, 1.08), (1.62, 1.0), (2.48, 0.88)):
+        cylinder(f"tech_reactor_ring_{z}", (0, 0, z), radius, 0.16, materials["team"], vertices=20)
+    cylinder("tech_sensor_mast", (0, 0, 3.62), 0.12, 2.5, materials["metal"], vertices=12)
+    sphere("tech_sensor_dish", (0, 0, 4.22), (1.42, 0.24, 0.86), materials["accent"], segments=28)
+    cylinder("tech_sensor_hub", (-0.18, 0, 4.22), 0.2, 0.62, materials["glass"], vertices=16, rotation=(0, math.pi / 2, 0))
+    for side in (-1, 1):
+        cylinder("tech_aux_antenna_" + str(side), (side * 1.42, 0.55, 3.28), 0.045, 2.55, materials["metal"], vertices=8)
+        sphere("tech_aux_beacon_" + str(side), (side * 1.42, 0.55, 4.6), (0.14, 0.14, 0.14), materials["warning"], segments=16)
 
 
 def add_hazard_lights(materials: dict[str, bpy.types.Material], width: float, y: float, z: float) -> None:
@@ -646,8 +928,9 @@ def export_scene(filepath: Path, objects: list[bpy.types.Object] | None = None) 
     bpy.ops.object.select_all(action="DESELECT")
     for obj in objects or list(bpy.context.scene.objects):
         obj.select_set(True)
+    temporary_path = filepath.with_name(f".{filepath.stem}.{os.getpid()}.tmp.glb")
     bpy.ops.export_scene.gltf(
-        filepath=str(filepath),
+        filepath=str(temporary_path),
         export_format="GLB",
         use_selection=True,
         export_apply=True,
@@ -656,6 +939,18 @@ def export_scene(filepath: Path, objects: list[bpy.types.Object] | None = None) 
         export_cameras=False,
         export_image_format="AUTO",
     )
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            os.replace(temporary_path, filepath)
+            last_error = None
+            break
+        except OSError as error:
+            last_error = error
+            time.sleep(0.08 * (attempt + 1))
+    if last_error is not None:
+        temporary_path.unlink(missing_ok=True)
+        raise last_error
     print(f"Exported {filepath}")
 
 
@@ -686,6 +981,26 @@ def is_tank_turret_object(obj: bpy.types.Object) -> bool:
     return obj.name.startswith(("Tank_Turret", "Tank_Gun", "commander_"))
 
 
+def is_vehicle_turret_object(asset_name: str, obj: bpy.types.Object) -> bool:
+    if asset_name == "light_tank":
+        return is_tank_turret_object(obj)
+    return obj.name.startswith(f"{asset_name}_turret_")
+
+
+def is_vehicle_collision_body(asset_name: str, obj: bpy.types.Object) -> bool:
+    if is_vehicle_turret_object(asset_name, obj):
+        return False
+    if asset_name == "artillery" and "_rear_spade_" in obj.name:
+        return False
+    return True
+
+
+def is_building_collision_body(asset_name: str, obj: bpy.types.Object) -> bool:
+    if asset_name not in {"machine_gun_turret", "anti_tank_turret"}:
+        return True
+    return not any(part in obj.name for part in ("barrel", "cannon", "muzzle"))
+
+
 def merge_objects(objects: list[bpy.types.Object], name: str) -> bpy.types.Object:
     bpy.ops.object.select_all(action="DESELECT")
     for obj in objects:
@@ -698,40 +1013,82 @@ def merge_objects(objects: list[bpy.types.Object], name: str) -> bpy.types.Objec
     return merged
 
 
-def export_tank_asset() -> None:
-    clear_scene()
-    build_tank()
-    tank_meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
-    turret_meshes = [obj for obj in tank_meshes if is_tank_turret_object(obj)]
-    body_meshes = [obj for obj in tank_meshes if obj not in turret_meshes]
+def merge_objects_by_material(objects: list[bpy.types.Object], name_prefix: str) -> list[bpy.types.Object]:
+    groups: dict[str, list[bpy.types.Object]] = {}
+    for obj in objects:
+        if len(obj.data.materials) != 1 or obj.data.materials[0] is None:
+            groups.setdefault(f"unmerged_{obj.name}", []).append(obj)
+            continue
+        groups.setdefault(obj.data.materials[0].name, []).append(obj)
+    return [
+        merge_objects(group, f"{name_prefix}_{material_name}")
+        for material_name, group in groups.items()
+    ]
 
-    export_scene(OUTPUT_DIR / "light_tank.glb", tank_meshes)
-    export_scene(OUTPUT_DIR / "light_tank_body.glb", body_meshes)
-    export_scene(OUTPUT_DIR / "light_tank_turret.glb", turret_meshes)
+
+def export_vehicle_asset(asset_name: str, builder) -> None:
+    clear_scene()
+    builder()
+    vehicle_meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    body_spec = UNIT_BODY_GEOMETRY[asset_name]
+    if body_spec["shape"] != "obb":
+        raise RuntimeError(f"{asset_name} requires an OBB geometry specification")
+    normalize_horizontal_footprint(
+        asset_name,
+        vehicle_meshes,
+        [obj for obj in vehicle_meshes if is_vehicle_collision_body(asset_name, obj)],
+        body_spec["length"],
+        body_spec["width"],
+    )
+    ground_scene_meshes()
+    turret_meshes = [obj for obj in vehicle_meshes if is_vehicle_turret_object(asset_name, obj)]
+    body_meshes = [obj for obj in vehicle_meshes if obj not in turret_meshes]
+    if not body_meshes or not turret_meshes:
+        raise RuntimeError(f"{asset_name} requires non-empty body and turret mesh groups")
+    body_meshes = merge_objects_by_material(body_meshes, f"{asset_name}_body")
+    turret_meshes = merge_objects_by_material(turret_meshes, f"{asset_name}_turret")
+    vehicle_meshes = body_meshes + turret_meshes
+
+    if asset_name == "light_tank":
+        export_scene(OUTPUT_DIR / f"{asset_name}.glb", vehicle_meshes)
+    export_scene(OUTPUT_DIR / f"{asset_name}_body.glb", body_meshes)
+    export_scene(OUTPUT_DIR / f"{asset_name}_turret.glb", turret_meshes)
 
     decimate_scene(0.2)
     material = bpy.data.materials.get("team_primary")
     if material is None:
         raise RuntimeError("team_primary material is required for tank LODs")
-    for obj in tank_meshes:
+    for obj in vehicle_meshes:
         obj.data.materials.clear()
         obj.data.materials.append(material)
         for polygon in obj.data.polygons:
             polygon.material_index = 0
 
-    body_lod = merge_objects(body_meshes, "light_tank_body_lod")
-    turret_lod = merge_objects(turret_meshes, "light_tank_turret_lod")
-    export_scene(OUTPUT_DIR / "light_tank_body_lod.glb", [body_lod])
-    export_scene(OUTPUT_DIR / "light_tank_turret_lod.glb", [turret_lod])
-    export_scene(OUTPUT_DIR / "light_tank_lod.glb", [body_lod, turret_lod])
+    body_lod = merge_objects(body_meshes, f"{asset_name}_body_lod")
+    turret_lod = merge_objects(turret_meshes, f"{asset_name}_turret_lod")
+    export_scene(OUTPUT_DIR / f"{asset_name}_body_lod.glb", [body_lod])
+    export_scene(OUTPUT_DIR / f"{asset_name}_turret_lod.glb", [turret_lod])
+    if asset_name == "light_tank":
+        export_scene(OUTPUT_DIR / f"{asset_name}_lod.glb", [body_lod, turret_lod])
 
 
 def export_asset(name: str, builder) -> None:
-    if name == "light_tank":
-        export_tank_asset()
+    if name in {"scout_car", "light_tank", "heavy_tank", "artillery"}:
+        export_vehicle_asset(name, builder)
         return
     clear_scene()
     builder()
+    scene_meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    if name in BUILDING_BODY_GEOMETRY:
+        body_spec = BUILDING_BODY_GEOMETRY[name]
+        normalize_horizontal_footprint(
+            name,
+            scene_meshes,
+            [obj for obj in scene_meshes if is_building_collision_body(name, obj)],
+            body_spec["width"],
+            body_spec["height"],
+        )
+    ground_scene_meshes()
     merge_single_material_meshes(name)
     export_scene(OUTPUT_DIR / f"{name}.glb")
     if name in {"worker", "soldier", "rifleman", "rocket_soldier"}:
@@ -745,11 +1102,17 @@ ASSETS = {
     "soldier": lambda: build_infantry("soldier"),
     "rifleman": lambda: build_infantry("rifleman"),
     "rocket_soldier": lambda: build_infantry("rocket_soldier"),
+    "scout_car": build_scout_car,
     "light_tank": build_tank,
+    "heavy_tank": build_heavy_tank,
+    "artillery": build_artillery,
     "hq": build_hq,
     "barracks": build_barracks,
     "war_factory": build_war_factory,
     "refinery": build_refinery,
+    "machine_gun_turret": build_machine_gun_turret,
+    "anti_tank_turret": build_anti_tank_turret,
+    "tech_center": build_tech_center,
     "resource": build_resource,
     "rock": build_rock,
 }

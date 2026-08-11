@@ -10,6 +10,39 @@ import {
 const MAX_HARVESTERS_PER_RESOURCE = 2;
 
 export class HarvestOrderSystem {
+  assignDefaultHarvestOrder(world: WorldState, worker: WorldUnit): boolean {
+    if (
+      !worker.exists
+      || worker.type !== UNIT_TYPES.WORKER
+      || worker.order
+      || worker.constructingBuildingId
+    ) {
+      return false;
+    }
+
+    const hasDeliveryBuilding = world.buildings
+      .getBuildingsByPlayer(worker.playerId)
+      .some(isResourceDeliveryBuilding);
+    if (!hasDeliveryBuilding) return false;
+
+    const resourceTarget = this.resolveResourceTarget(world, worker);
+    if (!resourceTarget) return false;
+
+    worker.order = {
+      type: "harvest_loop",
+      targetX: resourceTarget.x,
+      targetY: resourceTarget.y,
+    };
+    world.markChanged();
+    return true;
+  }
+
+  assignDefaultHarvestOrders(world: WorldState): void {
+    for (const worker of world.units.getAllUnits()) {
+      this.assignDefaultHarvestOrder(world, worker);
+    }
+  }
+
   step(world: WorldState): void {
     for (const worker of world.units.getAllUnits()) {
       if (!worker.exists || worker.order?.type !== "harvest_loop" || worker.type !== UNIT_TYPES.WORKER) continue;

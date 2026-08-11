@@ -205,7 +205,7 @@ export interface ProductionOrder extends ProductionBatchRequest {
   remainingCount: number;
 }
 
-export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn";
+export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite";
 
 export interface ProductionProgress {
   orderId: string;
@@ -215,6 +215,7 @@ export interface ProductionProgress {
   paidCredits: number;
   totalCost: number;
   status: ProductionStatus;
+  missingPrerequisites?: BuildingType[];
 }
 
 export interface Building extends GameObject {
@@ -226,6 +227,9 @@ export interface Building extends GameObject {
   rallyPoint?: RallyPoint;
   productionQueue: ProductionOrder[];
   productionProgress?: ProductionProgress;
+  /** Defensive structures use the same deterministic weapon cooldown semantics as units. */
+  lastAttackTick?: number;
+  nextAttackTick?: number;
   constructionProgress?: {
     workerId: string;
     remainingTicks: number;
@@ -256,7 +260,7 @@ export interface ActiveProjectile {
   id: string;
   playerId: PlayerId;
   attackerId: string;
-  attackerType: UnitType;
+  attackerType: AttackTargetType;
   projectileType: ProjectileType;
   x: number;
   y: number;
@@ -718,6 +722,8 @@ export interface TickDeltaRecord {
       productionQueue?: ProductionOrder[];
       productionProgress?: Building["productionProgress"] | null;
       constructionProgress?: Building["constructionProgress"] | null;
+      lastAttackTick?: number;
+      nextAttackTick?: number;
     }>;
   }>;
   newLogs: GameLog[];

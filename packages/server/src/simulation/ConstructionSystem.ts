@@ -1,5 +1,6 @@
 import { UNIT_STATES, type BuildingType, type PlayerId } from "@llmcraft/shared";
 import { WorldState } from "../WorldState";
+import { HarvestOrderSystem } from "./HarvestOrderSystem";
 
 export type ConstructionEvent =
   | {
@@ -19,6 +20,8 @@ export type ConstructionEvent =
     };
 
 export class ConstructionSystem {
+  constructor(private readonly harvestOrders = new HarvestOrderSystem()) {}
+
   step(world: WorldState): ConstructionEvent[] {
     const events: ConstructionEvent[] = [];
     for (const building of world.buildings.getAllBuildings()) {
@@ -51,6 +54,9 @@ export class ConstructionSystem {
       worker.constructingBuildingId = undefined;
       worker.state = UNIT_STATES.IDLE;
       worker.order = resumeWorkerOrder ? structuredClone(resumeWorkerOrder) : undefined;
+      if (!resumeWorkerOrder) {
+        this.harvestOrders.assignDefaultHarvestOrder(world, worker);
+      }
       events.push({
         type: "building_completed",
         playerId: building.playerId,

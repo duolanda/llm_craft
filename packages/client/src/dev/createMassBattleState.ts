@@ -24,9 +24,11 @@ const FORMATION_ROWS = 6;
 const FORMATION_TYPES: UnitType[] = [
   UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
-  UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
+  UNIT_TYPES.SCOUT_CAR,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.HEAVY_TANK,
+  UNIT_TYPES.ARTILLERY,
 ];
 
 const ANIMATION_LAB_FX_PAIRS = [
@@ -147,12 +149,18 @@ function createShowcasePlayer(
         { type: BUILDING_TYPES.BARRACKS, x: 25, y: 41 },
         { type: BUILDING_TYPES.WAR_FACTORY, x: 30, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 44, y: 18 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 40, y: 39 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 40, y: 57 },
+        { type: BUILDING_TYPES.TECH_CENTER, x: 27, y: 63 },
       ]
     : [
         { type: BUILDING_TYPES.HQ, ...DEFAULT_MAP_LAYOUT.player2Hq },
         { type: BUILDING_TYPES.BARRACKS, x: 118, y: 55 },
         { type: BUILDING_TYPES.WAR_FACTORY, x: 113, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 99, y: 18 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 103, y: 57 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 103, y: 39 },
+        { type: BUILDING_TYPES.TECH_CENTER, x: 116, y: 33 },
       ];
 
   return {

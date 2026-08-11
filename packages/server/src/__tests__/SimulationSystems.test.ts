@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, getUnitStats, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, getAttackDamageAgainstUnit, getUnitStats, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { WorldState } from "../WorldState";
 import { ConstructionSystem } from "../simulation/ConstructionSystem";
@@ -254,6 +254,26 @@ describe("simulation systems", () => {
     }
   });
 
+  it("separates canonical heavy and light tank bodies in a dense vehicle pile", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const vehicles = [
+      world.createUnit(UNIT_TYPES.HEAVY_TANK, 70, 50, "player_1"),
+      world.createUnit(UNIT_TYPES.HEAVY_TANK, 70.8, 50.2, "player_2"),
+      world.createUnit(UNIT_TYPES.LIGHT_TANK, 69.5, 49.7, "player_1"),
+    ];
+
+    for (let tick = 0; tick < 16; tick++) new MovementSystem().step(world);
+
+    for (let leftIndex = 0; leftIndex < vehicles.length; leftIndex++) {
+      for (let rightIndex = leftIndex + 1; rightIndex < vehicles.length; rightIndex++) {
+        expect(getCollisionManifold(
+          getUnitCollisionShape(vehicles[leftIndex]),
+          getUnitCollisionShape(vehicles[rightIndex]),
+        )).toBeNull();
+      }
+    }
+  });
+
   it.each([
     UNIT_TYPES.WORKER,
     UNIT_TYPES.RIFLEMAN,
@@ -404,6 +424,7 @@ describe("simulation systems", () => {
     expect(JSON.parse(JSON.stringify(events))).toEqual(events);
     expect(building.constructionProgress).toBeUndefined();
     expect(worker.constructingBuildingId).toBeUndefined();
+    expect(worker.order).toMatchObject({ type: "harvest_loop" });
   });
 
   it("restores a worker's harvest loop after construction", () => {
@@ -592,6 +613,92 @@ describe("simulation systems", () => {
 
     expect(world.projectiles.some((projectile) => projectile.targetId === replacement.id)).toBe(true);
     expect(attacker.order).toMatchObject({ type: "attack", targetId: replacement.id });
+  });
+
+  it("assigns a newly produced worker to a harvest loop when no rally point overrides it", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const hq = world.buildings.getBuildingsByPlayer("player_1")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const [order] = world.buildings.enqueueProduction(hq, [{ unitType: UNIT_TYPES.WORKER, count: 1 }]);
+    hq.productionProgress = {
+      orderId: order.orderId,
+      unitType: UNIT_TYPES.WORKER,
+      remainingTicks: 1,
+      totalTicks: 1,
+      paidCredits: 0,
+      totalCost: 50,
+      status: "producing",
+    };
+
+    const event = new ProductionSystem().step(world)
+      .find((candidate) => candidate.type === "unit_spawned");
+
+    expect(event?.type).toBe("unit_spawned");
+    if (!event || event.type !== "unit_spawned") return;
+    expect(world.units.getUnit(event.unitId)?.order).toMatchObject({ type: "harvest_loop" });
+  });
+
+  it("lets completed defensive buildings acquire targets and deal armor-aware projectile damage", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const turret = world.createBuilding(BUILDING_TYPES.MACHINE_GUN_TURRET, 40, 40, "player_1");
+    const rifleman = world.createUnit(UNIT_TYPES.RIFLEMAN, 44, 40, "player_2");
+    const scoutCar = world.createUnit(UNIT_TYPES.SCOUT_CAR, 45, 42, "player_2");
+    const initialHp = rifleman.hp;
+
+    new CombatSystem().step(world);
+
+    expect(world.projectiles).toEqual([
+      expect.objectContaining({
+        attackerId: turret.id,
+        attackerType: BUILDING_TYPES.MACHINE_GUN_TURRET,
+        targetId: rifleman.id,
+        targetKind: "unit",
+      }),
+    ]);
+    world.tick = world.projectiles[0]!.impactTick;
+    new ProjectileSystem().step(world);
+    expect(rifleman.hp).toBe(initialHp - getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.RIFLEMAN));
+    expect(scoutCar.hp).toBe(scoutCar.maxHp);
+  });
+
+  it("enforces minimum range for siege units", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const artillery = world.createUnit(UNIT_TYPES.ARTILLERY, 40, 40, "player_1");
+    const closeTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+
+    const result = new CombatSystem().executeAttackOrder(world, artillery, "player_1", {
+      type: "attack",
+      targetId: closeTarget.id,
+    });
+
+    expect(result).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect(world.projectiles).toHaveLength(0);
+  });
+
+  it("moves a siege unit away from a target inside minimum range before firing", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const artillery = world.createUnit(UNIT_TYPES.ARTILLERY, 40, 40, "player_1");
+    const closeTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    artillery.order = { type: "attack", targetId: closeTarget.id };
+    const combat = new CombatSystem();
+
+    combat.step(world);
+
+    expect(artillery.pathTarget).toBeDefined();
+    expect(Math.max(
+      Math.abs(closeTarget.x - artillery.pathTarget!.x),
+      Math.abs(closeTarget.y - artillery.pathTarget!.y),
+    )).toBeGreaterThanOrEqual(4);
+    expect(artillery.order).toEqual({ type: "attack", targetId: closeTarget.id });
+
+    artillery.x = artillery.pathTarget!.x;
+    artillery.y = artillery.pathTarget!.y;
+    world.units.clearPath(artillery);
+    combat.step(world);
+
+    expect(world.projectiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ attackerId: artillery.id, targetId: closeTarget.id }),
+    ]));
   });
 
   it("delivers a full load while the worker remains on a resource inside refinery range", () => {

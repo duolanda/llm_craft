@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameplayController } from "../controller/GameplayController";
 import { executeAgentTool, getAgentToolDefinitions } from "../agent/AgentTools";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint, getUnitProductionTicks } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint, getDistanceToBuildingFootprint, getUnitProductionTicks } from "@llmcraft/shared";
 
 describe("GameplayController", () => {
   const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
@@ -205,6 +205,40 @@ describe("GameplayController", () => {
     expect(afterCancel.queues[0].queue[0].unitType).toBe(UNIT_TYPES.ROCKET_SOLDIER);
   });
 
+  it("exposes the derived tech tier and blocks T3 production until a tech center is complete", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 24, 48, "player_1");
+    const factory = game.getBuildingManager().createBuilding(BUILDING_TYPES.WAR_FACTORY, 32, 48, "player_1");
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      queueAvailability: expect.objectContaining({
+        [UNIT_TYPES.LIGHT_TANK]: true,
+        [UNIT_TYPES.HEAVY_TANK]: false,
+        [UNIT_TYPES.ARTILLERY]: false,
+      }),
+      techStatus: { own: expect.objectContaining({ tier: 2 }) },
+    });
+    expect(gameplayController.spawnUnit(factory.id, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 1 }]).result).toMatchObject({
+      ok: false,
+      error: "missing_prerequisite",
+      missingPrerequisites: [BUILDING_TYPES.TECH_CENTER],
+    });
+
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.TECH_CENTER, 40, 48, "player_1");
+    const upgradedController = new GameplayController(game, "player_1");
+    expect(upgradedController.getMyState().result).toMatchObject({
+      queueAvailability: expect.objectContaining({
+        [UNIT_TYPES.HEAVY_TANK]: true,
+        [UNIT_TYPES.ARTILLERY]: true,
+      }),
+      techStatus: { own: expect.objectContaining({ tier: 3 }) },
+    });
+    expect(upgradedController.spawnUnit(factory.id, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 1 }]).result).toMatchObject({
+      ok: true,
+    });
+  });
+
   it("exposes instantaneous phase separately from durable intent", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
@@ -222,6 +256,9 @@ describe("GameplayController", () => {
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
     const workers = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER).slice(0, 2);
+    for (const worker of workers) gameplayController.holdUnit(worker.id);
+    game.processCommands();
+    gameplayController.takeIssuedCommands();
 
     const assigned = executeAgentTool(gameplayController, "start_harvest_loop", {
       unitIds: workers.map((worker) => worker.id),
@@ -1049,10 +1086,10 @@ describe("GameplayController", () => {
           code: "missing_prerequisite",
           details: expect.objectContaining({
             buildingType: BUILDING_TYPES.WAR_FACTORY,
-            requiredBuildingType: BUILDING_TYPES.BARRACKS,
+            missingPrerequisites: [BUILDING_TYPES.BARRACKS],
           }),
         }),
-        waitingReason: expect.stringContaining("required"),
+        waitingReason: expect.stringContaining("barracks"),
       }),
     ]);
   });
@@ -1115,17 +1152,18 @@ describe("GameplayController", () => {
 
     expect(result.economyStatus).toMatchObject({
       workers: 4,
-      activeHarvesters: 2,
-      idleWorkers: 2,
+      activeHarvesters: 4,
+      idleWorkers: 0,
       carryingCredits: 0,
     });
     const assignedResources = result.economyStatus.resourceAssignments.filter(
-      (assignment) => assignment.assignedHarvesters === 1,
+      (assignment) => Number(assignment.assignedHarvesters) > 0,
     );
-    expect(assignedResources).toHaveLength(2);
+    expect(assignedResources.length).toBeGreaterThanOrEqual(2);
+    expect(assignedResources.reduce((sum, assignment) => sum + Number(assignment.assignedHarvesters), 0)).toBe(4);
     expect(assignedResources).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), assignedHarvesters: 1 }),
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), assignedHarvesters: expect.any(Number) }),
       ])
     );
     for (const assignment of assignedResources) {
@@ -1201,7 +1239,7 @@ describe("GameplayController", () => {
         stalledHarvesters: Array<{ unitId: string; reason: string }>;
       };
     };
-    expect(result.economyStatus.activeHarvesters).toBe(0);
+    expect(result.economyStatus.activeHarvesters).toBe(3);
     expect(result.economyStatus.stalledHarvesters).toContainEqual({
       unitId: worker.id,
       reason: "path_blocked",
@@ -1390,7 +1428,7 @@ describe("GameplayController", () => {
         }),
         expect.objectContaining({
           role: "worker",
-          intent: "none",
+          intent: "harvest_loop",
           count: 4,
         }),
       ])
@@ -1452,7 +1490,7 @@ describe("GameplayController", () => {
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["light_tank", "rocket_soldier", "rifleman", "soldier", "war_factory", "barracks", "hq", "refinery"],
+        targetPriority: ["heavy_tank", "light_tank", "artillery", "scout_car", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
       }),
     ]);
     game.stop();
@@ -1651,6 +1689,36 @@ describe("GameplayController", () => {
     game.stop();
   });
 
+  it("retreats to a legal firing tile when artillery is inside minimum range", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const artillery = game.getUnitManager().createUnit(
+      UNIT_TYPES.ARTILLERY,
+      enemyHq.x - Math.floor(footprint.width / 2) - 1,
+      enemyHq.y,
+      "player_1",
+    );
+
+    expect(gameplayController.attackTarget(artillery.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+    });
+    const [move] = gameplayController.takeIssuedCommands();
+    expect(move).toMatchObject({ type: "move", unitId: artillery.id });
+    expect(getDistanceToBuildingFootprint(
+      BUILDING_TYPES.HQ,
+      enemyHq.x,
+      enemyHq.y,
+      move.position!.x,
+      move.position!.y,
+    )).toBeGreaterThanOrEqual(4);
+    game.stop();
+  });
+
   it("does not replace an in-flight path every tick for a persistent attack order", () => {
     const game = new Game();
     game.start();
@@ -1785,7 +1853,8 @@ describe("GameplayController", () => {
     const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = gameplayController.startHarvestLoop(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
+    const explicitResource = DEFAULT_MAP_LAYOUT.resources.at(-1)!;
+    const result = gameplayController.startHarvestLoop(worker.id, explicitResource);
 
     expect(result.result).toMatchObject({ ok: true });
     expect(gameplayController.takeIssuedCommands()).toEqual(
@@ -1793,7 +1862,7 @@ describe("GameplayController", () => {
         expect.objectContaining({
           type: "harvest_loop",
           unitId: worker.id,
-          position: DEFAULT_MAP_LAYOUT.resources[0],
+          position: explicitResource,
         }),
       ])
     );
@@ -1804,8 +1873,8 @@ describe("GameplayController", () => {
     const updatedWorker = game.getState().players[0].units.find((unit) => unit.id === worker.id)!;
     expect(updatedWorker.intent).toMatchObject({
       type: "harvest_loop",
-      targetX: DEFAULT_MAP_LAYOUT.resources[0].x,
-      targetY: DEFAULT_MAP_LAYOUT.resources[0].y,
+      targetX: explicitResource.x,
+      targetY: explicitResource.y,
     });
   });
 

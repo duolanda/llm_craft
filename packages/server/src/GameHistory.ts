@@ -117,6 +117,8 @@ function diffBuildings(
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,
         constructionProgress: building.constructionProgress ?? null,
+        lastAttackTick: building.lastAttackTick,
+        nextAttackTick: building.nextAttackTick,
       });
       continue;
     }
@@ -125,7 +127,9 @@ function diffBuildings(
     const updated = JSON.stringify(previousBuilding.productionQueue) !== JSON.stringify(building.productionQueue)
       || JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress)
       || JSON.stringify(previousBuilding.constructionProgress) !== JSON.stringify(building.constructionProgress)
-      || JSON.stringify(previousBuilding.rallyPoint) !== JSON.stringify(building.rallyPoint);
+      || JSON.stringify(previousBuilding.rallyPoint) !== JSON.stringify(building.rallyPoint)
+      || previousBuilding.lastAttackTick !== building.lastAttackTick
+      || previousBuilding.nextAttackTick !== building.nextAttackTick;
 
     if (damaged || updated) {
       changes.push({
@@ -140,6 +144,8 @@ function diffBuildings(
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,
         constructionProgress: building.constructionProgress ?? null,
+        lastAttackTick: building.lastAttackTick,
+        nextAttackTick: building.nextAttackTick,
       });
     }
   }

@@ -2,7 +2,7 @@ import {
   UNIT_STATES,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
-  getUnitWeapon,
+  getAttackSourceWeapon,
   type ActiveProjectile,
   type Building,
   type PlayerId,
@@ -56,7 +56,7 @@ export class ProjectileSystem {
 
   private applyImpact(world: WorldState, projectile: ActiveProjectile, events: ProjectileEvent[]): void {
     const impact = this.resolveTarget(world, projectile) ?? { x: projectile.targetX, y: projectile.targetY };
-    const weapon = getUnitWeapon(projectile.attackerType);
+    const weapon = getAttackSourceWeapon(projectile.attackerType);
     const radius = weapon.splashRadius ?? 0;
     const damagedUnits = new Set<string>();
     const damagedBuildings = new Set<string>();

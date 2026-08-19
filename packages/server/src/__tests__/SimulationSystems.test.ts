@@ -316,6 +316,24 @@ describe("simulation systems", () => {
     expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(target))).toBeNull();
   });
 
+  it.each([
+    UNIT_TYPES.LIGHT_TANK,
+    UNIT_TYPES.FLAME_TANK,
+    UNIT_TYPES.HEAVY_TANK,
+  ])("makes a commando immune to %s crushing", (tankType) => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(tankType, 70, 50, "player_1");
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 72, 50, "player_2");
+    tank.path = [{ x: 71, y: 50 }];
+    tank.pathTarget = { x: 71, y: 50 };
+
+    const events = new MovementSystem().step(world);
+
+    expect(commando.exists).toBe(true);
+    expect(events).toEqual([]);
+    expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(commando))).toBeNull();
+  });
+
   it("does not crush enemy infantry merely because stationary bodies overlap", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 70, 50, "player_1");
@@ -782,6 +800,71 @@ describe("simulation systems", () => {
     expect(flameTank.attackWindup).toBeUndefined();
     expect(world.projectiles).toHaveLength(0);
     expect(flameTank.pathTarget).toBeDefined();
+  });
+
+  it("lets a commando kill infantry with one long-range rifle hit", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 46, 40, "player_2");
+    const combat = new CombatSystem();
+
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: target.id,
+    })).toBe(RESULT_CODES.OK);
+    const shot = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    expect(shot).toMatchObject({ projectileType: "bullet", targetId: target.id });
+    world.tick = shot.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(target.exists).toBe(false);
+    expect(target.hp).toBe(0);
+  });
+
+  it("leaves vehicles unharmed by commando rifle fire", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 45, 40, "player_2");
+    const initialHp = tank.hp;
+    const combat = new CombatSystem();
+
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: tank.id,
+    })).toBe(RESULT_CODES.OK);
+    const shot = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    world.tick = shot.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(tank.hp).toBe(initialHp);
+    expect(tank.exists).toBe(true);
+  });
+
+  it("requires a commando to reach a building before C4 destroys it in one hit", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const barracks = world.createBuilding(BUILDING_TYPES.BARRACKS, 44, 40, "player_2");
+    const combat = new CombatSystem();
+    commando.order = { type: "attack", targetId: barracks.id };
+
+    combat.step(world);
+    expect(commando.pathTarget).toBeDefined();
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === commando.id)).toHaveLength(0);
+
+    commando.x = 41;
+    commando.y = 40;
+    world.units.clearPath(commando);
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: barracks.id,
+    })).toBe(RESULT_CODES.OK);
+    const charge = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    expect(charge).toMatchObject({ projectileType: "demolition", targetId: barracks.id });
+    world.tick = charge.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(barracks.exists).toBe(false);
+    expect(barracks.hp).toBe(0);
   });
 
   it("delivers a full load while the worker remains on a resource inside refinery range", () => {

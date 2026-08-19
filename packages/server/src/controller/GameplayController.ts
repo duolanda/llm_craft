@@ -41,6 +41,7 @@ import {
   getDistanceToBuildingFootprint,
   getUnitVisionRange,
   getUnitCost,
+  getUnitLimit,
   getUnitPrerequisites,
   getUnitStats,
   getUnitWeapon,
@@ -789,8 +790,19 @@ export class GameplayController {
           availableBuilderIds: availableBuilders.map((worker) => worker.id),
         };
       });
-    const canQueueUnit = (unitType: UnitType): boolean =>
-      getMissingPrerequisites(completedBuildingTypes, getUnitPrerequisites(unitType)).length === 0
+    const committedUnitCount = (unitType: UnitType): number =>
+      myUnits.filter((unit) => unit.type === unitType).length
+      + myBuildings.reduce(
+        (total, building) => total + building.productionQueue.reduce(
+          (queueTotal, order) => queueTotal + (order.unitType === unitType ? order.remainingCount : 0),
+          0,
+        ),
+        0,
+      );
+    const canQueueUnit = (unitType: UnitType): boolean => {
+      const unitLimit = getUnitLimit(unitType);
+      return (unitLimit === undefined || committedUnitCount(unitType) < unitLimit)
+      && getMissingPrerequisites(completedBuildingTypes, getUnitPrerequisites(unitType)).length === 0
       && myBuildings.some((building) =>
         isBuildingComplete(building) &&
         canBuildingProduce(building.type, unitType) &&
@@ -799,6 +811,7 @@ export class GameplayController {
           0,
         ) < MAX_PENDING_PRODUCTION_PER_UNIT_TYPE
       );
+    };
     const queueAvailability = Object.fromEntries(
       ALL_UNIT_TYPES.map((unitType) => [unitType, canQueueUnit(unitType)]),
     );
@@ -821,7 +834,14 @@ export class GameplayController {
         canQueueRocketSoldier: canQueueUnit(UNIT_TYPES.ROCKET_SOLDIER),
         canQueueLightTank: canQueueUnit(UNIT_TYPES.LIGHT_TANK),
         canQueueFlameTank: canQueueUnit(UNIT_TYPES.FLAME_TANK),
+        canQueueCommando: canQueueUnit(UNIT_TYPES.COMMANDO),
         queueAvailability,
+        unitLimits: Object.fromEntries(
+          ALL_UNIT_TYPES.flatMap((unitType) => {
+            const limit = getUnitLimit(unitType);
+            return limit === undefined ? [] : [[unitType, { limit, committed: committedUnitCount(unitType) }]];
+          }),
+        ),
         retiredProductionUnitTypes: getRetiredProductionUnitTypes(),
         economyStatus: {
           workers: workers.length,
@@ -846,6 +866,7 @@ export class GameplayController {
             rocketSoldiers: countUnits(UNIT_TYPES.ROCKET_SOLDIER),
             lightTanks: countUnits(UNIT_TYPES.LIGHT_TANK),
             flameTanks: countUnits(UNIT_TYPES.FLAME_TANK),
+            commandos: countUnits(UNIT_TYPES.COMMANDO),
             barracks: countBuildings(BUILDING_TYPES.BARRACKS),
             warFactories: countBuildings(BUILDING_TYPES.WAR_FACTORY),
             refineries: countBuildings(BUILDING_TYPES.REFINERY),
@@ -1260,6 +1281,33 @@ export class GameplayController {
           ok: false,
           error: "production_queue_limit",
           hint: `Each building may have at most ${MAX_PENDING_PRODUCTION_PER_UNIT_TYPE} pending ${overflow[0]} units.`,
+        }),
+      };
+    }
+
+    const unitLimitOverflow = [...requestedCounts].find(([unitType, count]) => {
+      const limit = getUnitLimit(unitType);
+      if (limit === undefined) return false;
+      const living = me.units.filter((unit) => unit.exists && unit.type === unitType).length;
+      const pending = me.buildings.reduce(
+        (total, candidate) => total + candidate.productionQueue.reduce(
+          (queueTotal, order) => queueTotal + (order.unitType === unitType ? order.remainingCount : 0),
+          0,
+        ),
+        0,
+      );
+      return living + pending + count > limit;
+    });
+    if (unitLimitOverflow) {
+      const [unitType] = unitLimitOverflow;
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: false,
+          error: "unit_limit_reached",
+          hint: `${unitType} has a player-wide limit of ${getUnitLimit(unitType)}. Cancel its queued order or wait until the existing unit is destroyed.`,
+          unitType,
+          limit: getUnitLimit(unitType),
         }),
       };
     }

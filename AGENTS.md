@@ -156,8 +156,8 @@ flowchart LR
 - 模型通过只读与动作工具观察/控制游戏，不再生成并执行 JavaScript
 - `orchestrate_plan` 与其支持的即时动作使用同一套工具名和参数形状，并暴露给 LLM；生产不属于 plan call，由专用有限队列工具管理；其余 global 建造计划可省略 `unitIds`，由 `MissionRuntime` 在每个 committed tick 持续推进；`cancel_plan` 按 `planId` 直接终止 active plan，显式绑定的单位死亡时 plan 自动失败而不是永久等待
 - plan 中的自动建造会自行选址、移动 worker，并在 footprint 被动态占据时立即重选
-- standard 的完成重工代表 T2，完成科技中心代表 T3；当前没有独立研究队列。T1 有 rifleman / rocket soldier / 机枪塔，T2 有 light tank / flame tank / 反坦克塔，T3 有 heavy tank
-- HQ、兵营和重工使用严格有序的有限生产队列；`spawn_unit` 一次追加多个 `{ unitType, count }`，`get_production_queue` 查询进度，`cancel_production` 按 order/building 取消。生产逐 tick 扣款，缺钱暂停并自动恢复，取消或建筑被摧毁时退还当前未完成单位已支付的 credits；已开始的 T3 单位会在科技中心被毁后完成，后续受锁项进入 `waiting_for_prerequisite` 并在重建后自动恢复；每建筑每兵种最多保留 100 个待生产单位
+- standard 的完成重工代表 T2，完成科技中心代表 T3；当前没有独立研究队列。T1 有 rifleman / rocket soldier / 机枪塔，T2 有 light tank / flame tank / 反坦克塔，T3 有 heavy tank 和全局限造 1 名的 commando
+- HQ、兵营和重工使用严格有序的有限生产队列；`spawn_unit` 一次追加多个 `{ unitType, count }`，`get_production_queue` 查询进度，`cancel_production` 按 order/building 取消。生产逐 tick 扣款，缺钱暂停并自动恢复，取消或建筑被摧毁时退还当前未完成单位已支付的 credits；已开始的 T3 单位会在科技中心被毁后完成，后续受锁项进入 `waiting_for_prerequisite` 并在重建后自动恢复；每建筑每兵种最多保留 100 个待生产单位，commando 另受存活加排队合计 1 名的玩家级限制
 - 开局 worker、无 rally point 的新 worker，以及完工后没有旧任务可恢复的建造 worker，会由模拟层自动分配高效 `harvest_loop`；显式 rally point、hold 和玩家命令优先
 - HQ、兵营和重工可持久保存 rally point；单位生产完成后由 ProductionSystem 生成普通 move order，目标占用时复用寻路层的附近可达格解析
 - 动作通过 MatchRuntime 专属 CommandGateway 提交，禁止异步直接修改 WorldState

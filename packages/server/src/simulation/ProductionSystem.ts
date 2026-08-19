@@ -7,6 +7,7 @@ import {
   getDefaultAttackMovePriority,
   getBuildingFootprint,
   getUnitCost,
+  getUnitLimit,
   getUnitProductionTicks,
   unitCanAttack,
   type Building,
@@ -83,6 +84,31 @@ export class ProductionSystem {
         }
         progress.status = "producing";
         delete progress.missingPrerequisites;
+        world.markChanged();
+      }
+
+      const unitLimit = getUnitLimit(order.unitType);
+      const livingUnitCount = world.units.getUnitsByPlayer(spawnBuilding.playerId)
+        .filter((unit) => unit.type === order.unitType)
+        .length;
+      if (unitLimit !== undefined && livingUnitCount >= unitLimit) {
+        if (progress.status !== "waiting_for_unit_limit") {
+          progress.status = "waiting_for_unit_limit";
+          world.markChanged();
+        }
+        continue;
+      }
+      if (progress.status === "waiting_for_unit_limit") {
+        const missingPrerequisites = progress.paidCredits === 0
+          ? world.buildings.getMissingProductionPrerequisites(spawnBuilding.playerId, order.unitType)
+          : [];
+        if (missingPrerequisites.length > 0) {
+          progress.status = "waiting_for_prerequisite";
+          progress.missingPrerequisites = missingPrerequisites;
+          world.markChanged();
+          continue;
+        }
+        progress.status = "producing";
         world.markChanged();
       }
 

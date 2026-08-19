@@ -143,6 +143,7 @@ def build_materials() -> dict[str, bpy.types.Material]:
         "worker": flat_material("worker_safety", (0.82, 0.52, 0.055, 1), roughness=0.64),
         "gunner": flat_material("gunner_armor", (0.105, 0.13, 0.12, 1), metallic=0.32, roughness=0.46),
         "rocket": flat_material("rocket_armor", (0.34, 0.31, 0.2, 1), metallic=0.12, roughness=0.68),
+        "commando": flat_material("commando_armor", (0.055, 0.085, 0.07, 1), metallic=0.18, roughness=0.7),
         "gold": flat_material(
             "resource_gold",
             (1, 0.54, 0.06, 1),
@@ -447,9 +448,14 @@ def infantry_base(materials: dict[str, bpy.types.Material], variant: str) -> lis
         materials["worker"] if variant == "worker"
         else materials["gunner"] if variant == "rifleman"
         else materials["rocket"] if variant == "rocket_soldier"
+        else materials["commando"] if variant == "commando"
         else materials["team"]
     )
-    helmet_material = materials["worker"] if variant == "worker" else materials["team"]
+    helmet_material = (
+        materials["worker"] if variant == "worker"
+        else materials["commando"] if variant == "commando"
+        else materials["team"]
+    )
     wedge("combat_vest", (0, -0.065, 0.84), 0.44, 0.24, 0.46, 0.82, class_material)
     cube("chest_rig", (0, -0.22, 0.85), (0.34, 0.08, 0.22), materials["accent"], bevel=0.025)
     for x in (-0.13, 0, 0.13):
@@ -457,7 +463,20 @@ def infantry_base(materials: dict[str, bpy.types.Material], variant: str) -> lis
     cube("battle_belt", (0, -0.01, 0.6), (0.43, 0.2, 0.085), materials["metal"], bevel=0.018)
     cube("radio_pack", (0.2, 0.13, 0.86), (0.18, 0.13, 0.34), materials["metal"], bevel=0.025)
     cylinder("radio_antenna", (0.25, 0.16, 1.17), 0.012, 0.46, materials["metal"], vertices=8)
-    sphere("combat_helmet", (0, 0, 1.31), (0.21, 0.2, 0.14), helmet_material)
+    if variant == "commando":
+        sphere("commando_headgear", (0, 0, 1.31), (0.195, 0.19, 0.12), helmet_material)
+        cylinder(
+            "commando_beret",
+            (-0.035, -0.005, 1.425),
+            0.245,
+            0.075,
+            materials["warning"],
+            vertices=18,
+            rotation=(0.12, -0.08, 0.16),
+            bevel=0.012,
+        )
+    else:
+        sphere("combat_helmet", (0, 0, 1.31), (0.21, 0.2, 0.14), helmet_material)
     cube("helmet_rail", (0, -0.19, 1.31), (0.28, 0.035, 0.055), materials["accent"], bevel=0.012)
     cube("visor", (0, -0.215, 1.25), (0.24, 0.028, 0.065), materials["glass"], bevel=0.012)
     for side in (-1, 1):
@@ -537,6 +556,14 @@ def build_infantry(variant: str) -> None:
         wedge("rocket_shoulder_pad", (0.3, 0.0, 1.03), 0.34, 0.32, 0.24, 0.72, materials["team"])
     elif variant == "rifleman":
         add_machine_gun(materials)
+    elif variant == "commando":
+        add_rifle(materials, marksman=True)
+        cube("commando_c4_satchel", (-0.15, 0.235, 0.84), (0.46, 0.16, 0.52), materials["commando"], bevel=0.04)
+        for index, x in enumerate((-0.26, -0.08)):
+            cube(f"commando_c4_charge_{index}", (x, 0.335, 0.87), (0.14, 0.07, 0.34), materials["warning"], bevel=0.02)
+            cube(f"commando_c4_cap_{index}", (x, 0.375, 1.03), (0.09, 0.025, 0.055), materials["glass"], bevel=0.008)
+        cube("commando_bandolier", (0.02, -0.245, 0.91), (0.14, 0.07, 0.68), materials["warning"], bevel=0.018, rotation=(0, 0.48, 0))
+        cube("commando_detonator", (-0.24, -0.24, 0.62), (0.14, 0.09, 0.19), materials["glass"], bevel=0.018)
     else:
         add_rifle(materials)
 
@@ -1087,7 +1114,7 @@ def export_asset(name: str, builder) -> None:
     ground_scene_meshes()
     merge_single_material_meshes(name)
     export_scene(OUTPUT_DIR / f"{name}.glb")
-    if name in {"worker", "soldier", "rifleman", "rocket_soldier"}:
+    if name in {"worker", "soldier", "rifleman", "rocket_soldier", "commando"}:
         decimate_scene(0.24)
         collapse_mass_battle_material(name)
         export_scene(OUTPUT_DIR / f"{name}_lod.glb")
@@ -1098,6 +1125,7 @@ ASSETS = {
     "soldier": lambda: build_infantry("soldier"),
     "rifleman": lambda: build_infantry("rifleman"),
     "rocket_soldier": lambda: build_infantry("rocket_soldier"),
+    "commando": lambda: build_infantry("commando"),
     "light_tank": build_tank,
     "flame_tank": build_flame_tank,
     "heavy_tank": build_heavy_tank,
@@ -1113,7 +1141,14 @@ ASSETS = {
 }
 
 
+requested_assets = {
+    name.strip()
+    for name in os.environ.get("LLMCRAFT_ASSETS", "").split(",")
+    if name.strip()
+}
 for asset_name, asset_builder in ASSETS.items():
+    if requested_assets and asset_name not in requested_assets:
+        continue
     export_asset(asset_name, asset_builder)
 
 print(f"Production battlefield GLBs written to {OUTPUT_DIR}")

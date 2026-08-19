@@ -72,6 +72,13 @@ function findRoleTarget(
       ?? findClosest(combatUnit, enemyBuildings);
   }
 
+  if (combatUnit.type === UNIT_TYPES.COMMANDO) {
+    return enemyUnits.find((unit) => getUnitStats(unit.type).armor === ARMOR_TYPES.INFANTRY)
+      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.MACHINE_GUN_TURRET)
+      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.ANTI_TANK_TURRET)
+      ?? findClosest(combatUnit, enemyBuildings);
+  }
+
   if (getUnitStats(combatUnit.type).armor === ARMOR_TYPES.VEHICLE) {
     return (
       enemyBuildings.find((building) => building.type === BUILDING_TYPES.HQ) ??
@@ -221,6 +228,7 @@ export async function runBuiltinCPUStrategy(options: {
   const canSpawnWorker = credits >= getUnitCost(UNIT_TYPES.WORKER);
   const canSpawnRifleman = credits >= getUnitCost(UNIT_TYPES.RIFLEMAN);
   const canSpawnRocketSoldier = credits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER);
+  const canSpawnCommando = credits >= getUnitCost(UNIT_TYPES.COMMANDO);
   const canSpawnLightTank = credits >= getUnitCost(UNIT_TYPES.LIGHT_TANK);
   const canSpawnFlameTank = credits >= getUnitCost(UNIT_TYPES.FLAME_TANK);
   const enemyUnits = mapUnits.filter((unit: any) => unit?.relation === "enemy");
@@ -235,9 +243,15 @@ export async function runBuiltinCPUStrategy(options: {
     UNIT_TYPES.FLAME_TANK,
     ...(hasTechCenter ? [UNIT_TYPES.HEAVY_TANK] : []),
   ].filter((unitType) => credits >= getUnitCost(unitType));
-  const preferredBarracksUnit = enemyHasVehicles && canSpawnRocketSoldier
-    ? UNIT_TYPES.ROCKET_SOLDIER
-    : UNIT_TYPES.RIFLEMAN;
+  const commandoCommitted = myUnits.some((unit: any) => unit.type === UNIT_TYPES.COMMANDO)
+    || buildings.some((building: any) => building.productionQueue?.some(
+      (order: any) => order.unitType === UNIT_TYPES.COMMANDO && order.remainingCount > 0,
+    ));
+  const preferredBarracksUnit = hasTechCenter && canSpawnCommando && !commandoCommitted
+    ? UNIT_TYPES.COMMANDO
+    : enemyHasVehicles && canSpawnRocketSoldier
+      ? UNIT_TYPES.ROCKET_SOLDIER
+      : UNIT_TYPES.RIFLEMAN;
   const rushInfrastructureReserve = !hasStartedBarracks
     ? getBuildingCost(BUILDING_TYPES.BARRACKS)
     : hasBarracks && !hasStartedRefinery
@@ -406,7 +420,10 @@ export async function runBuiltinCPUStrategy(options: {
           });
         }
       } else if (selectedPlan === "spawn-infantry") {
-        for (const barracks of barracksBuildings) {
+        const productionBarracks = preferredBarracksUnit === UNIT_TYPES.COMMANDO
+          ? barracksBuildings.slice(0, 1)
+          : barracksBuildings;
+        for (const barracks of productionBarracks) {
           await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: preferredBarracksUnit, count: 1 }] });
         }
       } else if (selectedPlan === "spawn-vehicle") {
@@ -423,7 +440,7 @@ export async function runBuiltinCPUStrategy(options: {
         } else if (!(await issueMultiFrontAdvance())) {
           for (const combatUnit of combatUnits) {
             const roleTarget = findRoleTarget(combatUnit, enemyUnits, enemyBuildings);
-            if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER || shouldAttackThisTurn)) {
+            if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER || combatUnit.type === UNIT_TYPES.COMMANDO || shouldAttackThisTurn)) {
               await callTool("attack", {
                 unitId: combatUnit.id,
                 targetId: roleTarget.id,
@@ -489,6 +506,13 @@ export async function runBuiltinCPUStrategy(options: {
     for (const barracks of barracksBuildings) {
       await callTool("spawn_unit", { buildingId: barracks.id, units: [{ unitType: rushBarracksUnit, count: 1 }] });
     }
+  }
+
+  if (hasTechCenter && canSpawnCommando && !commandoCommitted && barracksBuildings[0]) {
+    await callTool("spawn_unit", {
+      buildingId: barracksBuildings[0].id,
+      units: [{ unitType: UNIT_TYPES.COMMANDO, count: 1 }],
+    });
   }
 
   if (hasWarFactory && (canSpawnLightTank || canSpawnFlameTank)) {
@@ -566,7 +590,7 @@ export async function runBuiltinCPUStrategy(options: {
         continue;
       }
       const roleTarget = findRoleTarget(combatUnit, enemyUnits, enemyBuildings);
-      if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.FLAME_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER)) {
+      if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.FLAME_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER || combatUnit.type === UNIT_TYPES.COMMANDO)) {
         await callTool("attack", { unitId: combatUnit.id, targetId: roleTarget.id });
         continue;
       }

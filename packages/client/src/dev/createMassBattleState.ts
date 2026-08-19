@@ -25,6 +25,7 @@ const FORMATION_TYPES: UnitType[] = [
   UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
+  UNIT_TYPES.COMMANDO,
   UNIT_TYPES.LIGHT_TANK,
   UNIT_TYPES.FLAME_TANK,
   UNIT_TYPES.HEAVY_TANK,
@@ -281,6 +282,7 @@ function createAnimationLabPlayer(
         { type: BUILDING_TYPES.HQ, x: 98, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 94, y: 35 },
         { type: BUILDING_TYPES.BARRACKS, x: 94, y: 61 },
+        { type: BUILDING_TYPES.BARRACKS, x: 78, y: 48 },
       ];
 
   return {
@@ -313,6 +315,18 @@ function createAnimationLabPlayer(
         state: UNIT_STATES.MOVING,
         intent: { type: "attack_move", targetX, targetY: playerOne ? 46 : 50 },
       }),
+      ...(playerOne ? [
+        createAnimationLabUnit(playerId, `${playerId}_lab_commando`, UNIT_TYPES.COMMANDO, 74, 48, {
+          state: UNIT_STATES.ATTACKING,
+          intent: {
+            type: "attack",
+            targetId: `${PLAYER_IDS.PLAYER_2}_lab_building_3`,
+            targetX: 78,
+            targetY: 48,
+          },
+          lastAttackTick: tick,
+        }),
+      ] : []),
       ...createAnimationLabFxRangeUnits(playerId),
     ],
     buildings: buildingLayout.map((building, index) => {
@@ -430,6 +444,25 @@ export function createAnimationLabState(tick: number, mode: "implemented" | "pre
           ))
         .filter((projectile): projectile is ActiveProjectile => projectile !== null)
     : [];
+  if (mode === "implemented") {
+    labProjectiles.push({
+      id: `lab_demolition_${tick}`,
+      playerId: PLAYER_IDS.PLAYER_1,
+      attackerId: `${PLAYER_IDS.PLAYER_1}_lab_commando`,
+      attackerType: UNIT_TYPES.COMMANDO,
+      projectileType: PROJECTILE_TYPES.DEMOLITION,
+      x: 74,
+      y: 48,
+      startX: 74,
+      startY: 48,
+      targetX: 78,
+      targetY: 48,
+      launchedTick: tick,
+      impactTick: tick + 1,
+      targetId: `${PLAYER_IDS.PLAYER_2}_lab_building_3`,
+      targetKind: "building",
+    });
+  }
 
   return {
     tick,

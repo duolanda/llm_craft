@@ -46,6 +46,7 @@ const MOVEMENT_PROFILES: Record<UnitType, MovementProfile> = {
   [UNIT_TYPES.SOLDIER]: createMovementProfile(UNIT_TYPES.SOLDIER, 20),
   [UNIT_TYPES.RIFLEMAN]: createMovementProfile(UNIT_TYPES.RIFLEMAN, 20),
   [UNIT_TYPES.ROCKET_SOLDIER]: createMovementProfile(UNIT_TYPES.ROCKET_SOLDIER, 20),
+  [UNIT_TYPES.COMMANDO]: createMovementProfile(UNIT_TYPES.COMMANDO, 22),
   [UNIT_TYPES.LIGHT_TANK]: createMovementProfile(
     UNIT_TYPES.LIGHT_TANK,
     30,

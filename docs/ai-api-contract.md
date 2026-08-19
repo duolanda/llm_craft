@@ -428,15 +428,16 @@ interface AgentRunInput {
 
 当前规则由 shared 的 `standard` ruleset 描述：
 
-- 单位类型是 `worker | soldier | rifleman | rocket_soldier | light_tank | flame_tank | heavy_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
+- 单位类型是 `worker | soldier | rifleman | rocket_soldier | commando | light_tank | flame_tank | heavy_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
 - 建筑类型是 `hq | barracks | war_factory | refinery | machine_gun_turret | anti_tank_turret | tech_center`
 - `hq` 可生产 `worker`
-- `barracks` 可生产 `rifleman | rocket_soldier`
+- `barracks` 可生产 `rifleman | rocket_soldier`；完成 `tech_center` 后还可生产全局限造 1 名的 `commando`
 - `war_factory` 是 T2 生产建筑，可生产 `light_tank | flame_tank`；完成 `tech_center` 后还可生产 `heavy_tank`
 - `refinery` 是 worker 的采矿卸载点，不生产单位
 - `machine_gun_turret` 是 T1 反步兵防御，要求已完成 `barracks`；`anti_tank_turret` 是 T2 反装甲防御，要求已完成 `war_factory`
 - 科技层级由已完成建筑推导：基础为 T1，完成 `war_factory` 为 T2，完成 `tech_center` 为 T3；`war_factory` 要求 `barracks`，`tech_center` 要求 `war_factory`
 - 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 420 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 2 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
+- `commando` 为 T3 特种兵：160 HP / speed 1.2 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
 - 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 2 / 0.2 / 1.6，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 12 / 1 / 10 伤害；它依靠持续贴住目标形成反步兵和攻坚 DPS，而不是载具对拼升级
 - 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 2 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
@@ -831,13 +832,13 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 {
   buildingId: string;
   units: Array<{
-    unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank" | "flame_tank" | "heavy_tank";
+    unitType: "worker" | "rifleman" | "rocket_soldier" | "commando" | "light_tank" | "flame_tank" | "heavy_tank";
     count: number; // 1..100
   }>;
 }
 ```
 
-`units` 是追加到该建筑的有限批次，严格按数组顺序生产。standard 中请求 `soldier` 会返回 `invalid_spawn_request`，旧录像或已有状态中的 soldier 仍可正常观察、移动、攻击和回放。每座建筑每种可生产单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；credits 不够时当前单位暂停且不丢进度。T3 当前单位开始后即使 `tech_center` 被摧毁也会完成，后续 T3 单位转为 `waiting_for_prerequisite`，重建后自动恢复。
+`units` 是追加到该建筑的有限批次，严格按数组顺序生产。standard 中请求 `soldier` 会返回 `invalid_spawn_request`，旧录像或已有状态中的 soldier 仍可正常观察、移动、攻击和回放。每座建筑每种可生产单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。`commando` 另有玩家级限造：存活单位与所有建筑已排队数量合计不得超过 1，达到上限时新请求返回 `unit_limit_reached`；兼容导入的已有超额队列会显示 `waiting_for_unit_limit`，在名额释放后继续。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；credits 不够时当前单位暂停且不丢进度。T3 当前单位开始后即使 `tech_center` 被摧毁也会完成，后续 T3 单位转为 `waiting_for_prerequisite`，重建后自动恢复。
 
 ```ts
 interface ProductionOrder {
@@ -854,7 +855,7 @@ interface ProductionProgress {
   totalTicks: number;
   paidCredits: number;
   totalCost: number;
-  status: "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite";
+  status: "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite" | "waiting_for_unit_limit";
   missingPrerequisites?: BuildingType[];
 }
 ```

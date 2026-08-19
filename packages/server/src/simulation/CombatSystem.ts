@@ -2,9 +2,11 @@ import {
   RESULT_CODES,
   UNIT_STATES,
   getBuildingWeapon,
+  getBuildingArmor,
   getDefaultAttackMovePriority,
+  getAttackSourceWeaponAgainstArmor,
+  getUnitArmor,
   getUnitVisionRange,
-  getUnitWeapon,
   unitCanAttack,
   type ActiveProjectile,
   type AttackTargetType,
@@ -81,8 +83,9 @@ export class CombatSystem {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
     const distance = world.buildings.getDistanceToBuilding(target, attacker.x, attacker.y);
-    const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
-    if (distance > attacker.attackRange || distance < minRange) {
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, getBuildingArmor(target.type));
+    const minRange = weapon.minRange ?? 0;
+    if (distance > weapon.range || distance < minRange) {
       this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
@@ -95,8 +98,9 @@ export class CombatSystem {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
     const distance = this.chebyshevDistance(attacker, target);
-    const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
-    if (distance > attacker.attackRange || distance < minRange) {
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, getUnitArmor(target.type));
+    const minRange = weapon.minRange ?? 0;
+    if (distance > weapon.range || distance < minRange) {
       this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
@@ -113,7 +117,10 @@ export class CombatSystem {
   ): ResultCode {
     if (!unitCanAttack(attacker.type)) return RESULT_CODES.ERR_INVALID_TARGET;
 
-    const weapon = getUnitWeapon(attacker.type);
+    const targetArmor = targetKind === "building"
+      ? getBuildingArmor((target as Building).type)
+      : getUnitArmor((target as WorldUnit).type);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
     const continuousFire = weapon.continuousFire;
     const continuingStream = continuousFire && attacker.attackStream?.targetId === target.id;
     if (attacker.attackStream && !continuingStream) {
@@ -216,8 +223,9 @@ export class CombatSystem {
       return false;
     }
     const distance = this.chebyshevDistance(defender, attacker);
-    const minRange = getUnitWeapon(defender.type).minRange ?? 0;
-    return distance >= minRange && distance <= defender.attackRange;
+    const weapon = getAttackSourceWeaponAgainstArmor(defender.type, getUnitArmor(attacker.type));
+    const minRange = weapon.minRange ?? 0;
+    return distance >= minRange && distance <= weapon.range;
   }
 
   private processAttackMoveOrders(world: WorldState): void {
@@ -419,7 +427,10 @@ export class CombatSystem {
     target: WorldUnit | Building,
     kind: "unit" | "building",
   ): boolean {
-    const weapon = getUnitWeapon(attacker.type);
+    const targetArmor = kind === "building"
+      ? getBuildingArmor((target as Building).type)
+      : getUnitArmor((target as WorldUnit).type);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
     const distance = kind === "building"
       ? world.buildings.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
       : this.chebyshevDistance(attacker, target);

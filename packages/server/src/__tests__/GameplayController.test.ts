@@ -166,7 +166,7 @@ describe("GameplayController", () => {
     }).result).toMatchObject({
       ok: false,
       error: "invalid_spawn_request",
-      validUnitTypes: [UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+      validUnitTypes: [UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.COMMANDO],
     });
     expect(gameplayController.getMyState().result).toMatchObject({
       canQueueSoldier: false,
@@ -236,6 +236,32 @@ describe("GameplayController", () => {
     expect(upgradedController.spawnUnit(factory.id, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 1 }]).result).toMatchObject({
       ok: true,
     });
+  });
+
+  it("exposes and enforces the player-wide Commando limit", () => {
+    const game = new Game();
+    const barracks = game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 24, 48, "player_1");
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.TECH_CENTER, 32, 48, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      canQueueCommando: true,
+      unitLimits: {
+        commando: { limit: 1, committed: 0 },
+      },
+    });
+    expect(gameplayController.spawnUnit(barracks.id, [{ unitType: UNIT_TYPES.COMMANDO, count: 1 }]).result)
+      .toMatchObject({ ok: true });
+    game.processCommands();
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      canQueueCommando: false,
+      unitLimits: {
+        commando: { limit: 1, committed: 1 },
+      },
+    });
+    expect(gameplayController.spawnUnit(barracks.id, [{ unitType: UNIT_TYPES.COMMANDO, count: 1 }]).result)
+      .toMatchObject({ ok: false, error: "unit_limit_reached", limit: 1 });
   });
 
   it("exposes instantaneous phase separately from durable intent", () => {
@@ -1483,13 +1509,13 @@ describe("GameplayController", () => {
         type: "attack_move",
         unitId: soldier.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["rocket_soldier", "rifleman", "soldier", "worker", "light_tank", "barracks", "refinery", "hq"],
+        targetPriority: ["commando", "rocket_soldier", "rifleman", "soldier", "worker", "light_tank", "barracks", "refinery", "hq"],
       }),
       expect.objectContaining({
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["heavy_tank", "light_tank", "flame_tank", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
+        targetPriority: ["heavy_tank", "light_tank", "flame_tank", "commando", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
       }),
     ]);
     game.stop();

@@ -202,7 +202,7 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
-const MODEL_VERSION = "production-20260811-2";
+const MODEL_VERSION = "production-20260820-1";
 const SHOW_DEBUG_INTENTS = new URLSearchParams(window.location.search).has("debug-intents");
 const MASS_BATTLE_LOD_ENABLED = new URLSearchParams(window.location.search).get("lod") === "mass";
 const FAR_READABILITY_VIEW = new URLSearchParams(window.location.search).get("view") === "far";
@@ -222,6 +222,8 @@ const MODEL_URLS = {
   rifleman_lod: modelUrl("rifleman_lod"),
   rocket_soldier: modelUrl("rocket_soldier"),
   rocket_soldier_lod: modelUrl("rocket_soldier_lod"),
+  commando: modelUrl("commando"),
+  commando_lod: modelUrl("commando_lod"),
   light_tank_body: modelUrl("light_tank_body"),
   light_tank_body_lod: modelUrl("light_tank_body_lod"),
   light_tank_turret: modelUrl("light_tank_turret"),
@@ -753,6 +755,77 @@ function FlameStreamEffects({
   );
 }
 
+function DemolitionChargeEffects({
+  projectiles,
+  buildings,
+  dimensions,
+}: {
+  projectiles: ActiveProjectile[];
+  buildings: Building[];
+  dimensions: MapDimensions;
+}) {
+  const chargeRef = useRef<THREE.InstancedMesh>(null);
+  const ringRef = useRef<THREE.InstancedMesh>(null);
+  const charges = useMemo(() => {
+    const buildingIds = new Set(buildings.map((building) => building.id));
+    return projectiles
+      .filter((projectile) =>
+        projectile.projectileType === "demolition"
+        && projectile.targetId
+        && buildingIds.has(projectile.targetId)
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((projectile) => ({
+        id: projectile.id,
+        position: toWorldPosition(projectile.targetX, projectile.targetY, dimensions, 1.48),
+        phase: deterministicNoise(projectile.targetX, projectile.targetY, projectile.launchedTick) * Math.PI * 2,
+      }));
+  }, [buildings, dimensions, projectiles]);
+  const scratch = useMemo(() => ({
+    matrix: new THREE.Matrix4(),
+    position: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    chargeQuaternion: new THREE.Quaternion(),
+    ringQuaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+
+  useFrame(({ clock }) => {
+    const charge = chargeRef.current;
+    const ring = ringRef.current;
+    if (!charge || !ring) return;
+    charges.forEach((entry, index) => {
+      const pulse = 0.88 + Math.sin(clock.elapsedTime * 18 + entry.phase) * 0.16;
+      scratch.position.set(...entry.position);
+      scratch.chargeQuaternion.setFromAxisAngle(scratch.up, clock.elapsedTime * 2.4 + entry.phase);
+      scratch.scale.set(0.32 * pulse, 0.16 * pulse, 0.46 * pulse);
+      scratch.matrix.compose(scratch.position, scratch.chargeQuaternion, scratch.scale);
+      charge.setMatrixAt(index, scratch.matrix);
+
+      scratch.position.y += 0.03;
+      scratch.scale.setScalar(0.48 + pulse * 0.12);
+      scratch.matrix.compose(scratch.position, scratch.ringQuaternion, scratch.scale);
+      ring.setMatrixAt(index, scratch.matrix);
+    });
+    charge.instanceMatrix.needsUpdate = true;
+    ring.instanceMatrix.needsUpdate = true;
+  }, -8);
+
+  if (charges.length === 0) return null;
+  return (
+    <>
+      <instancedMesh ref={chargeRef} args={[undefined, undefined, charges.length]} frustumCulled={false} renderOrder={10}>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color="#252b28" emissive="#ff4b16" emissiveIntensity={1.1} roughness={0.46} metalness={0.35} />
+      </instancedMesh>
+      <instancedMesh ref={ringRef} args={[undefined, undefined, charges.length]} frustumCulled={false} renderOrder={11}>
+        <torusGeometry args={[0.46, 0.07, 8, 18]} />
+        <meshBasicMaterial color="#ffb21c" transparent opacity={0.9} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+    </>
+  );
+}
+
 function deterministicNoise(x: number, y: number, salt: number): number {
   const value = Math.sin(x * 12.9898 + y * 78.233 + salt * 37.719) * 43758.5453;
   return value - Math.floor(value);
@@ -1164,6 +1237,9 @@ function BasePlatform({
 }
 
 function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
+  if (unit.type === "commando") {
+    return massBattleLod ? MODEL_URLS.commando_lod : MODEL_URLS.commando;
+  }
   if (unit.type === "rocket_soldier") {
     return massBattleLod ? MODEL_URLS.rocket_soldier_lod : MODEL_URLS.rocket_soldier;
   }
@@ -1534,7 +1610,7 @@ function CombatEffects({
   const shots = useMemo(() => {
     const objects = new Map([...units, ...buildings].map((object) => [object.id, object]));
     const activeProjectileShots = projectiles
-      .filter((projectile) => projectile.projectileType !== "flame")
+      .filter((projectile) => projectile.projectileType !== "flame" && projectile.projectileType !== "demolition")
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((projectile, index): CombatShot => {
         const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
@@ -2193,6 +2269,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
         <UnitReadabilityLayer units={units} dimensions={dimensions} visualWorld={visualWorld} />
         <AttackWindupEffects units={units} dimensions={dimensions} visualWorld={visualWorld} />
         <FlameStreamEffects units={units} buildings={buildings} dimensions={dimensions} visualWorld={visualWorld} />
+        <DemolitionChargeEffects projectiles={state.projectiles ?? []} buildings={buildings} dimensions={dimensions} />
         {projectileFxMode === "game" ? (
           <CombatEffects
             units={units}

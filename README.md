@@ -100,9 +100,9 @@ llmcraft/
 
 每局默认每 500ms 推进一个 tick。命令在 tick 边界经 `CommandGateway` 进入模拟，每条命令独立执行；同一个 batch 中一条动作失败不会撤销其他成功动作。
 
-当前标准地图为 144×96。standard 规则包含 Worker、Rifleman、Rocket Soldier、Light Tank、Flame Tank 和 Heavy Tank；建筑包含 HQ、Barracks、War Factory、Refinery、Machine Gun Turret、Anti-Tank Turret 和 Tech Center。`soldier` 仅保留旧录像兼容，新对局不可生产。胜利条件由 `MatchDefinition` 冻结；默认规则要求摧毁敌方全部建筑，单独摧毁 HQ 不会立即结束对局。
+当前标准地图为 144×96。standard 规则包含 Worker、Rifleman、Rocket Soldier、Commando、Light Tank、Flame Tank 和 Heavy Tank；建筑包含 HQ、Barracks、War Factory、Refinery、Machine Gun Turret、Anti-Tank Turret 和 Tech Center。`soldier` 仅保留旧录像兼容，新对局不可生产。胜利条件由 `MatchDefinition` 冻结；默认规则要求摧毁敌方全部建筑，单独摧毁 HQ 不会立即结束对局。
 
-科技层级不使用单独研究按钮：完成 War Factory 即进入 T2，解锁轻坦、火焰坦克与反坦克塔；完成 Tech Center 进入 T3，解锁重坦。科技中心被毁时，正在生产的 T3 单位会完成，后续受锁订单暂停并在重建后恢复。
+科技层级不使用单独研究按钮：完成 War Factory 即进入 T2，解锁轻坦、火焰坦克与反坦克塔；完成 Tech Center 进入 T3，解锁重坦，以及兵营中全局限造 1 名的特种兵。特种兵远程秒杀步兵、贴身用 C4 秒杀建筑，但无法伤害载具。科技中心被毁时，正在生产的 T3 单位会完成，后续受锁订单暂停并在重建后恢复。
 
 Agent 可使用的工具包括：
 

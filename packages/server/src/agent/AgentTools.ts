@@ -267,7 +267,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "spawn_unit",
-    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick and pauses without losing progress when credits or a required technology building are unavailable. If technology is destroyed, the active unit completes and later locked units wait for rebuilding. Each building may keep at most 100 pending units of each unit type. Use get_production_queue to inspect unlocks, order IDs, and progress.",
+    description: "Append a finite ordered batch to one building's production queue. The building completes entries strictly in array order. Production charges credits gradually each tick and pauses without losing progress when credits, a required technology building, or a player-wide unit limit is unavailable. If technology is destroyed, the active unit completes and later locked units wait for rebuilding. Each building may keep at most 100 pending units of each unit type; the T3 commando instead has a player-wide committed limit of 1. Use get_production_queue to inspect unlocks, order IDs, and progress.",
     parameters: {
       type: "object",
       required: ["buildingId", "units"],

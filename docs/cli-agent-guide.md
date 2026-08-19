@@ -311,7 +311,7 @@ llmcraft buildings --type hq --ready | llmcraft train worker
 llmcraft buildings --type barracks --ready | llmcraft train rifleman
 ```
 
-The standard ruleset no longer produces `soldier`; barracks production starts with `rifleman` and also supports `rocket_soldier`. A completed war factory unlocks the T2 `light_tank` and short-range anti-infantry/structure `flame_tank`; a completed tech center unlocks the T3 `heavy_tank` in war factories. The `soldier` type remains readable and targetable so older Match Records can still be replayed and inspected.
+The standard ruleset no longer produces `soldier`; barracks production starts with `rifleman` and also supports `rocket_soldier`. A completed war factory unlocks the T2 `light_tank` and short-range anti-infantry/structure `flame_tank`; a completed tech center unlocks the T3 `heavy_tank` in war factories and one player-wide `commando` in barracks. The commando one-shots infantry at long range and buildings with adjacent C4, but cannot damage vehicles. The `soldier` type remains readable and targetable so older Match Records can still be replayed and inspected.
 
 When piped, the CLI groups compatible selections into array-shaped actions and sends the complete expansion through one HTTP request and one `CommandEnvelope`. Each action is applied independently at the same tick boundary; one failed action does not roll back successful siblings. The output is `kind: "batch_result"`.
 

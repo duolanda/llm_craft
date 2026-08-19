@@ -8,6 +8,7 @@ import {
   canBuildingProduce,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
+  getAttackSourceWeaponAgainstArmor,
   getBuildingCost,
   getBuildingFootprint,
   getBuildingStats,
@@ -17,6 +18,7 @@ import {
   getUnitCost,
   getUnitStats,
   getUnitProductionTicks,
+  getUnitLimit,
   getUnitWeapon,
   getBuildingVisionRange,
   getBuildingPrerequisites,
@@ -38,6 +40,7 @@ describe("default ruleset", () => {
     expect(getUnitStats(UNIT_TYPES.SOLDIER)).toEqual(UNIT_STATS.soldier);
     expect(getUnitStats(UNIT_TYPES.RIFLEMAN)).toEqual(UNIT_STATS.rifleman);
     expect(getUnitStats(UNIT_TYPES.ROCKET_SOLDIER)).toEqual(UNIT_STATS.rocket_soldier);
+    expect(getUnitStats(UNIT_TYPES.COMMANDO)).toEqual(UNIT_STATS.commando);
     expect(getUnitStats(UNIT_TYPES.LIGHT_TANK)).toEqual(UNIT_STATS.light_tank);
     expect(getUnitStats(UNIT_TYPES.FLAME_TANK)).toEqual(UNIT_STATS.flame_tank);
     expect(getUnitStats(UNIT_TYPES.HEAVY_TANK)).toEqual(UNIT_STATS.heavy_tank);
@@ -45,23 +48,28 @@ describe("default ruleset", () => {
     expect(getUnitCost(UNIT_TYPES.SOLDIER)).toBe(55);
     expect(getUnitCost(UNIT_TYPES.RIFLEMAN)).toBe(70);
     expect(getUnitCost(UNIT_TYPES.ROCKET_SOLDIER)).toBe(110);
+    expect(getUnitCost(UNIT_TYPES.COMMANDO)).toBe(600);
     expect(getUnitCost(UNIT_TYPES.LIGHT_TANK)).toBe(240);
     expect(getUnitCost(UNIT_TYPES.FLAME_TANK)).toBe(320);
     expect(unitCanAttack(UNIT_TYPES.WORKER)).toBe(false);
     expect(unitCanAttack(UNIT_TYPES.SOLDIER)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
+    expect(unitCanAttack(UNIT_TYPES.COMMANDO)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.LIGHT_TANK)).toBe(true);
     expect(unitCanAttack(UNIT_TYPES.FLAME_TANK)).toBe(true);
     expect(getUnitProductionTicks(UNIT_TYPES.SOLDIER)).toBe(4);
     expect(getUnitProductionTicks(UNIT_TYPES.LIGHT_TANK)).toBe(14);
     expect(getUnitProductionTicks(UNIT_TYPES.FLAME_TANK)).toBe(18);
+    expect(getUnitProductionTicks(UNIT_TYPES.COMMANDO)).toBe(24);
+    expect(getUnitLimit(UNIT_TYPES.COMMANDO)).toBe(1);
   });
 
   it("defines vision ranges for units and buildings", () => {
     expect(getUnitVisionRange(UNIT_TYPES.WORKER)).toBe(5);
     expect(getUnitVisionRange(UNIT_TYPES.RIFLEMAN)).toBe(7);
     expect(getUnitVisionRange(UNIT_TYPES.ROCKET_SOLDIER)).toBe(7);
+    expect(getUnitVisionRange(UNIT_TYPES.COMMANDO)).toBe(10);
     expect(getUnitVisionRange(UNIT_TYPES.LIGHT_TANK)).toBe(7);
     expect(getUnitVisionRange(UNIT_TYPES.FLAME_TANK)).toBe(7);
     expect(getBuildingVisionRange(BUILDING_TYPES.HQ)).toBe(8);
@@ -88,6 +96,17 @@ describe("default ruleset", () => {
     expect(getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ)).toBe(10);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(1);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.ANTI_TANK_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(102);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.COMMANDO, UNIT_TYPES.LIGHT_TANK)).toBe(0);
+    expect(getAttackSourceWeaponAgainstArmor(UNIT_TYPES.COMMANDO, "infantry")).toMatchObject({
+      range: 7,
+      projectileType: "bullet",
+      instantKill: true,
+    });
+    expect(getAttackSourceWeaponAgainstArmor(UNIT_TYPES.COMMANDO, "structure")).toMatchObject({
+      range: 1,
+      projectileType: "demolition",
+      instantKill: true,
+    });
   });
 
   it("makes flame tanks a resource-efficient specialist instead of a main battle tank upgrade", () => {
@@ -125,10 +144,10 @@ describe("default ruleset", () => {
 
   it("uses role-aware default attack target priorities", () => {
     expect(getDefaultAttackMovePriority(UNIT_TYPES.RIFLEMAN).slice(0, 4)).toEqual([
+      UNIT_TYPES.COMMANDO,
       UNIT_TYPES.ROCKET_SOLDIER,
       UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.SOLDIER,
-      UNIT_TYPES.WORKER,
     ]);
     expect(getDefaultAttackMovePriority(UNIT_TYPES.ROCKET_SOLDIER).slice(0, 3)).toEqual([
       UNIT_TYPES.HEAVY_TANK,
@@ -159,6 +178,7 @@ describe("default ruleset", () => {
     expect(getProductionOptions(BUILDING_TYPES.BARRACKS)).toEqual([
       UNIT_TYPES.RIFLEMAN,
       UNIT_TYPES.ROCKET_SOLDIER,
+      UNIT_TYPES.COMMANDO,
     ]);
     expect(getProductionOptions(BUILDING_TYPES.WAR_FACTORY)).toEqual([
       UNIT_TYPES.LIGHT_TANK,
@@ -171,6 +191,7 @@ describe("default ruleset", () => {
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.SOLDIER)).toBe(false);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.RIFLEMAN)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.ROCKET_SOLDIER)).toBe(true);
+    expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.COMMANDO)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.BARRACKS, UNIT_TYPES.LIGHT_TANK)).toBe(false);
     expect(canBuildingProduce(BUILDING_TYPES.WAR_FACTORY, UNIT_TYPES.LIGHT_TANK)).toBe(true);
     expect(canBuildingProduce(BUILDING_TYPES.WAR_FACTORY, UNIT_TYPES.FLAME_TANK)).toBe(true);
@@ -184,6 +205,7 @@ describe("default ruleset", () => {
     expect(getUnitPrerequisites(UNIT_TYPES.LIGHT_TANK)).toEqual([]);
     expect(getUnitPrerequisites(UNIT_TYPES.FLAME_TANK)).toEqual([]);
     expect(getUnitPrerequisites(UNIT_TYPES.HEAVY_TANK)).toEqual([BUILDING_TYPES.TECH_CENTER]);
+    expect(getUnitPrerequisites(UNIT_TYPES.COMMANDO)).toEqual([BUILDING_TYPES.TECH_CENTER]);
     expect(getBuildingWeapon(BUILDING_TYPES.MACHINE_GUN_TURRET)).toMatchObject({
       projectileType: "bullet",
       range: 7,

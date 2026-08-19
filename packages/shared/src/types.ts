@@ -220,7 +220,7 @@ export interface ProductionOrder extends ProductionBatchRequest {
   remainingCount: number;
 }
 
-export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite";
+export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite" | "waiting_for_unit_limit";
 
 export interface ProductionProgress {
   orderId: string;

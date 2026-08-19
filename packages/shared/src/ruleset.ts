@@ -52,6 +52,10 @@ export function getUnitProductionTicks(unitType: UnitType, ruleset: GameRuleset 
   return getUnitStats(unitType, ruleset).productionTicks;
 }
 
+export function getUnitLimit(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): number | undefined {
+  return getUnitStats(unitType, ruleset).unitLimit;
+}
+
 export function getBuildingCost(buildingType: BuildingType, ruleset: GameRuleset = DEFAULT_RULESET): number {
   return getBuildingStats(buildingType, ruleset).cost;
 }
@@ -183,6 +187,24 @@ export function getAttackSourceWeapon(
   };
 }
 
+export function getAttackSourceWeaponAgainstArmor(
+  attackerType: AttackTargetType,
+  targetArmor: ArmorType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): RulesetWeaponDefinition {
+  const weapon = getAttackSourceWeapon(attackerType, ruleset);
+  const override = weapon.targetOverrides?.[targetArmor];
+  return override ? { ...weapon, ...override } : weapon;
+}
+
+export function attackSourceInstantKills(
+  attackerType: AttackTargetType,
+  targetArmor: ArmorType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): boolean {
+  return getAttackSourceWeaponAgainstArmor(attackerType, targetArmor, ruleset).instantKill ?? false;
+}
+
 export function attackSourceCanAttack(
   attackerType: AttackTargetType,
   ruleset: GameRuleset = DEFAULT_RULESET,
@@ -294,6 +316,7 @@ export function getDefaultAttackMovePriority(
         UNIT_TYPES.HEAVY_TANK,
         UNIT_TYPES.LIGHT_TANK,
         UNIT_TYPES.FLAME_TANK,
+        UNIT_TYPES.COMMANDO,
         UNIT_TYPES.ROCKET_SOLDIER,
         UNIT_TYPES.RIFLEMAN,
         UNIT_TYPES.SOLDIER,

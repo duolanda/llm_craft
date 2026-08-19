@@ -1,8 +1,12 @@
 import {
   UNIT_STATES,
+  attackSourceInstantKills,
   getAttackDamageAgainstBuilding,
   getAttackDamageAgainstUnit,
   getAttackSourceWeapon,
+  getAttackSourceWeaponAgainstArmor,
+  getBuildingArmor,
+  getUnitArmor,
   type ActiveProjectile,
   type Building,
   type PlayerId,
@@ -56,13 +60,21 @@ export class ProjectileSystem {
 
   private applyImpact(world: WorldState, projectile: ActiveProjectile, events: ProjectileEvent[]): void {
     const impact = this.resolveTarget(world, projectile) ?? { x: projectile.targetX, y: projectile.targetY };
-    const weapon = getAttackSourceWeapon(projectile.attackerType);
-    const radius = weapon.splashRadius ?? 0;
+    const baseWeapon = getAttackSourceWeapon(projectile.attackerType);
     const damagedUnits = new Set<string>();
     const damagedBuildings = new Set<string>();
     const directTarget = projectile.targetId
       ? world.entities.resolve(projectile.targetId)
       : undefined;
+    const directTargetArmor = directTarget?.kind === "unit"
+      ? getUnitArmor(directTarget.entity.type)
+      : directTarget?.kind === "building"
+        ? getBuildingArmor(directTarget.entity.type)
+        : undefined;
+    const weapon = directTargetArmor
+      ? getAttackSourceWeaponAgainstArmor(projectile.attackerType, directTargetArmor)
+      : baseWeapon;
+    const radius = weapon.splashRadius ?? 0;
 
     if (
       directTarget?.kind === "unit"
@@ -112,10 +124,12 @@ export class ProjectileSystem {
     events: ProjectileEvent[],
   ): void {
     if (!target.exists) return;
-    const damage = Math.max(
-      0,
-      Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier),
-    );
+    const damage = attackSourceInstantKills(projectile.attackerType, getUnitArmor(target.type))
+      ? target.hp
+      : Math.max(
+          0,
+          Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier),
+        );
     if (damage <= 0) return;
     target.hp -= damage;
     if (target.hp <= 0 && world.destroyEntity(target.id)) {
@@ -134,10 +148,12 @@ export class ProjectileSystem {
     target: Building,
     multiplier: number,
   ): void {
-    const damage = Math.max(
-      0,
-      Math.round(getAttackDamageAgainstBuilding(projectile.attackerType, target.type) * multiplier),
-    );
+    const damage = attackSourceInstantKills(projectile.attackerType, getBuildingArmor(target.type))
+      ? target.hp
+      : Math.max(
+          0,
+          Math.round(getAttackDamageAgainstBuilding(projectile.attackerType, target.type) * multiplier),
+        );
     if (damage <= 0) return;
     const destroyed = world.buildings.takeDamage(target, damage);
     if (!destroyed) return;

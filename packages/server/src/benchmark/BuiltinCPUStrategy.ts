@@ -64,17 +64,11 @@ function findRoleTarget(
       ?? findClosest(combatUnit, enemyBuildings);
   }
 
-  if (combatUnit.type === UNIT_TYPES.ARTILLERY) {
-    return enemyBuildings.find((building) => building.type === BUILDING_TYPES.ANTI_TANK_TURRET)
-      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.MACHINE_GUN_TURRET)
-      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.TECH_CENTER)
-      ?? findClosest(combatUnit, enemyBuildings);
-  }
-
-  if (combatUnit.type === UNIT_TYPES.SCOUT_CAR) {
+  if (combatUnit.type === UNIT_TYPES.FLAME_TANK) {
     return enemyUnits.find((unit) => unit.type === UNIT_TYPES.ROCKET_SOLDIER)
       ?? enemyUnits.find((unit) => unit.type === UNIT_TYPES.RIFLEMAN)
       ?? enemyUnits.find((unit) => unit.type === UNIT_TYPES.WORKER)
+      ?? enemyBuildings.find((building) => building.type === BUILDING_TYPES.MACHINE_GUN_TURRET)
       ?? findClosest(combatUnit, enemyBuildings);
   }
 
@@ -228,13 +222,18 @@ export async function runBuiltinCPUStrategy(options: {
   const canSpawnRifleman = credits >= getUnitCost(UNIT_TYPES.RIFLEMAN);
   const canSpawnRocketSoldier = credits >= getUnitCost(UNIT_TYPES.ROCKET_SOLDIER);
   const canSpawnLightTank = credits >= getUnitCost(UNIT_TYPES.LIGHT_TANK);
+  const canSpawnFlameTank = credits >= getUnitCost(UNIT_TYPES.FLAME_TANK);
   const enemyUnits = mapUnits.filter((unit: any) => unit?.relation === "enemy");
   const enemyBuildings = mapBuildings.filter((building: any) => building?.relation === "enemy");
   const enemyHasVehicles = enemyUnits.some((unit: any) => getUnitStats(unit.type).armor === ARMOR_TYPES.VEHICLE);
+  const enemyInfantryCount = enemyUnits.filter((unit: any) => getUnitStats(unit.type).armor === ARMOR_TYPES.INFANTRY).length;
+  const preferredFactoryUnit = enemyInfantryCount >= 3 && canSpawnFlameTank
+    ? UNIT_TYPES.FLAME_TANK
+    : UNIT_TYPES.LIGHT_TANK;
   const factoryUnitOptions = [
-    UNIT_TYPES.SCOUT_CAR,
     UNIT_TYPES.LIGHT_TANK,
-    ...(hasTechCenter ? [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.ARTILLERY] : []),
+    UNIT_TYPES.FLAME_TANK,
+    ...(hasTechCenter ? [UNIT_TYPES.HEAVY_TANK] : []),
   ].filter((unitType) => credits >= getUnitCost(unitType));
   const preferredBarracksUnit = enemyHasVehicles && canSpawnRocketSoldier
     ? UNIT_TYPES.ROCKET_SOLDIER
@@ -492,9 +491,9 @@ export async function runBuiltinCPUStrategy(options: {
     }
   }
 
-  if (hasWarFactory && canSpawnLightTank) {
+  if (hasWarFactory && (canSpawnLightTank || canSpawnFlameTank)) {
     for (const warFactory of warFactoryBuildings) {
-      await callTool("spawn_unit", { buildingId: warFactory.id, units: [{ unitType: UNIT_TYPES.LIGHT_TANK, count: 1 }] });
+      await callTool("spawn_unit", { buildingId: warFactory.id, units: [{ unitType: preferredFactoryUnit, count: 1 }] });
     }
   }
 
@@ -567,7 +566,7 @@ export async function runBuiltinCPUStrategy(options: {
         continue;
       }
       const roleTarget = findRoleTarget(combatUnit, enemyUnits, enemyBuildings);
-      if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER)) {
+      if (roleTarget && (combatUnit.type === UNIT_TYPES.LIGHT_TANK || combatUnit.type === UNIT_TYPES.FLAME_TANK || combatUnit.type === UNIT_TYPES.ROCKET_SOLDIER)) {
         await callTool("attack", { unitId: combatUnit.id, targetId: roleTarget.id });
         continue;
       }

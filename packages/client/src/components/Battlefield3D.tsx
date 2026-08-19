@@ -139,10 +139,9 @@ const PLAYER_1_COLOR = PLAYER_COLORS.player_1;
 const PLAYER_2_COLOR = PLAYER_COLORS.player_2;
 const NEUTRAL_PALETTE: TeamPalette = { primary: "#ffffff", accent: "#ffffff" };
 const VEHICLE_UNIT_TYPES = new Set<Unit["type"]>([
-  UNIT_TYPES.SCOUT_CAR,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
   UNIT_TYPES.HEAVY_TANK,
-  UNIT_TYPES.ARTILLERY,
 ]);
 const isVehicleUnit = (unit: Unit): boolean => VEHICLE_UNIT_TYPES.has(unit.type);
 const PREVIEW_FX_SOURCE_X = 63;
@@ -223,22 +222,18 @@ const MODEL_URLS = {
   rifleman_lod: modelUrl("rifleman_lod"),
   rocket_soldier: modelUrl("rocket_soldier"),
   rocket_soldier_lod: modelUrl("rocket_soldier_lod"),
-  scout_car_body: modelUrl("scout_car_body"),
-  scout_car_body_lod: modelUrl("scout_car_body_lod"),
-  scout_car_turret: modelUrl("scout_car_turret"),
-  scout_car_turret_lod: modelUrl("scout_car_turret_lod"),
   light_tank_body: modelUrl("light_tank_body"),
   light_tank_body_lod: modelUrl("light_tank_body_lod"),
   light_tank_turret: modelUrl("light_tank_turret"),
   light_tank_turret_lod: modelUrl("light_tank_turret_lod"),
+  flame_tank_body: modelUrl("flame_tank_body"),
+  flame_tank_body_lod: modelUrl("flame_tank_body_lod"),
+  flame_tank_turret: modelUrl("flame_tank_turret"),
+  flame_tank_turret_lod: modelUrl("flame_tank_turret_lod"),
   heavy_tank_body: modelUrl("heavy_tank_body"),
   heavy_tank_body_lod: modelUrl("heavy_tank_body_lod"),
   heavy_tank_turret: modelUrl("heavy_tank_turret"),
   heavy_tank_turret_lod: modelUrl("heavy_tank_turret_lod"),
-  artillery_body: modelUrl("artillery_body"),
-  artillery_body_lod: modelUrl("artillery_body_lod"),
-  artillery_turret: modelUrl("artillery_turret"),
-  artillery_turret_lod: modelUrl("artillery_turret_lod"),
   hq: modelUrl("hq"),
   barracks: modelUrl("barracks"),
   war_factory: modelUrl("war_factory"),
@@ -554,6 +549,210 @@ function ProjectileFxModeMarker({ mode }: { mode: ProjectileFxMode }) {
   return null;
 }
 
+function FlameWindupMarker({
+  unit,
+  visualWorld,
+  dimensions,
+}: {
+  unit: Unit;
+  visualWorld: VisualWorld;
+  dimensions: MapDimensions;
+}) {
+  const coreRef = useRef<THREE.Mesh>(null);
+  const ringRef = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    const pulse = 0.82 + Math.sin(clock.elapsedTime * 15 + unit.x * 0.7 + unit.y) * 0.18;
+    coreRef.current?.scale.setScalar(pulse);
+    if (ringRef.current) {
+      ringRef.current.rotation.z = clock.elapsedTime * 4.5;
+      ringRef.current.scale.setScalar(0.88 + pulse * 0.16);
+    }
+  });
+
+  return (
+    <VisualUnitAnchor entityId={unit.id} visualWorld={visualWorld} dimensions={dimensions} elevation={0.08} scale={1}>
+      <group position={[-0.92, 1.24, 0]}>
+        <mesh ref={coreRef}>
+          <sphereGeometry args={[0.18, 12, 8]} />
+          <meshBasicMaterial color="#fff06a" transparent opacity={0.92} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+        </mesh>
+        <mesh ref={ringRef} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.27, 0.045, 8, 18]} />
+          <meshBasicMaterial color="#ff5a16" transparent opacity={0.8} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+        </mesh>
+      </group>
+    </VisualUnitAnchor>
+  );
+}
+
+function AttackWindupEffects({
+  units,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
+  const windingUp = units.filter((unit) => unit.type === UNIT_TYPES.FLAME_TANK && unit.attackWindup);
+  return windingUp.map((unit) => (
+    <FlameWindupMarker key={unit.id} unit={unit} dimensions={dimensions} visualWorld={visualWorld} />
+  ));
+}
+
+const FLAME_STREAM_SEGMENTS = 14;
+const FLAME_STREAM_NOZZLES = 2;
+
+function FlameStreamEffects({
+  units,
+  buildings,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  buildings: Building[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
+  const { gl } = useThree();
+  const outerRef = useRef<THREE.InstancedMesh>(null);
+  const coreRef = useRef<THREE.InstancedMesh>(null);
+  const streams = useMemo(() => {
+    const targets = new Map([...units, ...buildings].map((target) => [target.id, target]));
+    return units
+      .filter((unit) => unit.type === UNIT_TYPES.FLAME_TANK && unit.attackStream)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .flatMap((unit) => {
+        const targetId = unit.attackStream?.targetId;
+        const target = targetId ? targets.get(targetId) : undefined;
+        if (!target) return [];
+        const targetIsBuilding = "productionQueue" in target;
+        return [{
+          sourceId: unit.id,
+          source: toWorldPosition(unit.x, unit.y, dimensions, 1.12),
+          targetId: targetIsBuilding ? undefined : target.id,
+          target: toWorldPosition(
+            target.x,
+            target.y,
+            dimensions,
+            targetIsBuilding ? 1.05 : isVehicleUnit(target) ? 0.72 : 0.78,
+          ),
+          phase: deterministicNoise(unit.x, unit.y, unit.attackStream?.startedTick ?? 0) * Math.PI * 2,
+        }];
+      });
+  }, [buildings, dimensions, units]);
+  const instanceCount = streams.length * FLAME_STREAM_NOZZLES * FLAME_STREAM_SEGMENTS;
+  const scratch = useMemo(() => ({
+    matrix: new THREE.Matrix4(),
+    position: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    direction: new THREE.Vector3(),
+    segmentDirection: new THREE.Vector3(),
+    perpendicular: new THREE.Vector3(),
+    source: new THREE.Vector3(),
+    target: new THREE.Vector3(),
+    nozzle: new THREE.Vector3(),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+
+  useEffect(() => {
+    gl.domElement.dataset.flameStreams = String(streams.length);
+    return () => {
+      delete gl.domElement.dataset.flameStreams;
+    };
+  }, [gl, streams.length]);
+
+  useLayoutEffect(() => {
+    const outer = outerRef.current;
+    const core = coreRef.current;
+    if (!outer || !core) return;
+    for (let index = 0; index < instanceCount; index++) {
+      const segment = index % FLAME_STREAM_SEGMENTS;
+      const heat = segment / Math.max(1, FLAME_STREAM_SEGMENTS - 1);
+      outer.setColorAt(index, new THREE.Color().setHSL(0.065 - heat * 0.035, 1, 0.55 - heat * 0.08));
+      core.setColorAt(index, new THREE.Color().setHSL(0.13 - heat * 0.04, 1, 0.82 - heat * 0.14));
+    }
+    if (outer.instanceColor) outer.instanceColor.needsUpdate = true;
+    if (core.instanceColor) core.instanceColor.needsUpdate = true;
+  }, [instanceCount]);
+
+  useFrame(({ clock }) => {
+    const outer = outerRef.current;
+    const core = coreRef.current;
+    if (!outer || !core) return;
+    const elapsed = clock.elapsedTime;
+    let instanceIndex = 0;
+
+    for (const stream of streams) {
+      const sourceVisual = visualWorld.getTransform(stream.sourceId);
+      const targetVisual = stream.targetId ? visualWorld.getTransform(stream.targetId) : undefined;
+      scratch.source.set(
+        sourceVisual ? (sourceVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE : stream.source[0],
+        stream.source[1],
+        sourceVisual ? (sourceVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE : stream.source[2],
+      );
+      scratch.target.set(
+        targetVisual ? (targetVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE : stream.target[0],
+        stream.target[1],
+        targetVisual ? (targetVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE : stream.target[2],
+      );
+      scratch.direction.copy(scratch.target).sub(scratch.source).normalize();
+      scratch.perpendicular.set(-scratch.direction.z, 0, scratch.direction.x).normalize();
+
+      for (let nozzleIndex = 0; nozzleIndex < FLAME_STREAM_NOZZLES; nozzleIndex++) {
+        const nozzleSide = nozzleIndex === 0 ? -1 : 1;
+        scratch.nozzle.copy(scratch.source)
+          .addScaledVector(scratch.direction, 0.72)
+          .addScaledVector(scratch.perpendicular, nozzleSide * 0.12);
+        const streamLength = scratch.nozzle.distanceTo(scratch.target);
+        const segmentLength = Math.max(0.08, streamLength / FLAME_STREAM_SEGMENTS * 1.62);
+
+        for (let segment = 0; segment < FLAME_STREAM_SEGMENTS; segment++) {
+          const t = (segment + 0.5) / FLAME_STREAM_SEGMENTS;
+          const pulse = elapsed * 11 - segment * 1.15 + stream.phase + nozzleIndex * 0.8;
+          const jitter = (0.018 + t * 0.075) * Math.sin(pulse);
+          scratch.position.copy(scratch.nozzle).lerp(scratch.target, t)
+            .addScaledVector(scratch.perpendicular, jitter);
+          scratch.position.y += Math.cos(pulse * 0.73) * (0.012 + t * 0.045);
+          scratch.segmentDirection.copy(scratch.target).sub(scratch.nozzle).normalize();
+          scratch.quaternion.setFromUnitVectors(scratch.up, scratch.segmentDirection);
+
+          const tipEnvelope = t > 0.84 ? Math.max(0.22, (1 - t) / 0.16) : 1;
+          const outerRadius = (0.09 + t * 0.3) * tipEnvelope * (0.9 + Math.sin(pulse * 0.61) * 0.1);
+          scratch.scale.set(outerRadius, segmentLength, outerRadius);
+          scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+          outer.setMatrixAt(instanceIndex, scratch.matrix);
+
+          const coreRadius = (0.045 + t * 0.12) * tipEnvelope * (0.92 + Math.cos(pulse * 0.77) * 0.08);
+          scratch.scale.set(coreRadius, segmentLength * 0.82, coreRadius);
+          scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+          core.setMatrixAt(instanceIndex, scratch.matrix);
+          instanceIndex++;
+        }
+      }
+    }
+
+    outer.instanceMatrix.needsUpdate = true;
+    core.instanceMatrix.needsUpdate = true;
+  }, -9);
+
+  if (instanceCount === 0) return null;
+  return (
+    <>
+      <instancedMesh ref={outerRef} args={[undefined, undefined, instanceCount]} frustumCulled={false} renderOrder={8}>
+        <cylinderGeometry args={[1, 1, 1, 8, 1, true]} />
+        <meshBasicMaterial transparent opacity={0.68} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+      <instancedMesh ref={coreRef} args={[undefined, undefined, instanceCount]} frustumCulled={false} renderOrder={9}>
+        <cylinderGeometry args={[1, 1, 1, 7, 1, true]} />
+        <meshBasicMaterial transparent opacity={0.9} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+    </>
+  );
+}
+
 function deterministicNoise(x: number, y: number, salt: number): number {
   const value = Math.sin(x * 12.9898 + y * 78.233 + salt * 37.719) * 43758.5453;
   return value - Math.floor(value);
@@ -837,14 +1036,12 @@ function HealthBar({
 
 function getUnitHealthBarY(unit: Unit): number {
   switch (unit.type) {
-    case UNIT_TYPES.SCOUT_CAR:
-      return 1.64;
     case UNIT_TYPES.LIGHT_TANK:
       return 2.22;
+    case UNIT_TYPES.FLAME_TANK:
+      return 2.28;
     case UNIT_TYPES.HEAVY_TANK:
       return 2.76;
-    case UNIT_TYPES.ARTILLERY:
-      return 2.86;
     default:
       return 1.7;
   }
@@ -984,20 +1181,15 @@ function getVehiclePartModelUrls(
   massBattleLod: boolean,
 ): { body: string; turret: string } {
   switch (unit.type) {
-    case UNIT_TYPES.SCOUT_CAR:
+    case UNIT_TYPES.FLAME_TANK:
       return {
-        body: massBattleLod ? MODEL_URLS.scout_car_body_lod : MODEL_URLS.scout_car_body,
-        turret: massBattleLod ? MODEL_URLS.scout_car_turret_lod : MODEL_URLS.scout_car_turret,
+        body: massBattleLod ? MODEL_URLS.flame_tank_body_lod : MODEL_URLS.flame_tank_body,
+        turret: massBattleLod ? MODEL_URLS.flame_tank_turret_lod : MODEL_URLS.flame_tank_turret,
       };
     case UNIT_TYPES.HEAVY_TANK:
       return {
         body: massBattleLod ? MODEL_URLS.heavy_tank_body_lod : MODEL_URLS.heavy_tank_body,
         turret: massBattleLod ? MODEL_URLS.heavy_tank_turret_lod : MODEL_URLS.heavy_tank_turret,
-      };
-    case UNIT_TYPES.ARTILLERY:
-      return {
-        body: massBattleLod ? MODEL_URLS.artillery_body_lod : MODEL_URLS.artillery_body,
-        turret: massBattleLod ? MODEL_URLS.artillery_turret_lod : MODEL_URLS.artillery_turret,
       };
     default:
       return {
@@ -1271,6 +1463,9 @@ function getProjectileVisualType(unitType: Unit["type"]): ActiveProjectile["proj
 }
 
 function getProjectileVisualColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "flame") {
+    return "#fff06a";
+  }
   if (projectileType === "rocket") {
     return "#ff8a2a";
   }
@@ -1281,6 +1476,9 @@ function getProjectileVisualColor(projectileType: ActiveProjectile["projectileTy
 }
 
 function getProjectileTrailColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "flame") {
+    return "#ff5a16";
+  }
   if (projectileType === "rocket") {
     return "#b7b5a7";
   }
@@ -1291,6 +1489,9 @@ function getProjectileTrailColor(projectileType: ActiveProjectile["projectileTyp
 }
 
 function getProjectileVisualScale(projectileType: ActiveProjectile["projectileType"]): number {
+  if (projectileType === "flame") {
+    return 0.24;
+  }
   if (projectileType === "rocket") {
     return 0.19;
   }
@@ -1333,6 +1534,7 @@ function CombatEffects({
   const shots = useMemo(() => {
     const objects = new Map([...units, ...buildings].map((object) => [object.id, object]));
     const activeProjectileShots = projectiles
+      .filter((projectile) => projectile.projectileType !== "flame")
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((projectile, index): CombatShot => {
         const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
@@ -1356,7 +1558,7 @@ function CombatEffects({
     }
 
     return units
-      .filter((unit) => unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1 && unit.intent?.targetId)
+      .filter((unit) => unit.type !== UNIT_TYPES.FLAME_TANK && unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1 && unit.intent?.targetId)
       .sort((left, right) => left.id.localeCompare(right.id))
       .flatMap((unit, index): CombatShot[] => {
         const target = unit.intent?.targetId ? objects.get(unit.intent.targetId) : undefined;
@@ -1454,22 +1656,22 @@ function CombatEffects({
         THREE.MathUtils.lerp(sourceZ, targetZ, progress),
       );
 
-      const projectileLength = shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
+      const projectileLength = shot.projectileType === "flame" ? 5.4 : shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
       scratch.scale.set(shot.scale * 0.5, shot.scale * projectileLength, shot.scale * 0.5);
       scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
       projectile.setMatrixAt(index, scratch.matrix);
 
-      const trailLength = shot.projectileType === "rocket" ? shot.scale * 8.5 : shot.scale * 5.4;
+      const trailLength = shot.projectileType === "flame" ? shot.scale * 10.5 : shot.projectileType === "rocket" ? shot.scale * 8.5 : shot.scale * 5.4;
       scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
       scratch.scale.set(
-        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+        shot.scale * (shot.projectileType === "flame" ? 1.25 : shot.projectileType === "rocket" ? 0.9 : 0.38),
         trailLength,
-        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+        shot.scale * (shot.projectileType === "flame" ? 1.25 : shot.projectileType === "rocket" ? 0.9 : 0.38),
       );
       scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
       trail.setMatrixAt(index, scratch.matrix);
 
-      const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "rocket" ? 5.2 : 4.6);
+      const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "flame" ? 6.5 : shot.projectileType === "rocket" ? 5.2 : 4.6);
       scratch.quaternion.identity();
       scratch.position.set(sourceX, sourceY, sourceZ);
       if (progress < 0.09) {
@@ -1583,22 +1785,22 @@ function ProjectilePreviewEffects({ dimensions }: { dimensions: MapDimensions })
           THREE.MathUtils.lerp(preview.source[1], preview.target[1], progress) + arc,
           THREE.MathUtils.lerp(preview.source[2], preview.target[2], progress),
         );
-        const projectileLength = preview.projectileType === "bullet" ? 6.2 : preview.projectileType === "rocket" ? 3.2 : 2.8;
+        const projectileLength = preview.projectileType === "flame" ? 5.4 : preview.projectileType === "bullet" ? 6.2 : preview.projectileType === "rocket" ? 3.2 : 2.8;
         scratch.scale.set(preview.scale * 0.5, preview.scale * projectileLength, preview.scale * 0.5);
         scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
         projectile.setMatrixAt(index, scratch.matrix);
 
-        const trailLength = preview.projectileType === "rocket" ? preview.scale * 8.5 : preview.scale * 5.4;
+        const trailLength = preview.projectileType === "flame" ? preview.scale * 10.5 : preview.projectileType === "rocket" ? preview.scale * 8.5 : preview.scale * 5.4;
         scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
         scratch.scale.set(
-          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+          preview.scale * (preview.projectileType === "flame" ? 1.25 : preview.projectileType === "rocket" ? 0.9 : 0.38),
           trailLength,
-          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+          preview.scale * (preview.projectileType === "flame" ? 1.25 : preview.projectileType === "rocket" ? 0.9 : 0.38),
         );
         scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
         trail.setMatrixAt(index, scratch.matrix);
 
-        const muzzleScale = Math.max(0.001, 1 - progress * 18) * preview.scale * (preview.projectileType === "rocket" ? 5.2 : 4.6);
+        const muzzleScale = Math.max(0.001, 1 - progress * 18) * preview.scale * (preview.projectileType === "flame" ? 6.5 : preview.projectileType === "rocket" ? 5.2 : 4.6);
         scratch.quaternion.identity();
         scratch.scale.setScalar(muzzleScale);
         scratch.position.set(...preview.source);
@@ -1989,6 +2191,8 @@ const BattlefieldScene = memo(function BattlefieldScene({
           visualWorld={visualWorld}
         />
         <UnitReadabilityLayer units={units} dimensions={dimensions} visualWorld={visualWorld} />
+        <AttackWindupEffects units={units} dimensions={dimensions} visualWorld={visualWorld} />
+        <FlameStreamEffects units={units} buildings={buildings} dimensions={dimensions} visualWorld={visualWorld} />
         {projectileFxMode === "game" ? (
           <CombatEffects
             units={units}

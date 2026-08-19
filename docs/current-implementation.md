@@ -1,6 +1,6 @@
 # LLMCraft 当前实现现状
 
-日期：2026-08-11
+日期：2026-08-20
 
 ## 1. 运行边界
 
@@ -13,13 +13,13 @@
 
 移动采用两层模型：A* 只根据地形和建筑规划全局路线；单位之间的动态冲突由确定性优先级、空间索引和有限角度/距离候选做局部避障。每种移动 footprint 会为当前静态拓扑建立 passability 与 connected-domain 层；同类单位前往同一目标时共享一个有界的 reverse integration field，先以连通域排除不可达请求，再只在目标附近 24 格内分配可达落点，最后每个单位最多执行一次 A*。integration field 使用 64 项 LRU，上限与搜索节点数均与整局时长、失败重试次数无关；建筑增删会使静态拓扑缓存失效，移动单位不会进入该缓存。这一分层对应 OpenRA 的 connected domains、Game AI Pro 的 cost/island/integration fields，以及 Recast/Detour 的 bounded query 思路，不以全图逐候选 A* 猜测可达性。
 
-局部候选按前向进度、移动距离、转向幅度和确定性避让侧评分；无前向进度的横移不会清除拥堵计数，也不允许立即返回上一位置。持续拥堵后开放扩展侧移；OBB 车辆还能保持车体朝向沿车身轴前进或倒车，先腾出转向扫掠空间。A* 中间格只作为路线引导，单位进入半格范围即可继续下一个节点，最终目的地仍需精确抵达，避免大型车体因无法压准狭窄处格心而永久微调。阻塞时间最长的单位优先脱困。单位终点预约只用于避免多个命令选择重叠终点，不会作为整条全局路线的硬障碍。权威碰撞在 XY 平面计算：worker/步兵使用按人体投影标定的圆，四种车辆按各自尺寸使用 OBB，建筑和障碍格组成静态 AABB。A* 不搜索朝向，因而以 OBB 包围圆提供保守静态净空；终点、出生、移动扫掠、单位避障和拥堵解叠使用精确 Circle/OBB + SAT。单位朝向由模拟层持有，写入实时状态和录像 delta，前端只做位置与最短角度插值。车体尺寸来自 shared `entity-geometry.json`；simulation movement profile 只补充避让优先级、locomotion layer 和可碾压类型。移动中的轻坦和重坦按实际提交的扫掠轨迹瞬杀敌方 `worker`、`rifleman` 和 `rocket_soldier`，并产生普通 `unit_destroyed` 事件；友军、车辆、建筑、静止重叠以及已退役的 `soldier` 仍按普通碰撞处理。后续让行或不同尺寸单位应继续扩展 profile 间交互策略，而不是向 A* 或前端塞单位特例。
+局部候选按前向进度、移动距离、转向幅度和确定性避让侧评分；无前向进度的横移不会清除拥堵计数，也不允许立即返回上一位置。持续拥堵后开放扩展侧移；OBB 车辆还能保持车体朝向沿车身轴前进或倒车，先腾出转向扫掠空间。A* 中间格只作为路线引导，单位进入半格范围即可继续下一个节点，最终目的地仍需精确抵达，避免大型车体因无法压准狭窄处格心而永久微调。阻塞时间最长的单位优先脱困。单位终点预约只用于避免多个命令选择重叠终点，不会作为整条全局路线的硬障碍。权威碰撞在 XY 平面计算：worker/步兵使用按人体投影标定的圆，三种车辆按各自尺寸使用 OBB，建筑和障碍格组成静态 AABB。A* 不搜索朝向，因而以 OBB 包围圆提供保守静态净空；终点、出生、移动扫掠、单位避障和拥堵解叠使用精确 Circle/OBB + SAT。单位朝向由模拟层持有，写入实时状态和录像 delta，前端只做位置与最短角度插值。车体尺寸来自 shared `entity-geometry.json`；simulation movement profile 只补充避让优先级、locomotion layer 和可碾压类型。移动中的轻坦、火焰坦克和重坦按实际提交的扫掠轨迹瞬杀敌方 `worker`、`rifleman` 和 `rocket_soldier`，并产生普通 `unit_destroyed` 事件；友军、车辆、建筑、静止重叠以及已退役的 `soldier` 仍按普通碰撞处理。后续让行或不同尺寸单位应继续扩展 profile 间交互策略，而不是向 A* 或前端塞单位特例。
 
 实时 WebSocket 使用独立的 `LiveStateProjectionFrame` 作为动态状态投影；完整 `GameState` 只属于服务端模拟、Match Record 和 Replay。live frame 不携带历史日志、静态地图、寻路缓存、生产队列或 AI 输出：地图通过一次性的 `map_init`，日志通过有界 `state_events`，最新 AI 输出通过可替换的 `ai_output` 消息传递。Live 与 Replay 都通过 `SimulationVisualTimeline` 消费同一个 frame sampler：Live clock 使用单调服务器时间和 2 tick 固定显示缓冲，Replay clock 用 `requestAnimationFrame` 连续推进可暂停、变速和 seek 的 playhead；React 的 replay frame index 只用于界面、tick 级元数据和滚动缓冲窗口，不充当模型渲染时钟，正常播放也不再每 tick 清空 frame buffer。客户端按 frame sequence 丢弃晚到旧帧，采样位置与最短角度 heading；超过 10 格的状态跳变立即 snap。
 
 逐帧视觉状态由 `VisualWorld` 持有。每个 R3F render frame 只读取一次 timeline 和每个实体的 transform，再由稳定的实例 batch 直接调用 Three.js `setMatrixAt` / `instanceMatrix.needsUpdate`；单位坐标不进入 React state，不克隆逐帧 `Unit[]`，也没有 30fps 动作限流。模型、车体/炮塔朝向、血条、地面环、intent 和战斗提示在同一 render frame 读取同一份 mutable transform。React 只负责 Canvas/批次结构、HUD 和 tick 级属性；视觉层只读权威状态，不反向修改模拟。WebSocket 断开后每秒重连，换局或重连时清空旧 live frame buffer。
 
-车辆和建筑 GLB 在 Blender 导出前按同一份 shared 几何规格归一化，导出根变换为 1；前端不再用按类型的视觉补偿系数，只用统一 `CELL_SIZE` 把“模拟格”换算为 Three.js 世界单位。车辆碰撞只覆盖履带/底盘/车体，炮管、天线和火炮支撑铲作为装饰悬垂；生成器会验证主体没有越出 canonical footprint，服务端测试同时验证建筑规则 footprint 与模型规格一致。
+车辆和建筑 GLB 在 Blender 导出前按同一份 shared 几何规格归一化，导出根变换为 1；前端不再用按类型的视觉补偿系数，只用统一 `CELL_SIZE` 把“模拟格”换算为 Three.js 世界单位。车辆碰撞只覆盖履带/底盘/车体，炮管、天线和排气附件作为装饰悬垂；生成器会验证主体没有越出 canonical footprint，服务端测试同时验证建筑规则 footprint 与模型规格一致。
 
 持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。attack-move 的可选 `priority` 只把指定目标类型提前，未列出的类型继续按兵种默认相对顺序参与兜底索敌，不再充当严格目标白名单。指定目标攻击无论是在首次调用实时校验时，还是在后续持续攻击过程中发现目标已消失，都会只在攻击者自身视野内确定性地重选附近敌人；没有候选时后续持续攻击转为 hold 并清掉旧追击路径，首次调用则返回目标已消失。大部分无明确点杀目标的推进仍应直接使用 attack-move。
 
@@ -56,12 +56,12 @@ shared constants 是内置 `standard` 规则和地图模板的定义处；`creat
 standard 的科技层级由已完成建筑实时推导，没有额外研究队列：
 
 - T1：兵营生产 `rifleman` / `rocket_soldier`；已完成兵营可作为机枪塔的前置。
-- T2：已完成兵营后可建重工；重工完成即解锁 `scout_car` / `light_tank`，同时允许建反坦克塔。
-- T3：已完成重工后可建科技中心；科技中心完成后，同一座重工解锁 `heavy_tank` / `artillery`。
+- T2：已完成兵营后可建重工；重工完成即解锁 `light_tank` / `flame_tank`，同时允许建反坦克塔。
+- T3：已完成重工后可建科技中心；科技中心完成后，同一座重工解锁 `heavy_tank`。
 
-机枪塔和反坦克塔都是服务端权威战斗单位：完工后按自身视野、目标优先级和冷却自动索敌，并通过与移动单位相同的 projectile/warhead 管线造成伤害。火箭兵和火炮的最小射程由战斗系统强制执行；指定目标或 attack-move 发现目标位于最小射程内时，会先退到合法射界再开火。
+机枪塔和反坦克塔都是服务端权威战斗单位：完工后按自身视野、目标优先级和冷却自动索敌，并通过与移动单位相同的 projectile/warhead 管线造成伤害。火箭兵的最小射程由战斗系统强制执行；指定目标或 attack-move 发现目标位于最小射程内时，会先退到合法射界再开火。火焰坦克为 T2 近程反步兵/攻坚车辆：420 HP 与轻坦相同，射程 3，攻击前有 2 tick 权威前摇，完成后建立持续喷火状态并每 tick 生成一次伤害脉冲；目标失效、离开射程、切换目标或收到移动/hold 命令会立即中断，重新接敌必须再次前摇。每次脉冲基础伤害为 6，infantry / vehicle / structure 系数为 2 / 0.2 / 1.6（直击分别为 12 / 1 / 10），因此持续贴住步兵和建筑时伤害很高，却不会替代轻坦参与载具对拼；机枪塔几乎无法阻挡它，反坦克塔则是硬克制。客户端根据权威 `attackStream` 绘制双喷口连续火焰，不显示用于逐 tick 结算的火焰 projectile。
 
-重坦当前为 850 HP、0.6 格/tick，保留 90 基础伤害、520 credits 和 26 tick 生产时间；相较轻坦，它以显著更慢的机动换取 T3 正面反装甲能力。迫击炮车已从当前类型、生产关系和资产中移除，不保留 Match Record 兼容分支。
+重坦当前为 850 HP、0.6 格/tick，保留 90 基础伤害、520 credits 和 26 tick 生产时间；相较轻坦，它以显著更慢的机动换取 T3 正面反装甲能力。侦察车、自行火炮和迫击炮车已从当前类型、生产关系和资产中移除，不保留 Match Record 兼容分支。
 
 ## 4. Agent runtime
 

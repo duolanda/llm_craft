@@ -627,44 +627,64 @@ def add_track_chassis(
             )
 
 
-def build_scout_car() -> None:
+def build_flame_tank() -> None:
     materials = build_materials()
-    asset_name = "scout_car"
-    # A low six-wheeled wedge reads immediately differently from every tracked vehicle.
-    wedge(f"{asset_name}_body_armored_hull", (0.05, 0, 0.38), 2.75, 1.42, 0.62, 0.72, materials["team"])
-    wedge(f"{asset_name}_body_sloped_nose", (-1.22, 0, 0.43), 0.72, 1.25, 0.5, 0.34, materials["accent"])
-    cube(f"{asset_name}_body_rear_deck", (0.93, 0, 0.52), (0.62, 1.22, 0.38), materials["metal"], bevel=0.065)
+    asset_name = "flame_tank"
+    add_track_chassis(materials, asset_name, length=3.08, width=2.08, hull_height=0.58, track_width=0.44)
+    wedge(f"{asset_name}_body_glacis", (-0.92, 0, 0.72), 1.3, 1.38, 0.5, 0.58, materials["team"])
+    cube(f"{asset_name}_body_rear_deck", (0.88, 0, 0.77), (0.95, 1.35, 0.28), materials["accent"], bevel=0.065)
+
+    # Twin exposed fuel cylinders are the long-range silhouette cue. Their hot
+    # warning bands stay neutral so both team palettes retain the same identity.
     for side in (-1, 1):
-        y = side * 0.77
-        for index, x in enumerate((-0.88, 0.0, 0.88)):
-            cylinder(
-                f"{asset_name}_body_wheel_{side}_{index}",
-                (x, y, 0.32),
-                0.34,
-                0.24,
-                materials["rubber"],
-                vertices=16,
-                rotation=(math.pi / 2, 0, 0),
-                bevel=0.025,
-            )
-            cylinder(
-                f"{asset_name}_body_hub_{side}_{index}",
-                (x, y + side * 0.13, 0.32),
-                0.14,
-                0.035,
-                materials["accent"],
-                vertices=12,
-                rotation=(math.pi / 2, 0, 0),
-            )
-    cube(f"{asset_name}_body_windscreen", (-0.42, 0, 0.83), (0.08, 0.82, 0.28), materials["glass"], bevel=0.025)
+        cylinder_between(
+            f"{asset_name}_body_fuel_tank_{side}",
+            (0.42, side * 0.54, 0.98),
+            (1.38, side * 0.54, 0.98),
+            0.25,
+            materials["industrial"],
+            vertices=18,
+            bevel=0.025,
+        )
+        cylinder_between(
+            f"{asset_name}_body_fuel_band_front_{side}",
+            (0.59, side * 0.54, 0.98),
+            (0.72, side * 0.54, 0.98),
+            0.275,
+            materials["warning"],
+            vertices=18,
+        )
+        cylinder_between(
+            f"{asset_name}_body_fuel_band_rear_{side}",
+            (1.08, side * 0.54, 0.98),
+            (1.21, side * 0.54, 0.98),
+            0.275,
+            materials["warning"],
+            vertices=18,
+        )
+
+    cylinder(f"{asset_name}_turret_ring", (-0.18, 0, 0.94), 0.58, 0.17, materials["accent"], vertices=18)
+    wedge(f"{asset_name}_turret_low_cupola", (-0.22, 0, 1.03), 1.15, 1.12, 0.48, 0.62, materials["team"])
+    cube(f"{asset_name}_turret_heat_shield", (-0.82, 0, 1.2), (0.32, 0.88, 0.38), materials["warning"], bevel=0.055)
     for side in (-1, 1):
-        cube(f"{asset_name}_body_headlight_{side}", (-1.49, side * 0.4, 0.43), (0.08, 0.2, 0.12), materials["warning"], bevel=0.018)
-    cylinder(f"{asset_name}_turret_ring", (-0.05, 0, 0.86), 0.38, 0.16, materials["accent"], vertices=16)
-    wedge(f"{asset_name}_turret_cupola", (-0.05, 0, 0.94), 0.72, 0.68, 0.35, 0.72, materials["team"])
-    cylinder_between(f"{asset_name}_turret_autocannon", (-0.24, 0, 1.11), (-1.2, 0, 1.11), 0.055, materials["industrial"], vertices=12)
-    cube(f"{asset_name}_turret_sensor", (-0.14, -0.27, 1.18), (0.25, 0.18, 0.2), materials["glass"], bevel=0.025)
-    for side in (-1, 1):
-        cylinder(f"{asset_name}_turret_antenna_{side}", (0.12, side * 0.22, 1.45), 0.012, 0.72, materials["industrial"], vertices=8)
+        cylinder_between(
+            f"{asset_name}_turret_flame_nozzle_{side}",
+            (-0.86, side * 0.24, 1.2),
+            (-1.68, side * 0.24, 1.2),
+            0.085,
+            materials["accent"],
+            vertices=14,
+            bevel=0.012,
+        )
+        cylinder_between(
+            f"{asset_name}_turret_igniter_{side}",
+            (-1.57, side * 0.24, 1.2),
+            (-1.82, side * 0.24, 1.2),
+            0.13,
+            materials["warning"],
+            vertices=14,
+        )
+    cube(f"{asset_name}_turret_optics", (-0.43, -0.4, 1.48), (0.28, 0.2, 0.2), materials["glass"], bevel=0.025)
 
 
 def build_heavy_tank() -> None:
@@ -688,28 +708,6 @@ def build_heavy_tank() -> None:
     cube(f"{asset_name}_turret_optics", (-0.6, 0.48, 1.76), (0.32, 0.24, 0.25), materials["glass"], bevel=0.035)
     for side in (-1, 1):
         cylinder(f"{asset_name}_turret_antenna_{side}", (0.5, side * 0.43, 2.18), 0.018, 0.85, materials["industrial"], vertices=8)
-
-
-def build_artillery() -> None:
-    materials = build_materials()
-    asset_name = "artillery"
-    add_track_chassis(materials, asset_name, length=3.25, width=1.82, hull_height=0.46, track_width=0.36)
-    cube(f"{asset_name}_body_front_cabin", (-0.95, 0, 0.96), (0.82, 1.05, 0.62), materials["team"], bevel=0.075)
-    cube(f"{asset_name}_body_front_glass", (-1.39, 0, 1.02), (0.06, 0.62, 0.23), materials["glass"], bevel=0.02)
-    # Rear stabilizers and a very long elevated barrel create an unmistakable artillery silhouette.
-    for side in (-1, 1):
-        cylinder_between(f"{asset_name}_body_rear_spade_arm_{side}", (1.05, side * 0.58, 0.55), (1.92, side * 0.9, 0.18), 0.07, materials["industrial"], vertices=10)
-        cube(f"{asset_name}_body_rear_spade_{side}", (2.02, side * 0.98, 0.16), (0.42, 0.5, 0.18), materials["warning"], bevel=0.035)
-    cylinder(f"{asset_name}_turret_ring", (0.32, 0, 0.85), 0.56, 0.16, materials["accent"], vertices=18)
-    wedge(f"{asset_name}_turret_breech", (0.22, 0, 0.92), 1.05, 1.08, 0.62, 0.68, materials["team"])
-    cube(f"{asset_name}_turret_counterweight", (0.76, 0, 1.16), (0.62, 0.92, 0.58), materials["accent"], bevel=0.07)
-    for side in (-1, 1):
-        wedge(f"{asset_name}_turret_gun_shield_{side}", (0.0, side * 0.47, 1.28), 1.24, 0.12, 0.92, 0.7, materials["team"])
-    cylinder_between(f"{asset_name}_turret_long_barrel", (-0.15, 0, 1.2), (-4.25, 0, 2.42), 0.105, materials["industrial"], vertices=18, bevel=0.012)
-    cylinder_between(f"{asset_name}_turret_muzzle", (-3.98, 0, 2.34), (-4.52, 0, 2.5), 0.17, materials["accent"], vertices=16)
-    for side in (-1, 1):
-        cylinder_between(f"{asset_name}_turret_recoil_rail_{side}", (0.25, side * 0.25, 1.02), (-1.35, side * 0.25, 1.5), 0.055, materials["industrial"], vertices=10)
-    cube(f"{asset_name}_turret_rangefinder", (-0.15, -0.48, 1.42), (0.52, 0.22, 0.26), materials["glass"], bevel=0.035)
 
 
 def build_machine_gun_turret() -> None:
@@ -990,8 +988,6 @@ def is_vehicle_turret_object(asset_name: str, obj: bpy.types.Object) -> bool:
 def is_vehicle_collision_body(asset_name: str, obj: bpy.types.Object) -> bool:
     if is_vehicle_turret_object(asset_name, obj):
         return False
-    if asset_name == "artillery" and "_rear_spade_" in obj.name:
-        return False
     return True
 
 
@@ -1073,7 +1069,7 @@ def export_vehicle_asset(asset_name: str, builder) -> None:
 
 
 def export_asset(name: str, builder) -> None:
-    if name in {"scout_car", "light_tank", "heavy_tank", "artillery"}:
+    if name in {"light_tank", "flame_tank", "heavy_tank"}:
         export_vehicle_asset(name, builder)
         return
     clear_scene()
@@ -1102,10 +1098,9 @@ ASSETS = {
     "soldier": lambda: build_infantry("soldier"),
     "rifleman": lambda: build_infantry("rifleman"),
     "rocket_soldier": lambda: build_infantry("rocket_soldier"),
-    "scout_car": build_scout_car,
     "light_tank": build_tank,
+    "flame_tank": build_flame_tank,
     "heavy_tank": build_heavy_tank,
-    "artillery": build_artillery,
     "hq": build_hq,
     "barracks": build_barracks,
     "war_factory": build_war_factory,

@@ -18,6 +18,6 @@ export interface EntityGeometrySpec {
 
 /**
  * Canonical physical dimensions for simulation collision and shipped model bodies.
- * Decorative overhangs such as barrels, antennas, and artillery spades are excluded.
+ * Decorative overhangs such as barrels, antennas, and exhaust fixtures are excluded.
  */
 export const ENTITY_GEOMETRY = geometrySpec as EntityGeometrySpec;

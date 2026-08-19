@@ -25,13 +25,19 @@ const FORMATION_TYPES: UnitType[] = [
   UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
-  UNIT_TYPES.SCOUT_CAR,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
   UNIT_TYPES.HEAVY_TANK,
-  UNIT_TYPES.ARTILLERY,
 ];
 
 const ANIMATION_LAB_FX_PAIRS = [
+  {
+    sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_flame`,
+    targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_flame_rifle`,
+    sourceType: UNIT_TYPES.FLAME_TANK,
+    targetType: UNIT_TYPES.RIFLEMAN,
+    y: 33,
+  },
   {
     sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_rifle`,
     targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_rifle`,
@@ -66,7 +72,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 2,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.62,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.35,
-    y: ANIMATION_LAB_FX_PAIRS[0].y,
+    y: ANIMATION_LAB_FX_PAIRS[1].y,
     offsetTicks: 0,
   },
   {
@@ -76,7 +82,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 5,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.68,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.52,
-    y: ANIMATION_LAB_FX_PAIRS[1].y,
+    y: ANIMATION_LAB_FX_PAIRS[2].y,
     offsetTicks: 2,
   },
   {
@@ -86,7 +92,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 6,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.92,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.72,
-    y: ANIMATION_LAB_FX_PAIRS[2].y,
+    y: ANIMATION_LAB_FX_PAIRS[3].y,
     offsetTicks: 5,
   },
 ] as const;
@@ -231,7 +237,7 @@ function createAnimationLabUnit(
   type: UnitType,
   x: number,
   y: number,
-  options: Partial<Pick<Unit, "state" | "intent" | "lastAttackTick" | "carryingCredits">> = {},
+  options: Partial<Pick<Unit, "state" | "intent" | "lastAttackTick" | "carryingCredits" | "attackWindup" | "attackStream">> = {},
 ): Unit {
   const stats = UNIT_STATS[type];
   return {
@@ -249,6 +255,8 @@ function createAnimationLabUnit(
     carryCapacity: type === UNIT_TYPES.WORKER ? ECONOMY_RULES.WORKER_CARRY_CAPACITY : 0,
     intent: options.intent,
     lastAttackTick: options.lastAttackTick,
+    attackWindup: options.attackWindup,
+    attackStream: options.attackStream,
   };
 }
 
@@ -333,20 +341,32 @@ function createAnimationLabFxRangeUnits(
           intent: {
             type: "attack",
             targetId: pair.targetId,
-            targetX: ANIMATION_LAB_FX_TARGET_X,
+            targetX: pair.sourceType === UNIT_TYPES.FLAME_TANK
+              ? ANIMATION_LAB_FX_SOURCE_X + 3
+              : ANIMATION_LAB_FX_TARGET_X,
             targetY: pair.y,
           },
+          attackStream: pair.sourceType === UNIT_TYPES.FLAME_TANK
+            ? { targetId: pair.targetId, startedTick: 0 }
+            : undefined,
         }))
     : ANIMATION_LAB_FX_PAIRS.map((pair) =>
-        createAnimationLabUnit(playerId, pair.targetId, pair.targetType, ANIMATION_LAB_FX_TARGET_X, pair.y, {
-          state: UNIT_STATES.IDLE,
-          intent: {
-            type: "attack",
-            targetId: pair.sourceId,
-            targetX: ANIMATION_LAB_FX_SOURCE_X,
-            targetY: pair.y,
+        createAnimationLabUnit(
+          playerId,
+          pair.targetId,
+          pair.targetType,
+          pair.sourceType === UNIT_TYPES.FLAME_TANK ? ANIMATION_LAB_FX_SOURCE_X + 3 : ANIMATION_LAB_FX_TARGET_X,
+          pair.y,
+          {
+            state: UNIT_STATES.IDLE,
+            intent: {
+              type: "attack",
+              targetId: pair.sourceId,
+              targetX: ANIMATION_LAB_FX_SOURCE_X,
+              targetY: pair.y,
+            },
           },
-        }));
+        ));
 }
 
 function createAnimationLabProjectile(
@@ -373,7 +393,11 @@ function createAnimationLabProjectile(
     id: `${id}_${launchedTick}`,
     playerId: PLAYER_IDS.PLAYER_1,
     attackerId: `${PLAYER_IDS.PLAYER_1}_lab_projectile_source`,
-    attackerType: projectileType === PROJECTILE_TYPES.ROCKET ? UNIT_TYPES.ROCKET_SOLDIER : UNIT_TYPES.LIGHT_TANK,
+    attackerType: projectileType === PROJECTILE_TYPES.ROCKET
+      ? UNIT_TYPES.ROCKET_SOLDIER
+      : projectileType === PROJECTILE_TYPES.FLAME
+        ? UNIT_TYPES.FLAME_TANK
+        : UNIT_TYPES.LIGHT_TANK,
     projectileType,
     x: startX + (targetX - startX) * progress,
     y: startY + (targetY - startY) * progress,

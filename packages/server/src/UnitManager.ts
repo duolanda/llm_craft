@@ -241,6 +241,8 @@ export class UnitManager {
     unit.y = targetY;
     unit.heading = nextHeading;
     unit.state = UNIT_STATES.MOVING;
+    delete unit.attackWindup;
+    delete unit.attackStream;
     // Record move intent for visualization
     unit.order = { type: 'move', targetX, targetY };
 
@@ -283,6 +285,8 @@ export class UnitManager {
     }
 
     unit.state = UNIT_STATES.IDLE;
+    delete unit.attackWindup;
+    delete unit.attackStream;
     this.blockedTicks.delete(unit.id);
     this.lastMovementOrigins.delete(unit.id);
     // Record hold intent for visualization
@@ -346,6 +350,9 @@ export class UnitManager {
     if (!resolvedTarget) {
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
+
+    delete unit.attackWindup;
+    delete unit.attackStream;
 
     const path = PathFinder.findPath(
       startCell.x,

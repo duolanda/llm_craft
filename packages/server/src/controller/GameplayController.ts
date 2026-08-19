@@ -820,6 +820,7 @@ export class GameplayController {
         canQueueRifleman: canQueueUnit(UNIT_TYPES.RIFLEMAN),
         canQueueRocketSoldier: canQueueUnit(UNIT_TYPES.ROCKET_SOLDIER),
         canQueueLightTank: canQueueUnit(UNIT_TYPES.LIGHT_TANK),
+        canQueueFlameTank: canQueueUnit(UNIT_TYPES.FLAME_TANK),
         queueAvailability,
         retiredProductionUnitTypes: getRetiredProductionUnitTypes(),
         economyStatus: {
@@ -844,6 +845,7 @@ export class GameplayController {
             riflemen: countUnits(UNIT_TYPES.RIFLEMAN),
             rocketSoldiers: countUnits(UNIT_TYPES.ROCKET_SOLDIER),
             lightTanks: countUnits(UNIT_TYPES.LIGHT_TANK),
+            flameTanks: countUnits(UNIT_TYPES.FLAME_TANK),
             barracks: countBuildings(BUILDING_TYPES.BARRACKS),
             warFactories: countBuildings(BUILDING_TYPES.WAR_FACTORY),
             refineries: countBuildings(BUILDING_TYPES.REFINERY),

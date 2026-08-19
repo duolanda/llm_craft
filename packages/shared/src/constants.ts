@@ -53,10 +53,9 @@ export const UNIT_TYPES = {
   SOLDIER: "soldier",
   RIFLEMAN: "rifleman",
   ROCKET_SOLDIER: "rocket_soldier",
-  SCOUT_CAR: "scout_car",
   LIGHT_TANK: "light_tank",
+  FLAME_TANK: "flame_tank",
   HEAVY_TANK: "heavy_tank",
-  ARTILLERY: "artillery",
 } as const;
 
 export type UnitType = typeof UNIT_TYPES[keyof typeof UNIT_TYPES];
@@ -108,6 +107,7 @@ export const PROJECTILE_TYPES = {
   BULLET: "bullet",
   SHELL: "shell",
   ROCKET: "rocket",
+  FLAME: "flame",
 } as const;
 
 export type ProjectileType = typeof PROJECTILE_TYPES[keyof typeof PROJECTILE_TYPES];
@@ -139,6 +139,10 @@ export interface RulesetWeaponDefinition {
   damage: number;
   range: number;
   minRange?: number;
+  windupTicks?: number;
+  continuousFire?: {
+    damageIntervalTicks: number;
+  };
   reloadTicks: number;
   projectileType: ProjectileType;
   projectileSpeed: number;
@@ -261,36 +265,7 @@ export const DEFAULT_RULESET = {
           [ARMOR_TYPES.VEHICLE]: 2.25,
           [ARMOR_TYPES.STRUCTURE]: 0.9,
         },
-        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ARTILLERY, UNIT_TYPES.SCOUT_CAR, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.HQ, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN],
-      },
-    },
-    [UNIT_TYPES.SCOUT_CAR]: {
-      hp: 165,
-      speed: 1.5,
-      attack: 12,
-      cost: 135,
-      attackRange: 5,
-      visionRange: 10,
-      armor: ARMOR_TYPES.VEHICLE,
-      productionTicks: 8,
-      techTier: 2,
-      damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 1.6,
-        [ARMOR_TYPES.VEHICLE]: 0.2,
-        [ARMOR_TYPES.STRUCTURE]: 0.25,
-      },
-      weapon: {
-        damage: 12,
-        range: 5,
-        reloadTicks: 2,
-        projectileType: PROJECTILE_TYPES.BULLET,
-        projectileSpeed: 10,
-        damageModifiers: {
-          [ARMOR_TYPES.INFANTRY]: 1.6,
-          [ARMOR_TYPES.VEHICLE]: 0.2,
-          [ARMOR_TYPES.STRUCTURE]: 0.25,
-        },
-        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER, UNIT_TYPES.SCOUT_CAR, UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.MACHINE_GUN_TURRET, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ],
+        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.HQ, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN],
       },
     },
     [UNIT_TYPES.LIGHT_TANK]: {
@@ -321,7 +296,40 @@ export const DEFAULT_RULESET = {
           [ARMOR_TYPES.VEHICLE]: 1,
           [ARMOR_TYPES.STRUCTURE]: 0.9,
         },
-        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ARTILLERY, UNIT_TYPES.SCOUT_CAR, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY],
+        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.HQ, BUILDING_TYPES.REFINERY],
+      },
+    },
+    [UNIT_TYPES.FLAME_TANK]: {
+      hp: 420,
+      speed: 1,
+      attack: 6,
+      cost: 320,
+      attackRange: 3,
+      visionRange: 7,
+      armor: ARMOR_TYPES.VEHICLE,
+      productionTicks: 18,
+      techTier: 2,
+      damageModifiers: {
+        [ARMOR_TYPES.INFANTRY]: 2,
+        [ARMOR_TYPES.VEHICLE]: 0.2,
+        [ARMOR_TYPES.STRUCTURE]: 1.6,
+      },
+      weapon: {
+        damage: 6,
+        range: 3,
+        windupTicks: 2,
+        continuousFire: { damageIntervalTicks: 1 },
+        reloadTicks: 1,
+        projectileType: PROJECTILE_TYPES.FLAME,
+        projectileSpeed: 4,
+        splashRadius: 1,
+        splashFalloff: [1, 0.65],
+        damageModifiers: {
+          [ARMOR_TYPES.INFANTRY]: 2,
+          [ARMOR_TYPES.VEHICLE]: 0.2,
+          [ARMOR_TYPES.STRUCTURE]: 1.6,
+        },
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, BUILDING_TYPES.MACHINE_GUN_TURRET, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.HQ, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.HEAVY_TANK, BUILDING_TYPES.ANTI_TANK_TURRET],
       },
     },
     [UNIT_TYPES.HEAVY_TANK]: {
@@ -353,40 +361,7 @@ export const DEFAULT_RULESET = {
           [ARMOR_TYPES.VEHICLE]: 1.35,
           [ARMOR_TYPES.STRUCTURE]: 1.15,
         },
-        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ARTILLERY, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.HQ],
-      },
-    },
-    [UNIT_TYPES.ARTILLERY]: {
-      hp: 280,
-      speed: 0.65,
-      attack: 125,
-      cost: 440,
-      attackRange: 14,
-      visionRange: 10,
-      armor: ARMOR_TYPES.VEHICLE,
-      productionTicks: 24,
-      techTier: 3,
-      requires: [BUILDING_TYPES.TECH_CENTER],
-      damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 1,
-        [ARMOR_TYPES.VEHICLE]: 1,
-        [ARMOR_TYPES.STRUCTURE]: 1.7,
-      },
-      weapon: {
-        damage: 125,
-        range: 14,
-        minRange: 4,
-        reloadTicks: 12,
-        projectileType: PROJECTILE_TYPES.SHELL,
-        projectileSpeed: 5,
-        splashRadius: 2,
-        splashFalloff: [1, 0.6, 0.3],
-        damageModifiers: {
-          [ARMOR_TYPES.INFANTRY]: 1,
-          [ARMOR_TYPES.VEHICLE]: 1,
-          [ARMOR_TYPES.STRUCTURE]: 1.7,
-        },
-        targetPriority: [BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.MACHINE_GUN_TURRET, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.HQ, UNIT_TYPES.HEAVY_TANK],
+        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.ANTI_TANK_TURRET, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.HQ],
       },
     },
   },
@@ -408,7 +383,7 @@ export const DEFAULT_RULESET = {
       constructionTicks: 18,
       visionRange: 7,
       armor: ARMOR_TYPES.STRUCTURE,
-      produces: [UNIT_TYPES.SCOUT_CAR, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.ARTILLERY],
+      produces: [UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.HEAVY_TANK],
       footprint: { width: 7, height: 5 },
       techTier: 2,
       requires: [BUILDING_TYPES.BARRACKS],
@@ -435,7 +410,7 @@ export const DEFAULT_RULESET = {
           [ARMOR_TYPES.VEHICLE]: 0.12,
           [ARMOR_TYPES.STRUCTURE]: 0.1,
         },
-        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER, UNIT_TYPES.SCOUT_CAR, UNIT_TYPES.LIGHT_TANK],
+        targetPriority: [UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.WORKER, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.LIGHT_TANK],
       },
     },
     [BUILDING_TYPES.ANTI_TANK_TURRET]: {
@@ -459,7 +434,7 @@ export const DEFAULT_RULESET = {
           [ARMOR_TYPES.VEHICLE]: 1.75,
           [ARMOR_TYPES.STRUCTURE]: 0.4,
         },
-        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.ARTILLERY, UNIT_TYPES.SCOUT_CAR, UNIT_TYPES.ROCKET_SOLDIER],
+        targetPriority: [UNIT_TYPES.HEAVY_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.ROCKET_SOLDIER],
       },
     },
     [BUILDING_TYPES.TECH_CENTER]: {

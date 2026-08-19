@@ -10,10 +10,9 @@ const UNIT_COLORS: Record<string, string> = {
   soldier: "#ff2a4a",
   rifleman: "#8df2a6",
   rocket_soldier: "#ff8840",
-  scout_car: "#5eead4",
   light_tank: "#7dd3fc",
+  flame_tank: "#fb923c",
   heavy_tank: "#a78bfa",
-  artillery: "#f472b6",
 };
 
 const UNIT_LABELS: Record<string, string> = {
@@ -21,20 +20,18 @@ const UNIT_LABELS: Record<string, string> = {
   soldier: "士兵",
   rifleman: "步兵",
   rocket_soldier: "火箭",
-  scout_car: "侦察",
   light_tank: "轻坦",
+  flame_tank: "火焰",
   heavy_tank: "重坦",
-  artillery: "火炮",
 };
 
 const ACTIVE_DISPLAY_UNIT_TYPES: UnitType[] = [
   UNIT_TYPES.WORKER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
-  UNIT_TYPES.SCOUT_CAR,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
   UNIT_TYPES.HEAVY_TANK,
-  UNIT_TYPES.ARTILLERY,
 ];
 
 export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {

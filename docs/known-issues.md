@@ -51,9 +51,9 @@
 
 - **根因与处理**：OrbitControls 只限制距离和俯仰角，没有限制 target，连续平移可把观察中心推到地图外；Replay/Live 状态切换后，旧初始化焦点也可能继续保留。控制器现将 target 限制在战场边界和地平面，中键短按按当前战术焦点复位；中键拖动仍保留原控制语义。
 
-### 已解决：最小射程单位贴近建筑后反复报告超出射程
+### 已归档：旧自行火炮贴近建筑后反复报告超出射程
 
-- **实战证据与处理**：`match-2026-08-10T15-47-44-296Z-db1781b9` 中 artillery `unit_72` 抵达敌方建筑旁后连续 22 次得到 `attack_out_of_range`。GameplayController 过去只检查最大射程，CombatSystem 的 attack-move 又会继续向目标中心移动。两条路径现在都会识别最小射程并先选择最近的合法射击格；回归测试覆盖贴近建筑的高层攻击和底层持续攻击。
+- **实战证据与结论**：`match-2026-08-10T15-47-44-296Z-db1781b9` 中旧 artillery `unit_72` 抵达敌方建筑旁后连续 22 次得到 `attack_out_of_range`。GameplayController 与 CombatSystem 后续补齐了最小射程处理；当前 standard 已彻底移除 artillery 且不保留旧录像兼容分支，因此该兵种特有症状不再是活跃问题。通用最小射程支持仍供 `rocket_soldier` 使用。
 
 ### 已解决：开局、新生产和建造完工后的 worker 无默认采矿任务
 

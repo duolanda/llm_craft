@@ -46,9 +46,13 @@ const MOVEMENT_PROFILES: Record<UnitType, MovementProfile> = {
   [UNIT_TYPES.SOLDIER]: createMovementProfile(UNIT_TYPES.SOLDIER, 20),
   [UNIT_TYPES.RIFLEMAN]: createMovementProfile(UNIT_TYPES.RIFLEMAN, 20),
   [UNIT_TYPES.ROCKET_SOLDIER]: createMovementProfile(UNIT_TYPES.ROCKET_SOLDIER, 20),
-  [UNIT_TYPES.SCOUT_CAR]: createMovementProfile(UNIT_TYPES.SCOUT_CAR, 28),
   [UNIT_TYPES.LIGHT_TANK]: createMovementProfile(
     UNIT_TYPES.LIGHT_TANK,
+    30,
+    [UNIT_TYPES.WORKER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+  ),
+  [UNIT_TYPES.FLAME_TANK]: createMovementProfile(
+    UNIT_TYPES.FLAME_TANK,
     30,
     [UNIT_TYPES.WORKER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
   ),
@@ -57,7 +61,6 @@ const MOVEMENT_PROFILES: Record<UnitType, MovementProfile> = {
     40,
     [UNIT_TYPES.WORKER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
   ),
-  [UNIT_TYPES.ARTILLERY]: createMovementProfile(UNIT_TYPES.ARTILLERY, 26),
 };
 
 export function getMovementProfile(type: UnitType): MovementProfile {

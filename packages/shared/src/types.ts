@@ -107,6 +107,17 @@ export interface GameObject {
   exists: boolean;
 }
 
+export interface AttackWindup {
+  targetId: string;
+  startedTick: number;
+  completesAtTick: number;
+}
+
+export interface AttackStream {
+  targetId: string;
+  startedTick: number;
+}
+
 export type UnitIntent =
   | {
       type: "move";
@@ -184,6 +195,10 @@ export interface Unit extends GameObject {
   lastAttackTick?: number;
   // 下一次可开火的 tick，用于武器装填/冷却
   nextAttackTick?: number;
+  // 权威攻击前摇；目标改变、离开射程或收到移动/停止命令时取消
+  attackWindup?: AttackWindup;
+  // 权威持续攻击；目标改变、离开射程或收到移动/停止命令时取消
+  attackStream?: AttackStream;
   // 当前正在施工的建筑 ID；施工时 worker 被占用
   constructingBuildingId?: string;
 }
@@ -708,6 +723,8 @@ export interface TickDeltaRecord {
       carryCapacity?: number;
       heading?: number;
       intent?: UnitIntent | null;
+      attackWindup?: AttackWindup | null;
+      attackStream?: AttackStream | null;
       constructingBuildingId?: string | null;
     }>;
     buildings: Array<{

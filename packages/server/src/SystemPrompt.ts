@@ -29,7 +29,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 地图较大，可以根据战场局势自主选择集中进攻、多方向进攻、分兵骚扰或兵团作战
 - 状态读取工具提供完整战场信息；单位执行无目标推进时的自动索敌仍受自身 visionRange 限制
 - 建筑有 hq、barracks、war_factory、refinery、machine_gun_turret、anti_tank_turret、tech_center
-- HQ 生产 worker；barracks 是 T1，生产 rifleman 和 rocket_soldier；war_factory 是 T2，生产 scout_car 和 light_tank，并在 tech_center 完成后生产 heavy_tank 和 artillery
+- HQ 生产 worker；barracks 是 T1，生产 rifleman 和 rocket_soldier；war_factory 是 T2，生产 light_tank 和 flame_tank，并在 tech_center 完成后生产 heavy_tank
 - worker 负责采集有限矿藏和建造建筑；开局和新生产的 worker 默认自动采矿，显式命令可覆盖；多个 worker 可共用同一矿点，分配数不是硬性容量上限
 - refinery 是矿物交付点，不直接提高采集速度；它的价值在于缩短矿点到交付点的往返路线，因此建在 HQ 旁边通常收益很小
 - 采矿时省略矿点坐标会按交付路程、worker 初始路程和当前分配自动选择；只在需要刻意指定矿点时传坐标
@@ -42,11 +42,10 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - worker：负责采集和建造，没有战斗能力
 - rifleman：基础远程反步兵单位，适合对抗其他步兵和缺少保护的反载具步兵；对载具和建筑效果较差
 - rocket_soldier：远程反载具单位，对 light_tank 和建筑效果较好；攻击慢、有最小射程，对普通步兵效果很差，需要其他单位保护
-- scout_car：T2 高速侦察与反步兵车辆，适合骚扰和追杀 rocket_soldier，但不适合正面对抗坦克或建筑
 - light_tank：高生命值的装甲单位，适合正面推进并能造成范围伤害；普通步兵难以有效伤害它，但 rocket_soldier 对它威胁很大
+- flame_tank：T2 近程反步兵/攻坚车辆，生命与轻坦相同，开火前需要短暂预热，随后会持续喷火直至目标失效或命令中断；对步兵和建筑杀伤很高，但对其他载具伤害极低，且会被反坦克塔克制
 - heavy_tank：T3 高耐久反装甲前排，正面作战和攻坚能力强，但造价高且仍会被成规模 rocket_soldier 克制
-- artillery：T3 超远程攻城单位，对建筑和阵地杀伤极高，有较大最小射程，必须由前排保护并防范 scout_car 侧袭
-- machine_gun_turret：T1 反步兵防御；anti_tank_turret：T2 反装甲防御。静态防御不能追击，需防范攻城单位绕射程拆除
+- machine_gun_turret：T1 反步兵防御，对 flame_tank 效果很差；anti_tank_turret：T2 反装甲防御，是 flame_tank 的硬克制
 - 克制关系会显著影响交战结果，但不能代替对数量、阵型、位置和战场时机的判断
 
 ## 工具与行动

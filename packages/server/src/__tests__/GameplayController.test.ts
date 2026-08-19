@@ -214,8 +214,8 @@ describe("GameplayController", () => {
     expect(gameplayController.getMyState().result).toMatchObject({
       queueAvailability: expect.objectContaining({
         [UNIT_TYPES.LIGHT_TANK]: true,
+        [UNIT_TYPES.FLAME_TANK]: true,
         [UNIT_TYPES.HEAVY_TANK]: false,
-        [UNIT_TYPES.ARTILLERY]: false,
       }),
       techStatus: { own: expect.objectContaining({ tier: 2 }) },
     });
@@ -230,7 +230,6 @@ describe("GameplayController", () => {
     expect(upgradedController.getMyState().result).toMatchObject({
       queueAvailability: expect.objectContaining({
         [UNIT_TYPES.HEAVY_TANK]: true,
-        [UNIT_TYPES.ARTILLERY]: true,
       }),
       techStatus: { own: expect.objectContaining({ tier: 3 }) },
     });
@@ -1490,7 +1489,7 @@ describe("GameplayController", () => {
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["heavy_tank", "light_tank", "artillery", "scout_car", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
+        targetPriority: ["heavy_tank", "light_tank", "flame_tank", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
       }),
     ]);
     game.stop();
@@ -1689,33 +1688,26 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("retreats to a legal firing tile when artillery is inside minimum range", () => {
+  it("moves a short-ranged flame tank toward an out-of-range building", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
     const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
       .find((building) => building.type === BUILDING_TYPES.HQ)!;
     const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
-    const artillery = game.getUnitManager().createUnit(
-      UNIT_TYPES.ARTILLERY,
-      enemyHq.x - Math.floor(footprint.width / 2) - 1,
+    const flameTank = game.getUnitManager().createUnit(
+      UNIT_TYPES.FLAME_TANK,
+      enemyHq.x - Math.floor(footprint.width / 2) - 5,
       enemyHq.y,
       "player_1",
     );
 
-    expect(gameplayController.attackTarget(artillery.id, enemyHq.id).result).toMatchObject({
+    expect(gameplayController.attackTarget(flameTank.id, enemyHq.id).result).toMatchObject({
       ok: true,
       mode: "move_to_target",
     });
     const [move] = gameplayController.takeIssuedCommands();
-    expect(move).toMatchObject({ type: "move", unitId: artillery.id });
-    expect(getDistanceToBuildingFootprint(
-      BUILDING_TYPES.HQ,
-      enemyHq.x,
-      enemyHq.y,
-      move.position!.x,
-      move.position!.y,
-    )).toBeGreaterThanOrEqual(4);
+    expect(move).toMatchObject({ type: "move", unitId: flameTank.id });
     game.stop();
   });
 

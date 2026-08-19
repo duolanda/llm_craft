@@ -665,6 +665,9 @@ function unitTypeLabel(unitType: string) {
   if (unitType === "light_tank") {
     return "轻型坦克";
   }
+  if (unitType === "flame_tank") {
+    return "火焰坦克";
+  }
   return unitType;
 }
 

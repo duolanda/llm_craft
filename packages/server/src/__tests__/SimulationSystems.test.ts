@@ -642,7 +642,7 @@ describe("simulation systems", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const turret = world.createBuilding(BUILDING_TYPES.MACHINE_GUN_TURRET, 40, 40, "player_1");
     const rifleman = world.createUnit(UNIT_TYPES.RIFLEMAN, 44, 40, "player_2");
-    const scoutCar = world.createUnit(UNIT_TYPES.SCOUT_CAR, 45, 42, "player_2");
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 45, 42, "player_2");
     const initialHp = rifleman.hp;
 
     new CombatSystem().step(world);
@@ -658,47 +658,130 @@ describe("simulation systems", () => {
     world.tick = world.projectiles[0]!.impactTick;
     new ProjectileSystem().step(world);
     expect(rifleman.hp).toBe(initialHp - getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.RIFLEMAN));
-    expect(scoutCar.hp).toBe(scoutCar.maxHp);
+    expect(flameTank.hp).toBe(flameTank.maxHp);
   });
 
-  it("enforces minimum range for siege units", () => {
+  it("does not launch a flame projectile until the authoritative windup completes", () => {
     const world = new WorldState(createDefaultMatchDefinition());
-    const artillery = world.createUnit(UNIT_TYPES.ARTILLERY, 40, 40, "player_1");
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
     const closeTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
 
-    const result = new CombatSystem().executeAttackOrder(world, artillery, "player_1", {
+    const result = combat.executeAttackOrder(world, flameTank, "player_1", {
       type: "attack",
       targetId: closeTarget.id,
     });
 
-    expect(result).toBe(RESULT_CODES.ERR_NOT_IN_RANGE);
+    expect(result).toBe(RESULT_CODES.ERR_BUSY);
+    expect(flameTank.attackWindup).toEqual({ targetId: closeTarget.id, startedTick: 0, completesAtTick: 2 });
     expect(world.projectiles).toHaveLength(0);
+    world.tick = 1;
+    combat.step(world);
+    expect(world.projectiles).toHaveLength(0);
+    world.tick = 2;
+    combat.step(world);
+    expect(flameTank.attackWindup).toBeUndefined();
+    expect(flameTank.attackStream).toEqual({ targetId: closeTarget.id, startedTick: 2 });
+    expect(world.projectiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ attackerId: flameTank.id, targetId: closeTarget.id, projectileType: "flame" }),
+    ]));
   });
 
-  it("moves a siege unit away from a target inside minimum range before firing", () => {
+  it("keeps applying flame damage every tick while the target remains in range", () => {
     const world = new WorldState(createDefaultMatchDefinition());
-    const artillery = world.createUnit(UNIT_TYPES.ARTILLERY, 40, 40, "player_1");
-    const closeTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
-    artillery.order = { type: "attack", targetId: closeTarget.id };
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const initialHp = target.hp;
     const combat = new CombatSystem();
+    const projectiles = new ProjectileSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
 
+    world.tick = 2;
+    combat.step(world);
+    world.tick = 3;
+    projectiles.step(world);
+    combat.step(world);
+    world.tick = 4;
+    projectiles.step(world);
     combat.step(world);
 
-    expect(artillery.pathTarget).toBeDefined();
-    expect(Math.max(
-      Math.abs(closeTarget.x - artillery.pathTarget!.x),
-      Math.abs(closeTarget.y - artillery.pathTarget!.y),
-    )).toBeGreaterThanOrEqual(4);
-    expect(artillery.order).toEqual({ type: "attack", targetId: closeTarget.id });
+    expect(target.hp).toBe(initialHp - getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.RIFLEMAN) * 2);
+    expect(flameTank.attackStream).toEqual({ targetId: target.id, startedTick: 2 });
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === flameTank.id)).toEqual([
+      expect.objectContaining({ targetId: target.id, launchedTick: 4 }),
+    ]);
+  });
 
-    artillery.x = artillery.pathTarget!.x;
-    artillery.y = artillery.pathTarget!.y;
-    world.units.clearPath(artillery);
+  it("interrupts a flame stream immediately and requires a new windup after retargeting", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const firstTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const secondTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 40, 42, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: firstTarget.id });
+    world.tick = 2;
     combat.step(world);
 
-    expect(world.projectiles).toEqual(expect.arrayContaining([
-      expect.objectContaining({ attackerId: artillery.id, targetId: closeTarget.id }),
-    ]));
+    world.tick = 3;
+    const result = combat.executeAttackOrder(world, flameTank, "player_1", {
+      type: "attack",
+      targetId: secondTarget.id,
+    });
+
+    expect(result).toBe(RESULT_CODES.ERR_BUSY);
+    expect(flameTank.attackStream).toBeUndefined();
+    expect(flameTank.attackWindup).toEqual({
+      targetId: secondTarget.id,
+      startedTick: 3,
+      completesAtTick: 5,
+    });
+  });
+
+  it("interrupts an active flame stream on hold", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+    world.tick = 2;
+    combat.step(world);
+
+    expect(flameTank.attackStream).toBeDefined();
+    world.units.holdPosition(flameTank);
+    expect(flameTank.attackStream).toBeUndefined();
+  });
+
+  it("interrupts an active flame stream when the target leaves firing range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+    world.tick = 2;
+    combat.step(world);
+
+    target.x = 48;
+    world.tick = 3;
+    combat.step(world);
+
+    expect(flameTank.attackStream).toBeUndefined();
+    expect(flameTank.pathTarget).toBeDefined();
+  });
+
+  it("cancels a flame windup when its target leaves the short firing range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+
+    target.x = 48;
+    world.tick = 1;
+    combat.step(world);
+
+    expect(flameTank.attackWindup).toBeUndefined();
+    expect(world.projectiles).toHaveLength(0);
+    expect(flameTank.pathTarget).toBeDefined();
   });
 
   it("delivers a full load while the worker remains on a resource inside refinery range", () => {

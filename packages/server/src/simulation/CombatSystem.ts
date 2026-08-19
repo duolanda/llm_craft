@@ -77,11 +77,13 @@ export class CombatSystem {
 
   private attackBuilding(world: WorldState, attacker: WorldUnit, target: Building): ResultCode {
     if (!attacker.exists || !target.exists || attacker.playerId === target.playerId) {
+      this.cancelAttackCycle(attacker);
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
     const distance = world.buildings.getDistanceToBuilding(target, attacker.x, attacker.y);
     const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
     if (distance > attacker.attackRange || distance < minRange) {
+      this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
     return this.launchProjectile(world, attacker, target, "building", target.x, target.y);
@@ -89,11 +91,13 @@ export class CombatSystem {
 
   private attackUnit(world: WorldState, attacker: WorldUnit, target: WorldUnit): ResultCode {
     if (!attacker.exists || !target.exists || attacker.playerId === target.playerId) {
+      this.cancelAttackCycle(attacker);
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
     const distance = this.chebyshevDistance(attacker, target);
     const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
     if (distance > attacker.attackRange || distance < minRange) {
+      this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
     return this.launchProjectile(world, attacker, target, "unit", target.x, target.y);
@@ -108,11 +112,53 @@ export class CombatSystem {
     targetY: number,
   ): ResultCode {
     if (!unitCanAttack(attacker.type)) return RESULT_CODES.ERR_INVALID_TARGET;
+
+    const weapon = getUnitWeapon(attacker.type);
+    const continuousFire = weapon.continuousFire;
+    const continuingStream = continuousFire && attacker.attackStream?.targetId === target.id;
+    if (attacker.attackStream && !continuingStream) {
+      delete attacker.attackStream;
+      delete attacker.attackWindup;
+      world.markChanged();
+    }
     if (attacker.nextAttackTick !== undefined && world.tick < attacker.nextAttackTick) {
       return RESULT_CODES.ERR_BUSY;
     }
 
-    const weapon = getUnitWeapon(attacker.type);
+    const windupTicks = weapon.windupTicks ?? 0;
+    if (!continuingStream && windupTicks > 0) {
+      const windup = attacker.attackWindup;
+      if (!windup || windup.targetId !== target.id) {
+        attacker.attackWindup = {
+          targetId: target.id,
+          startedTick: world.tick,
+          completesAtTick: world.tick + windupTicks,
+        };
+        attacker.state = UNIT_STATES.ATTACKING;
+        attacker.order = { type: "attack", targetId: target.id, targetX, targetY };
+        world.markChanged();
+        return RESULT_CODES.ERR_BUSY;
+      }
+      if (world.tick < windup.completesAtTick) {
+        attacker.state = UNIT_STATES.ATTACKING;
+        return RESULT_CODES.ERR_BUSY;
+      }
+      delete attacker.attackWindup;
+      if (continuousFire) {
+        attacker.attackStream = {
+          targetId: target.id,
+          startedTick: world.tick,
+        };
+        world.markChanged();
+      }
+    }
+    if (!continuingStream && continuousFire && !attacker.attackStream) {
+      attacker.attackStream = {
+        targetId: target.id,
+        startedTick: world.tick,
+      };
+      world.markChanged();
+    }
     const distance = targetKind === "building"
       ? world.buildings.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
       : this.chebyshevDistance(attacker, target);
@@ -141,7 +187,7 @@ export class CombatSystem {
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.order = { type: "attack", targetId: target.id, targetX, targetY };
     attacker.lastAttackTick = world.tick;
-    attacker.nextAttackTick = world.tick + weapon.reloadTicks;
+    attacker.nextAttackTick = world.tick + (continuousFire?.damageIntervalTicks ?? weapon.reloadTicks);
     return RESULT_CODES.OK;
   }
 
@@ -313,6 +359,8 @@ export class CombatSystem {
           continue;
         }
         unit.state = UNIT_STATES.IDLE;
+      } else if (result === RESULT_CODES.ERR_BUSY) {
+        unit.state = UNIT_STATES.ATTACKING;
       } else if (result !== RESULT_CODES.OK && unit.order?.targetId) {
         unit.state = UNIT_STATES.IDLE;
       }
@@ -460,5 +508,14 @@ export class CombatSystem {
     tolerance = 0.35,
   ): boolean {
     return Math.max(Math.abs(position.x - target.x), Math.abs(position.y - target.y)) <= tolerance;
+  }
+
+  private cancelAttackCycle(attacker: WorldUnit, targetId?: string): void {
+    if (!targetId || attacker.attackWindup?.targetId === targetId) {
+      delete attacker.attackWindup;
+    }
+    if (!targetId || attacker.attackStream?.targetId === targetId) {
+      delete attacker.attackStream;
+    }
   }
 }

@@ -74,4 +74,22 @@ describe("tick history", () => {
       }),
     ]);
   });
+
+  it("records authoritative continuous attack state for replay projection", () => {
+    const idleTank = tank(0);
+    const streamingTank: Unit = {
+      ...idleTank,
+      attackStream: { targetId: "target_1", startedTick: 2 },
+    };
+
+    const delta = buildTickDelta(snapshot(1, [idleTank]), snapshot(2, [streamingTank]));
+
+    expect(delta.players[0].units).toEqual([
+      expect.objectContaining({
+        id: idleTank.id,
+        change: "updated",
+        attackStream: streamingTank.attackStream,
+      }),
+    ]);
+  });
 });

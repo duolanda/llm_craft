@@ -428,22 +428,24 @@ interface AgentRunInput {
 
 当前规则由 shared 的 `standard` ruleset 描述：
 
-- 单位类型是 `worker | soldier | rifleman | rocket_soldier | scout_car | light_tank | heavy_tank | artillery`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
+- 单位类型是 `worker | soldier | rifleman | rocket_soldier | light_tank | flame_tank | heavy_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
 - 建筑类型是 `hq | barracks | war_factory | refinery | machine_gun_turret | anti_tank_turret | tech_center`
 - `hq` 可生产 `worker`
 - `barracks` 可生产 `rifleman | rocket_soldier`
-- `war_factory` 是 T2 生产建筑，可生产 `scout_car | light_tank`；完成 `tech_center` 后还可生产 `heavy_tank | artillery`
+- `war_factory` 是 T2 生产建筑，可生产 `light_tank | flame_tank`；完成 `tech_center` 后还可生产 `heavy_tank`
 - `refinery` 是 worker 的采矿卸载点，不生产单位
 - `machine_gun_turret` 是 T1 反步兵防御，要求已完成 `barracks`；`anti_tank_turret` 是 T2 反装甲防御，要求已完成 `war_factory`
 - 科技层级由已完成建筑推导：基础为 T1，完成 `war_factory` 为 T2，完成 `tech_center` 为 T3；`war_factory` 要求 `barracks`，`tech_center` 要求 `war_factory`
-- 当前采用 144x96 三战线大战场尺度。车辆为：`scout_car` 165 HP / speed 1.5 / 12 damage / range 5 / vision 10 / cost 135 / reload 2；`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / reload 6；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / reload 8；`artillery` 280 HP / speed 0.65 / 125 damage / range 14 / min range 4 / cost 440 / reload 12
-- 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`scout_car` 对 infantry / vehicle / structure 的系数为 1.6 / 0.2 / 0.25，`light_tank` 为 0.8 / 1 / 0.9，`heavy_tank` 为 0.7 / 1.35 / 1.15，`artillery` 为 1 / 1 / 1.7
-- 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `artillery` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`ok: true` 不表示目标 HP 已经立即变化。
+- 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 420 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 2 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
+- 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 2 / 0.2 / 1.6，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 12 / 1 / 10 伤害；它依靠持续贴住目标形成反步兵和攻坚 DPS，而不是载具对拼升级
+- 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 2 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
+- `Unit.attackWindup?: { targetId; startedTick; completesAtTick }` 暴露当前权威攻击前摇，录像 delta 同步记录该字段，客户端只据此表现点火提示。
+- `Unit.attackStream?: { targetId; startedTick }` 暴露当前权威持续攻击，录像 delta 同步记录该字段；客户端据此显示连续喷火，并有意隐藏仅用于伤害结算的逐 tick 火焰 projectile。
 - 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
 - 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
 - `UNIT_STATS` / `BUILDING_STATS` 是 `standard` ruleset 的便捷只读视图，供 UI、诊断和测试使用
-- `ENTITY_GEOMETRY` 是模拟碰撞和已发布 GLB 主体共用的格尺寸规格；车辆炮管、天线和火炮支撑铲不属于碰撞主体
+- `ENTITY_GEOMETRY` 是模拟碰撞和已发布 GLB 主体共用的格尺寸规格；车辆炮管、天线和排气附件不属于碰撞主体
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、当前生产关系、成本和攻击能力判断；standard 的生产 helper 会过滤兼容性退役单位，即使底层 legacy ruleset 数据仍保留其历史数值和建筑关联。工具 schema 已接受新增 unit/building 类型。
 
@@ -829,7 +831,7 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 {
   buildingId: string;
   units: Array<{
-    unitType: "worker" | "rifleman" | "rocket_soldier" | "scout_car" | "light_tank" | "heavy_tank" | "artillery";
+    unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank" | "flame_tank" | "heavy_tank";
     count: number; // 1..100
   }>;
 }

@@ -1,17 +1,19 @@
 import { memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentRef, ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Billboard, OrbitControls, useGLTF, useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import {
   Building,
   ActiveProjectile,
+  ENTITY_GEOMETRY,
   GAME_COLORS,
   GameState,
   PLAYER_COLORS,
   TICK_INTERVAL_MS,
   Tile,
   Unit,
+  UNIT_TYPES,
 } from "@llmcraft/shared";
 import { type SimulationVisualTimeline, VisualWorld } from "@llmcraft/record";
 
@@ -136,14 +138,12 @@ const CELL_SIZE = 1.15;
 const PLAYER_1_COLOR = PLAYER_COLORS.player_1;
 const PLAYER_2_COLOR = PLAYER_COLORS.player_2;
 const NEUTRAL_PALETTE: TeamPalette = { primary: "#ffffff", accent: "#ffffff" };
-const UNIT_VISUAL_SCALE = 1.32;
-const UNIT_SCALE_BY_TYPE: Partial<Record<Unit["type"], number>> = {
-  worker: 1.08,
-  soldier: 1.08,
-  rifleman: 1.06,
-  rocket_soldier: 1.06,
-  light_tank: 1.16,
-};
+const VEHICLE_UNIT_TYPES = new Set<Unit["type"]>([
+  UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
+  UNIT_TYPES.HEAVY_TANK,
+]);
+const isVehicleUnit = (unit: Unit): boolean => VEHICLE_UNIT_TYPES.has(unit.type);
 const PREVIEW_FX_SOURCE_X = 63;
 const PREVIEW_FX_TARGET_X = 81;
 const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
@@ -200,10 +200,9 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
   },
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
-const STRUCTURE_VISUAL_SCALE = 1.16;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
-const MODEL_VERSION = "production-20260620-1";
+const MODEL_VERSION = "production-20260820-1";
 const SHOW_DEBUG_INTENTS = new URLSearchParams(window.location.search).has("debug-intents");
 const MASS_BATTLE_LOD_ENABLED = new URLSearchParams(window.location.search).get("lod") === "mass";
 const FAR_READABILITY_VIEW = new URLSearchParams(window.location.search).get("view") === "far";
@@ -223,16 +222,27 @@ const MODEL_URLS = {
   rifleman_lod: modelUrl("rifleman_lod"),
   rocket_soldier: modelUrl("rocket_soldier"),
   rocket_soldier_lod: modelUrl("rocket_soldier_lod"),
-  light_tank: modelUrl("light_tank"),
-  light_tank_lod: modelUrl("light_tank_lod"),
+  commando: modelUrl("commando"),
+  commando_lod: modelUrl("commando_lod"),
   light_tank_body: modelUrl("light_tank_body"),
   light_tank_body_lod: modelUrl("light_tank_body_lod"),
   light_tank_turret: modelUrl("light_tank_turret"),
   light_tank_turret_lod: modelUrl("light_tank_turret_lod"),
+  flame_tank_body: modelUrl("flame_tank_body"),
+  flame_tank_body_lod: modelUrl("flame_tank_body_lod"),
+  flame_tank_turret: modelUrl("flame_tank_turret"),
+  flame_tank_turret_lod: modelUrl("flame_tank_turret_lod"),
+  heavy_tank_body: modelUrl("heavy_tank_body"),
+  heavy_tank_body_lod: modelUrl("heavy_tank_body_lod"),
+  heavy_tank_turret: modelUrl("heavy_tank_turret"),
+  heavy_tank_turret_lod: modelUrl("heavy_tank_turret_lod"),
   hq: modelUrl("hq"),
   barracks: modelUrl("barracks"),
   war_factory: modelUrl("war_factory"),
   refinery: modelUrl("refinery"),
+  machine_gun_turret: modelUrl("machine_gun_turret"),
+  anti_tank_turret: modelUrl("anti_tank_turret"),
+  tech_center: modelUrl("tech_center"),
   resource: modelUrl("resource"),
   rock: modelUrl("rock"),
 } as const;
@@ -346,6 +356,94 @@ function ResponsiveCamera({
   return null;
 }
 
+function BoundedCameraControls({
+  resetFocus,
+  dimensions,
+}: {
+  resetFocus: CameraFocus;
+  dimensions: MapDimensions;
+}) {
+  const controlsRef = useRef<ComponentRef<typeof OrbitControls>>(null);
+  const middlePointer = useRef<{ x: number; y: number } | null>(null);
+  const initialized = useRef(false);
+  const { camera, gl } = useThree();
+  const halfWidth = Math.max(0, (dimensions.width - 1) * CELL_SIZE * 0.5);
+  const halfHeight = Math.max(0, (dimensions.height - 1) * CELL_SIZE * 0.5);
+
+  const resetCamera = () => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    controls.target.set(...resetFocus.target);
+    camera.position.set(...resetFocus.position);
+    camera.lookAt(controls.target);
+    camera.updateProjectionMatrix();
+    controls.update();
+  };
+
+  useEffect(() => {
+    if (initialized.current || !controlsRef.current) return;
+    controlsRef.current.target.set(...resetFocus.target);
+    controlsRef.current.update();
+    initialized.current = true;
+  }, [resetFocus]);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 1) return;
+      middlePointer.current = { x: event.clientX, y: event.clientY };
+    };
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.button !== 1 || !middlePointer.current) return;
+      const movement = Math.hypot(
+        event.clientX - middlePointer.current.x,
+        event.clientY - middlePointer.current.y,
+      );
+      middlePointer.current = null;
+      if (movement <= 4) resetCamera();
+    };
+    const clearMiddlePointer = () => {
+      middlePointer.current = null;
+    };
+    canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", clearMiddlePointer);
+    return () => {
+      canvas.removeEventListener("pointerdown", handlePointerDown);
+      canvas.removeEventListener("pointerup", handlePointerUp);
+      canvas.removeEventListener("pointercancel", clearMiddlePointer);
+    };
+  }, [camera, gl, resetFocus]);
+
+  useFrame(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    const clampedX = THREE.MathUtils.clamp(controls.target.x, -halfWidth, halfWidth);
+    const clampedZ = THREE.MathUtils.clamp(controls.target.z, -halfHeight, halfHeight);
+    const deltaX = clampedX - controls.target.x;
+    const deltaY = -controls.target.y;
+    const deltaZ = clampedZ - controls.target.z;
+    if (deltaX === 0 && deltaY === 0 && deltaZ === 0) return;
+    controls.target.set(clampedX, 0, clampedZ);
+    camera.position.add(new THREE.Vector3(deltaX, deltaY, deltaZ));
+    controls.update();
+  });
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      makeDefault
+      enableDamping
+      enablePan
+      dampingFactor={0.08}
+      minDistance={10}
+      maxDistance={88}
+      minPolarAngle={Math.PI * 0.18}
+      maxPolarAngle={Math.PI * 0.42}
+    />
+  );
+}
+
 function RenderDiagnostics() {
   const { gl } = useThree();
   const frameCounter = useRef(0);
@@ -453,6 +551,281 @@ function ProjectileFxModeMarker({ mode }: { mode: ProjectileFxMode }) {
   return null;
 }
 
+function FlameWindupMarker({
+  unit,
+  visualWorld,
+  dimensions,
+}: {
+  unit: Unit;
+  visualWorld: VisualWorld;
+  dimensions: MapDimensions;
+}) {
+  const coreRef = useRef<THREE.Mesh>(null);
+  const ringRef = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    const pulse = 0.82 + Math.sin(clock.elapsedTime * 15 + unit.x * 0.7 + unit.y) * 0.18;
+    coreRef.current?.scale.setScalar(pulse);
+    if (ringRef.current) {
+      ringRef.current.rotation.z = clock.elapsedTime * 4.5;
+      ringRef.current.scale.setScalar(0.88 + pulse * 0.16);
+    }
+  });
+
+  return (
+    <VisualUnitAnchor entityId={unit.id} visualWorld={visualWorld} dimensions={dimensions} elevation={0.08} scale={1}>
+      <group position={[-0.92, 1.24, 0]}>
+        <mesh ref={coreRef}>
+          <sphereGeometry args={[0.18, 12, 8]} />
+          <meshBasicMaterial color="#fff06a" transparent opacity={0.92} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+        </mesh>
+        <mesh ref={ringRef} rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.27, 0.045, 8, 18]} />
+          <meshBasicMaterial color="#ff5a16" transparent opacity={0.8} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+        </mesh>
+      </group>
+    </VisualUnitAnchor>
+  );
+}
+
+function AttackWindupEffects({
+  units,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
+  const windingUp = units.filter((unit) => unit.type === UNIT_TYPES.FLAME_TANK && unit.attackWindup);
+  return windingUp.map((unit) => (
+    <FlameWindupMarker key={unit.id} unit={unit} dimensions={dimensions} visualWorld={visualWorld} />
+  ));
+}
+
+const FLAME_STREAM_SEGMENTS = 14;
+const FLAME_STREAM_NOZZLES = 2;
+
+function FlameStreamEffects({
+  units,
+  buildings,
+  dimensions,
+  visualWorld,
+}: {
+  units: Unit[];
+  buildings: Building[];
+  dimensions: MapDimensions;
+  visualWorld: VisualWorld;
+}) {
+  const { gl } = useThree();
+  const outerRef = useRef<THREE.InstancedMesh>(null);
+  const coreRef = useRef<THREE.InstancedMesh>(null);
+  const streams = useMemo(() => {
+    const targets = new Map([...units, ...buildings].map((target) => [target.id, target]));
+    return units
+      .filter((unit) => unit.type === UNIT_TYPES.FLAME_TANK && unit.attackStream)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .flatMap((unit) => {
+        const targetId = unit.attackStream?.targetId;
+        const target = targetId ? targets.get(targetId) : undefined;
+        if (!target) return [];
+        const targetIsBuilding = "productionQueue" in target;
+        return [{
+          sourceId: unit.id,
+          source: toWorldPosition(unit.x, unit.y, dimensions, 1.12),
+          targetId: targetIsBuilding ? undefined : target.id,
+          target: toWorldPosition(
+            target.x,
+            target.y,
+            dimensions,
+            targetIsBuilding ? 1.05 : isVehicleUnit(target) ? 0.72 : 0.78,
+          ),
+          phase: deterministicNoise(unit.x, unit.y, unit.attackStream?.startedTick ?? 0) * Math.PI * 2,
+        }];
+      });
+  }, [buildings, dimensions, units]);
+  const instanceCount = streams.length * FLAME_STREAM_NOZZLES * FLAME_STREAM_SEGMENTS;
+  const scratch = useMemo(() => ({
+    matrix: new THREE.Matrix4(),
+    position: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    direction: new THREE.Vector3(),
+    segmentDirection: new THREE.Vector3(),
+    perpendicular: new THREE.Vector3(),
+    source: new THREE.Vector3(),
+    target: new THREE.Vector3(),
+    nozzle: new THREE.Vector3(),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+
+  useEffect(() => {
+    gl.domElement.dataset.flameStreams = String(streams.length);
+    return () => {
+      delete gl.domElement.dataset.flameStreams;
+    };
+  }, [gl, streams.length]);
+
+  useLayoutEffect(() => {
+    const outer = outerRef.current;
+    const core = coreRef.current;
+    if (!outer || !core) return;
+    for (let index = 0; index < instanceCount; index++) {
+      const segment = index % FLAME_STREAM_SEGMENTS;
+      const heat = segment / Math.max(1, FLAME_STREAM_SEGMENTS - 1);
+      outer.setColorAt(index, new THREE.Color().setHSL(0.065 - heat * 0.035, 1, 0.55 - heat * 0.08));
+      core.setColorAt(index, new THREE.Color().setHSL(0.13 - heat * 0.04, 1, 0.82 - heat * 0.14));
+    }
+    if (outer.instanceColor) outer.instanceColor.needsUpdate = true;
+    if (core.instanceColor) core.instanceColor.needsUpdate = true;
+  }, [instanceCount]);
+
+  useFrame(({ clock }) => {
+    const outer = outerRef.current;
+    const core = coreRef.current;
+    if (!outer || !core) return;
+    const elapsed = clock.elapsedTime;
+    let instanceIndex = 0;
+
+    for (const stream of streams) {
+      const sourceVisual = visualWorld.getTransform(stream.sourceId);
+      const targetVisual = stream.targetId ? visualWorld.getTransform(stream.targetId) : undefined;
+      scratch.source.set(
+        sourceVisual ? (sourceVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE : stream.source[0],
+        stream.source[1],
+        sourceVisual ? (sourceVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE : stream.source[2],
+      );
+      scratch.target.set(
+        targetVisual ? (targetVisual.x - (dimensions.width - 1) / 2) * CELL_SIZE : stream.target[0],
+        stream.target[1],
+        targetVisual ? (targetVisual.y - (dimensions.height - 1) / 2) * CELL_SIZE : stream.target[2],
+      );
+      scratch.direction.copy(scratch.target).sub(scratch.source).normalize();
+      scratch.perpendicular.set(-scratch.direction.z, 0, scratch.direction.x).normalize();
+
+      for (let nozzleIndex = 0; nozzleIndex < FLAME_STREAM_NOZZLES; nozzleIndex++) {
+        const nozzleSide = nozzleIndex === 0 ? -1 : 1;
+        scratch.nozzle.copy(scratch.source)
+          .addScaledVector(scratch.direction, 0.72)
+          .addScaledVector(scratch.perpendicular, nozzleSide * 0.12);
+        const streamLength = scratch.nozzle.distanceTo(scratch.target);
+        const segmentLength = Math.max(0.08, streamLength / FLAME_STREAM_SEGMENTS * 1.62);
+
+        for (let segment = 0; segment < FLAME_STREAM_SEGMENTS; segment++) {
+          const t = (segment + 0.5) / FLAME_STREAM_SEGMENTS;
+          const pulse = elapsed * 11 - segment * 1.15 + stream.phase + nozzleIndex * 0.8;
+          const jitter = (0.018 + t * 0.075) * Math.sin(pulse);
+          scratch.position.copy(scratch.nozzle).lerp(scratch.target, t)
+            .addScaledVector(scratch.perpendicular, jitter);
+          scratch.position.y += Math.cos(pulse * 0.73) * (0.012 + t * 0.045);
+          scratch.segmentDirection.copy(scratch.target).sub(scratch.nozzle).normalize();
+          scratch.quaternion.setFromUnitVectors(scratch.up, scratch.segmentDirection);
+
+          const tipEnvelope = t > 0.84 ? Math.max(0.22, (1 - t) / 0.16) : 1;
+          const outerRadius = (0.09 + t * 0.3) * tipEnvelope * (0.9 + Math.sin(pulse * 0.61) * 0.1);
+          scratch.scale.set(outerRadius, segmentLength, outerRadius);
+          scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+          outer.setMatrixAt(instanceIndex, scratch.matrix);
+
+          const coreRadius = (0.045 + t * 0.12) * tipEnvelope * (0.92 + Math.cos(pulse * 0.77) * 0.08);
+          scratch.scale.set(coreRadius, segmentLength * 0.82, coreRadius);
+          scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
+          core.setMatrixAt(instanceIndex, scratch.matrix);
+          instanceIndex++;
+        }
+      }
+    }
+
+    outer.instanceMatrix.needsUpdate = true;
+    core.instanceMatrix.needsUpdate = true;
+  }, -9);
+
+  if (instanceCount === 0) return null;
+  return (
+    <>
+      <instancedMesh ref={outerRef} args={[undefined, undefined, instanceCount]} frustumCulled={false} renderOrder={8}>
+        <cylinderGeometry args={[1, 1, 1, 8, 1, true]} />
+        <meshBasicMaterial transparent opacity={0.68} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+      <instancedMesh ref={coreRef} args={[undefined, undefined, instanceCount]} frustumCulled={false} renderOrder={9}>
+        <cylinderGeometry args={[1, 1, 1, 7, 1, true]} />
+        <meshBasicMaterial transparent opacity={0.9} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+    </>
+  );
+}
+
+function DemolitionChargeEffects({
+  projectiles,
+  buildings,
+  dimensions,
+}: {
+  projectiles: ActiveProjectile[];
+  buildings: Building[];
+  dimensions: MapDimensions;
+}) {
+  const chargeRef = useRef<THREE.InstancedMesh>(null);
+  const ringRef = useRef<THREE.InstancedMesh>(null);
+  const charges = useMemo(() => {
+    const buildingIds = new Set(buildings.map((building) => building.id));
+    return projectiles
+      .filter((projectile) =>
+        projectile.projectileType === "demolition"
+        && projectile.targetId
+        && buildingIds.has(projectile.targetId)
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((projectile) => ({
+        id: projectile.id,
+        position: toWorldPosition(projectile.targetX, projectile.targetY, dimensions, 1.48),
+        phase: deterministicNoise(projectile.targetX, projectile.targetY, projectile.launchedTick) * Math.PI * 2,
+      }));
+  }, [buildings, dimensions, projectiles]);
+  const scratch = useMemo(() => ({
+    matrix: new THREE.Matrix4(),
+    position: new THREE.Vector3(),
+    scale: new THREE.Vector3(),
+    chargeQuaternion: new THREE.Quaternion(),
+    ringQuaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)),
+    up: new THREE.Vector3(0, 1, 0),
+  }), []);
+
+  useFrame(({ clock }) => {
+    const charge = chargeRef.current;
+    const ring = ringRef.current;
+    if (!charge || !ring) return;
+    charges.forEach((entry, index) => {
+      const pulse = 0.88 + Math.sin(clock.elapsedTime * 18 + entry.phase) * 0.16;
+      scratch.position.set(...entry.position);
+      scratch.chargeQuaternion.setFromAxisAngle(scratch.up, clock.elapsedTime * 2.4 + entry.phase);
+      scratch.scale.set(0.32 * pulse, 0.16 * pulse, 0.46 * pulse);
+      scratch.matrix.compose(scratch.position, scratch.chargeQuaternion, scratch.scale);
+      charge.setMatrixAt(index, scratch.matrix);
+
+      scratch.position.y += 0.03;
+      scratch.scale.setScalar(0.48 + pulse * 0.12);
+      scratch.matrix.compose(scratch.position, scratch.ringQuaternion, scratch.scale);
+      ring.setMatrixAt(index, scratch.matrix);
+    });
+    charge.instanceMatrix.needsUpdate = true;
+    ring.instanceMatrix.needsUpdate = true;
+  }, -8);
+
+  if (charges.length === 0) return null;
+  return (
+    <>
+      <instancedMesh ref={chargeRef} args={[undefined, undefined, charges.length]} frustumCulled={false} renderOrder={10}>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color="#252b28" emissive="#ff4b16" emissiveIntensity={1.1} roughness={0.46} metalness={0.35} />
+      </instancedMesh>
+      <instancedMesh ref={ringRef} args={[undefined, undefined, charges.length]} frustumCulled={false} renderOrder={11}>
+        <torusGeometry args={[0.46, 0.07, 8, 18]} />
+        <meshBasicMaterial color="#ffb21c" transparent opacity={0.9} blending={THREE.AdditiveBlending} toneMapped={false} depthWrite={false} />
+      </instancedMesh>
+    </>
+  );
+}
+
 function deterministicNoise(x: number, y: number, salt: number): number {
   const value = Math.sin(x * 12.9898 + y * 78.233 + salt * 37.719) * 43758.5453;
   return value - Math.floor(value);
@@ -468,10 +841,10 @@ function getHeading(object: Unit): number {
 }
 
 function getBodyHeading(unit: Unit): number {
-  if (unit.type === "light_tank" && unit.heading !== undefined) {
+  if (isVehicleUnit(unit) && unit.heading !== undefined) {
     return Math.PI - unit.heading;
   }
-  return getHeading(unit) + (unit.type === "light_tank" ? TANK_FORWARD_OFFSET : 0);
+  return getHeading(unit) + (isVehicleUnit(unit) ? TANK_FORWARD_OFFSET : 0);
 }
 
 function getAimHeading(unit: Unit, objectPositions: Map<string, { x: number; y: number }>): number {
@@ -734,6 +1107,19 @@ function HealthBar({
   );
 }
 
+function getUnitHealthBarY(unit: Unit): number {
+  switch (unit.type) {
+    case UNIT_TYPES.LIGHT_TANK:
+      return 2.22;
+    case UNIT_TYPES.FLAME_TANK:
+      return 2.28;
+    case UNIT_TYPES.HEAVY_TANK:
+      return 2.76;
+    default:
+      return 1.7;
+  }
+}
+
 function getResourceClusterTransforms(tile: Tile, dimensions: MapDimensions): ModelTransform[] {
   const basePosition = toWorldPosition(tile.x, tile.y, dimensions, 0.02);
   const count = 10;
@@ -835,14 +1221,15 @@ function BasePlatform({
   }
 
   const color = getPlayerColor(building.playerId);
+  const hqRadius = ENTITY_GEOMETRY.buildingBodies.hq.width * CELL_SIZE * 0.5;
   return (
     <group position={toWorldPosition(building.x, building.y, dimensions, 0.018)}>
       <mesh receiveShadow>
-        <cylinderGeometry args={[4.2, 4.2, 0.08, 12]} />
+        <cylinderGeometry args={[hqRadius, hqRadius, 0.08, 12]} />
         <meshStandardMaterial color="#1a211e" roughness={0.86} metalness={0.05} />
       </mesh>
       <mesh position={[0, 0.055, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[3.2, 3.52, 12]} />
+        <ringGeometry args={[hqRadius * 0.76, hqRadius * 0.84, 12]} />
         <meshBasicMaterial color={color} transparent opacity={0.38} side={THREE.DoubleSide} />
       </mesh>
     </group>
@@ -850,8 +1237,8 @@ function BasePlatform({
 }
 
 function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
-  if (unit.type === "light_tank") {
-    return massBattleLod ? MODEL_URLS.light_tank_lod : MODEL_URLS.light_tank;
+  if (unit.type === "commando") {
+    return massBattleLod ? MODEL_URLS.commando_lod : MODEL_URLS.commando;
   }
   if (unit.type === "rocket_soldier") {
     return massBattleLod ? MODEL_URLS.rocket_soldier_lod : MODEL_URLS.rocket_soldier;
@@ -865,12 +1252,31 @@ function getUnitModelUrl(unit: Unit, massBattleLod: boolean): string {
   return massBattleLod ? MODEL_URLS.soldier_lod : MODEL_URLS.soldier;
 }
 
-function getUnitVisualScale(unit: Unit): number {
-  return UNIT_VISUAL_SCALE * (UNIT_SCALE_BY_TYPE[unit.type] ?? 1);
+function getVehiclePartModelUrls(
+  unit: Unit,
+  massBattleLod: boolean,
+): { body: string; turret: string } {
+  switch (unit.type) {
+    case UNIT_TYPES.FLAME_TANK:
+      return {
+        body: massBattleLod ? MODEL_URLS.flame_tank_body_lod : MODEL_URLS.flame_tank_body,
+        turret: massBattleLod ? MODEL_URLS.flame_tank_turret_lod : MODEL_URLS.flame_tank_turret,
+      };
+    case UNIT_TYPES.HEAVY_TANK:
+      return {
+        body: massBattleLod ? MODEL_URLS.heavy_tank_body_lod : MODEL_URLS.heavy_tank_body,
+        turret: massBattleLod ? MODEL_URLS.heavy_tank_turret_lod : MODEL_URLS.heavy_tank_turret,
+      };
+    default:
+      return {
+        body: massBattleLod ? MODEL_URLS.light_tank_body_lod : MODEL_URLS.light_tank_body,
+        turret: massBattleLod ? MODEL_URLS.light_tank_turret_lod : MODEL_URLS.light_tank_turret,
+      };
+  }
 }
 
 function getUnitMotionProfile(unit: Unit, moving: boolean, firing: boolean): Pick<ModelTransform, "motionAmplitude" | "motionFrequency" | "swayAmplitude" | "swayFrequency" | "recoilAmplitude"> {
-  if (unit.type === "light_tank") {
+  if (isVehicleUnit(unit)) {
     return {
       motionAmplitude: 0,
       swayAmplitude: 0,
@@ -967,7 +1373,7 @@ function UnitBatches({
         visualRotation: "body",
         position: toWorldPosition(unit.x, unit.y, dimensions, 0.08),
         rotation: [0, getBodyHeading(unit), 0],
-        scale: getUnitVisualScale(unit),
+        scale: CELL_SIZE,
         motionAmplitude: motionProfile.motionAmplitude,
         motionFrequency: motionProfile.motionFrequency,
         motionPhase: index * 1.73 + (unit.playerId === "player_1" ? 0 : 0.8),
@@ -988,9 +1394,10 @@ function UnitBatches({
         grouped.set(key, batch);
       };
 
-      if (unit.type === "light_tank") {
-        addToBatch(massBattleLod ? MODEL_URLS.light_tank_body_lod : MODEL_URLS.light_tank_body, baseTransform);
-        addToBatch(massBattleLod ? MODEL_URLS.light_tank_turret_lod : MODEL_URLS.light_tank_turret, {
+      if (isVehicleUnit(unit)) {
+        const vehicleModels = getVehiclePartModelUrls(unit, massBattleLod);
+        addToBatch(vehicleModels.body, baseTransform);
+        addToBatch(vehicleModels.turret, {
           ...baseTransform,
           visualRotation: "aim",
           rotation: [0, getAimHeading(unit, objectPositions), 0],
@@ -1028,14 +1435,14 @@ function UnitBatches({
               visualWorld={visualWorld}
               dimensions={dimensions}
               elevation={0.08}
-              scale={getUnitVisualScale(unit)}
+              scale={CELL_SIZE}
             >
               <HealthBar
                 hp={unit.hp}
                 maxHp={unit.maxHp}
                 color={palette.primary}
-                width={unit.type === "light_tank" ? 1.25 : 0.82}
-                y={unit.type === "light_tank" ? 1.28 : 1.34}
+                width={isVehicleUnit(unit) ? 1.25 : 0.82}
+                y={getUnitHealthBarY(unit)}
               />
             </VisualUnitAnchor>
           );
@@ -1073,7 +1480,7 @@ function GroundRingBatch({
     visualRotation: "fixed",
     position: toWorldPosition(unit.x, unit.y, dimensions, 0.035),
     rotation: [-Math.PI / 2, 0, 0],
-    scale: unit.type === "light_tank" ? 1.22 : 0.72,
+    scale: isVehicleUnit(unit) ? 1.22 : 0.72,
   })), [dimensions, units]);
 
   return (
@@ -1125,13 +1532,16 @@ function getProjectileVisualType(unitType: Unit["type"]): ActiveProjectile["proj
   if (unitType === "rocket_soldier") {
     return "rocket";
   }
-  if (unitType === "light_tank") {
+  if (VEHICLE_UNIT_TYPES.has(unitType)) {
     return "shell";
   }
   return "bullet";
 }
 
 function getProjectileVisualColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "flame") {
+    return "#fff06a";
+  }
   if (projectileType === "rocket") {
     return "#ff8a2a";
   }
@@ -1142,6 +1552,9 @@ function getProjectileVisualColor(projectileType: ActiveProjectile["projectileTy
 }
 
 function getProjectileTrailColor(projectileType: ActiveProjectile["projectileType"]): string {
+  if (projectileType === "flame") {
+    return "#ff5a16";
+  }
   if (projectileType === "rocket") {
     return "#b7b5a7";
   }
@@ -1152,6 +1565,9 @@ function getProjectileTrailColor(projectileType: ActiveProjectile["projectileTyp
 }
 
 function getProjectileVisualScale(projectileType: ActiveProjectile["projectileType"]): number {
+  if (projectileType === "flame") {
+    return 0.24;
+  }
   if (projectileType === "rocket") {
     return 0.19;
   }
@@ -1194,6 +1610,7 @@ function CombatEffects({
   const shots = useMemo(() => {
     const objects = new Map([...units, ...buildings].map((object) => [object.id, object]));
     const activeProjectileShots = projectiles
+      .filter((projectile) => projectile.projectileType !== "flame" && projectile.projectileType !== "demolition")
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((projectile, index): CombatShot => {
         const totalTicks = Math.max(1, projectile.impactTick - projectile.launchedTick);
@@ -1217,15 +1634,15 @@ function CombatEffects({
     }
 
     return units
-      .filter((unit) => unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1 && unit.intent?.targetId)
+      .filter((unit) => unit.type !== UNIT_TYPES.FLAME_TANK && unit.lastAttackTick !== undefined && tick - unit.lastAttackTick <= 1 && unit.intent?.targetId)
       .sort((left, right) => left.id.localeCompare(right.id))
       .flatMap((unit, index): CombatShot[] => {
         const target = unit.intent?.targetId ? objects.get(unit.intent.targetId) : undefined;
         if (!target) {
           return [];
         }
-        const sourceHeight = unit.type === "light_tank" ? 1.02 : 0.96;
-        const targetHeight = "productionQueue" in target ? 1.4 : target.type === "light_tank" ? 0.76 : 0.82;
+        const sourceHeight = isVehicleUnit(unit) ? 1.02 : 0.96;
+        const targetHeight = "productionQueue" in target ? 1.4 : VEHICLE_UNIT_TYPES.has(target.type) ? 0.76 : 0.82;
         const projectileType = getProjectileVisualType(unit.type);
         return [{
           sourceEntityId: unit.id,
@@ -1315,22 +1732,22 @@ function CombatEffects({
         THREE.MathUtils.lerp(sourceZ, targetZ, progress),
       );
 
-      const projectileLength = shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
+      const projectileLength = shot.projectileType === "flame" ? 5.4 : shot.projectileType === "bullet" ? 6.2 : shot.projectileType === "rocket" ? 3.2 : 2.8;
       scratch.scale.set(shot.scale * 0.5, shot.scale * projectileLength, shot.scale * 0.5);
       scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
       projectile.setMatrixAt(index, scratch.matrix);
 
-      const trailLength = shot.projectileType === "rocket" ? shot.scale * 8.5 : shot.scale * 5.4;
+      const trailLength = shot.projectileType === "flame" ? shot.scale * 10.5 : shot.projectileType === "rocket" ? shot.scale * 8.5 : shot.scale * 5.4;
       scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
       scratch.scale.set(
-        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+        shot.scale * (shot.projectileType === "flame" ? 1.25 : shot.projectileType === "rocket" ? 0.9 : 0.38),
         trailLength,
-        shot.scale * (shot.projectileType === "rocket" ? 0.9 : 0.38),
+        shot.scale * (shot.projectileType === "flame" ? 1.25 : shot.projectileType === "rocket" ? 0.9 : 0.38),
       );
       scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
       trail.setMatrixAt(index, scratch.matrix);
 
-      const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "rocket" ? 5.2 : 4.6);
+      const muzzleScale = Math.max(0.001, 1 - progress * 18) * shot.scale * (shot.projectileType === "flame" ? 6.5 : shot.projectileType === "rocket" ? 5.2 : 4.6);
       scratch.quaternion.identity();
       scratch.position.set(sourceX, sourceY, sourceZ);
       if (progress < 0.09) {
@@ -1444,22 +1861,22 @@ function ProjectilePreviewEffects({ dimensions }: { dimensions: MapDimensions })
           THREE.MathUtils.lerp(preview.source[1], preview.target[1], progress) + arc,
           THREE.MathUtils.lerp(preview.source[2], preview.target[2], progress),
         );
-        const projectileLength = preview.projectileType === "bullet" ? 6.2 : preview.projectileType === "rocket" ? 3.2 : 2.8;
+        const projectileLength = preview.projectileType === "flame" ? 5.4 : preview.projectileType === "bullet" ? 6.2 : preview.projectileType === "rocket" ? 3.2 : 2.8;
         scratch.scale.set(preview.scale * 0.5, preview.scale * projectileLength, preview.scale * 0.5);
         scratch.matrix.compose(scratch.position, scratch.quaternion, scratch.scale);
         projectile.setMatrixAt(index, scratch.matrix);
 
-        const trailLength = preview.projectileType === "rocket" ? preview.scale * 8.5 : preview.scale * 5.4;
+        const trailLength = preview.projectileType === "flame" ? preview.scale * 10.5 : preview.projectileType === "rocket" ? preview.scale * 8.5 : preview.scale * 5.4;
         scratch.trailPosition.copy(scratch.position).addScaledVector(scratch.direction, -trailLength * 0.55);
         scratch.scale.set(
-          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+          preview.scale * (preview.projectileType === "flame" ? 1.25 : preview.projectileType === "rocket" ? 0.9 : 0.38),
           trailLength,
-          preview.scale * (preview.projectileType === "rocket" ? 0.9 : 0.38),
+          preview.scale * (preview.projectileType === "flame" ? 1.25 : preview.projectileType === "rocket" ? 0.9 : 0.38),
         );
         scratch.matrix.compose(scratch.trailPosition, scratch.quaternion, scratch.scale);
         trail.setMatrixAt(index, scratch.matrix);
 
-        const muzzleScale = Math.max(0.001, 1 - progress * 18) * preview.scale * (preview.projectileType === "rocket" ? 5.2 : 4.6);
+        const muzzleScale = Math.max(0.001, 1 - progress * 18) * preview.scale * (preview.projectileType === "flame" ? 6.5 : preview.projectileType === "rocket" ? 5.2 : 4.6);
         scratch.quaternion.identity();
         scratch.scale.setScalar(muzzleScale);
         scratch.position.set(...preview.source);
@@ -1524,9 +1941,9 @@ function DestructionEffects({
         if (!current.has(id)) {
           destroyed.push({
             id: `${id}-${Date.now()}`,
-            position: toWorldPosition(object.x, object.y, dimensions, object.type === "light_tank" ? 0.58 : 0.42),
+            position: toWorldPosition(object.x, object.y, dimensions, "productionQueue" in object ? 0.86 : VEHICLE_UNIT_TYPES.has(object.type) ? 0.58 : 0.42),
             bornAt: Date.now() / 1000,
-            scale: "productionQueue" in object ? 2.2 : object.type === "light_tank" ? 1.35 : 0.72,
+            scale: "productionQueue" in object ? 2.2 : VEHICLE_UNIT_TYPES.has(object.type) ? 1.35 : 0.72,
           });
         }
       }
@@ -1603,21 +2020,36 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
         ? MODEL_URLS.barracks
         : building.type === "war_factory"
           ? MODEL_URLS.war_factory
-          : MODEL_URLS.refinery;
+          : building.type === "refinery"
+            ? MODEL_URLS.refinery
+            : building.type === "machine_gun_turret"
+              ? MODEL_URLS.machine_gun_turret
+              : building.type === "anti_tank_turret"
+                ? MODEL_URLS.anti_tank_turret
+                : MODEL_URLS.tech_center;
   const presentation = building.type === "hq"
-    ? { scale: 1, healthY: 6.9, healthWidth: 3.4 }
+    ? { healthY: 6.65, healthWidth: 3.4 }
     : building.type === "barracks"
-      ? { scale: 0.92, healthY: 4.35, healthWidth: 2.45 }
+      ? { healthY: 3.85, healthWidth: 2.45 }
       : building.type === "war_factory"
-        ? { scale: 0.92, healthY: 5.15, healthWidth: 3.1 }
-        : { scale: 0.94, healthY: 6.15, healthWidth: 2.7 };
+        ? { healthY: 3.8, healthWidth: 3.1 }
+        : building.type === "refinery"
+          ? { healthY: 3.98, healthWidth: 2.7 }
+          : building.type === "machine_gun_turret"
+            ? { healthY: 2.55, healthWidth: 1.9 }
+            : building.type === "anti_tank_turret"
+              ? { healthY: 2.3, healthWidth: 2.3 }
+              : { healthY: 4.77, healthWidth: 3.0 };
+  const rotation: Vec3 = building.type === "machine_gun_turret" || building.type === "anti_tank_turret"
+    ? [0, building.playerId === "player_1" ? Math.PI : 0, 0]
+    : [0, 0, 0];
 
   return (
     <group
       position={toWorldPosition(building.x, building.y, dimensions, 0)}
-      scale={STRUCTURE_VISUAL_SCALE * presentation.scale}
+      scale={CELL_SIZE}
     >
-      <ModelInstance url={modelUrl} palette={palette} position={[0, 0, 0]} />
+      <ModelInstance url={modelUrl} palette={palette} position={[0, 0, 0]} rotation={rotation} />
       <HealthBar
         hp={building.hp}
         maxHp={building.maxHp}
@@ -1754,7 +2186,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
   const terrainHeight = dimensions.height * CELL_SIZE;
   const initialFocus = useMemo(
     () => getInitialCameraFocus(state, dimensions),
-    [],
+    [dimensions, state],
   );
   const visualWorld = useVisualWorld();
 
@@ -1835,6 +2267,9 @@ const BattlefieldScene = memo(function BattlefieldScene({
           visualWorld={visualWorld}
         />
         <UnitReadabilityLayer units={units} dimensions={dimensions} visualWorld={visualWorld} />
+        <AttackWindupEffects units={units} dimensions={dimensions} visualWorld={visualWorld} />
+        <FlameStreamEffects units={units} buildings={buildings} dimensions={dimensions} visualWorld={visualWorld} />
+        <DemolitionChargeEffects projectiles={state.projectiles ?? []} buildings={buildings} dimensions={dimensions} />
         {projectileFxMode === "game" ? (
           <CombatEffects
             units={units}
@@ -1851,17 +2286,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
       {SHOW_DEBUG_INTENTS ? (
         <IntentLines units={units} dimensions={dimensions} visualWorld={visualWorld} />
       ) : null}
-      <OrbitControls
-        makeDefault
-        target={initialFocus.target}
-        enableDamping
-        enablePan
-        dampingFactor={0.08}
-        minDistance={10}
-        maxDistance={88}
-        minPolarAngle={Math.PI * 0.18}
-        maxPolarAngle={Math.PI * 0.42}
-      />
+      <BoundedCameraControls resetFocus={initialFocus} dimensions={dimensions} />
     </>
   );
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TILE_TYPES, UNIT_TYPES, type TileType } from "@llmcraft/shared";
+import { ENTITY_GEOMETRY, TILE_TYPES, UNIT_TYPES, type TileType } from "@llmcraft/shared";
 import {
   getCollisionManifold,
   type CircleShape,
@@ -34,11 +34,23 @@ describe("collision shapes", () => {
 
   it("uses a tank's shorter side footprint instead of its bounding circle", () => {
     const left = createUnitCollisionShape(UNIT_TYPES.LIGHT_TANK, 0, 0, 0);
-    const sideBySide = createUnitCollisionShape(UNIT_TYPES.LIGHT_TANK, 0, 2, 0);
+    const sideBySide = createUnitCollisionShape(UNIT_TYPES.LIGHT_TANK, 0, 2.2, 0);
     const endToEnd = createUnitCollisionShape(UNIT_TYPES.LIGHT_TANK, 2, 0, 0);
 
     expect(getCollisionManifold(left, sideBySide)).toBeNull();
     expect(getCollisionManifold(left, endToEnd)).not.toBeNull();
+  });
+
+  it("derives vehicle OBBs from the canonical model body dimensions", () => {
+    const heavyTank = createUnitCollisionShape(UNIT_TYPES.HEAVY_TANK, 0, 0, 0);
+    const geometry = ENTITY_GEOMETRY.unitBodies.heavy_tank;
+
+    expect(geometry.shape).toBe("obb");
+    expect(heavyTank).toMatchObject({
+      kind: "obb",
+      halfLength: geometry.shape === "obb" ? geometry.length / 2 : 0,
+      halfWidth: geometry.shape === "obb" ? geometry.width / 2 : 0,
+    });
   });
 
   it("detects perpendicular and rotated OBB intersections with a separating axis", () => {

@@ -36,6 +36,8 @@ function cloneReplayFrameState(state: GameState): GameState {
       units: player.units.map((unit) => ({
         ...unit,
         intent: unit.intent ? { ...unit.intent } : undefined,
+        attackWindup: unit.attackWindup ? { ...unit.attackWindup } : undefined,
+        attackStream: unit.attackStream ? { ...unit.attackStream } : undefined,
         pathTarget: unit.pathTarget ? { ...unit.pathTarget } : undefined,
         constructingBuildingId: unit.constructingBuildingId,
       })),
@@ -90,6 +92,8 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
       carryCapacity: change.carryCapacity ?? 0,
       heading: change.heading,
       intent: change.intent ?? undefined,
+      attackWindup: change.attackWindup ?? undefined,
+      attackStream: change.attackStream ?? undefined,
       constructingBuildingId: change.constructingBuildingId ?? undefined,
     };
     player.units.push(createdUnit);
@@ -110,6 +114,8 @@ function applyUnitDelta(player: Player, change: TickDeltaRecord["players"][numbe
     carryCapacity: change.carryCapacity ?? current.carryCapacity,
     heading: change.heading ?? current.heading,
     intent: "intent" in change ? change.intent ?? undefined : current.intent,
+    attackWindup: "attackWindup" in change ? change.attackWindup ?? undefined : current.attackWindup,
+    attackStream: "attackStream" in change ? change.attackStream ?? undefined : current.attackStream,
     constructingBuildingId: "constructingBuildingId" in change
       ? change.constructingBuildingId ?? undefined
       : current.constructingBuildingId,
@@ -140,6 +146,8 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
       productionQueue: change.productionQueue ?? [],
       productionProgress: change.productionProgress ?? undefined,
       constructionProgress: change.constructionProgress ?? undefined,
+      lastAttackTick: change.lastAttackTick,
+      nextAttackTick: change.nextAttackTick,
     };
     player.buildings.push(createdBuilding);
     return;
@@ -157,6 +165,8 @@ function applyBuildingDelta(player: Player, change: TickDeltaRecord["players"][n
     productionQueue: change.productionQueue ?? current.productionQueue,
     productionProgress: change.productionProgress === null ? undefined : change.productionProgress ?? current.productionProgress,
     constructionProgress: change.constructionProgress === null ? undefined : change.constructionProgress ?? current.constructionProgress,
+    lastAttackTick: change.lastAttackTick ?? current.lastAttackTick,
+    nextAttackTick: change.nextAttackTick ?? current.nextAttackTick,
   };
 }
 

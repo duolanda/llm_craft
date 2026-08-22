@@ -10,7 +10,10 @@ const UNIT_COLORS: Record<string, string> = {
   soldier: "#ff2a4a",
   rifleman: "#8df2a6",
   rocket_soldier: "#ff8840",
+  commando: "#facc15",
   light_tank: "#7dd3fc",
+  flame_tank: "#fb923c",
+  heavy_tank: "#a78bfa",
 };
 
 const UNIT_LABELS: Record<string, string> = {
@@ -18,14 +21,20 @@ const UNIT_LABELS: Record<string, string> = {
   soldier: "士兵",
   rifleman: "步兵",
   rocket_soldier: "火箭",
+  commando: "特种",
   light_tank: "轻坦",
+  flame_tank: "火焰",
+  heavy_tank: "重坦",
 };
 
 const ACTIVE_DISPLAY_UNIT_TYPES: UnitType[] = [
   UNIT_TYPES.WORKER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
+  UNIT_TYPES.COMMANDO,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
+  UNIT_TYPES.HEAVY_TANK,
 ];
 
 export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
@@ -61,6 +70,14 @@ export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
       hq: buildings.filter((b) => b.type === BUILDING_TYPES.HQ).length,
       barracks: buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS).length,
       warFactory: buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY).length,
+      refinery: buildings.filter((b) => b.type === BUILDING_TYPES.REFINERY).length,
+      defenses: buildings.filter((b) => b.type === BUILDING_TYPES.MACHINE_GUN_TURRET || b.type === BUILDING_TYPES.ANTI_TANK_TURRET).length,
+      techCenter: buildings.filter((b) => b.type === BUILDING_TYPES.TECH_CENTER).length,
+      techTier: buildings.some((b) => b.type === BUILDING_TYPES.TECH_CENTER && !b.constructionProgress)
+        ? 3
+        : buildings.some((b) => b.type === BUILDING_TYPES.WAR_FACTORY && !b.constructionProgress)
+          ? 2
+          : 1,
       total: buildings.length,
     };
   };
@@ -135,6 +152,9 @@ export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
         <BuildingRow label="HP" p1={p1HQHealth} p2={p2HQHealth} />
         <BuildingRow label="兵营" p1={p1Buildings.barracks} p2={p2Buildings.barracks} />
         <BuildingRow label="战车工厂" p1={p1Buildings.warFactory} p2={p2Buildings.warFactory} />
+        <BuildingRow label="科技等级" p1={`T${p1Buildings.techTier}`} p2={`T${p2Buildings.techTier}`} />
+        <BuildingRow label="防御塔" p1={p1Buildings.defenses} p2={p2Buildings.defenses} />
+        <BuildingRow label="科技中心" p1={p1Buildings.techCenter} p2={p2Buildings.techCenter} />
       </div>
 
       <div className="stat-block">

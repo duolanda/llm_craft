@@ -1,9 +1,12 @@
 import {
   RESULT_CODES,
   UNIT_STATES,
+  getBuildingWeapon,
+  getBuildingArmor,
   getDefaultAttackMovePriority,
+  getAttackSourceWeaponAgainstArmor,
+  getUnitArmor,
   getUnitVisionRange,
-  getUnitWeapon,
   unitCanAttack,
   type ActiveProjectile,
   type AttackTargetType,
@@ -20,6 +23,7 @@ type AttackMoveOrder = Extract<UnitIntent, { type: "attack_move" }>;
 
 export class CombatSystem {
   step(world: WorldState): void {
+    this.processDefensiveBuildings(world);
     this.processAttackMoveOrders(world);
     this.processAttackOrders(world);
   }
@@ -75,9 +79,14 @@ export class CombatSystem {
 
   private attackBuilding(world: WorldState, attacker: WorldUnit, target: Building): ResultCode {
     if (!attacker.exists || !target.exists || attacker.playerId === target.playerId) {
+      this.cancelAttackCycle(attacker);
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
-    if (world.buildings.getDistanceToBuilding(target, attacker.x, attacker.y) > attacker.attackRange) {
+    const distance = world.buildings.getDistanceToBuilding(target, attacker.x, attacker.y);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, getBuildingArmor(target.type));
+    const minRange = weapon.minRange ?? 0;
+    if (distance > weapon.range || distance < minRange) {
+      this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
     return this.launchProjectile(world, attacker, target, "building", target.x, target.y);
@@ -85,9 +94,14 @@ export class CombatSystem {
 
   private attackUnit(world: WorldState, attacker: WorldUnit, target: WorldUnit): ResultCode {
     if (!attacker.exists || !target.exists || attacker.playerId === target.playerId) {
+      this.cancelAttackCycle(attacker);
       return RESULT_CODES.ERR_INVALID_TARGET;
     }
-    if (this.chebyshevDistance(attacker, target) > attacker.attackRange) {
+    const distance = this.chebyshevDistance(attacker, target);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, getUnitArmor(target.type));
+    const minRange = weapon.minRange ?? 0;
+    if (distance > weapon.range || distance < minRange) {
+      this.cancelAttackCycle(attacker, target.id);
       return RESULT_CODES.ERR_NOT_IN_RANGE;
     }
     return this.launchProjectile(world, attacker, target, "unit", target.x, target.y);
@@ -102,11 +116,56 @@ export class CombatSystem {
     targetY: number,
   ): ResultCode {
     if (!unitCanAttack(attacker.type)) return RESULT_CODES.ERR_INVALID_TARGET;
+
+    const targetArmor = targetKind === "building"
+      ? getBuildingArmor((target as Building).type)
+      : getUnitArmor((target as WorldUnit).type);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
+    const continuousFire = weapon.continuousFire;
+    const continuingStream = continuousFire && attacker.attackStream?.targetId === target.id;
+    if (attacker.attackStream && !continuingStream) {
+      delete attacker.attackStream;
+      delete attacker.attackWindup;
+      world.markChanged();
+    }
     if (attacker.nextAttackTick !== undefined && world.tick < attacker.nextAttackTick) {
       return RESULT_CODES.ERR_BUSY;
     }
 
-    const weapon = getUnitWeapon(attacker.type);
+    const windupTicks = weapon.windupTicks ?? 0;
+    if (!continuingStream && windupTicks > 0) {
+      const windup = attacker.attackWindup;
+      if (!windup || windup.targetId !== target.id) {
+        attacker.attackWindup = {
+          targetId: target.id,
+          startedTick: world.tick,
+          completesAtTick: world.tick + windupTicks,
+        };
+        attacker.state = UNIT_STATES.ATTACKING;
+        attacker.order = { type: "attack", targetId: target.id, targetX, targetY };
+        world.markChanged();
+        return RESULT_CODES.ERR_BUSY;
+      }
+      if (world.tick < windup.completesAtTick) {
+        attacker.state = UNIT_STATES.ATTACKING;
+        return RESULT_CODES.ERR_BUSY;
+      }
+      delete attacker.attackWindup;
+      if (continuousFire) {
+        attacker.attackStream = {
+          targetId: target.id,
+          startedTick: world.tick,
+        };
+        world.markChanged();
+      }
+    }
+    if (!continuingStream && continuousFire && !attacker.attackStream) {
+      attacker.attackStream = {
+        targetId: target.id,
+        startedTick: world.tick,
+      };
+      world.markChanged();
+    }
     const distance = targetKind === "building"
       ? world.buildings.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
       : this.chebyshevDistance(attacker, target);
@@ -135,7 +194,7 @@ export class CombatSystem {
     attacker.state = UNIT_STATES.ATTACKING;
     attacker.order = { type: "attack", targetId: target.id, targetX, targetY };
     attacker.lastAttackTick = world.tick;
-    attacker.nextAttackTick = world.tick + weapon.reloadTicks;
+    attacker.nextAttackTick = world.tick + (continuousFire?.damageIntervalTicks ?? weapon.reloadTicks);
     return RESULT_CODES.OK;
   }
 
@@ -163,7 +222,10 @@ export class CombatSystem {
     ) {
       return false;
     }
-    return this.chebyshevDistance(defender, attacker) <= defender.attackRange;
+    const distance = this.chebyshevDistance(defender, attacker);
+    const weapon = getAttackSourceWeaponAgainstArmor(defender.type, getUnitArmor(attacker.type));
+    const minRange = weapon.minRange ?? 0;
+    return distance >= minRange && distance <= weapon.range;
   }
 
   private processAttackMoveOrders(world: WorldState): void {
@@ -192,16 +254,7 @@ export class CombatSystem {
           }
           if (result === RESULT_CODES.ERR_NOT_IN_RANGE) {
             if (attackMoveOrder.targetId === target.target.id && unit.pathTarget) continue;
-            const targetCell = this.toGridPosition(world, target.target);
-            const moveResult = world.units.setMoveTarget(
-              unit,
-              targetCell.x,
-              targetCell.y,
-              world.tiles,
-              world.buildings.getOccupiedPositions(),
-              true,
-            );
-            if (moveResult === RESULT_CODES.OK) {
+            if (this.moveIntoWeaponRange(world, unit, target.target, target.kind)) {
               unit.order = { ...attackMoveOrder, targetId: target.target.id };
               continue;
             }
@@ -232,10 +285,66 @@ export class CombatSystem {
     }
   }
 
+  private processDefensiveBuildings(world: WorldState): void {
+    const defensiveBuildings = world.buildings.getAllBuildings()
+      .filter((building) => !building.constructionProgress && getBuildingWeapon(building.type))
+      .sort((left, right) => left.id.localeCompare(right.id));
+
+    for (const building of defensiveBuildings) {
+      if (building.nextAttackTick !== undefined && world.tick < building.nextAttackTick) continue;
+      const weapon = getBuildingWeapon(building.type);
+      if (!weapon) continue;
+      const minRange = weapon.minRange ?? 0;
+      const priority = weapon.targetPriority ?? [];
+      const priorityIndex = (unit: WorldUnit): number => {
+        const index = priority.indexOf(unit.type);
+        return index < 0 ? priority.length : index;
+      };
+      const targets = world.units.getAllUnits()
+        .filter((unit) => unit.playerId !== building.playerId)
+        .map((unit) => ({ unit, distance: world.buildings.getDistanceToBuilding(building, unit.x, unit.y) }))
+        .filter(({ distance }) => distance >= minRange && distance <= weapon.range)
+        .sort((left, right) =>
+          priorityIndex(left.unit) - priorityIndex(right.unit)
+          || left.distance - right.distance
+          || left.unit.hp - right.unit.hp
+          || left.unit.id.localeCompare(right.unit.id)
+        );
+      const target = targets[0]?.unit;
+      if (!target) continue;
+      const distance = world.buildings.getDistanceToBuilding(building, target.x, target.y);
+      const flightTicks = weapon.projectileType === "instant"
+        ? 1
+        : Math.max(1, Math.ceil(Math.max(1, distance) / Math.max(1, weapon.projectileSpeed)));
+      world.projectiles.push({
+        id: `projectile_${++world.projectileCounter}`,
+        playerId: building.playerId,
+        attackerId: building.id,
+        attackerType: building.type,
+        projectileType: weapon.projectileType,
+        x: building.x,
+        y: building.y,
+        startX: building.x,
+        startY: building.y,
+        targetX: target.x,
+        targetY: target.y,
+        launchedTick: world.tick,
+        impactTick: world.tick + flightTicks,
+        targetId: target.id,
+        targetKind: "unit",
+        splashRadius: weapon.splashRadius,
+      });
+      building.lastAttackTick = world.tick;
+      building.nextAttackTick = world.tick + weapon.reloadTicks;
+      world.markChanged();
+    }
+  }
+
   private processAttackOrders(world: WorldState): void {
     for (const unit of world.units.getAllUnits()) {
       if (!unit.exists || unit.order?.type !== "attack" || unit.lastAttackTick === world.tick) continue;
-      const result = this.executeAttackOrder(world, unit, unit.playerId, unit.order);
+      const attackOrder = unit.order;
+      const result = this.executeAttackOrder(world, unit, unit.playerId, attackOrder);
       if (result === RESULT_CODES.ERR_INVALID_TARGET && unit.order?.targetId) {
         const target = this.findPrioritizedTarget(world, unit, unit.playerId, unit.order.targetPriority);
         if (target) {
@@ -251,6 +360,15 @@ export class CombatSystem {
         }
         unit.order = { type: "hold" };
         unit.state = UNIT_STATES.IDLE;
+      } else if (result === RESULT_CODES.ERR_NOT_IN_RANGE && attackOrder.targetId) {
+        const target = world.entities.resolve(attackOrder.targetId);
+        if (target && this.moveIntoWeaponRange(world, unit, target.entity, target.kind)) {
+          unit.order = attackOrder;
+          continue;
+        }
+        unit.state = UNIT_STATES.IDLE;
+      } else if (result === RESULT_CODES.ERR_BUSY) {
+        unit.state = UNIT_STATES.ATTACKING;
       } else if (result !== RESULT_CODES.OK && unit.order?.targetId) {
         unit.state = UNIT_STATES.IDLE;
       }
@@ -303,6 +421,85 @@ export class CombatSystem {
     return null;
   }
 
+  private moveIntoWeaponRange(
+    world: WorldState,
+    attacker: WorldUnit,
+    target: WorldUnit | Building,
+    kind: "unit" | "building",
+  ): boolean {
+    const targetArmor = kind === "building"
+      ? getBuildingArmor((target as Building).type)
+      : getUnitArmor((target as WorldUnit).type);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
+    const distance = kind === "building"
+      ? world.buildings.getDistanceToBuilding(target as Building, attacker.x, attacker.y)
+      : this.chebyshevDistance(attacker, target);
+    const minRange = weapon.minRange ?? 0;
+    const candidates = distance < minRange
+      ? this.getMinimumRangeRetreatCandidates(world, attacker, target, kind, minRange, weapon.range)
+      : [this.toGridPosition(world, target)];
+    const blockedPositions = world.buildings.getOccupiedPositions();
+
+    for (const candidate of candidates) {
+      const result = world.units.setMoveTarget(
+        attacker,
+        candidate.x,
+        candidate.y,
+        world.tiles,
+        blockedPositions,
+        true,
+      );
+      if (result !== RESULT_CODES.OK) continue;
+
+      const resolvedTarget = attacker.pathTarget ?? candidate;
+      const resolvedDistance = kind === "building"
+        ? world.buildings.getDistanceToBuilding(target as Building, resolvedTarget.x, resolvedTarget.y)
+        : this.chebyshevDistance(resolvedTarget, target);
+      if (resolvedDistance >= minRange && resolvedDistance <= weapon.range) return true;
+      world.units.clearPath(attacker);
+    }
+    return false;
+  }
+
+  private getMinimumRangeRetreatCandidates(
+    world: WorldState,
+    attacker: WorldUnit,
+    target: WorldUnit | Building,
+    kind: "unit" | "building",
+    minRange: number,
+    maxRange: number,
+  ): Array<{ x: number; y: number }> {
+    const height = world.tiles.length;
+    const width = world.tiles[0]?.length ?? 0;
+    const blockedPositions = world.buildings.getOccupiedPositions();
+    const candidates: Array<{ x: number; y: number; movementDistance: number; targetDistance: number }> = [];
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (blockedPositions.has(`${x},${y}`)) continue;
+        const targetDistance = kind === "building"
+          ? world.buildings.getDistanceToBuilding(target as Building, x, y)
+          : this.chebyshevDistance({ x, y }, target);
+        if (targetDistance < minRange || targetDistance > maxRange) continue;
+        candidates.push({
+          x,
+          y,
+          targetDistance,
+          movementDistance: this.chebyshevDistance(attacker, { x, y }),
+        });
+      }
+    }
+
+    return candidates
+      .sort((left, right) =>
+        left.movementDistance - right.movementDistance
+        || left.targetDistance - right.targetDistance
+        || left.y - right.y
+        || left.x - right.x
+      )
+      .map(({ x, y }) => ({ x, y }));
+  }
+
   private chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
     return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
   }
@@ -322,5 +519,14 @@ export class CombatSystem {
     tolerance = 0.35,
   ): boolean {
     return Math.max(Math.abs(position.x - target.x), Math.abs(position.y - target.y)) <= tolerance;
+  }
+
+  private cancelAttackCycle(attacker: WorldUnit, targetId?: string): void {
+    if (!targetId || attacker.attackWindup?.targetId === targetId) {
+      delete attacker.attackWindup;
+    }
+    if (!targetId || attacker.attackStream?.targetId === targetId) {
+      delete attacker.attackStream;
+    }
   }
 }

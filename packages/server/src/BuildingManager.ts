@@ -6,9 +6,11 @@ import {
   ProductionOrder,
   UnitType,
   canBuildingProduce,
+  getBuildingPrerequisites,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
   getBuildingStats,
+  getUnitPrerequisites,
 } from "@llmcraft/shared";
 
 export const MAX_PENDING_PRODUCTION_PER_UNIT_TYPE = 100;
@@ -139,7 +141,28 @@ export class BuildingManager {
   }
 
   canProduce(building: Building, unitType: UnitType): boolean {
-    return building.exists && !building.constructionProgress && canBuildingProduce(building.type, unitType);
+    return building.exists
+      && !building.constructionProgress
+      && canBuildingProduce(building.type, unitType)
+      && this.getMissingProductionPrerequisites(building.playerId, unitType).length === 0;
+  }
+
+  getMissingBuildingPrerequisites(playerId: PlayerId, buildingType: BuildingType): BuildingType[] {
+    return this.getMissingPrerequisites(playerId, getBuildingPrerequisites(buildingType));
+  }
+
+  getMissingProductionPrerequisites(playerId: PlayerId, unitType: UnitType): BuildingType[] {
+    return this.getMissingPrerequisites(playerId, getUnitPrerequisites(unitType));
+  }
+
+  private getMissingPrerequisites(playerId: PlayerId, required: readonly BuildingType[]): BuildingType[] {
+    if (required.length === 0) return [];
+    const completedTypes = new Set(
+      this.getBuildingsByPlayer(playerId)
+        .filter((building) => !building.constructionProgress)
+        .map((building) => building.type),
+    );
+    return required.filter((buildingType) => !completedTypes.has(buildingType));
   }
 
   getDistanceToBuilding(building: Building, x: number, y: number): number {

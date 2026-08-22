@@ -107,6 +107,17 @@ export interface GameObject {
   exists: boolean;
 }
 
+export interface AttackWindup {
+  targetId: string;
+  startedTick: number;
+  completesAtTick: number;
+}
+
+export interface AttackStream {
+  targetId: string;
+  startedTick: number;
+}
+
 export type UnitIntent =
   | {
       type: "move";
@@ -184,6 +195,10 @@ export interface Unit extends GameObject {
   lastAttackTick?: number;
   // 下一次可开火的 tick，用于武器装填/冷却
   nextAttackTick?: number;
+  // 权威攻击前摇；目标改变、离开射程或收到移动/停止命令时取消
+  attackWindup?: AttackWindup;
+  // 权威持续攻击；目标改变、离开射程或收到移动/停止命令时取消
+  attackStream?: AttackStream;
   // 当前正在施工的建筑 ID；施工时 worker 被占用
   constructingBuildingId?: string;
 }
@@ -205,7 +220,7 @@ export interface ProductionOrder extends ProductionBatchRequest {
   remainingCount: number;
 }
 
-export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn";
+export type ProductionStatus = "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite" | "waiting_for_unit_limit";
 
 export interface ProductionProgress {
   orderId: string;
@@ -215,6 +230,7 @@ export interface ProductionProgress {
   paidCredits: number;
   totalCost: number;
   status: ProductionStatus;
+  missingPrerequisites?: BuildingType[];
 }
 
 export interface Building extends GameObject {
@@ -226,6 +242,9 @@ export interface Building extends GameObject {
   rallyPoint?: RallyPoint;
   productionQueue: ProductionOrder[];
   productionProgress?: ProductionProgress;
+  /** Defensive structures use the same deterministic weapon cooldown semantics as units. */
+  lastAttackTick?: number;
+  nextAttackTick?: number;
   constructionProgress?: {
     workerId: string;
     remainingTicks: number;
@@ -256,7 +275,7 @@ export interface ActiveProjectile {
   id: string;
   playerId: PlayerId;
   attackerId: string;
-  attackerType: UnitType;
+  attackerType: AttackTargetType;
   projectileType: ProjectileType;
   x: number;
   y: number;
@@ -704,6 +723,8 @@ export interface TickDeltaRecord {
       carryCapacity?: number;
       heading?: number;
       intent?: UnitIntent | null;
+      attackWindup?: AttackWindup | null;
+      attackStream?: AttackStream | null;
       constructingBuildingId?: string | null;
     }>;
     buildings: Array<{
@@ -718,6 +739,8 @@ export interface TickDeltaRecord {
       productionQueue?: ProductionOrder[];
       productionProgress?: Building["productionProgress"] | null;
       constructionProgress?: Building["constructionProgress"] | null;
+      lastAttackTick?: number;
+      nextAttackTick?: number;
     }>;
   }>;
   newLogs: GameLog[];

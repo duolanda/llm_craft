@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-07-16
+日期: 2026-08-09
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -428,19 +428,25 @@ interface AgentRunInput {
 
 当前规则由 shared 的 `standard` ruleset 描述：
 
-- 单位类型仍是 `worker | soldier | rifleman | rocket_soldier | light_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
-- 建筑类型是 `hq | barracks | war_factory | refinery`
+- 单位类型是 `worker | soldier | rifleman | rocket_soldier | commando | light_tank | flame_tank | heavy_tank`；`soldier` 只为旧录像、既有状态和战斗目标兼容保留，standard 新对局不可生产
+- 建筑类型是 `hq | barracks | war_factory | refinery | machine_gun_turret | anti_tank_turret | tech_center`
 - `hq` 可生产 `worker`
-- `barracks` 可生产 `rifleman | rocket_soldier`
-- `war_factory` 可生产 `light_tank`
+- `barracks` 可生产 `rifleman | rocket_soldier`；完成 `tech_center` 后还可生产全局限造 1 名的 `commando`
+- `war_factory` 是 T2 生产建筑，可生产 `light_tank | flame_tank`；完成 `tech_center` 后还可生产 `heavy_tank`
 - `refinery` 是 worker 的采矿卸载点，不生产单位
-- 当前采用 144x96 三战线大战场尺度：兼容单位 `soldier` 保留 115 HP / 10 damage / range 1 / vision 5 / cost 55 / reload 3；`rifleman` 95 HP / 9 damage / range 6 / vision 7 / cost 70 / reload 2；`rocket_soldier` 80 HP / 34 damage / range 6 / vision 7 / cost 110 / reload 8；`light_tank` 420 HP / 42 damage / range 5 / vision 7 / cost 240 / reload 6
-- 伤害按目标 armor 计算：`soldier` 对 infantry 1x、vehicle 0.25x、structure 0.35x；`rifleman` 对 infantry 1.45x、vehicle 0.25x、structure 0.35x；`rocket_soldier` 对 infantry 0.35x、vehicle 2.25x、structure 0.9x；`light_tank` 对 infantry 0.8x、vehicle 1x、structure 0.9x
-- 攻击结算为 weapon/projectile/warhead 模型：命令成功会生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 和 `light_tank` 有 1 格 splash；`ok: true` 不表示目标 HP 已经立即变化。
+- `machine_gun_turret` 是 T1 反步兵防御，要求已完成 `barracks`；`anti_tank_turret` 是 T2 反装甲防御，要求已完成 `war_factory`
+- 科技层级由已完成建筑推导：基础为 T1，完成 `war_factory` 为 T2，完成 `tech_center` 为 T3；`war_factory` 要求 `barracks`，`tech_center` 要求 `war_factory`
+- 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 560 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 1 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
+- `commando` 为 T3 特种兵：160 HP / speed 1.2 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
+- 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 4 / 0.2 / 4，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 24 / 1 / 24 伤害；它以高于轻坦的生命和持续贴住目标的反步兵/攻坚 DPS 换取完全放弃载具对拼能力，而不是载具对拼升级
+- 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 1 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
+- `Unit.attackWindup?: { targetId; startedTick; completesAtTick }` 暴露当前权威攻击前摇，录像 delta 同步记录该字段，客户端只据此表现点火提示。
+- `Unit.attackStream?: { targetId; startedTick }` 暴露当前权威持续攻击，录像 delta 同步记录该字段；客户端据此显示连续喷火，并有意隐藏仅用于伤害结算的逐 tick 火焰 projectile。
 - 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
 - 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
 - `UNIT_STATS` / `BUILDING_STATS` 是 `standard` ruleset 的便捷只读视图，供 UI、诊断和测试使用
+- `ENTITY_GEOMETRY` 是模拟碰撞和已发布 GLB 主体共用的格尺寸规格；车辆炮管、天线和排气附件不属于碰撞主体
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、当前生产关系、成本和攻击能力判断；standard 的生产 helper 会过滤兼容性退役单位，即使底层 legacy ruleset 数据仍保留其历史数值和建筑关联。工具 schema 已接受新增 unit/building 类型。
 
@@ -590,11 +596,13 @@ interface CommandProvenance {
   canBuildBarracks: boolean;
   canBuildWarFactory: boolean;
   canBuildRefinery: boolean;
+  canBuildTechCenter: boolean;
   canQueueWorker: boolean;
   canQueueSoldier: boolean; // 兼容字段；standard 恒为 false
   canQueueRifleman: boolean;
   canQueueRocketSoldier: boolean;
   canQueueLightTank: boolean;
+  queueAvailability: Record<UnitType, boolean>;
   retiredProductionUnitTypes: UnitType[]; // standard 当前为 ["soldier"]
   economyStatus: {
     workers: number;
@@ -619,26 +627,32 @@ interface CommandProvenance {
   buildingCosts: Partial<Record<BuildingType, number>>;
   buildingConstructionTicks: Partial<Record<BuildingType, number>>;
   buildOptions: Array<{
-    buildingType: "barracks" | "war_factory" | "refinery";
+    buildingType: Exclude<BuildingType, "hq">;
     cost: number;
     constructionTicks: number;
     prerequisiteMet: boolean;
+    missingPrerequisites: BuildingType[];
     affordable: boolean;
     availableBuilderIds: string[];
   }>;
   techStatus: {
     own: {
+      tier: 1 | 2 | 3;
       workers: number;
       combatUnits: number;
+      unitsByType: Record<UnitType, number>;
       riflemen: number;
       rocketSoldiers: number;
       lightTanks: number;
       barracks: number;
       warFactories: number;
+      refineries: number;
+      techCenters: number;
     };
     enemy: {
+      tier: 1 | 2 | 3;
       hasWarFactory: boolean;
-      lightTanks: number;
+      lightTanks: number; // 兼容字段；当前返回已观察敌方全部 vehicle 数量
       rocketSoldiers: number;
     };
   };
@@ -781,18 +795,18 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
   unitIds: string[];
   x: number;
   y: number;
-  priority?: Array<"worker" | "soldier" | "rifleman" | "rocket_soldier" | "light_tank" | "hq" | "barracks" | "war_factory" | "refinery">;
+  priority?: AttackTargetType[];
 }
 ```
 
 说明：
 
 - 语义等同于框选多个战斗单位后下达同一无目标推进命令
-- 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：`rifleman` 默认优先清火箭/步兵，`rocket_soldier` 默认优先打 `light_tank`，`light_tank` 默认优先打敌方装甲和反装甲支援，其后才拆生产建筑/HQ/精炼厂
+- 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：反步兵、反装甲、攻城单位分别按 ruleset 的目标顺序索敌；攻城单位不会攻击落入自身最小射程的目标
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
-- 不用于指定攻击某个目标或建筑；点杀敌军、拆 HQ、拆 barracks、拆 war_factory、拆 refinery 应使用 `attack`
-- 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`
+- 不用于指定攻击某个目标或建筑；点杀敌军或拆指定建筑应使用 `attack`
+- 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`。射程外单位会持续追击；建筑目标按射程和来向为同批攻击者预约互不重叠的近侧射击位，单位进入射程后立即停止移动并开火。对同一目标重复调用不会重置仍在执行的追击路径
 
 #### `attack`
 
@@ -807,7 +821,7 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 
 - 框选的所有合法战斗单位对同一 `targetId` 下达持续攻击命令
 - `targetId` 必须来自全图情报中的敌方单位或建筑 ID
-- 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击
+- 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击；目标进入武器最小射程内时，单位会先退到合法射界，避免原地重复提交超近攻击
 - 聚焦目标在观察后、首次命令提交前死亡时，攻击者会立刻在自身自动索敌视野内按同样规则换目标，成功结果携带 `retargetedFrom`；持续攻击中目标消失时也会重选。排序先看正在威胁友军的目标，再按兵种默认优先级、距离、残血和稳定 ID
 - 附近没有合法目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则转为 hold 并清掉旧追击路径
 - `targetStatus` 在目标曾被当前控制器观察且后来消失时为 `destroyed`；友军 ID 为 `not_enemy`；其他未知 ID 为 `invalid_id`
@@ -818,13 +832,13 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 {
   buildingId: string;
   units: Array<{
-    unitType: "worker" | "rifleman" | "rocket_soldier" | "light_tank";
+    unitType: "worker" | "rifleman" | "rocket_soldier" | "commando" | "light_tank" | "flame_tank" | "heavy_tank";
     count: number; // 1..100
   }>;
 }
 ```
 
-`units` 是追加到该建筑的有限批次，严格按数组顺序生产。standard 中请求 `soldier` 会返回 `invalid_spawn_request`，旧录像或已有状态中的 soldier 仍可正常观察、移动、攻击和回放。每座建筑每种可生产单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；当期 credits 不够时当前单位暂停且不丢进度，有收入后自动继续。单位真正完成时累计扣款恰好等于其完整造价。
+`units` 是追加到该建筑的有限批次，严格按数组顺序生产。standard 中请求 `soldier` 会返回 `invalid_spawn_request`，旧录像或已有状态中的 soldier 仍可正常观察、移动、攻击和回放。每座建筑每种可生产单位最多保留 100 个待生产单位；同一调用中重复兵种也会合并计入该上限。`commando` 另有玩家级限造：存活单位与所有建筑已排队数量合计不得超过 1，达到上限时新请求返回 `unit_limit_reached`；兼容导入的已有超额队列会显示 `waiting_for_unit_limit`，在名额释放后继续。入队不扣全款，ProductionSystem 按生产进度逐 tick 扣款；credits 不够时当前单位暂停且不丢进度。T3 当前单位开始后即使 `tech_center` 被摧毁也会完成，后续 T3 单位转为 `waiting_for_prerequisite`，重建后自动恢复。
 
 ```ts
 interface ProductionOrder {
@@ -841,7 +855,8 @@ interface ProductionProgress {
   totalTicks: number;
   paidCredits: number;
   totalCost: number;
-  status: "producing" | "waiting_for_credits" | "waiting_for_spawn";
+  status: "producing" | "waiting_for_credits" | "waiting_for_spawn" | "waiting_for_prerequisite" | "waiting_for_unit_limit";
+  missingPrerequisites?: BuildingType[];
 }
 ```
 
@@ -851,7 +866,7 @@ interface ProductionProgress {
 { buildingIds?: string[] }
 ```
 
-省略 `buildingIds` 时返回全部己方 HQ、兵营和重工。结果包含严格有序的 `queue`、当前 `progress`、`pendingByUnitType`、每兵种上限和当前 credits。
+省略 `buildingIds` 时返回全部己方 HQ、兵营和重工。结果包含严格有序的 `queue`、当前 `progress`、`pendingByUnitType`、每兵种上限、当前 credits，以及逐单位的 `productionOptions[].unlocked/missingPrerequisites`。
 
 #### `cancel_production`
 
@@ -874,7 +889,7 @@ interface ProductionProgress {
 ```ts
 {
   unitId: string;
-  buildingType: "barracks" | "war_factory" | "refinery";
+  buildingType: Exclude<BuildingType, "hq">;
   x?: number;
   y?: number;
 }
@@ -882,13 +897,13 @@ interface ProductionProgress {
 
 说明：
 
-- 当前允许建造 `barracks`、`war_factory` 和 `refinery`
-- `war_factory` 需要己方已有一个已完成的 `barracks`
+- 当前允许建造 `barracks`、`war_factory`、`refinery`、`machine_gun_turret`、`anti_tank_turret` 和 `tech_center`
+- `war_factory` 与 `machine_gun_turret` 需要已完成 `barracks`；`anti_tank_turret` 与 `tech_center` 需要已完成 `war_factory`
 - 省略 `x/y` 时自动选择合法工地；普通生产建筑优先沿 HQ 朝战场方向横向展开，同批尚未落地的建造计划会预留 footprint 外一格，避免贴边或竖向封住 HQ 出口；`refinery` 按可缩短的矿点交付路线排序。显式传入时使用指定建筑中心
 - worker 不在 footprint 旁时，工具会注册持久建造任务，自动移动；只有工人实际与完整 footprint 相邻时才进入建造步骤
 - 建造成功会立即扣 credits 并创建施工中的建筑；施工中建筑占地、可被攻击，但不能生产，也不满足科技前置
-- 施工会占用该 worker；如果建造前处于 `harvest_loop`，完工后自动恢复原采矿循环
-- 默认施工时间：`barracks` 12 ticks，`war_factory` 18 ticks，`refinery` 16 ticks
+- 施工会占用该 worker；如果建造前处于 `harvest_loop`，完工后自动恢复原采矿循环；没有原任务可恢复时自动选择矿路开始采矿
+- 默认施工时间：`barracks` 12 ticks，`war_factory` 18 ticks，`refinery` 16 ticks，`machine_gun_turret` 14 ticks，`anti_tank_turret` 20 ticks，`tech_center` 28 ticks
 - `refinery` 是交付点，不改变 worker 每 tick 的采集速度；收益来自缩短矿点与交付点之间的反复路线，因此贴 HQ 建造通常收益很小
 - 自动选址成功时，结果中的 `estimatedRouteSaving` 和 `nearbyResources` 说明该工地对矿点路线的影响
 - 建筑必须建在空地上，且要给己方 `HQ` 周围留出一圈空地
@@ -908,6 +923,7 @@ interface ProductionProgress {
 
 - `unitIds` 接受一个或多个己方 `worker`；同一批显式坐标会应用到所有选中 worker
 - 让 worker 进入内建采矿循环，在资源点和最近的己方已完成 HQ/refinery 之间自动往返
+- 开局 worker 和没有显式 rally point 的新 worker 默认已经获得自动采矿循环；该工具主要用于主动改派、从 hold/移动任务恢复或显式指定矿点
 - 省略 `x/y` 时，游戏按反复交付路程、worker 初始路程和当前分配数自动选择矿点；交付路程权重更高，避免近矿尚可用时仅为分散分配跑去远矿
 - 单个矿点最多保留 2 个 worker；超出后内建循环会自动改派到下一条高效路线，避免多个单位围住单格矿点
 - 显式传入 `x/y` 会尊重该矿点，只应在需要主动覆盖自动选择时使用
@@ -1055,7 +1071,7 @@ type PlanStepCondition =
 }
 ```
 
-示例：先用即时 `start_harvest_loop` 把另外 3 个开局 worker 挂矿，再为保留的 builder 注册兵营建造计划。兵营完成后另用一次 `spawn_unit({ buildingId, units: [{ unitType: "rifleman", count: 6 }] })` 注册有限生产批次。
+示例：开局 worker 会自动采矿；为 builder 注册兵营建造计划会暂时覆盖其采矿任务，完工后自动恢复。兵营完成后另用一次 `spawn_unit({ buildingId, units: [{ unitType: "rifleman", count: 6 }] })` 注册有限生产批次。
 
 ```json
 {

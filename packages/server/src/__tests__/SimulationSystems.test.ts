@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, getUnitStats, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, getAttackDamageAgainstUnit, getUnitStats, RESULT_CODES, UNIT_TYPES } from "@llmcraft/shared";
 import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { WorldState } from "../WorldState";
 import { ConstructionSystem } from "../simulation/ConstructionSystem";
@@ -254,6 +254,26 @@ describe("simulation systems", () => {
     }
   });
 
+  it("separates canonical heavy and light tank bodies in a dense vehicle pile", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const vehicles = [
+      world.createUnit(UNIT_TYPES.HEAVY_TANK, 70, 50, "player_1"),
+      world.createUnit(UNIT_TYPES.HEAVY_TANK, 70.8, 50.2, "player_2"),
+      world.createUnit(UNIT_TYPES.LIGHT_TANK, 69.5, 49.7, "player_1"),
+    ];
+
+    for (let tick = 0; tick < 16; tick++) new MovementSystem().step(world);
+
+    for (let leftIndex = 0; leftIndex < vehicles.length; leftIndex++) {
+      for (let rightIndex = leftIndex + 1; rightIndex < vehicles.length; rightIndex++) {
+        expect(getCollisionManifold(
+          getUnitCollisionShape(vehicles[leftIndex]),
+          getUnitCollisionShape(vehicles[rightIndex]),
+        )).toBeNull();
+      }
+    }
+  });
+
   it.each([
     UNIT_TYPES.WORKER,
     UNIT_TYPES.RIFLEMAN,
@@ -294,6 +314,24 @@ describe("simulation systems", () => {
     expect(target.exists).toBe(true);
     expect(events).toEqual([]);
     expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(target))).toBeNull();
+  });
+
+  it.each([
+    UNIT_TYPES.LIGHT_TANK,
+    UNIT_TYPES.FLAME_TANK,
+    UNIT_TYPES.HEAVY_TANK,
+  ])("makes a commando immune to %s crushing", (tankType) => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const tank = world.createUnit(tankType, 70, 50, "player_1");
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 72, 50, "player_2");
+    tank.path = [{ x: 71, y: 50 }];
+    tank.pathTarget = { x: 71, y: 50 };
+
+    const events = new MovementSystem().step(world);
+
+    expect(commando.exists).toBe(true);
+    expect(events).toEqual([]);
+    expect(getCollisionManifold(getUnitCollisionShape(tank), getUnitCollisionShape(commando))).toBeNull();
   });
 
   it("does not crush enemy infantry merely because stationary bodies overlap", () => {
@@ -404,6 +442,7 @@ describe("simulation systems", () => {
     expect(JSON.parse(JSON.stringify(events))).toEqual(events);
     expect(building.constructionProgress).toBeUndefined();
     expect(worker.constructingBuildingId).toBeUndefined();
+    expect(worker.order).toMatchObject({ type: "harvest_loop" });
   });
 
   it("restores a worker's harvest loop after construction", () => {
@@ -592,6 +631,237 @@ describe("simulation systems", () => {
 
     expect(world.projectiles.some((projectile) => projectile.targetId === replacement.id)).toBe(true);
     expect(attacker.order).toMatchObject({ type: "attack", targetId: replacement.id });
+  });
+
+  it("assigns a newly produced worker to a harvest loop when no rally point overrides it", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const hq = world.buildings.getBuildingsByPlayer("player_1")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const [order] = world.buildings.enqueueProduction(hq, [{ unitType: UNIT_TYPES.WORKER, count: 1 }]);
+    hq.productionProgress = {
+      orderId: order.orderId,
+      unitType: UNIT_TYPES.WORKER,
+      remainingTicks: 1,
+      totalTicks: 1,
+      paidCredits: 0,
+      totalCost: 50,
+      status: "producing",
+    };
+
+    const event = new ProductionSystem().step(world)
+      .find((candidate) => candidate.type === "unit_spawned");
+
+    expect(event?.type).toBe("unit_spawned");
+    if (!event || event.type !== "unit_spawned") return;
+    expect(world.units.getUnit(event.unitId)?.order).toMatchObject({ type: "harvest_loop" });
+  });
+
+  it("lets completed defensive buildings acquire targets and deal armor-aware projectile damage", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const turret = world.createBuilding(BUILDING_TYPES.MACHINE_GUN_TURRET, 40, 40, "player_1");
+    const rifleman = world.createUnit(UNIT_TYPES.RIFLEMAN, 44, 40, "player_2");
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 45, 42, "player_2");
+    const initialHp = rifleman.hp;
+
+    new CombatSystem().step(world);
+
+    expect(world.projectiles).toEqual([
+      expect.objectContaining({
+        attackerId: turret.id,
+        attackerType: BUILDING_TYPES.MACHINE_GUN_TURRET,
+        targetId: rifleman.id,
+        targetKind: "unit",
+      }),
+    ]);
+    world.tick = world.projectiles[0]!.impactTick;
+    new ProjectileSystem().step(world);
+    expect(rifleman.hp).toBe(initialHp - getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.RIFLEMAN));
+    expect(flameTank.hp).toBe(flameTank.maxHp);
+  });
+
+  it("does not launch a flame projectile until the authoritative windup completes", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const closeTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+
+    const result = combat.executeAttackOrder(world, flameTank, "player_1", {
+      type: "attack",
+      targetId: closeTarget.id,
+    });
+
+    expect(result).toBe(RESULT_CODES.ERR_BUSY);
+    expect(flameTank.attackWindup).toEqual({ targetId: closeTarget.id, startedTick: 0, completesAtTick: 1 });
+    expect(world.projectiles).toHaveLength(0);
+    world.tick = 1;
+    combat.step(world);
+    expect(flameTank.attackWindup).toBeUndefined();
+    expect(flameTank.attackStream).toEqual({ targetId: closeTarget.id, startedTick: 1 });
+    expect(world.projectiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ attackerId: flameTank.id, targetId: closeTarget.id, projectileType: "flame" }),
+    ]));
+  });
+
+  it("keeps applying flame damage every tick while the target remains in range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const initialHp = target.hp;
+    const combat = new CombatSystem();
+    const projectiles = new ProjectileSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+
+    world.tick = 2;
+    combat.step(world);
+    world.tick = 3;
+    projectiles.step(world);
+    combat.step(world);
+    world.tick = 4;
+    projectiles.step(world);
+    combat.step(world);
+
+    expect(target.hp).toBe(initialHp - getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.RIFLEMAN) * 2);
+    expect(flameTank.attackStream).toEqual({ targetId: target.id, startedTick: 2 });
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === flameTank.id)).toEqual([
+      expect.objectContaining({ targetId: target.id, launchedTick: 4 }),
+    ]);
+  });
+
+  it("interrupts a flame stream immediately and requires a new windup after retargeting", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const firstTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const secondTarget = world.createUnit(UNIT_TYPES.RIFLEMAN, 40, 42, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: firstTarget.id });
+    world.tick = 2;
+    combat.step(world);
+
+    world.tick = 3;
+    const result = combat.executeAttackOrder(world, flameTank, "player_1", {
+      type: "attack",
+      targetId: secondTarget.id,
+    });
+
+    expect(result).toBe(RESULT_CODES.ERR_BUSY);
+    expect(flameTank.attackStream).toBeUndefined();
+    expect(flameTank.attackWindup).toEqual({
+      targetId: secondTarget.id,
+      startedTick: 3,
+      completesAtTick: 4,
+    });
+  });
+
+  it("interrupts an active flame stream on hold", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+    world.tick = 2;
+    combat.step(world);
+
+    expect(flameTank.attackStream).toBeDefined();
+    world.units.holdPosition(flameTank);
+    expect(flameTank.attackStream).toBeUndefined();
+  });
+
+  it("interrupts an active flame stream when the target leaves firing range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+    world.tick = 2;
+    combat.step(world);
+
+    target.x = 48;
+    world.tick = 3;
+    combat.step(world);
+
+    expect(flameTank.attackStream).toBeUndefined();
+    expect(flameTank.pathTarget).toBeDefined();
+  });
+
+  it("cancels a flame windup when its target leaves the short firing range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 42, 40, "player_2");
+    const combat = new CombatSystem();
+    combat.executeAttackOrder(world, flameTank, "player_1", { type: "attack", targetId: target.id });
+
+    target.x = 48;
+    world.tick = 1;
+    combat.step(world);
+
+    expect(flameTank.attackWindup).toBeUndefined();
+    expect(world.projectiles).toHaveLength(0);
+    expect(flameTank.pathTarget).toBeDefined();
+  });
+
+  it("lets a commando kill infantry with one long-range rifle hit", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.RIFLEMAN, 46, 40, "player_2");
+    const combat = new CombatSystem();
+
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: target.id,
+    })).toBe(RESULT_CODES.OK);
+    const shot = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    expect(shot).toMatchObject({ projectileType: "bullet", targetId: target.id });
+    world.tick = shot.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(target.exists).toBe(false);
+    expect(target.hp).toBe(0);
+  });
+
+  it("leaves vehicles unharmed by commando rifle fire", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 45, 40, "player_2");
+    const initialHp = tank.hp;
+    const combat = new CombatSystem();
+
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: tank.id,
+    })).toBe(RESULT_CODES.OK);
+    const shot = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    world.tick = shot.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(tank.hp).toBe(initialHp);
+    expect(tank.exists).toBe(true);
+  });
+
+  it("requires a commando to reach a building before C4 destroys it in one hit", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const commando = world.createUnit(UNIT_TYPES.COMMANDO, 40, 40, "player_1");
+    const barracks = world.createBuilding(BUILDING_TYPES.BARRACKS, 44, 40, "player_2");
+    const combat = new CombatSystem();
+    commando.order = { type: "attack", targetId: barracks.id };
+
+    combat.step(world);
+    expect(commando.pathTarget).toBeDefined();
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === commando.id)).toHaveLength(0);
+
+    commando.x = 41;
+    commando.y = 40;
+    world.units.clearPath(commando);
+    expect(combat.executeAttackOrder(world, commando, "player_1", {
+      type: "attack",
+      targetId: barracks.id,
+    })).toBe(RESULT_CODES.OK);
+    const charge = world.projectiles.find((projectile) => projectile.attackerId === commando.id)!;
+    expect(charge).toMatchObject({ projectileType: "demolition", targetId: barracks.id });
+    world.tick = charge.impactTick;
+    new ProjectileSystem().step(world);
+
+    expect(barracks.exists).toBe(false);
+    expect(barracks.hp).toBe(0);
   });
 
   it("delivers a full load while the worker remains on a resource inside refinery range", () => {

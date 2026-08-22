@@ -151,6 +151,20 @@ export class WorldState {
     return this.playerStates.map((player) => player.id);
   }
 
+  getCommittedUnitCount(playerId: PlayerId, unitType: UnitType): number {
+    const living = this.units.getUnitsByPlayer(playerId)
+      .filter((unit) => unit.type === unitType)
+      .length;
+    const pending = this.buildings.getBuildingsByPlayer(playerId).reduce(
+      (total, building) => total + building.productionQueue.reduce(
+        (queueTotal, order) => queueTotal + (order.unitType === unitType ? order.remainingCount : 0),
+        0,
+      ),
+      0,
+    );
+    return living + pending;
+  }
+
   getPlayerCredits(): Array<[PlayerId, number]> {
     return this.playerStates.map((player) => [player.id, player.resources.credits]);
   }

@@ -28,20 +28,26 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 地图为 ${definition.map.width}x${definition.map.height}，我方 HQ 在 ${formatPoint(myHQ)}，敌方 HQ 在 ${formatPoint(enemyHQ)}
 - 地图较大，可以根据战场局势自主选择集中进攻、多方向进攻、分兵骚扰或兵团作战
 - 状态读取工具提供完整战场信息；单位执行无目标推进时的自动索敌仍受自身 visionRange 限制
-- 建筑有 hq、barracks、war_factory、refinery；当前可生产单位有 worker、rifleman、rocket_soldier、light_tank
-- HQ 生产 worker，barracks 生产 rifleman 和 rocket_soldier，war_factory 生产 light_tank
-- worker 负责采集有限矿藏和建造建筑；多个 worker 可共用同一矿点，分配数不是硬性容量上限
+- 建筑有 hq、barracks、war_factory、refinery、machine_gun_turret、anti_tank_turret、tech_center
+- HQ 生产 worker；barracks 是 T1，生产 rifleman 和 rocket_soldier，并在 tech_center 完成后生产全局限造 1 名的 commando；war_factory 是 T2，生产 light_tank 和 flame_tank，并在 tech_center 完成后生产 heavy_tank
+- worker 负责采集有限矿藏和建造建筑；开局和新生产的 worker 默认自动采矿，显式命令可覆盖；多个 worker 可共用同一矿点，分配数不是硬性容量上限
 - refinery 是矿物交付点，不直接提高采集速度；它的价值在于缩短矿点到交付点的往返路线，因此建在 HQ 旁边通常收益很小
 - 采矿时省略矿点坐标会按交付路程、worker 初始路程和当前分配自动选择；只在需要刻意指定矿点时传坐标
-- war_factory 需要己方已完成 barracks；施工会在多个 tick 内占用 worker
+- war_factory 和 machine_gun_turret 需要已完成 barracks；anti_tank_turret 和 tech_center 需要已完成 war_factory。tech_center 标志 T3；施工会在多个 tick 内占用 worker
+- 科技建筑被摧毁后，已经完成的单位与防御塔保留；正在生产的当前高阶单位完成，后续不满足前置的订单暂停，重建科技后自动恢复
 - 经济循环稳定后，worker 的数量应根据收入、路线拥堵和建造需求决定；生产建筑完成后，应及时将资源转化为初始战斗力
 
 ## 单位定位
 
-- worker：负责采集和建造，没有战斗能力
-- rifleman：基础远程反步兵单位，适合对抗其他步兵和缺少保护的反载具步兵；对载具和建筑效果较差
-- rocket_soldier：远程反载具单位，对 light_tank 和建筑效果较好；攻击慢、有最小射程，对普通步兵效果很差，需要其他单位保护
-- light_tank：高生命值的装甲单位，适合正面推进并能造成范围伤害；普通步兵难以有效伤害它，但 rocket_soldier 对它威胁很大
+- worker：经济与建造单位。强于：无。弱于：所有战斗单位。特点：没有战斗能力，负责采矿和建造建筑
+- rifleman：基础远程步兵。强于：步兵。弱于：载具、建筑。特点：适合保护反载具步兵
+- rocket_soldier：远程反装甲步兵。强于：载具、建筑。弱于：步兵。特点：攻击慢且有最小射程，需要其他单位保护
+- commando：T3 精锐狙击步兵，使用步枪消灭步兵，并贴近建筑放置 C4。强于：步兵、建筑。弱于：载具。特点：对步兵和建筑一击必杀，无法伤害载具，免疫坦克碾压，全局存活与排队合计限 1 名
+- light_tank：通用装甲突击单位。强于：载具、建筑。弱于：反装甲单位。特点：耐久较高并能造成范围伤害，可碾压普通步兵
+- flame_tank：T2 近程喷火突击载具，短暂预热后持续喷射范围火焰。强于：步兵、建筑。弱于：载具、反坦克塔。特点：生命高于轻坦，对步兵和建筑的持续输出远超轻坦；敌方步兵密集或需要快速摧毁建筑时优先考虑，但移动、保持位置、换目标或目标离开射程会中断喷火，可碾压普通步兵
+- heavy_tank：缓慢而坚固的 T3 主战坦克。强于：载具、建筑。弱于：成规模的 rocket_soldier。特点：造价高，可碾压普通步兵
+- machine_gun_turret：T1 反步兵防御塔。强于：步兵。弱于：载具。特点：对载具效果很差
+- anti_tank_turret：T2 反装甲防御塔。强于：载具。弱于：步兵。特点：能够有效克制载具
 - 克制关系会显著影响交战结果，但不能代替对数量、阵型、位置和战场时机的判断
 
 ## 工具与行动

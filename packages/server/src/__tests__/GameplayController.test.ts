@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Game } from "../Game";
 import { GameplayController } from "../controller/GameplayController";
 import { executeAgentTool, getAgentToolDefinitions } from "../agent/AgentTools";
-import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint, getUnitProductionTicks } from "@llmcraft/shared";
+import { BUILDING_TYPES, DEFAULT_MAP_LAYOUT, TILE_TYPES, UNIT_TYPES, getBuildingConstructionTicks, getBuildingFootprint, getDistanceToBuildingFootprint, getUnitProductionTicks } from "@llmcraft/shared";
 
 describe("GameplayController", () => {
   const player1BuildSite = { x: DEFAULT_MAP_LAYOUT.player1Hq.x + 16, y: DEFAULT_MAP_LAYOUT.player1Hq.y };
@@ -166,7 +166,7 @@ describe("GameplayController", () => {
     }).result).toMatchObject({
       ok: false,
       error: "invalid_spawn_request",
-      validUnitTypes: [UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER],
+      validUnitTypes: [UNIT_TYPES.RIFLEMAN, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.COMMANDO],
     });
     expect(gameplayController.getMyState().result).toMatchObject({
       canQueueSoldier: false,
@@ -205,6 +205,65 @@ describe("GameplayController", () => {
     expect(afterCancel.queues[0].queue[0].unitType).toBe(UNIT_TYPES.ROCKET_SOLDIER);
   });
 
+  it("exposes the derived tech tier and blocks T3 production until a tech center is complete", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 24, 48, "player_1");
+    const factory = game.getBuildingManager().createBuilding(BUILDING_TYPES.WAR_FACTORY, 32, 48, "player_1");
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      queueAvailability: expect.objectContaining({
+        [UNIT_TYPES.LIGHT_TANK]: true,
+        [UNIT_TYPES.FLAME_TANK]: true,
+        [UNIT_TYPES.HEAVY_TANK]: false,
+      }),
+      techStatus: { own: expect.objectContaining({ tier: 2 }) },
+    });
+    expect(gameplayController.spawnUnit(factory.id, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 1 }]).result).toMatchObject({
+      ok: false,
+      error: "missing_prerequisite",
+      missingPrerequisites: [BUILDING_TYPES.TECH_CENTER],
+    });
+
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.TECH_CENTER, 40, 48, "player_1");
+    const upgradedController = new GameplayController(game, "player_1");
+    expect(upgradedController.getMyState().result).toMatchObject({
+      queueAvailability: expect.objectContaining({
+        [UNIT_TYPES.HEAVY_TANK]: true,
+      }),
+      techStatus: { own: expect.objectContaining({ tier: 3 }) },
+    });
+    expect(upgradedController.spawnUnit(factory.id, [{ unitType: UNIT_TYPES.HEAVY_TANK, count: 1 }]).result).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("exposes and enforces the player-wide Commando limit", () => {
+    const game = new Game();
+    const barracks = game.getBuildingManager().createBuilding(BUILDING_TYPES.BARRACKS, 24, 48, "player_1");
+    game.getBuildingManager().createBuilding(BUILDING_TYPES.TECH_CENTER, 32, 48, "player_1");
+    const gameplayController = new GameplayController(game, "player_1");
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      canQueueCommando: true,
+      unitLimits: {
+        commando: { limit: 1, committed: 0 },
+      },
+    });
+    expect(gameplayController.spawnUnit(barracks.id, [{ unitType: UNIT_TYPES.COMMANDO, count: 1 }]).result)
+      .toMatchObject({ ok: true });
+    game.processCommands();
+
+    expect(gameplayController.getMyState().result).toMatchObject({
+      canQueueCommando: false,
+      unitLimits: {
+        commando: { limit: 1, committed: 1 },
+      },
+    });
+    expect(gameplayController.spawnUnit(barracks.id, [{ unitType: UNIT_TYPES.COMMANDO, count: 1 }]).result)
+      .toMatchObject({ ok: false, error: "unit_limit_reached", limit: 1 });
+  });
+
   it("exposes instantaneous phase separately from durable intent", () => {
     const game = new Game();
     const gameplayController = new GameplayController(game, "player_1");
@@ -222,6 +281,9 @@ describe("GameplayController", () => {
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
     const workers = game.getState().players[0].units.filter((unit) => unit.type === UNIT_TYPES.WORKER).slice(0, 2);
+    for (const worker of workers) gameplayController.holdUnit(worker.id);
+    game.processCommands();
+    gameplayController.takeIssuedCommands();
 
     const assigned = executeAgentTool(gameplayController, "start_harvest_loop", {
       unitIds: workers.map((worker) => worker.id),
@@ -1049,10 +1111,10 @@ describe("GameplayController", () => {
           code: "missing_prerequisite",
           details: expect.objectContaining({
             buildingType: BUILDING_TYPES.WAR_FACTORY,
-            requiredBuildingType: BUILDING_TYPES.BARRACKS,
+            missingPrerequisites: [BUILDING_TYPES.BARRACKS],
           }),
         }),
-        waitingReason: expect.stringContaining("required"),
+        waitingReason: expect.stringContaining("barracks"),
       }),
     ]);
   });
@@ -1115,17 +1177,18 @@ describe("GameplayController", () => {
 
     expect(result.economyStatus).toMatchObject({
       workers: 4,
-      activeHarvesters: 2,
-      idleWorkers: 2,
+      activeHarvesters: 4,
+      idleWorkers: 0,
       carryingCredits: 0,
     });
     const assignedResources = result.economyStatus.resourceAssignments.filter(
-      (assignment) => assignment.assignedHarvesters === 1,
+      (assignment) => Number(assignment.assignedHarvesters) > 0,
     );
-    expect(assignedResources).toHaveLength(2);
+    expect(assignedResources.length).toBeGreaterThanOrEqual(2);
+    expect(assignedResources.reduce((sum, assignment) => sum + Number(assignment.assignedHarvesters), 0)).toBe(4);
     expect(assignedResources).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), assignedHarvesters: 1 }),
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), assignedHarvesters: expect.any(Number) }),
       ])
     );
     for (const assignment of assignedResources) {
@@ -1201,7 +1264,7 @@ describe("GameplayController", () => {
         stalledHarvesters: Array<{ unitId: string; reason: string }>;
       };
     };
-    expect(result.economyStatus.activeHarvesters).toBe(0);
+    expect(result.economyStatus.activeHarvesters).toBe(3);
     expect(result.economyStatus.stalledHarvesters).toContainEqual({
       unitId: worker.id,
       reason: "path_blocked",
@@ -1390,7 +1453,7 @@ describe("GameplayController", () => {
         }),
         expect.objectContaining({
           role: "worker",
-          intent: "none",
+          intent: "harvest_loop",
           count: 4,
         }),
       ])
@@ -1446,13 +1509,13 @@ describe("GameplayController", () => {
         type: "attack_move",
         unitId: soldier.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["rocket_soldier", "rifleman", "soldier", "worker", "light_tank", "barracks", "refinery", "hq"],
+        targetPriority: ["commando", "rocket_soldier", "rifleman", "soldier", "worker", "light_tank", "barracks", "refinery", "hq"],
       }),
       expect.objectContaining({
         type: "attack_move",
         unitId: lightTank.id,
         position: DEFAULT_MAP_LAYOUT.player2Hq,
-        targetPriority: ["light_tank", "rocket_soldier", "rifleman", "soldier", "war_factory", "barracks", "hq", "refinery"],
+        targetPriority: ["heavy_tank", "light_tank", "flame_tank", "commando", "rocket_soldier", "rifleman", "soldier", "anti_tank_turret", "war_factory", "barracks", "hq", "refinery"],
       }),
     ]);
     game.stop();
@@ -1651,6 +1714,172 @@ describe("GameplayController", () => {
     game.stop();
   });
 
+  it("moves a short-ranged flame tank toward an out-of-range building", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const flameTank = game.getUnitManager().createUnit(
+      UNIT_TYPES.FLAME_TANK,
+      enemyHq.x - Math.floor(footprint.width / 2) - 5,
+      enemyHq.y,
+      "player_1",
+    );
+
+    expect(gameplayController.attackTarget(flameTank.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+    });
+    const [move] = gameplayController.takeIssuedCommands();
+    expect(move).toMatchObject({ type: "move", unitId: flameTank.id });
+    expect(move.position).toBeDefined();
+    expect(getDistanceToBuildingFootprint(
+      enemyHq.type,
+      enemyHq.x,
+      enemyHq.y,
+      move.position!.x,
+      move.position!.y,
+    )).toBeLessThanOrEqual(flameTank.attackRange);
+    expect(move.position!.x).toBeLessThan(enemyHq.x);
+    game.stop();
+  });
+
+  it("uses a commando's structure weapon range when pursuing a building", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const commando = game.getUnitManager().createUnit(
+      UNIT_TYPES.COMMANDO,
+      enemyHq.x - Math.floor(footprint.width / 2) - 8,
+      enemyHq.y,
+      "player_1",
+    );
+
+    expect(gameplayController.attackTarget(commando.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+    });
+    const [move] = gameplayController.takeIssuedCommands();
+    expect(move).toMatchObject({ type: "move", unitId: commando.id });
+    expect(move.position).toBeDefined();
+    expect(getDistanceToBuildingFootprint(
+      enemyHq.type,
+      enemyHq.x,
+      enemyHq.y,
+      move.position!.x,
+      move.position!.y,
+    )).toBe(1);
+
+    commando.x = move.position!.x;
+    commando.y = move.position!.y;
+    expect(gameplayController.handleCommittedTick()).toEqual([
+      expect.objectContaining({
+        type: "attack",
+        unitId: commando.id,
+        targetId: enemyHq.id,
+      }),
+    ]);
+    game.stop();
+  });
+
+  it("switches a persistent building pursuit to attack as soon as the unit enters range", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const flameTank = game.getUnitManager().createUnit(
+      UNIT_TYPES.FLAME_TANK,
+      enemyHq.x - Math.floor(footprint.width / 2) - 8,
+      enemyHq.y,
+      "player_1",
+    );
+
+    gameplayController.attackTarget(flameTank.id, enemyHq.id);
+    const [move] = gameplayController.takeIssuedCommands();
+    game.queueCommand(move);
+    game.tickUpdate();
+    flameTank.x = enemyHq.x - Math.floor(footprint.width / 2) - flameTank.attackRange;
+    flameTank.y = enemyHq.y;
+
+    expect(gameplayController.handleCommittedTick()).toEqual([
+      expect.objectContaining({
+        type: "attack",
+        unitId: flameTank.id,
+        targetId: enemyHq.id,
+      }),
+    ]);
+    game.stop();
+  });
+
+  it("keeps a repeated attack call on its existing pursuit path", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const flameTank = game.getUnitManager().createUnit(UNIT_TYPES.FLAME_TANK, 90, enemyHq.y, "player_1");
+
+    gameplayController.attackTarget(flameTank.id, enemyHq.id);
+    const [move] = gameplayController.takeIssuedCommands();
+    game.queueCommand(move);
+    game.tickUpdate();
+    const pathTarget = { ...flameTank.pathTarget! };
+
+    expect(gameplayController.attackTarget(flameTank.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+      alreadyActive: true,
+    });
+    expect(gameplayController.takeIssuedCommands()).toEqual([]);
+    expect(flameTank.pathTarget).toEqual(pathTarget);
+    game.stop();
+  });
+
+  it("gives a tank group distinct near-side firing positions and brings every tank into the attack", () => {
+    const game = new Game();
+    game.start();
+    for (const unit of game.getUnitManager().getAllUnits()) {
+      game.getUnitManager().removeUnit(unit.id);
+    }
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const tanks = [42, 46, 50, 54].map((y) =>
+      game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 90, y, "player_1")
+    );
+
+    for (const tank of tanks) gameplayController.attackTarget(tank.id, enemyHq.id);
+    const moves = gameplayController.takeIssuedCommands();
+    const destinations = moves.map((command) => command.position!);
+    expect(new Set(destinations.map((position) => `${position.x},${position.y}`)).size).toBe(tanks.length);
+    for (const position of destinations) {
+      expect(position.x).toBeLessThan(enemyHq.x);
+      expect(getDistanceToBuildingFootprint(
+        enemyHq.type,
+        enemyHq.x,
+        enemyHq.y,
+        position.x,
+        position.y,
+      )).toBeLessThanOrEqual(tanks[0]!.attackRange);
+    }
+    for (const command of moves) game.queueCommand(command);
+
+    for (let tick = 0; tick < 80 && tanks.some((tank) => tank.lastAttackTick === undefined); tick++) {
+      game.tickUpdate();
+      for (const command of gameplayController.handleCommittedTick()) game.queueCommand(command);
+    }
+
+    expect(tanks.every((tank) => tank.lastAttackTick !== undefined)).toBe(true);
+    game.stop();
+  });
+
   it("does not replace an in-flight path every tick for a persistent attack order", () => {
     const game = new Game();
     game.start();
@@ -1785,7 +2014,8 @@ describe("GameplayController", () => {
     const gameplayController = new GameplayController(game, "player_1");
     const worker = game.getState().players[0].units.find((unit) => unit.type === "worker")!;
 
-    const result = gameplayController.startHarvestLoop(worker.id, DEFAULT_MAP_LAYOUT.resources[0]);
+    const explicitResource = DEFAULT_MAP_LAYOUT.resources.at(-1)!;
+    const result = gameplayController.startHarvestLoop(worker.id, explicitResource);
 
     expect(result.result).toMatchObject({ ok: true });
     expect(gameplayController.takeIssuedCommands()).toEqual(
@@ -1793,7 +2023,7 @@ describe("GameplayController", () => {
         expect.objectContaining({
           type: "harvest_loop",
           unitId: worker.id,
-          position: DEFAULT_MAP_LAYOUT.resources[0],
+          position: explicitResource,
         }),
       ])
     );
@@ -1804,8 +2034,8 @@ describe("GameplayController", () => {
     const updatedWorker = game.getState().players[0].units.find((unit) => unit.id === worker.id)!;
     expect(updatedWorker.intent).toMatchObject({
       type: "harvest_loop",
-      targetX: DEFAULT_MAP_LAYOUT.resources[0].x,
-      targetY: DEFAULT_MAP_LAYOUT.resources[0].y,
+      targetX: explicitResource.x,
+      targetY: explicitResource.y,
     });
   });
 

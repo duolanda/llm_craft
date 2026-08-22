@@ -50,10 +50,13 @@ function renderAsciiMap(data: Record<string, unknown>): string {
           type === "war_factory" ? "F" :
             type === "refinery" ? "D" :
               type === "light_tank" ? "T" :
-                type === "rocket_soldier" ? "R" :
-                  type === "rifleman" ? "I" :
-                    type === "soldier" ? "S" :
-                      type === "worker" ? "W" : "?";
+                type === "flame_tank" ? "F" :
+                  type === "heavy_tank" ? "A" :
+                    type === "commando" ? "C" :
+                      type === "rocket_soldier" ? "R" :
+                        type === "rifleman" ? "I" :
+                          type === "soldier" ? "S" :
+                            type === "worker" ? "W" : "?";
     return relation === "enemy" ? symbol.toLowerCase() : symbol;
   };
   for (const building of (data.buildings as Array<Record<string, unknown>> | undefined) ?? []) {

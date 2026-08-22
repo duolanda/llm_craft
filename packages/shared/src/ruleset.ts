@@ -52,12 +52,24 @@ export function getUnitProductionTicks(unitType: UnitType, ruleset: GameRuleset 
   return getUnitStats(unitType, ruleset).productionTicks;
 }
 
+export function getUnitLimit(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): number | undefined {
+  return getUnitStats(unitType, ruleset).unitLimit;
+}
+
 export function getBuildingCost(buildingType: BuildingType, ruleset: GameRuleset = DEFAULT_RULESET): number {
   return getBuildingStats(buildingType, ruleset).cost;
 }
 
 export function getBuildingConstructionTicks(buildingType: BuildingType, ruleset: GameRuleset = DEFAULT_RULESET): number {
   return getBuildingStats(buildingType, ruleset).constructionTicks;
+}
+
+export function getBuildingPrerequisites(buildingType: BuildingType, ruleset: GameRuleset = DEFAULT_RULESET): BuildingType[] {
+  return [...(getBuildingStats(buildingType, ruleset).requires ?? [])];
+}
+
+export function getUnitPrerequisites(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): BuildingType[] {
+  return [...(getUnitStats(unitType, ruleset).requires ?? [])];
 }
 
 export function getUnitVisionRange(unitType: UnitType, ruleset: GameRuleset = DEFAULT_RULESET): number {
@@ -154,14 +166,72 @@ export function getUnitWeapon(unitType: UnitType, ruleset: GameRuleset = DEFAULT
   };
 }
 
-export function getAttackDamage(attackerType: UnitType, targetArmor: ArmorType, ruleset: GameRuleset = DEFAULT_RULESET): number {
-  const weapon = getUnitWeapon(attackerType, ruleset);
-  const modifier = weapon.damageModifiers?.[targetArmor] ?? getUnitStats(attackerType, ruleset).damageModifiers?.[targetArmor] ?? 1;
+export function getBuildingWeapon(
+  buildingType: BuildingType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): RulesetWeaponDefinition | undefined {
+  return getBuildingStats(buildingType, ruleset).weapon;
+}
+
+export function getAttackSourceWeapon(
+  attackerType: AttackTargetType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): RulesetWeaponDefinition {
+  if (isUnitType(attackerType)) return getUnitWeapon(attackerType, ruleset);
+  return getBuildingWeapon(attackerType, ruleset) ?? {
+    damage: 0,
+    range: 0,
+    reloadTicks: 1,
+    projectileType: "instant",
+    projectileSpeed: 99,
+  };
+}
+
+export function getAttackSourceWeaponAgainstArmor(
+  attackerType: AttackTargetType,
+  targetArmor: ArmorType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): RulesetWeaponDefinition {
+  const weapon = getAttackSourceWeapon(attackerType, ruleset);
+  const override = weapon.targetOverrides?.[targetArmor];
+  return override ? { ...weapon, ...override } : weapon;
+}
+
+export function attackSourceInstantKills(
+  attackerType: AttackTargetType,
+  targetArmor: ArmorType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): boolean {
+  return getAttackSourceWeaponAgainstArmor(attackerType, targetArmor, ruleset).instantKill ?? false;
+}
+
+export function attackSourceCanAttack(
+  attackerType: AttackTargetType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): boolean {
+  return getAttackSourceWeapon(attackerType, ruleset).damage > 0;
+}
+
+export function getAttackSourceVisionRange(
+  attackerType: AttackTargetType,
+  ruleset: GameRuleset = DEFAULT_RULESET,
+): number {
+  return isUnitType(attackerType)
+    ? getUnitVisionRange(attackerType, ruleset)
+    : getBuildingVisionRange(attackerType, ruleset);
+}
+
+export function getAttackDamage(attackerType: AttackTargetType, targetArmor: ArmorType, ruleset: GameRuleset = DEFAULT_RULESET): number {
+  const weapon = getAttackSourceWeapon(attackerType, ruleset);
+  const unitModifier = isUnitType(attackerType)
+    ? getUnitStats(attackerType, ruleset).damageModifiers?.[targetArmor]
+    : undefined;
+  const modifier = weapon.damageModifiers?.[targetArmor] ?? unitModifier ?? 1;
   return Math.max(0, Math.round(weapon.damage * modifier));
 }
 
 export function getAttackDamageAgainstUnit(
-  attackerType: UnitType,
+  attackerType: AttackTargetType,
   targetType: UnitType,
   ruleset: GameRuleset = DEFAULT_RULESET,
 ): number {
@@ -169,7 +239,7 @@ export function getAttackDamageAgainstUnit(
 }
 
 export function getAttackDamageAgainstBuilding(
-  attackerType: UnitType,
+  attackerType: AttackTargetType,
   targetType: BuildingType,
   ruleset: GameRuleset = DEFAULT_RULESET,
 ): number {
@@ -184,6 +254,10 @@ export function getDefaultAttackMovePriority(
   attackerType?: UnitType,
   ruleset: GameRuleset = DEFAULT_RULESET,
 ): AttackTargetType[] {
+  if (attackerType) {
+    const configuredPriority = getUnitWeapon(attackerType, ruleset).targetPriority;
+    if (configuredPriority) return [...configuredPriority];
+  }
   switch (attackerType) {
     case UNIT_TYPES.RIFLEMAN:
       return getUnitWeapon(attackerType, ruleset).targetPriority ?? [
@@ -236,7 +310,13 @@ export function getDefaultAttackMovePriority(
     default:
       return [
         BUILDING_TYPES.HQ,
+        BUILDING_TYPES.TECH_CENTER,
+        BUILDING_TYPES.ANTI_TANK_TURRET,
+        BUILDING_TYPES.MACHINE_GUN_TURRET,
+        UNIT_TYPES.HEAVY_TANK,
         UNIT_TYPES.LIGHT_TANK,
+        UNIT_TYPES.FLAME_TANK,
+        UNIT_TYPES.COMMANDO,
         UNIT_TYPES.ROCKET_SOLDIER,
         UNIT_TYPES.RIFLEMAN,
         UNIT_TYPES.SOLDIER,

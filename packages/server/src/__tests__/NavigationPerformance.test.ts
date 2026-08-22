@@ -30,6 +30,9 @@ describe("navigation performance", () => {
     const game = new Game();
     const buildings = game.getBuildingManager();
     const units = game.getUnitManager();
+    for (const worker of units.getAllUnits().filter((unit) => unit.type === UNIT_TYPES.WORKER)) {
+      units.removeUnit(worker.id);
+    }
 
     // Reproduces the player_2 production corridor from
     // match-2026-08-06T14-55-08-134Z-9e6493f9.match.json. The two tanks at
@@ -109,6 +112,9 @@ describe("navigation performance", () => {
   it("bounds cached integration fields during a long match", () => {
     const game = new Game();
     const units = game.getUnitManager();
+    for (const worker of units.getAllUnits().filter((unit) => unit.type === UNIT_TYPES.WORKER)) {
+      units.removeUnit(worker.id);
+    }
     const soldier = units.createUnit(UNIT_TYPES.SOLDIER, 72, 48, "player_1");
     const commands: Command[] = Array.from({ length: 70 }, (_, index) => ({
       id: `bounded-navigation-cache-${index}`,

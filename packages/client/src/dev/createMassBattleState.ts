@@ -24,12 +24,21 @@ const FORMATION_ROWS = 6;
 const FORMATION_TYPES: UnitType[] = [
   UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
-  UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
+  UNIT_TYPES.COMMANDO,
   UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
+  UNIT_TYPES.HEAVY_TANK,
 ];
 
 const ANIMATION_LAB_FX_PAIRS = [
+  {
+    sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_flame`,
+    targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_flame_rifle`,
+    sourceType: UNIT_TYPES.FLAME_TANK,
+    targetType: UNIT_TYPES.RIFLEMAN,
+    y: 33,
+  },
   {
     sourceId: `${PLAYER_IDS.PLAYER_1}_lab_fx_source_rifle`,
     targetId: `${PLAYER_IDS.PLAYER_2}_lab_fx_target_rifle`,
@@ -64,7 +73,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 2,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.62,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.35,
-    y: ANIMATION_LAB_FX_PAIRS[0].y,
+    y: ANIMATION_LAB_FX_PAIRS[1].y,
     offsetTicks: 0,
   },
   {
@@ -74,7 +83,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 5,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.68,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.52,
-    y: ANIMATION_LAB_FX_PAIRS[1].y,
+    y: ANIMATION_LAB_FX_PAIRS[2].y,
     offsetTicks: 2,
   },
   {
@@ -84,7 +93,7 @@ const ANIMATION_LAB_FX_PROJECTILES = [
     flightTicks: 6,
     sourceX: ANIMATION_LAB_FX_SOURCE_X + 0.92,
     targetX: ANIMATION_LAB_FX_TARGET_X - 0.72,
-    y: ANIMATION_LAB_FX_PAIRS[2].y,
+    y: ANIMATION_LAB_FX_PAIRS[3].y,
     offsetTicks: 5,
   },
 ] as const;
@@ -147,12 +156,18 @@ function createShowcasePlayer(
         { type: BUILDING_TYPES.BARRACKS, x: 25, y: 41 },
         { type: BUILDING_TYPES.WAR_FACTORY, x: 30, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 44, y: 18 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 40, y: 39 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 40, y: 57 },
+        { type: BUILDING_TYPES.TECH_CENTER, x: 27, y: 63 },
       ]
     : [
         { type: BUILDING_TYPES.HQ, ...DEFAULT_MAP_LAYOUT.player2Hq },
         { type: BUILDING_TYPES.BARRACKS, x: 118, y: 55 },
         { type: BUILDING_TYPES.WAR_FACTORY, x: 113, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 99, y: 18 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 103, y: 57 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 103, y: 39 },
+        { type: BUILDING_TYPES.TECH_CENTER, x: 116, y: 33 },
       ];
 
   return {
@@ -223,7 +238,7 @@ function createAnimationLabUnit(
   type: UnitType,
   x: number,
   y: number,
-  options: Partial<Pick<Unit, "state" | "intent" | "lastAttackTick" | "carryingCredits">> = {},
+  options: Partial<Pick<Unit, "state" | "intent" | "lastAttackTick" | "carryingCredits" | "attackWindup" | "attackStream">> = {},
 ): Unit {
   const stats = UNIT_STATS[type];
   return {
@@ -241,6 +256,8 @@ function createAnimationLabUnit(
     carryCapacity: type === UNIT_TYPES.WORKER ? ECONOMY_RULES.WORKER_CARRY_CAPACITY : 0,
     intent: options.intent,
     lastAttackTick: options.lastAttackTick,
+    attackWindup: options.attackWindup,
+    attackStream: options.attackStream,
   };
 }
 
@@ -265,6 +282,7 @@ function createAnimationLabPlayer(
         { type: BUILDING_TYPES.HQ, x: 98, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 94, y: 35 },
         { type: BUILDING_TYPES.BARRACKS, x: 94, y: 61 },
+        { type: BUILDING_TYPES.BARRACKS, x: 78, y: 48 },
       ];
 
   return {
@@ -297,6 +315,18 @@ function createAnimationLabPlayer(
         state: UNIT_STATES.MOVING,
         intent: { type: "attack_move", targetX, targetY: playerOne ? 46 : 50 },
       }),
+      ...(playerOne ? [
+        createAnimationLabUnit(playerId, `${playerId}_lab_commando`, UNIT_TYPES.COMMANDO, 74, 48, {
+          state: UNIT_STATES.ATTACKING,
+          intent: {
+            type: "attack",
+            targetId: `${PLAYER_IDS.PLAYER_2}_lab_building_3`,
+            targetX: 78,
+            targetY: 48,
+          },
+          lastAttackTick: tick,
+        }),
+      ] : []),
       ...createAnimationLabFxRangeUnits(playerId),
     ],
     buildings: buildingLayout.map((building, index) => {
@@ -325,20 +355,32 @@ function createAnimationLabFxRangeUnits(
           intent: {
             type: "attack",
             targetId: pair.targetId,
-            targetX: ANIMATION_LAB_FX_TARGET_X,
+            targetX: pair.sourceType === UNIT_TYPES.FLAME_TANK
+              ? ANIMATION_LAB_FX_SOURCE_X + 3
+              : ANIMATION_LAB_FX_TARGET_X,
             targetY: pair.y,
           },
+          attackStream: pair.sourceType === UNIT_TYPES.FLAME_TANK
+            ? { targetId: pair.targetId, startedTick: 0 }
+            : undefined,
         }))
     : ANIMATION_LAB_FX_PAIRS.map((pair) =>
-        createAnimationLabUnit(playerId, pair.targetId, pair.targetType, ANIMATION_LAB_FX_TARGET_X, pair.y, {
-          state: UNIT_STATES.IDLE,
-          intent: {
-            type: "attack",
-            targetId: pair.sourceId,
-            targetX: ANIMATION_LAB_FX_SOURCE_X,
-            targetY: pair.y,
+        createAnimationLabUnit(
+          playerId,
+          pair.targetId,
+          pair.targetType,
+          pair.sourceType === UNIT_TYPES.FLAME_TANK ? ANIMATION_LAB_FX_SOURCE_X + 3 : ANIMATION_LAB_FX_TARGET_X,
+          pair.y,
+          {
+            state: UNIT_STATES.IDLE,
+            intent: {
+              type: "attack",
+              targetId: pair.sourceId,
+              targetX: ANIMATION_LAB_FX_SOURCE_X,
+              targetY: pair.y,
+            },
           },
-        }));
+        ));
 }
 
 function createAnimationLabProjectile(
@@ -365,7 +407,11 @@ function createAnimationLabProjectile(
     id: `${id}_${launchedTick}`,
     playerId: PLAYER_IDS.PLAYER_1,
     attackerId: `${PLAYER_IDS.PLAYER_1}_lab_projectile_source`,
-    attackerType: projectileType === PROJECTILE_TYPES.ROCKET ? UNIT_TYPES.ROCKET_SOLDIER : UNIT_TYPES.LIGHT_TANK,
+    attackerType: projectileType === PROJECTILE_TYPES.ROCKET
+      ? UNIT_TYPES.ROCKET_SOLDIER
+      : projectileType === PROJECTILE_TYPES.FLAME
+        ? UNIT_TYPES.FLAME_TANK
+        : UNIT_TYPES.LIGHT_TANK,
     projectileType,
     x: startX + (targetX - startX) * progress,
     y: startY + (targetY - startY) * progress,
@@ -398,6 +444,25 @@ export function createAnimationLabState(tick: number, mode: "implemented" | "pre
           ))
         .filter((projectile): projectile is ActiveProjectile => projectile !== null)
     : [];
+  if (mode === "implemented") {
+    labProjectiles.push({
+      id: `lab_demolition_${tick}`,
+      playerId: PLAYER_IDS.PLAYER_1,
+      attackerId: `${PLAYER_IDS.PLAYER_1}_lab_commando`,
+      attackerType: UNIT_TYPES.COMMANDO,
+      projectileType: PROJECTILE_TYPES.DEMOLITION,
+      x: 74,
+      y: 48,
+      startX: 74,
+      startY: 48,
+      targetX: 78,
+      targetY: 48,
+      launchedTick: tick,
+      impactTick: tick + 1,
+      targetId: `${PLAYER_IDS.PLAYER_2}_lab_building_3`,
+      targetKind: "building",
+    });
+  }
 
   return {
     tick,

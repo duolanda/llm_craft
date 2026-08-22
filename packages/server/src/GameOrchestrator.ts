@@ -572,11 +572,27 @@ export class GameOrchestrator {
       .getAIFeedback(playerId, this.lastAIDispatchTick[playerId])
       .slice(-5)
       .map((log) => log.message);
+    const formatUnitComposition = (player: GameState["players"][number]): string => Object.entries(
+      player.units
+        .filter((unit) => unit.exists)
+        .reduce<Record<string, number>>((counts, unit) => {
+          counts[unit.type] = (counts[unit.type] ?? 0) + 1;
+          return counts;
+        }, {}),
+    ).sort(([left], [right]) => left.localeCompare(right))
+      .map(([unitType, count]) => `${unitType}:${count}`)
+      .join(",");
+    const getTier = (player: GameState["players"][number]): number =>
+      player.buildings.some((building) => building.exists && !building.constructionProgress && building.type === "tech_center")
+        ? 3
+        : player.buildings.some((building) => building.exists && !building.constructionProgress && building.type === "war_factory")
+          ? 2
+          : 1;
 
     const summaryLines = [
       `tick=${state.tick}, intervalMs=${tickIntervalMs}`,
-      `myCredits=${me.resources.credits}, myWorkers=${me.units.filter((unit) => unit.type === "worker" && unit.exists).length}, myRiflemen=${me.units.filter((unit) => unit.type === "rifleman" && unit.exists).length}, myRocketSoldiers=${me.units.filter((unit) => unit.type === "rocket_soldier" && unit.exists).length}, myLightTanks=${me.units.filter((unit) => unit.type === "light_tank" && unit.exists).length}`,
-      `enemyWorkers=${enemy.units.filter((unit) => unit.type === "worker" && unit.exists).length}, enemyRiflemen=${enemy.units.filter((unit) => unit.type === "rifleman" && unit.exists).length}, enemyRocketSoldiers=${enemy.units.filter((unit) => unit.type === "rocket_soldier" && unit.exists).length}, enemyLightTanks=${enemy.units.filter((unit) => unit.type === "light_tank" && unit.exists).length}`,
+      `myCredits=${me.resources.credits}, myTier=${getTier(me)}, myUnits=${formatUnitComposition(me)}`,
+      `enemyTier=${getTier(enemy)}, enemyUnits=${formatUnitComposition(enemy)}`,
       myHQ ? `myHQHp=${myHQ.hp}/${myHQ.maxHp}` : "myHQMissing=true",
       enemyHQ ? `enemyHQHp=${enemyHQ.hp}/${enemyHQ.maxHp}` : "enemyHQMissing=true",
       `activePlans=${this.gameplayControllerByPlayer[playerId].getActivePlans().length}`,

@@ -29,14 +29,15 @@ export interface SimulationSystems {
 }
 
 function createDefaultSystems(): SimulationSystems {
+  const harvestOrders = new HarvestOrderSystem();
   return {
     movement: new MovementSystem(),
     projectiles: new ProjectileSystem(),
     economy: new EconomySystem(),
-    harvestOrders: new HarvestOrderSystem(),
+    harvestOrders,
     combat: new CombatSystem(),
-    construction: new ConstructionSystem(),
-    production: new ProductionSystem(),
+    construction: new ConstructionSystem(harvestOrders),
+    production: new ProductionSystem(harvestOrders),
     victory: new VictorySystem(),
   };
 }

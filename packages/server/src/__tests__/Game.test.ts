@@ -70,6 +70,11 @@ describe("Game", () => {
     expect(player2.units.filter((u) => u.type === UNIT_TYPES.WORKER)).toEqual(
       expect.arrayContaining(DEFAULT_MAP_LAYOUT.player2Workers.map((position) => expect.objectContaining(position)))
     );
+    for (const player of state.players) {
+      const workers = player.units.filter((unit) => unit.type === UNIT_TYPES.WORKER);
+      expect(workers.every((worker) => worker.intent?.type === "harvest_loop")).toBe(true);
+      expect(new Set(workers.map((worker) => `${worker.intent?.targetX},${worker.intent?.targetY}`)).size).toBeGreaterThan(1);
+    }
   });
 
   it("uses the three-front strategic map baseline", () => {
@@ -898,7 +903,7 @@ describe("Game", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.ROCKET_SOLDIER, 5, 5, "player_1");
     const enemyRifleman = unitManager.createUnit(UNIT_TYPES.RIFLEMAN, 3, 5, "player_2");
-    const enemyTank = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 6, 5, "player_2");
+    const enemyTank = unitManager.createUnit(UNIT_TYPES.LIGHT_TANK, 7, 5, "player_2");
 
     game.queueCommand({
       id: "rocket_soldier_role_priority",
@@ -1429,6 +1434,8 @@ describe("Game", () => {
 
     const workerId = initialSnapshot.state.players[0].units[0].id;
     const runtimeWorker = game.getUnitManager().getUnit(workerId)!;
+    game.getUnitManager().holdPosition(runtimeWorker);
+    game.getUnitManager().clearPath(runtimeWorker);
     runtimeWorker.x = 9;
     runtimeWorker.y = 9;
 

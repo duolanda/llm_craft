@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 
 const knownBlenderPaths = [
   process.env.BLENDER_PATH,
+  "D:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
   "D:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe",
   "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe",
   "C:\\Program Files\\Blender Foundation\\Blender 4.4\\blender.exe",
@@ -29,7 +30,7 @@ function findBlenderOnPath() {
 const blenderPath = knownBlenderPaths.find((candidate) => existsSync(candidate)) ?? findBlenderOnPath();
 
 if (!blenderPath) {
-  console.error("Blender executable not found. Set BLENDER_PATH or install Blender 4.x.");
+  console.error("Blender executable not found. Set BLENDER_PATH or install Blender 5.x.");
   process.exit(1);
 }
 

@@ -94,7 +94,7 @@ describe("default ruleset", () => {
     });
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.RIFLEMAN)).toBe(24);
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.LIGHT_TANK)).toBe(1);
-    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ)).toBe(14);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ)).toBe(24);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(1);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.ANTI_TANK_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(102);
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.COMMANDO, UNIT_TYPES.LIGHT_TANK)).toBe(0);
@@ -128,6 +128,22 @@ describe("default ruleset", () => {
       / getUnitWeapon(UNIT_TYPES.FLAME_TANK).reloadTicks / flameCost)
       .toBeGreaterThan(getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.HQ)
         / getUnitWeapon(UNIT_TYPES.LIGHT_TANK).reloadTicks / lightCost);
+  });
+
+  it("makes flame tanks materially faster structure breachers than generalist tanks", () => {
+    const sustainedStructureDamage = (
+      attacker: typeof UNIT_TYPES.FLAME_TANK | typeof UNIT_TYPES.LIGHT_TANK | typeof UNIT_TYPES.HEAVY_TANK,
+    ) => getAttackDamageAgainstBuilding(attacker, BUILDING_TYPES.HQ)
+      / getUnitWeapon(attacker).reloadTicks;
+    const flameDamage = getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ);
+    const singleFlameTicksToKillHq = Math.ceil(getBuildingStats(BUILDING_TYPES.HQ).hp / flameDamage)
+      * getUnitWeapon(UNIT_TYPES.FLAME_TANK).reloadTicks;
+
+    expect(sustainedStructureDamage(UNIT_TYPES.FLAME_TANK))
+      .toBeGreaterThan(sustainedStructureDamage(UNIT_TYPES.HEAVY_TANK) * 1.75);
+    expect(sustainedStructureDamage(UNIT_TYPES.FLAME_TANK))
+      .toBeGreaterThan(sustainedStructureDamage(UNIT_TYPES.LIGHT_TANK) * 3.5);
+    expect(singleFlameTicksToKillHq).toBeLessThanOrEqual(60);
   });
 
   it("keeps the large-map HQ time-to-kill above a reaction window after reload timing", () => {

@@ -59,6 +59,7 @@ import type { AgentToolExecutionContext } from "../LLMProvider";
 import { ObservationProjection } from "../agent/ObservationProjection";
 import { AgentPolicy } from "../agent/AgentPolicy";
 import { MAX_PENDING_PRODUCTION_PER_UNIT_TYPE } from "../BuildingManager";
+import { getCollisionBoundingRadius } from "../navigation/MovementProfile";
 
 type ToolEffect = "read" | "action" | "plan";
 export interface ExecutedToolResult {
@@ -145,8 +146,20 @@ const PLAN_UNTIL_CONDITIONS = [
 ] as const;
 
 type AttackOrderResolution =
-  | { ok: true; command: Command; mode: "attack" | "move_to_target"; completedAfterCommand: boolean }
+  | {
+      ok: true;
+      command: Command;
+      mode: "attack" | "move_to_target";
+      completedAfterCommand: boolean;
+      pursuitPosition?: Position;
+    }
   | { ok: false; error: string; hint: string };
+
+interface PersistentAttackOrder {
+  unitId: string;
+  targetId: string;
+  pursuitPosition?: Position;
+}
 
 const isBuildingComplete = (building: Building): boolean => building.exists && !building.constructionProgress;
 
@@ -167,7 +180,7 @@ export class GameplayController {
   private missionRuntime: MissionRuntime;
   private commandProvenance: CommandProvenance | null = null;
   private readonly planToolHandlers: PlanToolHandlers;
-  private attackOrders = new Map<string, { unitId: string; targetId: string }>();
+  private attackOrders = new Map<string, PersistentAttackOrder>();
   private consumedMissionFailureKeys = new Set<string>();
   private readonly submitCommands: NonNullable<GameplayControllerOptions["submitCommands"]>;
   private readonly completedCommandBatches = new Map<string, {
@@ -1152,8 +1165,31 @@ export class GameplayController {
       resolution = fallbackResolution;
     }
 
+    const existingOrder = this.attackOrders.get(unitId);
+    if (
+      existingOrder?.targetId === actualTargetId
+      && resolution.mode === "move_to_target"
+      && attacker.state === "moving"
+      && attacker.intent?.type === "move"
+    ) {
+      return {
+        effect: "action",
+        result: this.withActionMetadata({
+          ok: true,
+          mode: "move_to_target",
+          targetId: actualTargetId,
+          alreadyActive: true,
+          ...(retargetedFrom ? { retargetedFrom } : {}),
+        }),
+      };
+    }
+
     this.missionRuntime.interruptUnit(unitId);
-    this.attackOrders.set(unitId, { unitId, targetId: actualTargetId });
+    this.attackOrders.set(unitId, {
+      unitId,
+      targetId: actualTargetId,
+      ...(resolution.pursuitPosition ? { pursuitPosition: resolution.pursuitPosition } : {}),
+    });
     if (resolution.mode === "attack" && this.isAttackReloading(attacker)) {
       return {
         effect: "action",
@@ -2013,14 +2049,6 @@ export class GameplayController {
         this.attackOrders.delete(unitId);
         continue;
       }
-      if (
-        unit.state === "moving" &&
-        unit.intent?.type === "move" &&
-        this.getEnemyTarget(order.targetId)
-      ) {
-        continue;
-      }
-
       const resolution = this.resolveAttackOrderCommand(order.unitId, order.targetId);
       if (!resolution.ok) {
         const fallbackTargetId = resolution.error === "target_missing"
@@ -2028,14 +2056,25 @@ export class GameplayController {
           : null;
         if (fallbackTargetId) {
           order.targetId = fallbackTargetId;
+          delete order.pursuitPosition;
           const fallback = this.resolveAttackOrderCommand(order.unitId, fallbackTargetId);
-          if (fallback.ok) commands.push(fallback.command);
+          if (fallback.ok) {
+            order.pursuitPosition = fallback.pursuitPosition;
+            commands.push(fallback.command);
+          }
           continue;
         }
         this.attackOrders.delete(unitId);
         if (unit.intent?.type === "move" || unit.intent?.type === "attack") {
           commands.push(this.createCommand("hold", { unitId }));
         }
+        continue;
+      }
+      if (
+        resolution.mode === "move_to_target"
+        && unit.state === "moving"
+        && unit.intent?.type === "move"
+      ) {
         continue;
       }
       if (resolution.mode === "attack" && unit.intent?.type === "attack" && unit.intent.targetId === order.targetId) {
@@ -2045,6 +2084,7 @@ export class GameplayController {
         continue;
       }
 
+      order.pursuitPosition = resolution.pursuitPosition;
       commands.push(resolution.command);
     }
     return commands;
@@ -2127,9 +2167,16 @@ export class GameplayController {
         };
       }
 
-      const movePosition = distance < minRange
+      const existingOrder = this.attackOrders.get(unitId);
+      const existingPursuitPosition = existingOrder?.targetId === targetId
+        ? existingOrder.pursuitPosition
+        : undefined;
+      const buildingTarget = isBuildingType(target.type) ? target as Building : null;
+      const movePosition = existingPursuitPosition ?? (distance < minRange
         ? this.findMinimumRangeRetreatPosition(attacker, target, minRange)
-        : this.toGridPosition(target, this.getReadState());
+        : buildingTarget
+          ? this.findBuildingFiringPosition(attacker, buildingTarget, minRange)
+          : this.toGridPosition(target, this.getReadState()));
       if (!movePosition) {
         return {
           ok: false,
@@ -2146,6 +2193,7 @@ export class GameplayController {
         }),
         mode: "move_to_target",
         completedAfterCommand: false,
+        ...(buildingTarget ? { pursuitPosition: movePosition } : {}),
       };
     }
 
@@ -2154,6 +2202,69 @@ export class GameplayController {
       error: "target_missing",
       hint: "No living enemy unit or building matches this targetId; use one of availableEnemyTargets.",
     };
+  }
+
+  private findBuildingFiringPosition(
+    attacker: Unit,
+    target: Building,
+    minRange: number,
+  ): Position | null {
+    const state = this.getReadState();
+    const height = state.tiles.length;
+    const width = state.tiles[0]?.length ?? 0;
+    const footprint = getBuildingFootprintCells(target.type, target.x, target.y);
+    const minFootprintX = Math.min(...footprint.map((cell) => cell.x));
+    const maxFootprintX = Math.max(...footprint.map((cell) => cell.x));
+    const minFootprintY = Math.min(...footprint.map((cell) => cell.y));
+    const maxFootprintY = Math.max(...footprint.map((cell) => cell.y));
+    const blockedBuildings = this.game.getBuildingManager().getOccupiedPositions();
+    const navigationTiles = state.tiles.map((row) => row.map((tile) => tile.type));
+    const reservedPositions = [...this.attackOrders.values()]
+      .filter((order) => order.unitId !== attacker.id && order.targetId === target.id && order.pursuitPosition)
+      .flatMap((order) => {
+        const unit = this.getFriendlyUnit(order.unitId);
+        return unit && order.pursuitPosition
+          ? [{ unit, position: order.pursuitPosition }]
+          : [];
+      });
+    const attackerRadius = getCollisionBoundingRadius(attacker.type);
+    const candidates: Array<Position & { movementDistance: number; targetDistance: number }> = [];
+
+    for (let y = Math.max(0, minFootprintY - attacker.attackRange); y <= Math.min(height - 1, maxFootprintY + attacker.attackRange); y++) {
+      for (let x = Math.max(0, minFootprintX - attacker.attackRange); x <= Math.min(width - 1, maxFootprintX + attacker.attackRange); x++) {
+        const targetDistance = getDistanceToBuildingFootprint(target.type, target.x, target.y, x, y);
+        if (targetDistance < minRange || targetDistance > attacker.attackRange) continue;
+        if (state.tiles[y]?.[x]?.type === TILE_TYPES.OBSTACLE) continue;
+        if (!this.game.getUnitManager().canPlaceUnitAt(
+          attacker.type,
+          x,
+          y,
+          navigationTiles,
+          blockedBuildings,
+          attacker.id,
+        )) continue;
+        if (reservedPositions.some(({ unit, position }) =>
+          Math.hypot(position.x - x, position.y - y)
+            < attackerRadius + getCollisionBoundingRadius(unit.type) + 0.05
+        )) continue;
+
+        candidates.push({
+          x,
+          y,
+          targetDistance,
+          movementDistance: Math.max(Math.abs(attacker.x - x), Math.abs(attacker.y - y)),
+        });
+      }
+    }
+
+    candidates.sort((left, right) =>
+      left.movementDistance - right.movementDistance
+      || right.targetDistance - left.targetDistance
+      || left.y - right.y
+      || left.x - right.x
+    );
+    const candidate = candidates[0];
+    return candidate ? { x: candidate.x, y: candidate.y } : null;
   }
 
   private findMinimumRangeRetreatPosition(

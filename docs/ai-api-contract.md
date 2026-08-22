@@ -438,7 +438,7 @@ interface AgentRunInput {
 - 科技层级由已完成建筑推导：基础为 T1，完成 `war_factory` 为 T2，完成 `tech_center` 为 T3；`war_factory` 要求 `barracks`，`tech_center` 要求 `war_factory`
 - 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 560 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 1 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
 - `commando` 为 T3 特种兵：160 HP / speed 1.2 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
-- 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 4 / 0.2 / 2.4，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 24 / 1 / 14 伤害；它以高于轻坦的生命和持续贴住目标的反步兵/攻坚 DPS 换取完全放弃载具对拼能力，而不是载具对拼升级
+- 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 4 / 0.2 / 4，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 24 / 1 / 24 伤害；它以高于轻坦的生命和持续贴住目标的反步兵/攻坚 DPS 换取完全放弃载具对拼能力，而不是载具对拼升级
 - 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 1 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
 - `Unit.attackWindup?: { targetId; startedTick; completesAtTick }` 暴露当前权威攻击前摇，录像 delta 同步记录该字段，客户端只据此表现点火提示。
@@ -806,7 +806,7 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 - 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
 - 不用于指定攻击某个目标或建筑；点杀敌军或拆指定建筑应使用 `attack`
-- 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`
+- 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`。射程外单位会持续追击；建筑目标按射程和来向为同批攻击者预约互不重叠的近侧射击位，单位进入射程后立即停止移动并开火。对同一目标重复调用不会重置仍在执行的追击路径
 
 #### `attack`
 

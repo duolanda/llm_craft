@@ -1734,6 +1734,108 @@ describe("GameplayController", () => {
     });
     const [move] = gameplayController.takeIssuedCommands();
     expect(move).toMatchObject({ type: "move", unitId: flameTank.id });
+    expect(move.position).toBeDefined();
+    expect(getDistanceToBuildingFootprint(
+      enemyHq.type,
+      enemyHq.x,
+      enemyHq.y,
+      move.position!.x,
+      move.position!.y,
+    )).toBeLessThanOrEqual(flameTank.attackRange);
+    expect(move.position!.x).toBeLessThan(enemyHq.x);
+    game.stop();
+  });
+
+  it("switches a persistent building pursuit to attack as soon as the unit enters range", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const flameTank = game.getUnitManager().createUnit(
+      UNIT_TYPES.FLAME_TANK,
+      enemyHq.x - Math.floor(footprint.width / 2) - 8,
+      enemyHq.y,
+      "player_1",
+    );
+
+    gameplayController.attackTarget(flameTank.id, enemyHq.id);
+    const [move] = gameplayController.takeIssuedCommands();
+    game.queueCommand(move);
+    game.tickUpdate();
+    flameTank.x = enemyHq.x - Math.floor(footprint.width / 2) - flameTank.attackRange;
+    flameTank.y = enemyHq.y;
+
+    expect(gameplayController.handleCommittedTick()).toEqual([
+      expect.objectContaining({
+        type: "attack",
+        unitId: flameTank.id,
+        targetId: enemyHq.id,
+      }),
+    ]);
+    game.stop();
+  });
+
+  it("keeps a repeated attack call on its existing pursuit path", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const flameTank = game.getUnitManager().createUnit(UNIT_TYPES.FLAME_TANK, 90, enemyHq.y, "player_1");
+
+    gameplayController.attackTarget(flameTank.id, enemyHq.id);
+    const [move] = gameplayController.takeIssuedCommands();
+    game.queueCommand(move);
+    game.tickUpdate();
+    const pathTarget = { ...flameTank.pathTarget! };
+
+    expect(gameplayController.attackTarget(flameTank.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+      alreadyActive: true,
+    });
+    expect(gameplayController.takeIssuedCommands()).toEqual([]);
+    expect(flameTank.pathTarget).toEqual(pathTarget);
+    game.stop();
+  });
+
+  it("gives a tank group distinct near-side firing positions and brings every tank into the attack", () => {
+    const game = new Game();
+    game.start();
+    for (const unit of game.getUnitManager().getAllUnits()) {
+      game.getUnitManager().removeUnit(unit.id);
+    }
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const tanks = [42, 46, 50, 54].map((y) =>
+      game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 90, y, "player_1")
+    );
+
+    for (const tank of tanks) gameplayController.attackTarget(tank.id, enemyHq.id);
+    const moves = gameplayController.takeIssuedCommands();
+    const destinations = moves.map((command) => command.position!);
+    expect(new Set(destinations.map((position) => `${position.x},${position.y}`)).size).toBe(tanks.length);
+    for (const position of destinations) {
+      expect(position.x).toBeLessThan(enemyHq.x);
+      expect(getDistanceToBuildingFootprint(
+        enemyHq.type,
+        enemyHq.x,
+        enemyHq.y,
+        position.x,
+        position.y,
+      )).toBeLessThanOrEqual(tanks[0]!.attackRange);
+    }
+    for (const command of moves) game.queueCommand(command);
+
+    for (let tick = 0; tick < 80 && tanks.some((tank) => tank.lastAttackTick === undefined); tick++) {
+      game.tickUpdate();
+      for (const command of gameplayController.handleCommittedTick()) game.queueCommand(command);
+    }
+
+    expect(tanks.every((tank) => tank.lastAttackTick !== undefined)).toBe(true);
     game.stop();
   });
 

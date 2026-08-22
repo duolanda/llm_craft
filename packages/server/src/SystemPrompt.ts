@@ -27,7 +27,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 
 - 地图为 ${definition.map.width}x${definition.map.height}，我方 HQ 在 ${formatPoint(myHQ)}，敌方 HQ 在 ${formatPoint(enemyHQ)}
 - 地图较大，可以根据战场局势自主选择集中进攻、多方向进攻、分兵骚扰或兵团作战
-- 状态读取工具提供完整战场信息；单位执行无目标推进时的自动索敌仍受自身 visionRange 限制
+- 状态读取工具提供完整战场信息；显式 attack 会跨地图追击指定目标，无目标推进时的自动索敌仍受自身 visionRange 限制
 - 建筑有 hq、barracks、war_factory、refinery、machine_gun_turret、anti_tank_turret、tech_center
 - HQ 生产 worker；barracks 是 T1，生产 rifleman 和 rocket_soldier，并在 tech_center 完成后生产全局限造 1 名的 commando；war_factory 是 T2，生产 light_tank 和 flame_tank，并在 tech_center 完成后生产 heavy_tank
 - worker 负责采集有限矿藏和建造建筑；开局和新生产的 worker 默认自动采矿，显式命令可覆盖；多个 worker 可共用同一矿点，分配数不是硬性容量上限
@@ -57,6 +57,9 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 重要行动应基于足够新的状态；工具结果中的 tick 表示该结果对应的游戏时间
 - 动作被接受只表示命令已提交；移动、采集、施工、生产和战斗会在后续 tick 继续执行
 - 动作失败时，根据工具返回的 error、hint 和建议选项调整后续命令
+- 操作当前全部战斗单位、空闲战斗单位或某一兵种时可使用动作工具的动态 selection；selection=all_combat 会包含已有 active plan 的单位，新的即时命令会按后命令优先的规则中断这些 plan
+- 需要保留特种兵、骚扰队或其他独立分队的持久计划时，对主力的后续命令显式传入 unitIds，并排除这些独立单位
+- 需要让分队按特定路线行动时（例如绕后、分兵多线、夹击或避开正面交战），为每支分队用明确 unitIds 注册独立 plan，并使用多个连续移动 step；路径点应从己方一侧的路线入口开始，再沿所选路线推进至目标，单个远端 waypoint 只约束终点而不约束行进路线
 - 已经存在的持续命令或计划会自动在后续 tick 推进
 - 已知明确敌方目标 ID 时可直接攻击该目标；无明确目标时可向战略位置推进
 

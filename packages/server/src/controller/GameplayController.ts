@@ -41,7 +41,6 @@ import {
   getBuildingPrerequisites,
   getBuildingFootprintCells,
   getDistanceToBuildingFootprint,
-  getUnitVisionRange,
   getUnitCost,
   getUnitLimit,
   getUnitArmor,
@@ -420,7 +419,11 @@ export class GameplayController {
         validateArgs: (args) => this.hasOptionalPlanUnitId(args) && Number.isInteger(args.x) && Number.isInteger(args.y),
         createCommand: (context) => {
           const unitId = this.resolvePlanUnitId(context);
-          if (context.unit?.state === "moving" && context.unit.intent?.type === "move") {
+          if (
+            context.commandAlreadyIssued
+            && context.unit?.state === "moving"
+            && context.unit.intent?.type === "move"
+          ) {
             return null;
           }
           return unitId && Number.isInteger(context.args.x) && Number.isInteger(context.args.y)
@@ -438,7 +441,7 @@ export class GameplayController {
           if (!unitId || !Number.isInteger(context.args.x) || !Number.isInteger(context.args.y)) {
             return null;
           }
-          if (context.unit?.intent?.type === "attack_move") {
+          if (context.commandAlreadyIssued && context.unit?.intent?.type === "attack_move") {
             return null;
           }
           return this.createCommand("attack_move", {
@@ -459,12 +462,17 @@ export class GameplayController {
             return null;
           }
           if (
-            context.unit?.intent?.type === "attack"
+            context.commandAlreadyIssued
+            && context.unit?.intent?.type === "attack"
             && context.unit.intent.targetId === context.args.targetId
           ) {
             return null;
           }
-          if (context.unit?.state === "moving" && context.unit.intent?.type === "move") {
+          if (
+            context.commandAlreadyIssued
+            && context.unit?.state === "moving"
+            && context.unit.intent?.type === "move"
+          ) {
             return null;
           }
           const resolution = this.resolveAttackOrderCommand(unitId, context.args.targetId);
@@ -1144,7 +1152,7 @@ export class GameplayController {
       }
       const recovery = this.getEnemyTargetRecovery(attacker, targetId);
       const fallbackTargetId = recovery.targetStatus === "destroyed"
-        ? this.findNearbyAttackFallback(attacker)
+        ? this.findAttackFallback(attacker)
         : null;
       if (!fallbackTargetId) {
         return this.actionResult({
@@ -2055,7 +2063,7 @@ export class GameplayController {
       const resolution = this.resolveAttackOrderCommand(order.unitId, order.targetId);
       if (!resolution.ok) {
         const fallbackTargetId = resolution.error === "target_missing"
-          ? this.findNearbyAttackFallback(unit)
+          ? this.findAttackFallback(unit)
           : null;
         if (fallbackTargetId) {
           order.targetId = fallbackTargetId;
@@ -2093,7 +2101,7 @@ export class GameplayController {
     return commands;
   }
 
-  private findNearbyAttackFallback(attacker: Unit): string | null {
+  private findAttackFallback(attacker: Unit): string | null {
     const state = this.getReadState();
     const me = state.players.find((player) => player.id === this.playerId)!;
     const friendlyIds = new Set([
@@ -2105,7 +2113,6 @@ export class GameplayController {
       const index = priority.indexOf(type);
       return index >= 0 ? index : priority.length;
     };
-    const visionRange = getUnitVisionRange(attacker.type);
     const candidates = state.players
       .filter((player) => player.id !== this.playerId)
       .flatMap((player) => [
@@ -2134,7 +2141,6 @@ export class GameplayController {
             threatening: false,
           })),
       ])
-      .filter((candidate) => candidate.distance <= visionRange)
       .sort((left, right) =>
         Number(right.threatening) - Number(left.threatening)
         || priorityIndex(left.type) - priorityIndex(right.type)

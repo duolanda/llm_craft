@@ -685,7 +685,7 @@ interface CommandProvenance {
 }
 ```
 
-`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队；具体操作仍使用 `units` 里的 unit id。`phase` 是当前 tick 的瞬时模拟阶段，`intent` 才是持续任务；例如采矿循环等待下一步时可以是 `phase: "idle"`、`intent.type: "harvest_loop"`，这不表示任务丢失。单元详情不返回完整逐格 `path`，只保留 `pathTarget` 和可选的 `remainingPathSteps`，避免长路径重复占据模型上下文。
+`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队。精确微操可以继续使用 `units` 里的 unit id；即时移动、attack-move、attack 和 hold 也可使用执行时动态 `selection`，不需要先读再复制一批容易过期的 ID。`phase` 是当前 tick 的瞬时模拟阶段，`intent` 才是持续任务；例如采矿循环等待下一步时可以是 `phase: "idle"`、`intent.type: "harvest_loop"`，这不表示任务丢失。单元详情不返回完整逐格 `path`，只保留 `pathTarget` 和可选的 `remainingPathSteps`，避免长路径重复占据模型上下文。
 
 #### `get_army_summary`
 
@@ -773,11 +773,31 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 
 ### 2.2 即时动作工具
 
+`move_unit`、`attack_move_unit`、`attack` 和 `hold_unit` 接受两种互斥的单位选择方式：
+
+```ts
+type DynamicUnitSelection = "all_combat" | "idle_combat" | UnitType;
+type CombatUnitType = Exclude<UnitType, "worker">;
+
+type UnitSubject =
+  | { unitIds: string[]; selection?: never }
+  | { unitIds?: never; selection: DynamicUnitSelection };
+```
+
+- `unitIds` 用于精确微操；`selection` 在工具真正执行时根据实时存活单位解析，避免同一模型响应中的状态查询与动作并行时复制到过期 ID
+- `all_combat` 选择当前全部存活战斗单位，包括已有 active plan 的单位；即时动作按后命令优先的 RTS 语义中断所有被选中单位的当前 plan
+- `idle_combat` 选择没有 active plan、瞬时为 idle，且没有持续意图或仅为 hold 的战斗单位
+- 具体 `UnitType`（例如 `light_tank`）选择当前全部存活的该类己方单位；战斗工具只接受能攻击的单位类型
+- 如果特种兵、骚扰队或其他独立分队必须继续当前 plan，对主力显式传入 `unitIds` 并排除这些单位，不要使用 `all_combat`
+- 必须且只能提供 `unitIds` 或 `selection` 之一；动态选择无匹配单位时返回 `empty_unit_selection`
+- 动态选择成功的批量结果额外返回 `selection` 和实际解析出的 `selectedUnitIds`
+
 #### `move_unit`
 
 ```ts
 {
-  unitIds: string[];
+  unitIds?: string[];
+  selection?: DynamicUnitSelection;
   x: number;
   y: number;
 }
@@ -792,7 +812,8 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 
 ```ts
 {
-  unitIds: string[];
+  unitIds?: string[];
+  selection?: "all_combat" | "idle_combat" | CombatUnitType;
   x: number;
   y: number;
   priority?: AttackTargetType[];
@@ -812,7 +833,8 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 
 ```ts
 {
-  unitIds: string[];
+  unitIds?: string[];
+  selection?: "all_combat" | "idle_combat" | CombatUnitType;
   targetId: string;
 }
 ```
@@ -822,8 +844,9 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 - 框选的所有合法战斗单位对同一 `targetId` 下达持续攻击命令
 - `targetId` 必须来自全图情报中的敌方单位或建筑 ID
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击；目标进入武器最小射程内时，单位会先退到合法射界，避免原地重复提交超近攻击
-- 聚焦目标在观察后、首次命令提交前死亡时，攻击者会立刻在自身自动索敌视野内按同样规则换目标，成功结果携带 `retargetedFrom`；持续攻击中目标消失时也会重选。排序先看正在威胁友军的目标，再按兵种默认优先级、距离、残血和稳定 ID
-- 附近没有合法目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则转为 hold 并清掉旧追击路径
+- 聚焦目标在观察后、首次批量命令提交前死亡时，系统会从当前全图情报中选择一个替代目标，并让该批全部合法攻击者统一追击；替代目标不受各单位当时的攻击范围或自动索敌视野限制，远处单位同样先移动再攻击。成功结果携带批量级 `targetId` 和 `retargetedFrom`
+- 持续攻击中目标消失时，各单位也会从当前战场目标中重选并继续追击。排序先看正在威胁友军的目标，再按兵种默认优先级、距离、残血和稳定 ID
+- 全图没有合法替代目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则转为 hold 并清掉旧追击路径
 - `targetStatus` 在目标曾被当前控制器观察且后来消失时为 `destroyed`；友军 ID 为 `not_enemy`；其他未知 ID 为 `invalid_id`
 
 #### `spawn_unit`
@@ -935,7 +958,8 @@ interface ProductionProgress {
 
 ```ts
 {
-  unitIds: string[];
+  unitIds?: string[];
+  selection?: DynamicUnitSelection;
 }
 ```
 
@@ -985,7 +1009,7 @@ interface ProductionProgress {
 
 ### 2.3 持久计划入口 `orchestrate_plan`
 
-这是 LLM、HTTP control 和 CLI 共用的多 tick 计划工具。step 的 `call` 与 `args` 复用其支持的 2.2 节即时动作工具名称和参数形状，内部 `MissionRuntime` 在每个 committed tick 推进；生产队列工具不属于 plan call。
+这是 LLM、HTTP control 和 CLI 共用的多 tick 计划工具。step 的 `call` 与 `args` 复用其支持的 2.2 节即时动作工具名称和动作参数，内部 `MissionRuntime` 在每个 committed tick 推进；生产队列工具不属于 plan call。per-unit plan 必须在注册时通过顶层 `unitIds` 固定所属单位，不能使用只在单次即时动作执行时解析的动态 `selection`。
 
 ```ts
 interface OrchestratePlanInput {
@@ -1045,6 +1069,7 @@ type PlanStepCondition =
 - `orchestrate_plan` 只注册计划，不会在一次 tool call 内跑完整段脚本
 - 计划会在后续 tick 自动推进
 - 即时动作会打断相关单位的当前计划
+- 新 plan 接管单位时，其首个移动或追击 step 会覆盖注册前遗留的移动目标；同一 step 已经下发后则等待当前移动，不每 tick 重发
 - 如果单位已有合适的 active plan，不要每个 run 都重复注册同一个计划
 - `steps` 只接受 call step，把现有动作工具调用注册成持续计划
 - `scope = "per_unit"` 会对 `unitIds` 中每个存活单位展开并要求 `unitIds`；`scope = "global"` 只执行一次，纯建造计划可省略 `unitIds`
@@ -1057,6 +1082,7 @@ type PlanStepCondition =
 - `building_exists` 用于 `build_structure` 时默认跟随该 step 当前的 x/y，因此换址后会等待新位置的建筑完成，并在完成边界先结束步骤而非重复 build
 - 多个 active plan 在同一 tick 推进时按顺序检查实际可用 credits；较早生成的 `build_structure` 会预留本 tick credits，后续付费 step 如果余额不够会等待下一次收入或下一轮推进
 - `attack` call step 默认具备持续重试语义；也可以显式传 `retry: true`
+- waypoint 由多个 `move_unit` / `attack_move_unit` step 依次表达。绕后、分兵多线、夹击、避开正面交战等对路线敏感的行动，应为每支分队显式分配 `unitIds` 并注册独立 plan：先设己方一侧的路线入口点，再沿所选路线设置后续路径点并接近目标。单个远端 waypoint 只约束终点，不约束实际行进路线
 
 最小自动建造计划只需指定 worker 和建筑类型；坐标省略时自动选择，后续动态占位会自动换址：
 
@@ -1194,6 +1220,7 @@ result:
 - 子 Agent 是执行 worker，不是战略规划者
 - 子 Agent 可使用全部游戏工具，但不能调用 `spawn_agent`
 - 分配到不同子 Agent 的 unitIds / buildingIds 必须互不重叠
+- 为保持资源租赁边界，子 Agent 的单位动作只暴露显式 `unitIds`，不能使用会扩展到未租赁单位的动态 `selection`
 - 每玩家默认最多同时运行 2 个子 Agent；重叠 lease 返回 `resource_already_leased`，超限返回 `subagent_concurrency_limit`
 - 子 Agent 工具调用中任一 `unitId/unitIds/buildingId` 未租赁时返回 `resource_not_leased`，不会生成命令
 - `spawn_agent` 调用后立即返回 `taskId`，不等待子 Agent 完成

@@ -36,12 +36,112 @@ describe("GameplayController", () => {
     const orchestrate = tools.find((tool) => tool.name === "orchestrate_plan")!;
     const planCalls = (((orchestrate.parameters.properties as any).steps.items.properties.call.enum) as string[]);
     expect(planCalls).not.toContain("spawn_unit");
-    for (const name of ["move_unit", "attack_move_unit", "attack", "start_harvest_loop", "hold_unit"]) {
+    for (const name of ["move_unit", "attack_move_unit", "attack", "hold_unit"]) {
       const tool = tools.find((candidate) => candidate.name === name)!;
       const unitIds = (tool.parameters.properties as Record<string, Record<string, unknown>>).unitIds;
+      const selection = (tool.parameters.properties as Record<string, Record<string, unknown>>).selection;
       expect(unitIds.minItems).toBe(1);
       expect(unitIds).not.toHaveProperty("maxItems");
+      expect(selection.enum).toEqual(expect.arrayContaining(["all_combat", "idle_combat", UNIT_TYPES.LIGHT_TANK]));
+      expect(tool.parameters.required ?? []).not.toContain("unitIds");
     }
+    const harvest = tools.find((candidate) => candidate.name === "start_harvest_loop")!;
+    expect(harvest.parameters.required).toContain("unitIds");
+    expect(harvest.parameters.properties).not.toHaveProperty("selection");
+  });
+
+  it("resolves combat and unit-type selections from live units at execution time", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const rifleman = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 5, 5, "player_1");
+    const firstTank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 6, 5, "player_1");
+    const secondTank = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 7, 5, "player_1");
+    const target = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 30, 5, "player_2");
+
+    const attack = executeAgentTool(gameplayController, "attack", {
+      selection: "all_combat",
+      targetId: target.id,
+    }).result as { selectedUnitIds: string[]; results: Array<Record<string, unknown>> };
+
+    expect(new Set(attack.selectedUnitIds)).toEqual(new Set([rifleman.id, firstTank.id, secondTank.id]));
+    expect(attack.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ unitId: rifleman.id, mode: "move_to_target" }),
+      expect.objectContaining({ unitId: firstTank.id, mode: "move_to_target" }),
+      expect.objectContaining({ unitId: secondTank.id, mode: "move_to_target" }),
+    ]));
+    gameplayController.takeIssuedCommands();
+
+    const typed = executeAgentTool(gameplayController, "hold_unit", {
+      selection: UNIT_TYPES.LIGHT_TANK,
+    }).result as { selectedUnitIds: string[] };
+    expect(new Set(typed.selectedUnitIds)).toEqual(new Set([firstTank.id, secondTank.id]));
+    game.stop();
+  });
+
+  it("selects only unplanned idle or holding combat units with idle_combat", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const idle = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 5, 5, "player_1");
+    const holding = game.getUnitManager().createUnit(UNIT_TYPES.ROCKET_SOLDIER, 6, 5, "player_1");
+    holding.order = { type: "hold" };
+    const moving = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 7, 5, "player_1");
+    moving.state = "moving";
+    moving.order = { type: "move", targetX: 20, targetY: 5 };
+
+    const result = executeAgentTool(gameplayController, "hold_unit", {
+      selection: "idle_combat",
+    }).result as { selectedUnitIds: string[] };
+
+    expect(new Set(result.selectedUnitIds)).toEqual(new Set([idle.id, holding.id]));
+    expect(result.selectedUnitIds).not.toContain(moving.id);
+    game.stop();
+  });
+
+  it("keeps all_combat literal and lets the latest immediate order interrupt planned units", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const commando = game.getUnitManager().createUnit(UNIT_TYPES.COMMANDO, 8, 8, "player_1");
+    const rifleman = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 9, 8, "player_1");
+
+    expect(gameplayController.orchestratePlan({
+      unitIds: [commando.id],
+      steps: [{
+        call: "move_unit",
+        args: { unitId: commando.id, x: 20, y: 20 },
+        until: { condition: "near_position", x: 20, y: 20, distance: 1 },
+        retry: true,
+      }],
+    }).result).toMatchObject({ ok: true });
+    expect(gameplayController.getActivePlans()).toHaveLength(1);
+
+    const result = executeAgentTool(gameplayController, "attack_move_unit", {
+      selection: "all_combat",
+      x: 30,
+      y: 20,
+    }).result as { selectedUnitIds: string[] };
+
+    expect(result.selectedUnitIds).toEqual(expect.arrayContaining([commando.id, rifleman.id]));
+    expect(gameplayController.getActivePlans()).toHaveLength(0);
+    expect(gameplayController.takeIssuedCommands()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "attack_move", unitId: commando.id }),
+      expect.objectContaining({ type: "attack_move", unitId: rifleman.id }),
+    ]));
+    game.stop();
+  });
+
+  it("rejects ambiguous explicit and dynamic unit selection", () => {
+    const game = new Game();
+    const gameplayController = new GameplayController(game, "player_1");
+    const result = executeAgentTool(gameplayController, "hold_unit", {
+      unitIds: ["unit_1"],
+      selection: "all_combat",
+    });
+
+    expect(result.result).toMatchObject({ ok: false, error: "conflicting_unit_selection" });
+    expect(gameplayController.takeIssuedCommands()).toEqual([]);
   });
 
   it("queues action commands into the game immediately", () => {
@@ -404,6 +504,73 @@ describe("GameplayController", () => {
         targetId: enemyHQ.id,
       }),
     ]);
+    game.stop();
+  });
+
+  it("lets a replacement plan take over an earlier move without flooding the new step", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const soldier = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 8, 8, "player_1");
+    const firstTarget = { x: 30, y: 8 };
+    const replacementTarget = { x: 8, y: 30 };
+
+    const firstPlan = gameplayController.orchestratePlan({
+      unitIds: [soldier.id],
+      steps: [{
+        call: "move_unit",
+        args: { unitId: soldier.id, ...firstTarget },
+        until: { condition: "near_position", ...firstTarget, distance: 1 },
+        retry: true,
+      }],
+    }).result as { planId: string };
+    const firstCommands = gameplayController.handleCommittedTick();
+    expect(firstCommands).toEqual([
+      expect.objectContaining({
+        type: "move",
+        unitId: soldier.id,
+        position: firstTarget,
+      }),
+    ]);
+    firstCommands.forEach((command) => game.queueCommand(command));
+    game.tickUpdate();
+    expect(game.getState().players[0].units.find((unit) => unit.id === soldier.id)?.intent).toMatchObject({
+      type: "move",
+      targetX: firstTarget.x,
+      targetY: firstTarget.y,
+    });
+
+    const replacementPlan = gameplayController.orchestratePlan({
+      unitIds: [soldier.id],
+      replaceExisting: true,
+      steps: [{
+        call: "move_unit",
+        args: { unitId: soldier.id, ...replacementTarget },
+        until: { condition: "near_position", ...replacementTarget, distance: 1 },
+        retry: true,
+      }],
+    }).result as { planId: string };
+    const replacementCommands = gameplayController.handleCommittedTick();
+    expect(replacementCommands).toEqual([
+      expect.objectContaining({
+        type: "move",
+        unitId: soldier.id,
+        position: replacementTarget,
+      }),
+    ]);
+    replacementCommands.forEach((command) => game.queueCommand(command));
+    game.tickUpdate();
+
+    expect(game.getState().players[0].units.find((unit) => unit.id === soldier.id)?.intent).toMatchObject({
+      type: "move",
+      targetX: replacementTarget.x,
+      targetY: replacementTarget.y,
+    });
+    expect(gameplayController.getAllPlans()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ planId: firstPlan.planId, status: "interrupted" }),
+      expect.objectContaining({ planId: replacementPlan.planId, status: "active" }),
+    ]));
+    expect(gameplayController.handleCommittedTick()).toEqual([]);
     game.stop();
   });
 
@@ -1668,7 +1835,47 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("cancels stale pursuit movement when a focused target dies with no nearby replacement", () => {
+  it("retargets one attack batch and sends distant members toward the same replacement", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const nearby = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 5, 5, "player_1");
+    const distant = game.getUnitManager().createUnit(UNIT_TYPES.RIFLEMAN, 40, 5, "player_1");
+    const focused = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 8, 5, "player_2");
+    const fallback = game.getUnitManager().createUnit(UNIT_TYPES.LIGHT_TANK, 9, 5, "player_2");
+    for (const unit of game.getUnitManager().getUnitsByPlayer("player_2")) {
+      if (unit.id !== focused.id && unit.id !== fallback.id) game.getUnitManager().removeUnit(unit.id);
+    }
+    gameplayController.getMapState();
+    game.getUnitManager().removeUnit(focused.id);
+
+    const execution = executeAgentTool(gameplayController, "attack", {
+      unitIds: [nearby.id, distant.id],
+      targetId: focused.id,
+    });
+    const result = execution.result as {
+      targetId: string;
+      retargetedFrom: string;
+      results: Array<Record<string, unknown>>;
+    };
+
+    expect(result).toMatchObject({
+      ok: true,
+      targetId: fallback.id,
+      retargetedFrom: focused.id,
+    });
+    expect(result.results).toEqual([
+      expect.objectContaining({ unitId: nearby.id, targetId: fallback.id, mode: "attack" }),
+      expect.objectContaining({ unitId: distant.id, targetId: fallback.id, mode: "move_to_target" }),
+    ]);
+    expect(gameplayController.takeIssuedCommands()).toEqual([
+      expect.objectContaining({ type: "attack", unitId: nearby.id, targetId: fallback.id }),
+      expect.objectContaining({ type: "move", unitId: distant.id }),
+    ]);
+    game.stop();
+  });
+
+  it("cancels stale pursuit movement when a focused target dies with no replacement", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
@@ -1679,6 +1886,12 @@ describe("GameplayController", () => {
     gameplayController.takeIssuedCommands();
     game.tickUpdate();
     game.getUnitManager().removeUnit(focused.id);
+    for (const unit of game.getUnitManager().getUnitsByPlayer("player_2")) {
+      game.getUnitManager().removeUnit(unit.id);
+    }
+    for (const building of game.getBuildingManager().getBuildingsByPlayer("player_2")) {
+      game.getBuildingManager().removeBuilding(building.id);
+    }
 
     expect(gameplayController.handleCommittedTick()).toEqual([
       expect.objectContaining({ unitId: attacker.id, type: "hold" }),
@@ -1929,30 +2142,32 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("reports a dead target instead of using fog-of-war memory", () => {
+  it("pursues a current battlefield target when the requested target is already dead", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
     const attacker = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = game.getUnitManager().createUnit(UNIT_TYPES.SOLDIER, 8, 5, "player_2");
+    for (const unit of game.getUnitManager().getUnitsByPlayer("player_2")) {
+      if (unit.id !== target.id) game.getUnitManager().removeUnit(unit.id);
+    }
 
     gameplayController.getMapState();
     game.getUnitManager().removeUnit(target.id);
 
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
     const result = gameplayController.attackTarget(attacker.id, target.id);
 
     expect(result.result).toMatchObject({
-      ok: false,
-      error: "target_missing",
-      targetId: target.id,
-      targetStatus: "destroyed",
-      availableEnemyTargetCount: expect.any(Number),
-      availableEnemyTargets: expect.arrayContaining([
-        expect.objectContaining({ type: BUILDING_TYPES.HQ }),
-      ]),
+      ok: true,
+      mode: "move_to_target",
+      targetId: enemyHq.id,
+      retargetedFrom: target.id,
     });
-    expect(gameplayController.takeIssuedCommands()).toEqual([]);
-    expect(gameplayController.handleCommittedTick()).toEqual([]);
+    expect(gameplayController.takeIssuedCommands()).toEqual([
+      expect.objectContaining({ type: "move", unitId: attacker.id }),
+    ]);
     game.stop();
   });
 

@@ -5,6 +5,8 @@ import {
   CONTROL_PROVIDER_ONLY_TOOL_NAMES,
   CONTROL_READ_TOOL_NAMES,
   OrchestratePlanInput,
+  UnitType,
+  unitCanAttack,
 } from "@llmcraft/shared";
 import { GameplayController } from "../controller/GameplayController";
 
@@ -23,6 +25,9 @@ type ToolExecutor = (gameplayController: GameplayController, args: any) => Agent
 
 const BUILDABLE_BUILDING_TYPES = ALL_BUILDING_TYPES.filter((buildingType) => buildingType !== BUILDING_TYPES.HQ);
 const ATTACK_TARGET_TYPES = [...ALL_UNIT_TYPES, ...ALL_BUILDING_TYPES];
+const COMBAT_UNIT_TYPES = ALL_UNIT_TYPES.filter((unitType) => unitCanAttack(unitType));
+const ALL_UNIT_SELECTIONS = ["all_combat", "idle_combat", ...ALL_UNIT_TYPES] as const;
+const COMBAT_UNIT_SELECTIONS = ["all_combat", "idle_combat", ...COMBAT_UNIT_TYPES] as const;
 const BATCH_SHARED_RECOVERY_KEYS = [
   "availableFriendlyUnits",
   "availableAttackers",
@@ -39,6 +44,107 @@ const getUnitIds = (args: Record<string, unknown>): string[] => {
   return [...new Set(ids)];
 };
 
+type UnitSelectionSnapshot = {
+  id: string;
+  type: UnitType;
+  phase: string;
+  intent?: { type?: string } | null;
+  hasActivePlan?: boolean;
+};
+
+type UnitBatchResolution =
+  | { ok: true; unitIds: string[]; selection?: string }
+  | { ok: false; result: Record<string, unknown> };
+
+const unitSelectionProperties = (selectionValues: readonly string[]): Record<string, unknown> => ({
+  unitIds: {
+    type: "array",
+    minItems: 1,
+    uniqueItems: true,
+    items: { type: "string" },
+    description: "Explicit unit IDs. Pass exactly one of unitIds or selection.",
+  },
+  selection: {
+    type: "string",
+    enum: selectionValues,
+    description:
+      "Dynamic execution-time selection. all_combat selects every living combat unit, including units with active plans; the new immediate order interrupts those plans. idle_combat selects unplanned idle/holding combat units; a unit type selects every living friendly unit of that type. To preserve a specialist or detached force, pass explicit unitIds for the intended main force and omit those units. Pass exactly one of unitIds or selection.",
+  },
+});
+
+const resolveUnitBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+  allowedSelections: readonly string[],
+): UnitBatchResolution => {
+  const hasExplicitIds = args.unitIds !== undefined || args.unitId !== undefined;
+  const hasSelection = args.selection !== undefined;
+  if (hasExplicitIds && hasSelection) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        error: "conflicting_unit_selection",
+        hint: "Pass exactly one of unitIds or selection, not both.",
+      },
+    };
+  }
+
+  if (hasExplicitIds) {
+    const unitIds = getUnitIds(args);
+    return unitIds.length > 0
+      ? { ok: true, unitIds }
+      : {
+          ok: false,
+          result: { ok: false, error: "missing_units", hint: "Pass one or more friendly unit IDs in unitIds." },
+        };
+  }
+
+  if (typeof args.selection !== "string" || !allowedSelections.includes(args.selection)) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        error: hasSelection ? "invalid_unit_selection" : "missing_units",
+        hint: hasSelection
+          ? "Use one of validSelections."
+          : "Pass one or more friendly unit IDs in unitIds, or use selection.",
+        validSelections: allowedSelections,
+      },
+    };
+  }
+
+  const snapshot = gameplayController.getMyUnits({ trackRead: false }).result as {
+    tick: number;
+    units: UnitSelectionSnapshot[];
+  };
+  const selectedUnits = snapshot.units.filter((unit) => {
+    if (args.selection === "all_combat") return unitCanAttack(unit.type);
+    if (args.selection === "idle_combat") {
+      return unitCanAttack(unit.type)
+        && unit.phase === "idle"
+        && unit.hasActivePlan !== true
+        && (!unit.intent || unit.intent.type === "hold");
+    }
+    return unit.type === args.selection;
+  });
+  const unitIds = selectedUnits.map((unit) => unit.id);
+  if (unitIds.length === 0) {
+    return {
+      ok: false,
+      result: {
+        tick: snapshot.tick,
+        ok: false,
+        error: "empty_unit_selection",
+        hint: "No living friendly units currently match selection.",
+        selection: args.selection,
+        selectedUnitIds: [],
+      },
+    };
+  }
+  return { ok: true, unitIds, selection: args.selection };
+};
+
 const getBuildingIds = (args: Record<string, unknown>): string[] => {
   const ids = Array.isArray(args.buildingIds)
     ? args.buildingIds.filter((value): value is string => typeof value === "string")
@@ -52,14 +158,16 @@ const executeUnitBatch = (
   gameplayController: GameplayController,
   args: Record<string, unknown>,
   execute: (unitId: string) => AgentToolExecution,
+  allowedSelections: readonly string[] = ALL_UNIT_SELECTIONS,
 ): AgentToolExecution => {
-  const unitIds = getUnitIds(args);
-  if (unitIds.length === 0) {
+  const resolution = resolveUnitBatch(gameplayController, args, allowedSelections);
+  if (!resolution.ok) {
     return {
       effect: "action",
-      result: { ok: false, error: "missing_units", hint: "Pass one or more friendly unit IDs in unitIds." },
+      result: resolution.result,
     };
   }
+  const { unitIds } = resolution;
   const results: Array<{ unitId: string; ok?: unknown; [key: string]: unknown }> = unitIds.map((unitId) => {
     const execution = execute(unitId);
     const result = execution.result && typeof execution.result === "object"
@@ -97,7 +205,49 @@ const executeUnitBatch = (
         failedUnitIds: failures.map((result) => result.unitId),
       } : {}),
       results,
+      ...(resolution.selection ? {
+        selection: resolution.selection,
+        selectedUnitIds: unitIds,
+      } : {}),
       ...recoveryContext,
+    },
+  };
+};
+
+const executeAttackBatch = (
+  gameplayController: GameplayController,
+  args: Record<string, unknown>,
+): AgentToolExecution => {
+  const requestedTargetId = String(args.targetId);
+  let actualTargetId = requestedTargetId;
+  const execution = executeUnitBatch(
+    gameplayController,
+    args,
+    (unitId) => {
+      const item = gameplayController.attackTarget(unitId, actualTargetId);
+      const result = item.result && typeof item.result === "object"
+        ? item.result as Record<string, unknown>
+        : {};
+      if (
+        result.ok === true
+        && typeof result.retargetedFrom === "string"
+        && typeof result.targetId === "string"
+      ) {
+        actualTargetId = result.targetId;
+      }
+      return item;
+    },
+    COMBAT_UNIT_SELECTIONS,
+  );
+  if (actualTargetId === requestedTargetId || !execution.result || typeof execution.result !== "object") {
+    return execution;
+  }
+  return {
+    ...execution,
+    result: {
+      ...(execution.result as Record<string, unknown>),
+      targetId: actualTargetId,
+      retargetedFrom: requestedTargetId,
     },
   };
 };
@@ -204,12 +354,12 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "move_unit",
     description:
-      "Queue the same move destination for one or more selected units. Blocked destinations are resolved to nearby reachable tiles when possible.",
+      "Queue the same move destination for explicitly listed units or a dynamic execution-time selection. Pass exactly one of unitIds or selection. Blocked destinations are resolved to nearby reachable tiles when possible.",
     parameters: {
       type: "object",
-      required: ["unitIds", "x", "y"],
+      required: ["x", "y"],
       properties: {
-        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        ...unitSelectionProperties(ALL_UNIT_SELECTIONS),
         x: { type: "integer" },
         y: { type: "integer" },
       },
@@ -224,12 +374,12 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   {
     name: "attack_move_unit",
     description:
-      "Queue the same targetless combat advance for one or more selected combat units. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing. Optional priority entries move those target types ahead of the unit's defaults; omitted target types remain valid fallback targets.",
+      "Queue the same targetless combat advance for explicitly listed combat units or a dynamic execution-time combat selection. Pass exactly one of unitIds or selection. Each unit receives a nearby reachable destination when the requested tile is occupied and automatically fights enemies acquired within its own vision while advancing. Optional priority entries move those target types ahead of the unit's defaults; omitted target types remain valid fallback targets.",
     parameters: {
       type: "object",
-      required: ["unitIds", "x", "y"],
+      required: ["x", "y"],
       properties: {
-        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        ...unitSelectionProperties(COMBAT_UNIT_SELECTIONS),
         x: { type: "integer" },
         y: { type: "integer" },
         priority: {
@@ -244,26 +394,23 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       gameplayController,
       args,
       (unitId) => gameplayController.attackMoveUnit(unitId, { x: Number(args.x), y: Number(args.y) }, args.priority),
+      COMBAT_UNIT_SELECTIONS,
     ),
   },
   {
     name: "attack",
     description:
-      "Order one or more selected combat units to attack one enemy target ID. Units move into range and keep attacking while the target exists. If an observed target dies before execution, each attacker immediately retargets a nearby visible enemy when possible; otherwise the result includes compact current alternatives.",
+      "Order explicitly listed combat units or a dynamic execution-time combat selection to attack one enemy target ID. Pass exactly one of unitIds or selection. Units pursue the target across the map, move into weapon range, and keep attacking. If an observed target dies before execution, the batch chooses one current replacement target and every selected attacker pursues it regardless of current weapon or vision range.",
     parameters: {
       type: "object",
-      required: ["unitIds", "targetId"],
+      required: ["targetId"],
       properties: {
-        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        ...unitSelectionProperties(COMBAT_UNIT_SELECTIONS),
         targetId: { type: "string" },
       },
       additionalProperties: false,
     },
-    execute: (gameplayController, args) => executeUnitBatch(
-      gameplayController,
-      args,
-      (unitId) => gameplayController.attackTarget(unitId, String(args.targetId)),
-    ),
+    execute: (gameplayController, args) => executeAttackBatch(gameplayController, args),
   },
   {
     name: "spawn_unit",
@@ -419,12 +566,11 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
   },
   {
     name: "hold_unit",
-    description: "Queue hold-position commands for one or more selected units.",
+    description: "Queue hold-position commands for explicitly listed units or a dynamic execution-time selection. Pass exactly one of unitIds or selection.",
     parameters: {
       type: "object",
-      required: ["unitIds"],
       properties: {
-        unitIds: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string" } },
+        ...unitSelectionProperties(ALL_UNIT_SELECTIONS),
       },
       additionalProperties: false,
     },
@@ -508,6 +654,8 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "- Multiple active plans share the same-tick available credits. Earlier paid build steps reserve credits, so later paid steps wait when the remaining credits cannot cover them.",
       "- Use get_active_plans to inspect currentStep, waiting.code/message/details, and lastAttempt before deciding a plan is stuck or re-registering a similar plan.",
       "- retry=true reissues the call while until is false; attack defaults to durable retry behavior.",
+      "- A new immediate unit action takes precedence and interrupts any active plan attached to the selected units. all_combat includes planned units; use explicit main-force unitIds when a specialist or detached force must keep its plan.",
+      "- For route-sensitive maneuvers such as flanking, split-front advances, converging attacks, or avoiding a frontal engagement, give each detachment explicit unitIds and a separate plan with multiple move or attack-move steps. Start with a route-entry waypoint on your own side, then advance along the chosen route. A single distant waypoint constrains only the destination, not the route taken.",
       "- Do not use this for routine mining; use start_harvest_loop for workers assigned to economy.",
       "- Do not re-register the same plan every run if the unit already has an active plan that is still appropriate.",
       "- loop = -1 means infinite loop.",

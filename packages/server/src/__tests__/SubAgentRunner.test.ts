@@ -11,6 +11,7 @@ describe("SubAgentRunner leases", () => {
           content: "",
           tool_calls: [
             { id: "bad", function: { name: "move_unit", arguments: JSON.stringify({ unitId: "unit_2", x: 1, y: 1 }) } },
+            { id: "bad-selection", function: { name: "move_unit", arguments: JSON.stringify({ selection: "all_combat", x: 1, y: 1 }) } },
             { id: "good", function: { name: "move_unit", arguments: JSON.stringify({ unitId: "unit_1", x: 2, y: 2 }) } },
           ],
         },
@@ -23,7 +24,7 @@ describe("SubAgentRunner leases", () => {
         usage: {},
       },
     ];
-    const requests: Array<{ messages: unknown[] }> = [];
+    const requests: Array<{ messages: unknown[]; tools?: Array<{ name: string; parameters: Record<string, unknown> }> }> = [];
 
     await runSubAgentTask({
       createCompletion: async (request) => {
@@ -41,7 +42,20 @@ describe("SubAgentRunner leases", () => {
         input: { playerId: "player_1", tick: 1, tickIntervalMs: 500, summary: "test" },
         messages: [],
         runtimeState: { mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null },
-        tools: [{ name: "move_unit", description: "move", parameters: {} }],
+        tools: [{
+          name: "move_unit",
+          description: "move",
+          parameters: {
+            type: "object",
+            required: ["x", "y"],
+            properties: {
+              unitIds: { type: "array", items: { type: "string" } },
+              selection: { type: "string", enum: ["all_combat"] },
+              x: { type: "integer" },
+              y: { type: "integer" },
+            },
+          },
+        }],
         executeTool,
       },
       signal: new AbortController().signal,
@@ -56,5 +70,9 @@ describe("SubAgentRunner leases", () => {
       source: "subagent",
     });
     expect(JSON.stringify(requests[1].messages)).toContain("resource_not_leased");
+    expect(requests[0].tools?.[0].parameters).toMatchObject({
+      required: expect.arrayContaining(["unitIds", "x", "y"]),
+    });
+    expect(requests[0].tools?.[0].parameters.properties).not.toHaveProperty("selection");
   });
 });

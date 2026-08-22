@@ -69,13 +69,14 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 
 - 模型通过 OpenAI-compatible tool calling 观察和控制游戏，不生成可执行 JavaScript。
 - 只读工具：`get_map_state`、`get_my_state`、`get_my_units`、`get_army_summary`、`get_production_queue`、`get_active_plans`、`get_recent_events`。
-- 动作工具：移动、attack move、指定目标攻击、有限批次生产、取消生产、集结点、建造、持续采矿和 hold；涉及单位选择的动作统一接受 `unitIds` 数组，集结点和整队列取消接受 `buildingIds` 数组。
+- 动作工具：移动、attack move、指定目标攻击、有限批次生产、取消生产、集结点、建造、持续采矿和 hold。即时移动、attack move、attack 与 hold 可在精确 `unitIds` 和执行时动态 `selection` 之间二选一；动态选择支持 `all_combat`、`idle_combat` 或具体单位类型，并在执行 tick 解析当前存活单位，避免查询与并行动作之间的 ID 过期。`all_combat` 严格包含所有存活战斗单位，不会暗中排除已有 plan 的分队；后下发的即时命令会中断被选中单位的 plan。保留独立分队时由调用者显式传入主力 `unitIds` 并排除该分队。子 Agent 为保持 unit lease 边界仍只允许显式 `unitIds`；集结点和整队列取消接受 `buildingIds` 数组。
 - `spawn_unit` 给一座建筑追加严格有序的 `{ unitType, count }[]`。生产按 tick 扣款，余额不够时保留进度暂停，有收入后自动继续；取消订单或生产建筑被摧毁时，当前未完成单位已经支付的 credits 全额退回。T3 单位一旦开始会在科技中心被毁后完成，队列中后续受锁单位进入 `waiting_for_prerequisite`，重建科技中心后自动恢复。每座建筑每种单位最多有 100 个待生产单位；`commando` 另受玩家级 1 名限造约束。
-- LLM、HTTP control 与 CLI 共用 `orchestrate_plan`；step 的 `call` 和 `args` 直接复用其支持的即时动作工具名与参数。`cancel_plan` 可按 ID 立即终止 active plan，显式绑定的单位死亡时计划自动失败。生产不再进入 plan，改由 `spawn_unit` / `get_production_queue` / `cancel_production` 管理有限队列；global 建造计划可省略 `unitIds`，内部 `MissionRuntime` 在每个 committed tick 推进。
+- LLM、HTTP control 与 CLI 共用 `orchestrate_plan`；step 的 `call` 和 `args` 复用其支持的即时动作工具名与动作参数，但 per-unit 持久计划仍在注册时用顶层 `unitIds` 固定所有权，不接受只适合单次即时解析的动态 `selection`。`cancel_plan` 可按 ID 立即终止 active plan，显式绑定的单位死亡时计划自动失败。新 plan 的首个移动或追击 step 会接管注册前遗留的单位命令，但已由当前 step 下发的移动不会每 tick 重发。绕后、分兵多线、夹击或避开正面交战等对路线敏感的分队行动由独立 `unitIds` plan 和连续移动 step 表达：先到己方一侧的路线入口点，再沿所选路线通过战场；单个远端点不约束实际行进路线。生产不再进入 plan，改由 `spawn_unit` / `get_production_queue` / `cancel_production` 管理有限队列；global 建造计划可省略 `unitIds`，内部 `MissionRuntime` 在每个 committed tick 推进。
 - plan 建造步骤可省略坐标自动选址，并负责 worker 走位；行军期间 footprint 被临时占据时立即重选。同批未落地工地会预留 footprint 外一格，普通生产建筑沿 HQ 朝战场方向横向展开，避免相邻计划贴边形成采矿封锁。
 - HQ、兵营和重工持久保存带模式的可选 rally point。默认 `move`；兵营和重工可设 `attack_move`，该模式会穿过命令规范化与 tick 队列原样保留，新战斗单位会边推进边索敌；HQ worker 集结只支持 `move`。目标格被占时寻路层为每个单位选择附近可达落点；清除 rally point 不影响已经出发的单位。
 - 开局 worker、无 rally point 的新 worker，以及完工后没有原任务可恢复的建造 worker 会自动选择高效矿路并进入 `harvest_loop`。显式集结点、hold、移动和手动改派仍覆盖自动任务。
 - group attack move 会一次提交所有编队命令，不做跨 tick pending group release。
+- 指定目标 `attack` 采用传统 RTS 追击语义：目标在射程外时先寻路进入合法射界再持续攻击；若已观察目标在批量工具执行前死亡，则从当前全图目标中选出一个替代目标供整批攻击者统一追击，不再按每个单位当时的自动索敌视野分别决定是否停下。持续攻击中的目标消失后，各单位也会从当前战场目标继续重选；只有不存在任何合法目标时才清理追击并 hold。
 - `get_map_state` 和 `get_my_units` 用 `phase` 表示瞬时模拟阶段，保留 `intent` 表示持续任务，避免把 `phase: idle` 误解为没有采矿任务。`get_my_units` 不再返回完整逐格路径，只返回终点与剩余步数；`get_my_state` 区分 assigned/active/stalled harvesters 并报告矿点余量，harvest loop 连续 12 tick 没有位移或 credits 变化时报告 `path_blocked`。LLM 的 `start_harvest_loop` 接受 `unitIds` 数组，相同有效任务返回 `already_active` 而不重启。
 - `no_recent_read` 只提示本轮从未读取过状态；一旦读取，模型推理跨过若干 tick 不再产生纯时间阈值的过期噪音。所有动作仍在调用时使用实时状态校验。
 - Agent session 会把 building complete、unit ready、unit lost 和任一己方建筑遭攻击四类关键 EVA 消息插入模型上下文并去重。

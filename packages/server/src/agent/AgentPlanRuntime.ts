@@ -46,6 +46,7 @@ export interface PlanToolContext {
   unit?: Unit;
   snapshot: PlanSnapshot;
   planUnitIds: string[];
+  commandAlreadyIssued: boolean;
 }
 
 export interface PlanToolHandler {
@@ -291,6 +292,7 @@ export class MissionRuntime {
       unit,
       snapshot,
       planUnitIds: plan.record.unitIds,
+      commandAlreadyIssued: plan.issuedGlobalStep === true,
     };
     const estimatedCost = handler.estimateCost?.(context) ?? 0;
     if (estimatedCost > snapshot.myCredits) {
@@ -399,6 +401,7 @@ export class MissionRuntime {
         unit,
         snapshot,
         planUnitIds: plan.record.unitIds,
+        commandAlreadyIssued: plan.issuedUnitIds.has(unit.id),
       };
       const estimatedCost = handler.estimateCost?.(context) ?? 0;
       if (estimatedCost > availableCredits) {

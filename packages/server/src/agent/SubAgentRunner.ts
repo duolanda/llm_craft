@@ -56,6 +56,9 @@ function findLeaseViolation(
     return null;
   }
   for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+    if (key === "selection") {
+      return { kind: "unit", id: `selection:${String(value)}` };
+    }
     if (key === "unitId" && typeof value === "string" && !assignedUnits.has(value)) {
       return { kind: "unit", id: value };
     }
@@ -70,6 +73,31 @@ function findLeaseViolation(
     if (violation) return violation;
   }
   return null;
+}
+
+function requireExplicitUnitIds(tool: AgentToolDefinition): AgentToolDefinition {
+  const parameters = tool.parameters;
+  const properties = parameters.properties;
+  if (!properties || typeof properties !== "object" || !("selection" in properties)) {
+    return tool;
+  }
+  const { selection: _selection, ...explicitProperties } = properties as Record<string, unknown>;
+  const required = Array.isArray(parameters.required)
+    ? parameters.required.filter((value): value is string => typeof value === "string")
+    : [];
+  const description = tool.description
+    .replace("explicitly listed combat units or a dynamic execution-time combat selection", "one or more explicitly assigned combat units")
+    .replace("explicitly listed units or a dynamic execution-time selection", "one or more explicitly assigned units")
+    .replace(" Pass exactly one of unitIds or selection.", " Pass assigned unitIds.");
+  return {
+    ...tool,
+    description,
+    parameters: {
+      ...parameters,
+      required: [...new Set([...required, "unitIds"])],
+      properties: explicitProperties,
+    },
+  };
 }
 
 function formatSubAgentUserMessage(
@@ -148,9 +176,9 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
   } = config;
 
   const subAgentSystemPrompt = (systemPrompt ?? SYSTEM_PROMPT) + SUB_AGENT_CONSTRAINTS;
-  const filteredTools: AgentToolDefinition[] = parentContext.tools.filter(
-    (tool) => tool.name !== "spawn_agent",
-  );
+  const filteredTools: AgentToolDefinition[] = parentContext.tools
+    .filter((tool) => tool.name !== "spawn_agent")
+    .map(requireExplicitUnitIds);
 
   const userMessage = formatSubAgentUserMessage(
     parentContext.input,

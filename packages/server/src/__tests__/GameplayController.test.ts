@@ -1746,6 +1746,47 @@ describe("GameplayController", () => {
     game.stop();
   });
 
+  it("uses a commando's structure weapon range when pursuing a building", () => {
+    const game = new Game();
+    game.start();
+    const gameplayController = new GameplayController(game, "player_1");
+    const enemyHq = game.getBuildingManager().getBuildingsByPlayer("player_2")
+      .find((building) => building.type === BUILDING_TYPES.HQ)!;
+    const footprint = getBuildingFootprint(BUILDING_TYPES.HQ);
+    const commando = game.getUnitManager().createUnit(
+      UNIT_TYPES.COMMANDO,
+      enemyHq.x - Math.floor(footprint.width / 2) - 8,
+      enemyHq.y,
+      "player_1",
+    );
+
+    expect(gameplayController.attackTarget(commando.id, enemyHq.id).result).toMatchObject({
+      ok: true,
+      mode: "move_to_target",
+    });
+    const [move] = gameplayController.takeIssuedCommands();
+    expect(move).toMatchObject({ type: "move", unitId: commando.id });
+    expect(move.position).toBeDefined();
+    expect(getDistanceToBuildingFootprint(
+      enemyHq.type,
+      enemyHq.x,
+      enemyHq.y,
+      move.position!.x,
+      move.position!.y,
+    )).toBe(1);
+
+    commando.x = move.position!.x;
+    commando.y = move.position!.y;
+    expect(gameplayController.handleCommittedTick()).toEqual([
+      expect.objectContaining({
+        type: "attack",
+        unitId: commando.id,
+        targetId: enemyHq.id,
+      }),
+    ]);
+    game.stop();
+  });
+
   it("switches a persistent building pursuit to attack as soon as the unit enters range", () => {
     const game = new Game();
     game.start();

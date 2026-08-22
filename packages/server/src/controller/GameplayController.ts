@@ -34,6 +34,8 @@ import {
   UnitIntent,
   canBuildingProduce,
   getDefaultAttackMovePriority,
+  getAttackSourceWeaponAgainstArmor,
+  getBuildingArmor,
   getBuildingCost,
   getBuildingConstructionTicks,
   getBuildingPrerequisites,
@@ -42,6 +44,7 @@ import {
   getUnitVisionRange,
   getUnitCost,
   getUnitLimit,
+  getUnitArmor,
   getUnitPrerequisites,
   getUnitStats,
   getUnitWeapon,
@@ -2150,11 +2153,23 @@ export class GameplayController {
 
     const target = this.getEnemyTarget(targetId);
     if (target) {
-      const distance = isBuildingType(target.type)
-        ? getDistanceToBuildingFootprint(target.type, target.x, target.y, attacker.x, attacker.y)
+      const buildingTarget = isBuildingType(target.type) ? target as Building : null;
+      const distance = buildingTarget
+        ? getDistanceToBuildingFootprint(
+            buildingTarget.type,
+            buildingTarget.x,
+            buildingTarget.y,
+            attacker.x,
+            attacker.y,
+          )
         : Math.max(Math.abs(attacker.x - target.x), Math.abs(attacker.y - target.y));
-      const minRange = getUnitWeapon(attacker.type).minRange ?? 0;
-      const inRange = distance >= minRange && distance <= attacker.attackRange;
+      const targetArmor = buildingTarget
+        ? getBuildingArmor(buildingTarget.type)
+        : getUnitArmor(target.type as UnitType);
+      const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
+      const minRange = weapon.minRange ?? 0;
+      const maxRange = weapon.range;
+      const inRange = distance >= minRange && distance <= maxRange;
       if (inRange) {
         return {
           ok: true,
@@ -2171,11 +2186,10 @@ export class GameplayController {
       const existingPursuitPosition = existingOrder?.targetId === targetId
         ? existingOrder.pursuitPosition
         : undefined;
-      const buildingTarget = isBuildingType(target.type) ? target as Building : null;
       const movePosition = existingPursuitPosition ?? (distance < minRange
-        ? this.findMinimumRangeRetreatPosition(attacker, target, minRange)
+        ? this.findMinimumRangeRetreatPosition(attacker, target, minRange, maxRange)
         : buildingTarget
-          ? this.findBuildingFiringPosition(attacker, buildingTarget, minRange)
+          ? this.findBuildingFiringPosition(attacker, buildingTarget, minRange, maxRange)
           : this.toGridPosition(target, this.getReadState()));
       if (!movePosition) {
         return {
@@ -2208,6 +2222,7 @@ export class GameplayController {
     attacker: Unit,
     target: Building,
     minRange: number,
+    maxRange: number,
   ): Position | null {
     const state = this.getReadState();
     const height = state.tiles.length;
@@ -2230,10 +2245,10 @@ export class GameplayController {
     const attackerRadius = getCollisionBoundingRadius(attacker.type);
     const candidates: Array<Position & { movementDistance: number; targetDistance: number }> = [];
 
-    for (let y = Math.max(0, minFootprintY - attacker.attackRange); y <= Math.min(height - 1, maxFootprintY + attacker.attackRange); y++) {
-      for (let x = Math.max(0, minFootprintX - attacker.attackRange); x <= Math.min(width - 1, maxFootprintX + attacker.attackRange); x++) {
+    for (let y = Math.max(0, minFootprintY - maxRange); y <= Math.min(height - 1, maxFootprintY + maxRange); y++) {
+      for (let x = Math.max(0, minFootprintX - maxRange); x <= Math.min(width - 1, maxFootprintX + maxRange); x++) {
         const targetDistance = getDistanceToBuildingFootprint(target.type, target.x, target.y, x, y);
-        if (targetDistance < minRange || targetDistance > attacker.attackRange) continue;
+        if (targetDistance < minRange || targetDistance > maxRange) continue;
         if (state.tiles[y]?.[x]?.type === TILE_TYPES.OBSTACLE) continue;
         if (!this.game.getUnitManager().canPlaceUnitAt(
           attacker.type,
@@ -2271,6 +2286,7 @@ export class GameplayController {
     attacker: Unit,
     target: Unit | Building,
     minRange: number,
+    maxRange: number,
   ): Position | null {
     const state = this.getReadState();
     const height = state.tiles.length;
@@ -2295,7 +2311,7 @@ export class GameplayController {
         const targetDistance = isBuildingType(target.type)
           ? getDistanceToBuildingFootprint(target.type, target.x, target.y, x, y)
           : Math.max(Math.abs(target.x - x), Math.abs(target.y - y));
-        if (targetDistance < minRange || targetDistance > attacker.attackRange) continue;
+        if (targetDistance < minRange || targetDistance > maxRange) continue;
         candidates.push({
           x,
           y,

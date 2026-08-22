@@ -84,16 +84,17 @@ describe("default ruleset", () => {
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.LIGHT_TANK)).toBe(77);
     expect(getAttackDamageAgainstBuilding(UNIT_TYPES.ROCKET_SOLDIER, BUILDING_TYPES.HQ)).toBe(31);
     expect(getAttackDamageAgainstBuilding(UNIT_TYPES.LIGHT_TANK, BUILDING_TYPES.BARRACKS)).toBe(38);
-    expect(getUnitStats(UNIT_TYPES.FLAME_TANK).hp).toBe(getUnitStats(UNIT_TYPES.LIGHT_TANK).hp);
+    expect(getUnitStats(UNIT_TYPES.FLAME_TANK).hp).toBe(560);
+    expect(getUnitStats(UNIT_TYPES.FLAME_TANK).hp).toBeGreaterThan(getUnitStats(UNIT_TYPES.LIGHT_TANK).hp);
     expect(getUnitWeapon(UNIT_TYPES.FLAME_TANK)).toMatchObject({
       range: 3,
-      windupTicks: 2,
+      windupTicks: 1,
       continuousFire: { damageIntervalTicks: 1 },
       projectileType: "flame",
     });
-    expect(getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.RIFLEMAN)).toBe(12);
+    expect(getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.RIFLEMAN)).toBe(24);
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.FLAME_TANK, UNIT_TYPES.LIGHT_TANK)).toBe(1);
-    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ)).toBe(10);
+    expect(getAttackDamageAgainstBuilding(UNIT_TYPES.FLAME_TANK, BUILDING_TYPES.HQ)).toBe(14);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(1);
     expect(getAttackDamageAgainstUnit(BUILDING_TYPES.ANTI_TANK_TURRET, UNIT_TYPES.FLAME_TANK)).toBe(102);
     expect(getAttackDamageAgainstUnit(UNIT_TYPES.COMMANDO, UNIT_TYPES.LIGHT_TANK)).toBe(0);

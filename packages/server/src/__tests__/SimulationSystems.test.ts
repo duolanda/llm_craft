@@ -691,15 +691,12 @@ describe("simulation systems", () => {
     });
 
     expect(result).toBe(RESULT_CODES.ERR_BUSY);
-    expect(flameTank.attackWindup).toEqual({ targetId: closeTarget.id, startedTick: 0, completesAtTick: 2 });
+    expect(flameTank.attackWindup).toEqual({ targetId: closeTarget.id, startedTick: 0, completesAtTick: 1 });
     expect(world.projectiles).toHaveLength(0);
     world.tick = 1;
     combat.step(world);
-    expect(world.projectiles).toHaveLength(0);
-    world.tick = 2;
-    combat.step(world);
     expect(flameTank.attackWindup).toBeUndefined();
-    expect(flameTank.attackStream).toEqual({ targetId: closeTarget.id, startedTick: 2 });
+    expect(flameTank.attackStream).toEqual({ targetId: closeTarget.id, startedTick: 1 });
     expect(world.projectiles).toEqual(expect.arrayContaining([
       expect.objectContaining({ attackerId: flameTank.id, targetId: closeTarget.id, projectileType: "flame" }),
     ]));
@@ -751,7 +748,7 @@ describe("simulation systems", () => {
     expect(flameTank.attackWindup).toEqual({
       targetId: secondTarget.id,
       startedTick: 3,
-      completesAtTick: 5,
+      completesAtTick: 4,
     });
   });
 

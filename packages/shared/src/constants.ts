@@ -371,7 +371,7 @@ export const DEFAULT_RULESET = {
       },
     },
     [UNIT_TYPES.FLAME_TANK]: {
-      hp: 420,
+      hp: 560,
       speed: 1,
       attack: 6,
       cost: 320,
@@ -381,14 +381,14 @@ export const DEFAULT_RULESET = {
       productionTicks: 18,
       techTier: 2,
       damageModifiers: {
-        [ARMOR_TYPES.INFANTRY]: 2,
+        [ARMOR_TYPES.INFANTRY]: 4,
         [ARMOR_TYPES.VEHICLE]: 0.2,
-        [ARMOR_TYPES.STRUCTURE]: 1.6,
+        [ARMOR_TYPES.STRUCTURE]: 2.4,
       },
       weapon: {
         damage: 6,
         range: 3,
-        windupTicks: 2,
+        windupTicks: 1,
         continuousFire: { damageIntervalTicks: 1 },
         reloadTicks: 1,
         projectileType: PROJECTILE_TYPES.FLAME,
@@ -396,9 +396,9 @@ export const DEFAULT_RULESET = {
         splashRadius: 1,
         splashFalloff: [1, 0.65],
         damageModifiers: {
-          [ARMOR_TYPES.INFANTRY]: 2,
+          [ARMOR_TYPES.INFANTRY]: 4,
           [ARMOR_TYPES.VEHICLE]: 0.2,
-          [ARMOR_TYPES.STRUCTURE]: 1.6,
+          [ARMOR_TYPES.STRUCTURE]: 2.4,
         },
         targetPriority: [UNIT_TYPES.COMMANDO, UNIT_TYPES.ROCKET_SOLDIER, UNIT_TYPES.RIFLEMAN, UNIT_TYPES.SOLDIER, UNIT_TYPES.WORKER, BUILDING_TYPES.MACHINE_GUN_TURRET, BUILDING_TYPES.BARRACKS, BUILDING_TYPES.REFINERY, BUILDING_TYPES.WAR_FACTORY, BUILDING_TYPES.TECH_CENTER, BUILDING_TYPES.HQ, UNIT_TYPES.FLAME_TANK, UNIT_TYPES.LIGHT_TANK, UNIT_TYPES.HEAVY_TANK, BUILDING_TYPES.ANTI_TANK_TURRET],
       },

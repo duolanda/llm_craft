@@ -1,11 +1,12 @@
-import { GameState, PLAYER_COLORS, LOG_LEVEL_COLORS, LOG_LEVEL_ICONS, ActorId } from "@llmcraft/shared";
+import { GameState, LiveLogEvent, PLAYER_COLORS, LOG_LEVEL_COLORS, LOG_LEVEL_ICONS, ActorId } from "@llmcraft/shared";
 import type { GameLog, LogLevel } from "@llmcraft/shared";
 
 interface GameLogProps {
   state: GameState | null;
+  logs?: LiveLogEvent[];
 }
 
-function getPlayerId(log: GameLog): ActorId {
+function getPlayerId(log: { meta: { owner: ActorId } }): ActorId {
   return log.meta.owner;
 }
 
@@ -21,10 +22,11 @@ function getLogLevelIcon(level: LogLevel): string {
   return LOG_LEVEL_ICONS[level];
 }
 
-export function GameLog({ state }: GameLogProps) {
+export function GameLog({ state, logs }: GameLogProps) {
+  const visibleLogs = (logs ?? state?.logs ?? []).slice(-20);
   return (
     <div className="log-terminal">
-      {state?.logs.slice(-20).map((log, i) => {
+      {visibleLogs.map((log, i) => {
         const playerId = getPlayerId(log);
         const playerColor = getPlayerColor(playerId);
         const level = log.meta.level;
@@ -42,7 +44,7 @@ export function GameLog({ state }: GameLogProps) {
           </div>
         );
       })}
-      {!state?.logs.length && (
+      {!visibleLogs.length && (
         <div className="empty-state">暂无日志数据</div>
       )}
     </div>

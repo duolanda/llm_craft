@@ -13,6 +13,8 @@ import {
   DEFAULT_CPU_DECISION_INTERVAL_TICKS,
   GameSnapshot,
   GameState,
+  LiveStateProjectionFrame,
+  LiveStateSnapshot,
   MatchDebugOptions,
   MatchLLMConfig,
   MatchRegistryKind,
@@ -27,13 +29,15 @@ import {
   MIN_CPU_DECISION_INTERVAL_TICKS,
   ServerWarmupStatusMessage,
   ServerMessage,
-  StateProjectionFrame,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
   UpdateLLMPresetRequest,
   isClientMessage,
 } from "@llmcraft/shared";
-import { applyStateProjectionDelta, createStateProjectionDelta } from "@llmcraft/record";
+import {
+  createLiveStateProjectionDelta,
+  createLiveStateSnapshot,
+} from "@llmcraft/record";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
 import { PresetStore } from "./PresetStore";
@@ -100,6 +104,7 @@ interface OrchestratorLike {
   getGame(): {
     getState(): GameState | null;
     getTick?: () => number;
+    getLogsTail?: (sinceCount: number) => { total: number; logs: GameState["logs"] };
     getAIOutputs?: () => Record<string, string>;
     getLatestSnapshot?: () => GameSnapshot | null;
     getDefinition?: () => { tickIntervalMs: number };
@@ -238,10 +243,7 @@ function getActiveLiveMatch(state: ServerState) {
 
 type StateMessagePayload = {
   type: "state";
-  state: GameState | null;
-  frame: StateProjectionFrame | null;
-  aiOutputs: Record<string, string>;
-  snapshots: GameSnapshot[];
+  frame: LiveStateProjectionFrame | null;
   liveEnabled: boolean;
   observedMatch: {
     matchId: string;
@@ -270,50 +272,49 @@ export function buildStateMessagePayload(
   options: {
     frameSequence?: number;
     baseFrameSequence?: number;
-    previousState?: GameState | null;
+    previousState?: LiveStateSnapshot | null;
     forceKeyframe?: boolean;
+    snapshot?: LiveStateSnapshot | null;
   } = {},
 ): StateMessagePayload {
   const currentMatch = state.matchRegistry.getObserved();
   const game = currentMatch?.handle.getGame();
-  const currentState = game?.getState() ?? null;
-  const aiOutputs = game?.getAIOutputs?.() ?? {};
+  // Callers that already hold a live snapshot for this tick pass it in so a
+  // broadcast does not deep-clone the whole world more than once per tick.
+  const fetchedState = options.snapshot === undefined ? game?.getState() ?? null : null;
+  const currentSnapshot = options.snapshot !== undefined
+    ? options.snapshot
+    : fetchedState
+      ? createLiveStateSnapshot(fetchedState)
+      : null;
   const frameSequence = options.frameSequence ?? 1;
   const tickIntervalMs = game?.getDefinition?.().tickIntervalMs ?? 500;
-  const metadata = currentState ? {
+  const metadata = currentSnapshot ? {
     frameSequence,
-    simulationTick: currentState.tick,
-    simulationTimeMs: currentState.tick * tickIntervalMs,
+    simulationTick: currentSnapshot.tick,
+    simulationTimeMs: currentSnapshot.tick * tickIntervalMs,
     tickIntervalMs,
-    serverTimeMs: Date.now(),
   } : null;
-  const keyframe = Boolean(currentState) && (
+  const keyframe = Boolean(currentSnapshot) && (
     options.forceKeyframe === true
     || !options.previousState
     || options.baseFrameSequence === undefined
     || frameSequence % 20 === 1
   );
-  const frame: StateProjectionFrame | null = !currentState || !metadata
+  const frame: LiveStateProjectionFrame | null = !currentSnapshot || !metadata
     ? null
     : keyframe
-      ? { kind: "keyframe", metadata, state: currentState, aiOutputs }
+      ? { kind: "keyframe", metadata, state: currentSnapshot }
       : {
           kind: "delta",
           metadata,
           baseFrameSequence: options.baseFrameSequence!,
-          delta: createStateProjectionDelta(options.previousState!, currentState),
-          aiOutputs,
+          delta: createLiveStateProjectionDelta(options.previousState!, currentSnapshot),
         };
 
   return {
     type: "state",
-    // `frame` is the authoritative live projection. Keep the legacy fields in
-    // the wire shape, but do not duplicate the full state on every keyframe or
-    // attach a second full GameSnapshot on every tick.
-    state: null,
     frame,
-    aiOutputs,
-    snapshots: [],
     liveEnabled: Boolean(state.liveEnabled),
     observedMatch: currentMatch
       ? {
@@ -338,6 +339,18 @@ function buildAITerminalMessagePayload(
     reset,
     events,
     hasMore,
+  };
+}
+
+function projectLiveLog(log: GameState["logs"][number]) {
+  return {
+    tick: log.tick,
+    type: log.type,
+    message: log.message,
+    meta: {
+      level: log.meta.level,
+      owner: log.meta.owner,
+    },
   };
 }
 
@@ -1131,8 +1144,12 @@ function createServer(state: ServerState) {
     let lastStateLiveEnabled: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
-    let lastProjectedState: GameState | null = null;
+    let lastProjectedState: LiveStateSnapshot | null = null;
     let lastFrameSequence = 0;
+    let lastEventsMatchId: string | null = null;
+    let lastStateLogCount = 0;
+    let lastAIOutputKey: string | null = null;
+    let lastMapMatchId: string | null = null;
 
     const logBroadcastPerfWarning = (
       phase: "state" | "ai_terminal",
@@ -1193,6 +1210,12 @@ function createServer(state: ServerState) {
           await refreshLiveEnabled(state);
         }
         const startedAt = performance.now();
+        // One full-world read per broadcast; the resulting live snapshot is
+        // reused for the wire frame, map_init, and the next delta baseline.
+        const currentGameState = currentOrchestrator?.getGame().getState() ?? null;
+        const currentLiveState = currentGameState
+          ? createLiveStateSnapshot(currentGameState)
+          : null;
         const buildStartedAt = performance.now();
         const matchChanged = currentOrchestrator !== lastStateOrchestrator;
         if (matchChanged) {
@@ -1205,19 +1228,31 @@ function createServer(state: ServerState) {
           baseFrameSequence: lastFrameSequence || undefined,
           previousState: lastProjectedState,
           forceKeyframe: force || matchChanged,
+          snapshot: currentLiveState,
         });
         const buildMs = performance.now() - buildStartedAt;
+        const currentMatchId = state.matchRegistry.getObserved()?.matchId
+          ?? currentOrchestrator?.getMatchId()
+          ?? null;
+        if (currentMatchId && currentMatchId !== lastMapMatchId && currentGameState) {
+          const currentState = currentGameState;
+          const mapPayload = {
+            type: "map_init" as const,
+            matchId: currentMatchId,
+            width: currentState.tiles[0]?.length ?? 0,
+            height: currentState.tiles.length,
+            tiles: currentState.tiles.map((row) => row.map(({ x, y, type }) => ({ x, y, type }))),
+          };
+          const mapSerialized = JSON.stringify(mapPayload);
+          ws.send(mapSerialized);
+          lastMapMatchId = currentMatchId;
+        }
         const stringifyStartedAt = performance.now();
         const serialized = JSON.stringify(payload);
         const stringifyMs = performance.now() - stringifyStartedAt;
         const sendStartedAt = performance.now();
         ws.send(serialized);
-        const sentState = payload.frame?.kind === "keyframe"
-          ? payload.frame.state
-          : payload.frame?.kind === "delta" && lastProjectedState
-            ? applyStateProjectionDelta(lastProjectedState, payload.frame.delta)
-            : null;
-        lastProjectedState = sentState ? structuredClone(sentState) : null;
+        lastProjectedState = currentLiveState ? structuredClone(currentLiveState) : null;
         lastFrameSequence = payload.frame?.metadata.frameSequence ?? lastFrameSequence;
         lastStateOrchestrator = currentOrchestrator;
         lastStateTick = currentTick;
@@ -1232,13 +1267,61 @@ function createServer(state: ServerState) {
             stringifyMs: Math.round(stringifyMs),
             sendMs: Math.round(sendMs),
             bytes: Buffer.byteLength(serialized, "utf8"),
-            tick: payload.state?.tick,
+            tick: payload.frame?.metadata.simulationTick,
           },
           lastStateBroadcastWarningAtMs
         );
       } finally {
         isSendingState = false;
       }
+    };
+
+    const sendStateEvents = () => {
+      if (ws.readyState !== WebSocket.OPEN || shouldDeferLatestProjection(ws.bufferedAmount)) return;
+      const observed = state.matchRegistry.getObserved();
+      const game = observed?.handle.getGame();
+      const matchId = observed?.matchId ?? null;
+      if (!matchId || !game) {
+        lastEventsMatchId = null;
+        lastStateLogCount = 0;
+        return;
+      }
+
+      // Cheap tail read; avoids a full-world clone on every sweep.
+      const tail = game.getLogsTail?.(lastEventsMatchId === matchId ? lastStateLogCount : 0);
+      if (!tail) return;
+      const reset = matchId !== lastEventsMatchId || tail.total < lastStateLogCount;
+      const events = (reset ? tail.logs.slice(-20) : tail.logs).map(projectLiveLog);
+      if (!reset && events.length === 0) return;
+
+      const payload = {
+        type: "state_events" as const,
+        matchId,
+        reset,
+        events,
+      };
+      ws.send(JSON.stringify(payload));
+      lastEventsMatchId = matchId;
+      lastStateLogCount = tail.total;
+    };
+
+    const sendAIOutputs = () => {
+      if (ws.readyState !== WebSocket.OPEN || shouldDeferLatestProjection(ws.bufferedAmount)) return;
+      const observed = state.matchRegistry.getObserved();
+      const matchId = observed?.matchId ?? null;
+      if (!matchId) {
+        lastAIOutputKey = null;
+        return;
+      }
+      const outputs = observed?.handle.getGame().getAIOutputs?.() ?? {};
+      const outputKey = `${matchId}:${JSON.stringify(outputs)}`;
+      if (outputKey === lastAIOutputKey) return;
+      ws.send(JSON.stringify({
+        type: "ai_output",
+        matchId,
+        outputs,
+      }));
+      lastAIOutputKey = outputKey;
     };
 
     const sendAITerminalEvents = () => {
@@ -1299,9 +1382,13 @@ function createServer(state: ServerState) {
     };
 
     void sendState(true);
+    sendStateEvents();
+    sendAIOutputs();
     sendAITerminalEvents();
     const interval = setInterval(() => {
       void sendState();
+      sendStateEvents();
+      sendAIOutputs();
       sendAITerminalEvents();
     }, 100);
 

@@ -1,6 +1,11 @@
 import {
   DEFAULT_RULESET,
+  type ActiveProjectile,
   type GameState,
+  type LiveBuilding,
+  type LiveStateProjectionDelta,
+  type LiveStateSnapshot,
+  type LiveUnit,
   type MatchRecord,
   type MatchDefinition,
   type StateProjectionDelta,
@@ -23,7 +28,7 @@ function valuesDiffer(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) !== JSON.stringify(right);
 }
 
-/** Builds the state delta shared by live transport and Match Record playback. */
+/** Builds the full GameState delta used by Match Record playback. */
 export function createStateProjectionDelta(
   previous: GameState,
   current: GameState,
@@ -63,6 +68,198 @@ export function createStateProjectionDelta(
       : { mode: "replace", entries: structuredClone(current.logs) },
     ...(previous.winner !== current.winner ? { winner: current.winner } : {}),
   };
+}
+
+function projectLiveUnit(unit: Unit): LiveUnit {
+  return {
+    id: unit.id,
+    type: unit.type,
+    x: unit.x,
+    y: unit.y,
+    hp: unit.hp,
+    maxHp: unit.maxHp,
+    state: unit.state,
+    playerId: unit.playerId,
+    ...(unit.heading === undefined ? {} : { heading: unit.heading }),
+    ...(unit.intent === undefined ? {} : {
+      intent: {
+        type: unit.intent.type,
+        ...(unit.intent.targetX === undefined ? {} : { targetX: unit.intent.targetX }),
+        ...(unit.intent.targetY === undefined ? {} : { targetY: unit.intent.targetY }),
+        ...(unit.intent.targetId === undefined ? {} : { targetId: unit.intent.targetId }),
+      },
+    }),
+    ...(unit.lastAttackTick === undefined ? {} : { lastAttackTick: unit.lastAttackTick }),
+  };
+}
+
+function projectLiveBuilding(building: GameState["players"][number]["buildings"][number]): LiveBuilding {
+  return {
+    id: building.id,
+    type: building.type,
+    x: building.x,
+    y: building.y,
+    hp: building.hp,
+    maxHp: building.maxHp,
+    playerId: building.playerId,
+    ...(building.constructionProgress === undefined ? {} : {
+      constructionProgress: {
+        remainingTicks: building.constructionProgress.remainingTicks,
+        totalTicks: building.constructionProgress.totalTicks,
+      },
+    }),
+  };
+}
+
+/** Builds the intentionally small, non-historical state sent to the live UI. */
+export function createLiveStateSnapshot(state: GameState): LiveStateSnapshot {
+  return {
+    tick: state.tick,
+    players: state.players.map((player) => ({
+      id: player.id,
+      resources: { credits: player.resources.credits },
+      units: player.units.filter((unit) => unit.exists).map(projectLiveUnit),
+      buildings: player.buildings.filter((building) => building.exists).map(projectLiveBuilding),
+    })),
+    winner: state.winner,
+    ...(state.projectiles === undefined ? {} : { projectiles: structuredClone(state.projectiles) }),
+  };
+}
+
+function liveIntentDiffer(previous: LiveUnit["intent"], current: LiveUnit["intent"]): boolean {
+  if ((previous === undefined) !== (current === undefined)) return true;
+  if (!previous || !current) return false;
+  return previous.type !== current.type
+    || previous.targetX !== current.targetX
+    || previous.targetY !== current.targetY
+    || previous.targetId !== current.targetId;
+}
+
+function liveUnitDiffer(previous: LiveUnit | undefined, current: LiveUnit): boolean {
+  if (!previous) return true;
+  return previous.type !== current.type
+    || previous.x !== current.x
+    || previous.y !== current.y
+    || previous.hp !== current.hp
+    || previous.maxHp !== current.maxHp
+    || previous.state !== current.state
+    || previous.heading !== current.heading
+    || previous.lastAttackTick !== current.lastAttackTick
+    || liveIntentDiffer(previous.intent, current.intent);
+}
+
+function liveBuildingDiffer(previous: LiveBuilding | undefined, current: LiveBuilding): boolean {
+  if (!previous) return true;
+  const previousProgress = previous.constructionProgress;
+  const currentProgress = current.constructionProgress;
+  if ((previousProgress === undefined) !== (currentProgress === undefined)) return true;
+  return previous.type !== current.type
+    || previous.x !== current.x
+    || previous.y !== current.y
+    || previous.hp !== current.hp
+    || previous.maxHp !== current.maxHp
+    || previousProgress?.remainingTicks !== currentProgress?.remainingTicks
+    || previousProgress?.totalTicks !== currentProgress?.totalTicks;
+}
+
+function liveProjectilesDiffer(
+  previous: ActiveProjectile[] | undefined,
+  current: ActiveProjectile[] | undefined,
+): boolean {
+  const left = previous ?? [];
+  const right = current ?? [];
+  if (left.length !== right.length) return true;
+  for (let index = 0; index < right.length; index++) {
+    const before = left[index]!;
+    const after = right[index]!;
+    if (
+      before.id !== after.id
+      || before.x !== after.x
+      || before.y !== after.y
+      || before.targetX !== after.targetX
+      || before.targetY !== after.targetY
+    ) return true;
+  }
+  return false;
+}
+
+/** Flat copies suffice: live entities carry no nested collections. */
+function copyLiveUnit(unit: LiveUnit): LiveUnit {
+  return { ...unit, intent: unit.intent ? { ...unit.intent } : undefined };
+}
+
+function copyLiveBuilding(building: LiveBuilding): LiveBuilding {
+  if (!building.constructionProgress) return building;
+  return {
+    ...building,
+    constructionProgress: { ...building.constructionProgress },
+  };
+}
+
+/** Builds a live delta without map tiles, logs, transcripts, or server caches. */
+export function createLiveStateProjectionDelta(
+  previous: LiveStateSnapshot,
+  current: LiveStateSnapshot,
+): LiveStateProjectionDelta {
+  return {
+    tick: current.tick,
+    players: current.players.map((player) => {
+      const previousPlayer = previous.players.find((entry) => entry.id === player.id);
+      const previousUnits = new Map(previousPlayer?.units.map((unit) => [unit.id, unit]) ?? []);
+      const currentUnitIds = new Set(player.units.map((unit) => unit.id));
+      const previousBuildings = new Map(previousPlayer?.buildings.map((building) => [building.id, building]) ?? []);
+      const currentBuildingIds = new Set(player.buildings.map((building) => building.id));
+      return {
+        playerId: player.id,
+        ...(previousPlayer?.resources.credits !== player.resources.credits
+          ? { resources: { credits: player.resources.credits } }
+          : {}),
+        unitUpserts: player.units
+          .filter((unit) => liveUnitDiffer(previousUnits.get(unit.id), unit))
+          .map(copyLiveUnit),
+        removedUnitIds: [...previousUnits.keys()].filter((id) => !currentUnitIds.has(id)),
+        buildingUpserts: player.buildings
+          .filter((building) => liveBuildingDiffer(previousBuildings.get(building.id), building))
+          .map(copyLiveBuilding),
+        removedBuildingIds: [...previousBuildings.keys()].filter((id) => !currentBuildingIds.has(id)),
+      };
+    }),
+    ...(liveProjectilesDiffer(previous.projectiles, current.projectiles)
+      ? { projectiles: (current.projectiles ?? []).map((projectile) => ({ ...projectile })) }
+      : {}),
+    ...(previous.winner !== current.winner ? { winner: current.winner } : {}),
+  };
+}
+
+/** Applies a live delta without introducing any historical fields. */
+export function applyLiveStateProjectionDelta(
+  previous: LiveStateSnapshot,
+  delta: LiveStateProjectionDelta,
+): LiveStateSnapshot {
+  const next = structuredClone(previous);
+  next.tick = delta.tick;
+  for (const playerDelta of delta.players) {
+    const player = next.players.find((entry) => entry.id === playerDelta.playerId);
+    if (!player) continue;
+    if (playerDelta.resources) player.resources = structuredClone(playerDelta.resources);
+    const removedUnits = new Set(playerDelta.removedUnitIds);
+    player.units = player.units.filter((unit) => !removedUnits.has(unit.id));
+    for (const unit of playerDelta.unitUpserts) {
+      const index = player.units.findIndex((entry) => entry.id === unit.id);
+      if (index === -1) player.units.push(structuredClone(unit));
+      else player.units[index] = structuredClone(unit);
+    }
+    const removedBuildings = new Set(playerDelta.removedBuildingIds);
+    player.buildings = player.buildings.filter((building) => !removedBuildings.has(building.id));
+    for (const building of playerDelta.buildingUpserts) {
+      const index = player.buildings.findIndex((entry) => entry.id === building.id);
+      if (index === -1) player.buildings.push(structuredClone(building));
+      else player.buildings[index] = structuredClone(building);
+    }
+  }
+  if (delta.projectiles) next.projectiles = structuredClone(delta.projectiles);
+  if ("winner" in delta) next.winner = delta.winner ?? null;
+  return next;
 }
 
 /** Applies a transport delta without mutating the prior projection. */

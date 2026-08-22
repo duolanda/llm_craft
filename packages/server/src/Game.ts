@@ -121,6 +121,18 @@ export class Game {
     });
   }
 
+  /**
+   * Cheap log tail for live transports. Returns direct references without
+   * cloning the world; callers must serialize synchronously.
+   */
+  getLogsTail(sinceCount: number): { total: number; logs: GameLog[] } {
+    const total = this.logs.length;
+    if (sinceCount <= 0 || sinceCount > total) {
+      return { total, logs: this.logs.slice(Math.max(0, total - 20)) };
+    }
+    return { total, logs: this.logs.slice(sinceCount) };
+  }
+
   getDefinition(): MatchDefinition {
     return structuredClone(this.definition);
   }

@@ -187,10 +187,7 @@ interface TestLLMPresetResponse {
 ```ts
 interface ServerStateMessage {
   type: "state";
-  state: GameState | null;
-  frame?: StateProjectionFrame;
-  aiOutputs: Record<string, string>;
-  snapshots: GameSnapshot[];
+  frame: LiveStateProjectionFrame | null;
   liveEnabled: boolean;
   observedMatch: {
     matchId: string;
@@ -201,7 +198,32 @@ interface ServerStateMessage {
 }
 ```
 
-`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs / serverTimeMs`。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。`frame` 是实时投影的权威载体；兼容字段 `state` 始终为 `null`，`snapshots` 始终为空数组，不再通过 WebSocket 重复发送完整状态。客户端用 `@llmcraft/record` projector 组装状态。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；历史 `logs`、静态 `tiles`、寻路缓存、生产队列和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+
+地图通过一次性的 `map_init` 消息发送，日志通过有界的 `state_events` 增量消息发送，最新 AI 输出通过可替换的 `ai_output` 消息发送。完整 `GameState` 仍只属于服务端模拟、Match Record 和 Replay，不作为 live WebSocket 的 wire type。
+
+```ts
+interface ServerMapInitMessage {
+  type: "map_init";
+  matchId: string;
+  width: number;
+  height: number;
+  tiles: Array<Array<Pick<Tile, "x" | "y" | "type">>>;
+}
+
+interface ServerStateEventsMessage {
+  type: "state_events";
+  matchId: string;
+  reset: boolean;
+  events: LiveLogEvent[];
+}
+
+interface ServerAIOutputMessage {
+  type: "ai_output";
+  matchId: string;
+  outputs: Record<string, string>;
+}
+```
 
 客户端的有界 `SimulationFrameBuffer` 同时服务 Live 和 Replay；它按 simulation time 取前后帧，包到达时间只用于估算带缓冲延迟的当前模拟时间，不再决定单位移动速度。
 

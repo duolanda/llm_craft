@@ -1,5 +1,14 @@
 import type { PlayerId } from "./constants.js";
-import type { AITerminalEvent, CPUStrategyType, GameSnapshot, GameState, MatchDebugOptions, MatchRegistryKind, MatchWarmupOptions, StateProjectionFrame } from "./types.js";
+import type {
+  AITerminalEvent,
+  CPUStrategyType,
+  LiveStateProjectionFrame,
+  MatchDebugOptions,
+  MatchRegistryKind,
+  MatchWarmupOptions,
+  Tile,
+} from "./types.js";
+import type { LiveLogEvent } from "./logs.js";
 
 // ============================================================
 // WebSocket 消息类型契约
@@ -81,10 +90,7 @@ export type ClientMessageType = ClientMessage["type"];
 /** 游戏状态推送（连接时 + 状态变化时） */
 export interface ServerStateMessage {
   type: "state";
-  state: GameState | null;
-  frame?: StateProjectionFrame;
-  aiOutputs: Record<string, string>;
-  snapshots: GameSnapshot[];
+  frame: LiveStateProjectionFrame | null;
   liveEnabled: boolean;
   observedMatch: {
     matchId: string;
@@ -99,6 +105,30 @@ export interface ServerStateMessage {
     | "finished"
     | "failed"
     | null;
+}
+
+/** Static map data sent once when the observed match changes. */
+export interface ServerMapInitMessage {
+  type: "map_init";
+  matchId: string;
+  width: number;
+  height: number;
+  tiles: Array<Array<Pick<Tile, "x" | "y" | "type">>>;
+}
+
+/** Incremental UI log feed; historical logs are not part of state frames. */
+export interface ServerStateEventsMessage {
+  type: "state_events";
+  matchId: string;
+  reset: boolean;
+  events: LiveLogEvent[];
+}
+
+/** Latest AI output, sent independently and replaced rather than accumulated. */
+export interface ServerAIOutputMessage {
+  type: "ai_output";
+  matchId: string;
+  outputs: Record<string, string>;
 }
 
 export interface ServerAITerminalEventsMessage {
@@ -177,6 +207,9 @@ export interface ServerWarmupStatusMessage {
 /** 所有服务端发送的消息联合类型 */
 export type ServerMessage =
   | ServerStateMessage
+  | ServerMapInitMessage
+  | ServerStateEventsMessage
+  | ServerAIOutputMessage
   | ServerAITerminalEventsMessage
   | ServerTerminalHistoryPageMessage
   | ServerErrorMessage

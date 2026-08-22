@@ -202,6 +202,7 @@ function App() {
     state,
     frameBuffer,
     aiOutputs,
+    liveLogs,
     aiTerminalEvents,
     terminalHistoryHasMore,
     loadEarlierTerminalEvents,
@@ -1137,7 +1138,7 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战术日志</span>
               </div>
-              <GameLog state={displayState} />
+              <GameLog state={displayState} logs={mode === "replay" ? undefined : liveLogs} />
             </div>
           </div>
 

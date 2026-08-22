@@ -175,6 +175,7 @@ flowchart LR
 
 **对局身份与记录:**
 - `MatchRegistry` 管理 live/control/benchmark 多个稳定 `matchId`；WebSocket 只投影 observed match
+- live WebSocket 使用独立的 `LiveStateProjectionFrame` 动态投影；地图、日志和最新 AI 输出分别通过 `map_init`、有界 `state_events` 和可替换 `ai_output` 消息发送，完整 `GameState` 只用于模拟、Match Record 与 Replay
 - 正式产物统一称为 Match Record，格式身份为 `match-record`，文件名为 `match-<timestamp>-<short-id>.match.json`
 - `MatchRecorder` 支持 `off` / `replay` / `evaluation` 档位；transcript 只是 evaluation record 中的可选内容
 - 运行中 delta 在共享 worker 中按块压缩留存，终局或显式保存时只写一次 JSON；不要重新引入 Journal workspace、事实流或 artifact retention 平台

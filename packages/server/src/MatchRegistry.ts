@@ -17,6 +17,7 @@ export interface MatchGameView {
   getTick?: () => number;
   getWinner?: () => GameState["winner"];
   isGameRunning?: () => boolean;
+  getLogsTail?: (sinceCount: number) => { total: number; logs: GameState["logs"] };
   getAIOutputs?: () => Record<string, string>;
   getLatestSnapshot?: () => GameSnapshot | null;
   getDefinition?: () => { tickIntervalMs: number };

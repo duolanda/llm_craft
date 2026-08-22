@@ -750,9 +750,6 @@ describe("server settings", () => {
       recordingEnabled: true,
     });
     expect(payload.matchStatus).toBeNull();
-    expect(payload.aiOutputs).toEqual({ player_1: "p1-24", player_2: "p2-24" });
-    expect(payload.state).toBeNull();
-    expect(payload.snapshots).toEqual([]);
     expect(payload.frame).toEqual(expect.objectContaining({
       kind: "keyframe",
       metadata: expect.objectContaining({
@@ -760,6 +757,8 @@ describe("server settings", () => {
         simulationTick: 24,
       }),
     }));
+    expect(payload.frame?.kind === "keyframe" ? payload.frame.state : null).not.toHaveProperty("logs");
+    expect(payload.frame?.kind === "keyframe" ? payload.frame.state : null).not.toHaveProperty("tiles");
   });
 
   it("saves the explicitly identified live match instead of the observed benchmark", async () => {

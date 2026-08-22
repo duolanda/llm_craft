@@ -764,6 +764,100 @@ export type StateProjectionFrame =
       aiOutputs: Record<string, string>;
     };
 
+/**
+ * The deliberately small state shape used by the live WebSocket projection.
+ *
+ * This is intentionally separate from GameState/StateProjectionFrame.  Those
+ * types are the authoritative simulation and replay format and contain
+ * historical logs, static map tiles, and server-only bookkeeping that should
+ * not cross the live UI boundary.
+ */
+export interface LiveUnitIntent {
+  type: UnitIntent["type"];
+  targetX?: number;
+  targetY?: number;
+  targetId?: string;
+}
+
+export interface LiveUnit {
+  id: string;
+  type: UnitType;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  state: UnitState;
+  playerId: PlayerId;
+  heading?: number;
+  intent?: LiveUnitIntent;
+  lastAttackTick?: number;
+}
+
+export interface LiveBuilding {
+  id: string;
+  type: BuildingType;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  playerId: PlayerId;
+  /** Only the live UI-relevant construction indicator crosses the wire. */
+  constructionProgress?: {
+    remainingTicks: number;
+    totalTicks: number;
+  };
+}
+
+export type LiveProjectile = ActiveProjectile;
+
+export interface LivePlayerState {
+  id: PlayerId;
+  resources: Resources;
+  units: LiveUnit[];
+  buildings: LiveBuilding[];
+}
+
+export interface LiveStateSnapshot {
+  tick: number;
+  players: LivePlayerState[];
+  winner: PlayerId | null;
+  projectiles?: LiveProjectile[];
+}
+
+export interface LiveStateProjectionDelta {
+  tick: number;
+  players: Array<{
+    playerId: PlayerId;
+    resources?: Resources;
+    unitUpserts: LiveUnit[];
+    removedUnitIds: string[];
+    buildingUpserts: LiveBuilding[];
+    removedBuildingIds: string[];
+  }>;
+  projectiles?: LiveProjectile[];
+  winner?: PlayerId | null;
+}
+
+export interface LiveStateFrameMetadata {
+  frameSequence: number;
+  simulationTick: number;
+  simulationTimeMs: number;
+  tickIntervalMs: number;
+}
+
+export type LiveStateProjectionFrame =
+  | {
+      kind: "keyframe";
+      metadata: LiveStateFrameMetadata;
+      state: LiveStateSnapshot;
+    }
+  | {
+      kind: "delta";
+      metadata: LiveStateFrameMetadata;
+      baseFrameSequence: number;
+      delta: LiveStateProjectionDelta;
+    };
+
 export interface MatchRecord {
   recordFormat: "match-record";
   matchId: string;

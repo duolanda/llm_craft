@@ -6,7 +6,7 @@
 
 ### 大地图与长局性能仍需真实 LLM 对局复测
 
-- **现状**：Agent read path 已减少重复完整状态读取，WebSocket 对慢客户端采用 latest-projection-wins；移动改为静态 A* 与有界局部避障分层，动态拥堵不再触发同 tick 重寻路。一次 717 tick 双 LLM 对局的浏览器堆快照显示，500 条 AI 终端 DOM 产生约 38 万个文本 shaping view 和约 19 万个行盒；实时尾部现限制为 100 条，终端使用动态高度虚拟列表，工具参数和结果仅在展开时挂载。2026-08-06 的 1017-tick 双 `oc-deepseek-v4-flash` 对局中，页面元素在 tick 488–1016 保持 389–399，server working set 从 368.9 MiB 增至 418.9 MiB；共享验收浏览器在连续抓取两组各 100 帧截图后发生 tab crash，尚不能据此判定游戏页面自身内存平台。
+- **现状**：Agent read path 已减少重复完整状态读取，WebSocket 对慢客户端采用 latest-projection-wins；移动改为静态 A* 与有界局部避障分层，动态拥堵不再触发同 tick 重寻路。一次 717 tick 双 LLM 对局的浏览器堆快照显示，500 条 AI 终端 DOM 产生约 38 万个文本 shaping view 和约 19 万个行盒；实时尾部现限制为 100 条，终端使用动态高度虚拟列表，工具参数和结果仅在展开时挂载。2026-08-06 的 1017-tick 双 `oc-deepseek-v4-flash` 对局中，页面元素在 tick 488–1016 保持 389–399，server working set 从 368.9 MiB 增至 418.9 MiB；共享验收浏览器在连续抓取两组各 100 帧截图后发生 tab crash，尚不能据此判定游戏页面自身内存平台。后续 Chrome 采样确认 OOM 的主要触发器是服务端实时广播每 100ms 为日志扫描完整 `getState()`，并在状态广播中重复读取完整世界，造成高频 clone/序列化分配压力；renderer 的 `partition_alloc` native buffer 是承载和放大该压力的内存层，不是旧 renderer 残留。实时通道已改为瘦投影（`map_init` 静态地图 + `LiveStateSnapshot` 帧），客户端 frame buffer 不再克隆 tile 网格（共享 `map_init` 网格仅在发布给 React 时附加），服务端每 tick 只做一次全量状态读取并复用于帧、map_init 与 delta 基线，日志推送改用廉价 tail 访问器；瘦帧下的内存平台仍需按进程 working set、V8 heap、WebGL、WebSocket 背压和单帧字节数联合复测确认。
 - **风险**：144x96 地图、大军团首次 A*、状态序列化、前端 3D 渲染和终局 Match Record JSON 仍可能造成 CPU 或内存峰值。
 - **验收**：用真实双 LLM 长局运行至少 1000 tick，记录 tick wall time、RSS、浏览器 working set、终端 DOM 数量和终局保存耗时；终端文本布局对象应在预热后进入平台期。
 

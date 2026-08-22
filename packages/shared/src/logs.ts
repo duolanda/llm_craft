@@ -397,3 +397,11 @@ export type GameLog = {
     data: GameLogDataMap[T];
   };
 }[LogType];
+
+/** Minimal log shape needed by the live UI terminal. */
+export interface LiveLogEvent {
+  tick: number;
+  type: LogType;
+  message: string;
+  meta: Pick<LogMeta, "level" | "owner">;
+}

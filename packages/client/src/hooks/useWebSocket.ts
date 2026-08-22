@@ -3,21 +3,121 @@ import {
   AITerminalEvent,
   ClientMessage,
   GameState,
+  LiveLogEvent,
+  LiveStateProjectionFrame,
+  LiveStateSnapshot,
   MatchWarmupState,
   PlayerId,
   ServerBenchmarkCompleteMessage,
   ServerBenchmarkProgressMessage,
   ServerMessage,
   ServerStateMessage,
+  StateProjectionFrame,
+  Tile,
+  Unit,
+  Building,
   isServerMessage,
 } from "@llmcraft/shared";
 import { SimulationFrameBuffer } from "@llmcraft/record";
 
 const MAX_LIVE_TERMINAL_EVENTS = 100;
+const MAX_LIVE_STATE_LOG_EVENTS = 100;
+
+function materializeLiveUnit(unit: LiveStateSnapshot["players"][number]["units"][number]): Unit {
+  return {
+    ...unit,
+    exists: true,
+    attackRange: 0,
+    carryingCredits: 0,
+    carryCapacity: 0,
+  };
+}
+
+function materializeLiveBuilding(
+  building: LiveStateSnapshot["players"][number]["buildings"][number],
+): Building {
+  const { constructionProgress, ...baseBuilding } = building;
+  const materialized: Building = {
+    ...baseBuilding,
+    exists: true,
+    productionQueue: [],
+  };
+  if (constructionProgress) {
+    materialized.constructionProgress = {
+      workerId: "",
+      remainingTicks: constructionProgress.remainingTicks,
+      totalTicks: constructionProgress.totalTicks,
+    };
+  }
+  return materialized;
+}
+
+// Buffered states intentionally carry no tile grid: SimulationFrameBuffer
+// structured-clones every buffered state, so embedding the shared 144x96 map
+// here would clone ~13k objects per ingested frame. The shared grid from
+// map_init is attached only when a projection is published to React.
+function materializeLiveSnapshot(snapshot: LiveStateSnapshot): GameState {
+  return {
+    tick: snapshot.tick,
+    players: snapshot.players.map((player) => ({
+      id: player.id,
+      resources: { ...player.resources },
+      units: player.units.map(materializeLiveUnit),
+      buildings: player.buildings.map(materializeLiveBuilding),
+    })),
+    tiles: [],
+    logs: [],
+    winner: snapshot.winner,
+    ...(snapshot.projectiles === undefined ? {} : { projectiles: snapshot.projectiles }),
+  };
+}
+
+function materializeLiveFrame(
+  frame: LiveStateProjectionFrame,
+  aiOutputs: Record<string, string>,
+): StateProjectionFrame {
+  const metadata = {
+    frameSequence: frame.metadata.frameSequence,
+    simulationTick: frame.metadata.simulationTick,
+    simulationTimeMs: frame.metadata.simulationTimeMs,
+    tickIntervalMs: frame.metadata.tickIntervalMs,
+    serverTimeMs: 0,
+  };
+  if (frame.kind === "keyframe") {
+    return {
+      kind: "keyframe",
+      metadata,
+      state: materializeLiveSnapshot(frame.state),
+      aiOutputs,
+    };
+  }
+  return {
+    kind: "delta",
+    metadata,
+    baseFrameSequence: frame.baseFrameSequence,
+    delta: {
+      tick: frame.delta.tick,
+      players: frame.delta.players.map((player) => ({
+        playerId: player.playerId,
+        ...(player.resources === undefined ? {} : { resources: { ...player.resources } }),
+        unitUpserts: player.unitUpserts.map(materializeLiveUnit),
+        removedUnitIds: player.removedUnitIds,
+        buildingUpserts: player.buildingUpserts.map(materializeLiveBuilding),
+        removedBuildingIds: player.removedBuildingIds,
+      })),
+      tileUpserts: [],
+      ...(frame.delta.projectiles === undefined ? {} : { projectiles: frame.delta.projectiles }),
+      logs: { mode: "replace", entries: [] },
+      ...(frame.delta.winner === undefined ? {} : { winner: frame.delta.winner }),
+    },
+    aiOutputs,
+  };
+}
 
 export function useWebSocket(url: string, enabled = true) {
   const [state, setState] = useState<GameState | null>(null);
   const [aiOutputs, setAIOutputs] = useState<Record<string, string>>({});
+  const [liveLogs, setLiveLogs] = useState<LiveLogEvent[]>([]);
   const [aiTerminalEvents, setAiTerminalEvents] = useState<AITerminalEvent[]>([]);
   const [terminalHistoryEvents, setTerminalHistoryEvents] = useState<AITerminalEvent[]>([]);
   const [terminalHistoryHasMore, setTerminalHistoryHasMore] = useState(false);
@@ -37,6 +137,9 @@ export function useWebSocket(url: string, enabled = true) {
   const terminalSessionIdRef = useRef<string | null>(null);
   const observedMatchIdRef = useRef<string | null>(null);
   const frameBufferRef = useRef(new SimulationFrameBuffer());
+  const mapTilesRef = useRef<Tile[][]>([]);
+  const liveLogsRef = useRef<LiveLogEvent[]>([]);
+  const aiOutputsRef = useRef<Record<string, string>>({});
 
   const send = useCallback((message: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -59,6 +162,11 @@ export function useWebSocket(url: string, enabled = true) {
     }
     observedMatchIdRef.current = null;
     frameBufferRef.current.clear();
+    mapTilesRef.current = [];
+    liveLogsRef.current = [];
+    aiOutputsRef.current = {};
+    setLiveLogs([]);
+    setAIOutputs({});
     const delayedStateTimers = new Set<number>();
     let disposed = false;
     let reconnectTimer: number | null = null;
@@ -70,20 +178,51 @@ export function useWebSocket(url: string, enabled = true) {
       : 0;
     const processServerMessage = (parsed: ServerMessage) => {
       switch (parsed.type) {
+          case "map_init":
+            mapTilesRef.current = parsed.tiles.map((row) => row.map((tile) => ({ ...tile })));
+            break;
+
+          case "state_events":
+            if (observedMatchIdRef.current && parsed.matchId !== observedMatchIdRef.current) {
+              break;
+            }
+            if (!observedMatchIdRef.current) observedMatchIdRef.current = parsed.matchId;
+            liveLogsRef.current = parsed.reset
+              ? parsed.events.slice(-MAX_LIVE_STATE_LOG_EVENTS)
+              : liveLogsRef.current.concat(parsed.events).slice(-MAX_LIVE_STATE_LOG_EVENTS);
+            setLiveLogs(liveLogsRef.current);
+            break;
+
+          case "ai_output":
+            if (observedMatchIdRef.current && parsed.matchId !== observedMatchIdRef.current) {
+              break;
+            }
+            if (!observedMatchIdRef.current) observedMatchIdRef.current = parsed.matchId;
+            aiOutputsRef.current = parsed.outputs;
+            setAIOutputs(parsed.outputs);
+            break;
+
           case "state":
             setServerMessage(null);
-            if (parsed.observedMatch?.matchId !== observedMatchIdRef.current) {
+            const nextObservedMatchId = parsed.observedMatch?.matchId ?? null;
+            const matchChanged = observedMatchIdRef.current !== null
+              && nextObservedMatchId !== observedMatchIdRef.current;
+            if (matchChanged) {
               frameBufferRef.current.clear();
-              observedMatchIdRef.current = parsed.observedMatch?.matchId ?? null;
+              liveLogsRef.current = [];
+              setLiveLogs([]);
+              aiOutputsRef.current = {};
+              setAIOutputs({});
             }
+            observedMatchIdRef.current = nextObservedMatchId;
             if (parsed.frame) {
-              const projected = frameBufferRef.current.ingest(parsed.frame);
-              if (projected) setState(projected);
-              setAIOutputs(parsed.frame.aiOutputs);
+              const projected = frameBufferRef.current.ingest(
+                materializeLiveFrame(parsed.frame, aiOutputsRef.current),
+              );
+              if (projected) setState({ ...projected, tiles: mapTilesRef.current });
             } else {
               frameBufferRef.current.clear();
-              setState(parsed.state);
-              setAIOutputs(parsed.aiOutputs);
+              setState(null);
             }
             setLiveEnabled(parsed.liveEnabled);
             setObservedMatch(parsed.observedMatch);
@@ -182,6 +321,9 @@ export function useWebSocket(url: string, enabled = true) {
         setConnected(false);
         observedMatchIdRef.current = null;
         frameBufferRef.current.clear();
+        mapTilesRef.current = [];
+        liveLogsRef.current = [];
+        aiOutputsRef.current = {};
         if (!disposed && reconnectTimer === null) {
           reconnectTimer = window.setTimeout(() => {
             reconnectTimer = null;
@@ -241,6 +383,7 @@ export function useWebSocket(url: string, enabled = true) {
     state,
     frameBuffer: frameBufferRef.current,
     aiOutputs,
+    liveLogs,
     aiTerminalEvents: combinedTerminalEvents,
     terminalHistoryHasMore,
     loadEarlierTerminalEvents,

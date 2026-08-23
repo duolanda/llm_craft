@@ -12,7 +12,7 @@ import {
   MAP_WIDTH,
   MAP_HEIGHT,
 } from "@llmcraft/shared";
-import { PathFinder, type IntegrationField, type NavigationField } from "./PathFinder";
+import { PathFinder, type IntegrationField, type NavigationField, type PathCostField } from "./PathFinder";
 import type { WorldUnit as Unit } from "./WorldUnit";
 import { getCollisionBoundingRadius, getMaximumCollisionBoundingRadius, getMovementProfile } from "./navigation/MovementProfile";
 import { UnitSpatialIndex } from "./navigation/UnitSpatialIndex";
@@ -37,6 +37,10 @@ const CONGESTION_ESCAPE_ANGLES = [-120, 120, -150, 150, 180] as const;
 const LOCAL_AVOIDANCE_DISTANCE_FACTORS = [1, 0.75, 0.5, 0.25] as const;
 const MOVEMENT_PROGRESS_EPSILON = 0.05;
 const CONGESTION_ESCAPE_TICKS = 4;
+const CONGESTION_REPATH_TICKS = 8;
+const MAX_CONGESTION_REPATHS_PER_TICK = 4;
+const ROUTE_PROGRESS_EPSILON = 0.25;
+const CONGESTION_ROUTE_PENALTY_STEPS = 12;
 const MAX_TARGET_PROJECTION_RADIUS = 24;
 const MAX_INTEGRATION_FIELD_CACHE_ENTRIES = 64;
 // Eight fixed samples keep translation + rotation work bounded while limiting
@@ -72,6 +76,15 @@ interface MovementCollisionResult {
   passThroughUnits: Unit[];
 }
 
+interface RouteProgressState {
+  bestRemainingDistance: number;
+  stagnantTicks: number;
+}
+
+interface CongestionRepathBudget {
+  remaining: number;
+}
+
 export interface MovementInteractionPolicy {
   canPassThrough(mover: Unit, other: Unit): boolean;
   onPassThrough(mover: Unit, other: Unit): void;
@@ -101,6 +114,7 @@ export class UnitManager {
   private idCounter = 0;
   private readonly blockedTicks = new Map<string, number>();
   private readonly lastMovementOrigins = new Map<string, { x: number; y: number }>();
+  private readonly routeProgress = new Map<string, RouteProgressState>();
   private navigationTiles: TileType[][] | null = null;
   private navigationTopologySignature = "";
   private readonly navigationFields = new Map<UnitType, NavigationField>();
@@ -289,6 +303,7 @@ export class UnitManager {
     delete unit.attackStream;
     this.blockedTicks.delete(unit.id);
     this.lastMovementOrigins.delete(unit.id);
+    this.routeProgress.delete(unit.id);
     // Record hold intent for visualization
     unit.order = { type: 'hold' };
     return RESULT_CODES.OK;
@@ -301,6 +316,7 @@ export class UnitManager {
       unit.exists = false;
       this.blockedTicks.delete(id);
       this.lastMovementOrigins.delete(id);
+      this.routeProgress.delete(id);
       return true;
     }
     return false;
@@ -373,6 +389,7 @@ export class UnitManager {
           ? { x: resolvedTarget.x, y: resolvedTarget.y }
           : undefined;
       unit.state = UNIT_STATES.IDLE;
+      this.routeProgress.delete(unit.id);
       if (unit.order?.type === "move") {
         unit.order = undefined;
       }
@@ -382,6 +399,7 @@ export class UnitManager {
     unit.path = path;
     unit.pathTarget = { x: resolvedTarget.x, y: resolvedTarget.y };
     unit.order = { type: "move", targetX: resolvedTarget.x, targetY: resolvedTarget.y };
+    this.resetRouteProgress(unit);
 
     return RESULT_CODES.OK;
   }
@@ -397,6 +415,7 @@ export class UnitManager {
     spatialIndex?: UnitSpatialIndex,
     movementReservations: readonly MovementReservation[] = [],
     interactionPolicy?: MovementInteractionPolicy,
+    congestionRepathBudget?: CongestionRepathBudget,
   ): ResultCode {
     if (!unit.exists || unit.state === UNIT_STATES.BUILDING || !unit.path || unit.path.length === 0) {
       return RESULT_CODES.OK;
@@ -407,6 +426,29 @@ export class UnitManager {
     let moved = false;
     let madeForwardProgress = false;
     let substeps = 0;
+
+    const congestionTicks = this.getCongestionTicks(unit.id);
+    const mayRepath = !congestionRepathBudget || congestionRepathBudget.remaining > 0;
+    if (congestionTicks >= CONGESTION_REPATH_TICKS && unit.pathTarget && mayRepath) {
+      if (congestionRepathBudget) congestionRepathBudget.remaining--;
+      const startCell = getPathCell(unit.x, unit.y);
+      const congestionCosts = this.buildCongestionCostField(unit, unit.path);
+      const reroutedPath = PathFinder.findPath(
+        startCell.x,
+        startCell.y,
+        unit.pathTarget.x,
+        unit.pathTarget.y,
+        tiles,
+        blockedPositions,
+        getMovementProfile(unit.type).navigationRadius,
+        congestionCosts,
+      );
+      if (reroutedPath.length > 0) unit.path = reroutedPath;
+      // Replanning is deliberately rate-limited by another complete no-progress
+      // window, whether or not a better route was found.
+      this.blockedTicks.delete(unit.id);
+      this.resetRouteProgress(unit);
+    }
 
     while (
       remainingDistance > ARRIVAL_EPSILON
@@ -467,15 +509,18 @@ export class UnitManager {
           // 无法到达，清除路径
           unit.path = undefined;
           unit.pathTarget = undefined;
+          this.routeProgress.delete(unit.id);
           return RESULT_CODES.ERR_POSITION_OCCUPIED;
         }
 
         unit.path = newPath;
         this.markBlocked(unit.id);
+        this.resetRouteProgress(unit);
         return RESULT_CODES.ERR_POSITION_OCCUPIED;
       }
 
-      // Mobile units are handled by bounded local avoidance, not by A*.
+      // Per-tick mobile conflicts use bounded local avoidance. Only the
+      // rate-limited no-progress escalation above may rebuild a global route.
       const localMove = this.findLocalMovement(
         unit,
         nextX,
@@ -489,6 +534,7 @@ export class UnitManager {
       );
       if (!localMove) {
         this.markBlocked(unit.id);
+        this.updateRouteProgress(unit);
         return RESULT_CODES.ERR_POSITION_OCCUPIED;
       }
 
@@ -537,18 +583,21 @@ export class UnitManager {
       unit.state = UNIT_STATES.IDLE;
       this.blockedTicks.delete(unit.id);
       this.lastMovementOrigins.delete(unit.id);
+      this.routeProgress.delete(unit.id);
       if (unit.order?.type === "move") {
         unit.order = undefined;
       }
+    } else {
+      this.updateRouteProgress(unit);
     }
 
     return RESULT_CODES.OK;
   }
 
   /**
-   * Advances all path followers against one spatial snapshot. Work is bounded
-   * by units × a fixed local-candidate count, and accepted moves update the
-   * broad-phase index immediately.
+   * Advances all path followers against one spatial snapshot. Local work is
+   * bounded by units × a fixed candidate count; congestion A* is separately
+   * capped per tick. Accepted moves update the broad-phase index immediately.
    */
   processAllPathMovement(
     tiles: TileType[][],
@@ -558,10 +607,13 @@ export class UnitManager {
     const units = this.getAllUnits();
     const index = new UnitSpatialIndex(units);
     const movementReservations: MovementReservation[] = [];
+    const congestionRepathBudget: CongestionRepathBudget = {
+      remaining: MAX_CONGESTION_REPATHS_PER_TICK,
+    };
     const movers = units
       .filter((unit) => unit.path && unit.path.length > 0)
       .sort((left, right) =>
-        (this.blockedTicks.get(right.id) ?? 0) - (this.blockedTicks.get(left.id) ?? 0)
+        this.getCongestionTicks(right.id) - this.getCongestionTicks(left.id)
         || getMovementProfile(right.type).avoidancePriority - getMovementProfile(left.type).avoidancePriority
         || this.compareUnitIds(left.id, right.id),
       );
@@ -578,6 +630,7 @@ export class UnitManager {
         index,
         movementReservations,
         interactionPolicy,
+        congestionRepathBudget,
       );
       if (unit.exists) index.add(unit);
       if (getDistance(startX, startY, unit.x, unit.y) > ARRIVAL_EPSILON) {
@@ -669,6 +722,7 @@ export class UnitManager {
     unit.pathTarget = undefined;
     this.blockedTicks.delete(unit.id);
     this.lastMovementOrigins.delete(unit.id);
+    this.routeProgress.delete(unit.id);
   }
 
   /**
@@ -1064,6 +1118,100 @@ export class UnitManager {
 
   private markBlocked(unitId: string): void {
     this.blockedTicks.set(unitId, (this.blockedTicks.get(unitId) ?? 0) + 1);
+  }
+
+  private getCongestionTicks(unitId: string): number {
+    return Math.max(
+      this.blockedTicks.get(unitId) ?? 0,
+      this.routeProgress.get(unitId)?.stagnantTicks ?? 0,
+    );
+  }
+
+  private getRemainingRouteDistance(unit: Unit): number {
+    if (!unit.path || unit.path.length === 0) return 0;
+    let distance = getDistance(unit.x, unit.y, unit.path[0]!.x, unit.path[0]!.y);
+    for (let index = 1; index < unit.path.length; index++) {
+      distance += getDistance(
+        unit.path[index - 1]!.x,
+        unit.path[index - 1]!.y,
+        unit.path[index]!.x,
+        unit.path[index]!.y,
+      );
+    }
+    return distance;
+  }
+
+  private resetRouteProgress(unit: Unit): void {
+    this.routeProgress.set(unit.id, {
+      bestRemainingDistance: this.getRemainingRouteDistance(unit),
+      stagnantTicks: 0,
+    });
+  }
+
+  private updateRouteProgress(unit: Unit): void {
+    if (!unit.path || unit.path.length === 0) {
+      this.routeProgress.delete(unit.id);
+      return;
+    }
+    const remainingDistance = this.getRemainingRouteDistance(unit);
+    const previous = this.routeProgress.get(unit.id);
+    if (!previous || remainingDistance < previous.bestRemainingDistance - ROUTE_PROGRESS_EPSILON) {
+      this.routeProgress.set(unit.id, {
+        bestRemainingDistance: previous
+          ? Math.min(previous.bestRemainingDistance, remainingDistance)
+          : remainingDistance,
+        stagnantTicks: 0,
+      });
+      return;
+    }
+    previous.stagnantTicks++;
+  }
+
+  /**
+   * Builds a transient, finite congestion overlay. Static terrain/buildings
+   * remain the only hard A* blockers; units and the repeatedly failing route
+   * are expensive enough to prefer a longer corridor but can still be crossed
+   * when no alternative topology exists.
+   */
+  private buildCongestionCostField(
+    mover: Unit,
+    currentPath: readonly { x: number; y: number }[],
+  ): PathCostField {
+    const width = MAP_WIDTH;
+    const height = MAP_HEIGHT;
+    const costs = new Uint16Array(width * height);
+    const addCost = (x: number, y: number, amount: number): void => {
+      if (x < 0 || x >= width || y < 0 || y >= height || amount <= 0) return;
+      const index = y * width + x;
+      costs[index] = Math.min(0xffff, costs[index]! + amount);
+    };
+
+    for (const [index, waypoint] of currentPath.slice(0, CONGESTION_ROUTE_PENALTY_STEPS).entries()) {
+      addCost(waypoint.x, waypoint.y, Math.max(8, 40 - index * 2));
+    }
+
+    const moverRadius = getCollisionBoundingRadius(mover.type);
+    for (const other of this.units.values()) {
+      if (!other.exists || other.id === mover.id) continue;
+      const otherBlockedTicks = this.blockedTicks.get(other.id) ?? 0;
+      const stationary = !other.path?.length || other.order?.type === "hold";
+      const baseCost = stationary ? 160 : otherBlockedTicks >= CONGESTION_ESCAPE_TICKS ? 120 : 36;
+      const influenceRadius = moverRadius + getCollisionBoundingRadius(other.type) + 0.75;
+      const minX = Math.max(0, Math.floor(other.x - influenceRadius));
+      const maxX = Math.min(width - 1, Math.ceil(other.x + influenceRadius));
+      const minY = Math.max(0, Math.floor(other.y - influenceRadius));
+      const maxY = Math.min(height - 1, Math.ceil(other.y + influenceRadius));
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const distance = getDistance(x, y, other.x, other.y);
+          if (distance > influenceRadius) continue;
+          const falloff = 1 - distance / influenceRadius;
+          addCost(x, y, Math.max(1, Math.ceil(baseCost * (0.25 + falloff * 0.75))));
+        }
+      }
+    }
+
+    return { width, height, costs };
   }
 
   private isTerrainMovementBlocked(

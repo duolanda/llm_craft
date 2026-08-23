@@ -9,6 +9,7 @@ import { WorldState } from "../WorldState";
 import {
   isResourceDeliveryBuilding,
   isWithinDeliveryRange,
+  isWithinResourceGatherRange,
   isWorkerConstructing,
 } from "./EconomyRules";
 
@@ -43,8 +44,7 @@ export class EconomySystem {
         if (unit.type !== UNIT_TYPES.WORKER || !unit.exists || isWorkerConstructing(unit)) continue;
 
         const preserveHarvestLoop = unit.order?.type === "harvest_loop" ? unit.order : null;
-        const unitCell = this.getNearestCell(world, unit);
-        const onResourceTile = world.tiles[unitCell.y]?.[unitCell.x] === TILE_TYPES.RESOURCE;
+        const resourceCell = this.getGatherableResourceCell(world, unit);
         const deliveryBuilding = deliveryBuildings
           .filter((building) => isWithinDeliveryRange(world, unit, building))
           .sort((left, right) =>
@@ -53,8 +53,8 @@ export class EconomySystem {
           )[0];
         let economyActionTaken = false;
 
-        if (onResourceTile && unit.carryingCredits < unit.carryCapacity) {
-          const resourceKey = `${unitCell.x},${unitCell.y}`;
+        if (resourceCell && unit.carryingCredits < unit.carryCapacity) {
+          const resourceKey = `${resourceCell.x},${resourceCell.y}`;
           const depositRemaining = world.resourceRemaining.get(resourceKey) ?? 0;
           const gatheredCredits = Math.min(
             ECONOMY_RULES.WORKER_GATHER_RATE,
@@ -63,9 +63,9 @@ export class EconomySystem {
           );
           if (gatheredCredits > 0) {
             unit.carryingCredits += gatheredCredits;
-            world.setResourceRemaining(unitCell.x, unitCell.y, depositRemaining - gatheredCredits);
+            world.setResourceRemaining(resourceCell.x, resourceCell.y, depositRemaining - gatheredCredits);
             unit.state = UNIT_STATES.GATHERING;
-            unit.order = preserveHarvestLoop ?? { type: "gather", targetX: unitCell.x, targetY: unitCell.y };
+            unit.order = preserveHarvestLoop ?? { type: "gather", targetX: resourceCell.x, targetY: resourceCell.y };
             events.push({
               type: "resource_gathered",
               playerId,
@@ -104,13 +104,39 @@ export class EconomySystem {
           !economyActionTaken
           && !unit.path?.length
           && unit.state === UNIT_STATES.GATHERING
-          && (!onResourceTile || unit.carryingCredits >= unit.carryCapacity)
+          && (!resourceCell || unit.carryingCredits >= unit.carryCapacity)
         ) {
           unit.state = UNIT_STATES.IDLE;
         }
       }
     }
     return events;
+  }
+
+  private getGatherableResourceCell(
+    world: WorldState,
+    unit: { x: number; y: number; order?: { type: string; targetX?: number; targetY?: number } },
+  ): { x: number; y: number } | null {
+    if (
+      unit.order?.type === "harvest_loop"
+      && unit.order.targetX !== undefined
+      && unit.order.targetY !== undefined
+    ) {
+      const assigned = { x: unit.order.targetX, y: unit.order.targetY };
+      if (
+        world.tiles[assigned.y]?.[assigned.x] === TILE_TYPES.RESOURCE
+        && (world.resourceRemaining.get(`${assigned.x},${assigned.y}`) ?? 0) > 0
+        && isWithinResourceGatherRange(unit, assigned)
+      ) {
+        return assigned;
+      }
+    }
+
+    const nearest = this.getNearestCell(world, unit);
+    return world.tiles[nearest.y]?.[nearest.x] === TILE_TYPES.RESOURCE
+      && (world.resourceRemaining.get(`${nearest.x},${nearest.y}`) ?? 0) > 0
+      ? nearest
+      : null;
   }
 
   private getNearestCell(world: WorldState, position: { x: number; y: number }): { x: number; y: number } {

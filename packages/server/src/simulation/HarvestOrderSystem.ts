@@ -5,6 +5,7 @@ import {
   getDeliveryRange,
   isResourceDeliveryBuilding,
   isWithinDeliveryRange,
+  isWithinResourceGatherRange,
 } from "./EconomyRules";
 
 const MAX_HARVESTERS_PER_RESOURCE = 2;
@@ -86,7 +87,7 @@ export class HarvestOrderSystem {
         continue;
       }
 
-      const onResourceTile = this.isNearPosition(worker, resourceTarget);
+      const onResourceTile = isWithinResourceGatherRange(worker, resourceTarget);
       const pathingToResource =
         worker.pathTarget?.x === resourceTarget.x
         && worker.pathTarget?.y === resourceTarget.y;
@@ -137,8 +138,8 @@ export class HarvestOrderSystem {
     if (requestedResource && requestedPosition) {
       const assigned = assignedHarvesters.get(`${requestedPosition.x},${requestedPosition.y}`) ?? 0;
       if (assigned < MAX_HARVESTERS_PER_RESOURCE) return requestedPosition;
-      // More workers cannot physically occupy one resource cell without
-      // blocking its approach. Fall through to the automatic route scorer.
+      // Two workers may use distinct edge approaches; further assignments
+      // would saturate the interaction area. Fall through to another route.
     } else if (requestedPosition && !allowAutomaticFallback) {
       return null;
     }
@@ -198,11 +199,4 @@ export class HarvestOrderSystem {
     );
   }
 
-  private isNearPosition(
-    position: { x: number; y: number },
-    target: { x: number; y: number },
-    tolerance = 0.35,
-  ): boolean {
-    return Math.max(Math.abs(position.x - target.x), Math.abs(position.y - target.y)) <= tolerance;
-  }
 }

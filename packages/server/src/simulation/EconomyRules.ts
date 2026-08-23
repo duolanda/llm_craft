@@ -7,6 +7,9 @@ import {
 } from "@llmcraft/shared";
 import { WorldState } from "../WorldState";
 
+/** Workers interact with a mineral cell from its edge instead of sharing its centre. */
+export const RESOURCE_GATHER_RANGE = 1.05;
+
 export function isWorkerConstructing(unit: Pick<Unit, "type" | "constructingBuildingId">): boolean {
   return unit.type === UNIT_TYPES.WORKER && Boolean(unit.constructingBuildingId);
 }
@@ -29,4 +32,11 @@ export function isWithinDeliveryRange(
   building: Building,
 ): boolean {
   return world.buildings.getDistanceToBuilding(building, unit.x, unit.y) <= getDeliveryRange(building);
+}
+
+export function isWithinResourceGatherRange(
+  unit: Pick<Unit, "x" | "y">,
+  resource: { x: number; y: number },
+): boolean {
+  return Math.max(Math.abs(unit.x - resource.x), Math.abs(unit.y - resource.y)) <= RESOURCE_GATHER_RANGE;
 }

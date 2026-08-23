@@ -24,6 +24,13 @@ export interface IntegrationField {
   readonly visitedNodes: number;
 }
 
+/** Per-cell additive costs used only by an explicit congestion replan. */
+export interface PathCostField {
+  readonly width: number;
+  readonly height: number;
+  readonly costs: Uint16Array;
+}
+
 interface Node {
   x: number;
   y: number;
@@ -77,7 +84,7 @@ class MinHeap {
 export class PathFinder {
   /**
    * Builds the static cost/island layer for one movement footprint. Buildings
-   * and terrain belong here; moving units remain a local-avoidance concern.
+   * and terrain belong here; moving units never invalidate this cached field.
    */
   static buildNavigationField(
     tiles: TileType[][],
@@ -210,7 +217,8 @@ export class PathFinder {
    * @param targetX 目标 X
    * @param targetY 目标 Y
    * @param tiles 地图地块
-   * @param occupiedPositions 被其他单位占据的位置集合（可选）
+   * @param occupiedPositions 被静态障碍占据的位置集合（可选）
+   * @param additionalCosts 拥堵恢复时使用的一次性软代价（可选）
    * @returns 路径数组（不包含起点），如果不可达返回空数组
    */
   static findPath(
@@ -221,9 +229,16 @@ export class PathFinder {
     tiles: TileType[][],
     occupiedPositions?: ReadonlySet<string>,
     clearanceRadius = 0,
+    additionalCosts?: PathCostField,
   ): Array<{ x: number; y: number }> {
     const width = MAP_WIDTH;
     const nodeCount = MAP_WIDTH * MAP_HEIGHT;
+    const costValues = additionalCosts
+      && additionalCosts.width === width
+      && additionalCosts.height === tiles.length
+      && additionalCosts.costs.length >= nodeCount
+      ? additionalCosts.costs
+      : undefined;
     const traversal = new Uint8Array(nodeCount);
     const isBlocked = (x: number, y: number): boolean => {
       const index = y * width + x;
@@ -299,7 +314,8 @@ export class PathFinder {
           continue;
         }
 
-        const nextG = currentNode.g + 1;
+        const dynamicCost = costValues?.[neighborIndex] ?? 0;
+        const nextG = currentNode.g + 1 + dynamicCost;
         if (gScores[neighborIndex] !== -1 && nextG >= gScores[neighborIndex]) continue;
         gScores[neighborIndex] = nextG;
         cameFrom[neighborIndex] = currentIndex;

@@ -140,6 +140,32 @@ describe("simulation systems", () => {
     expect(mover.pathTarget).toEqual({ x: 59, y: 47 });
   });
 
+  it("rate-limits congestion replans while a unit is completely surrounded", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const mover = world.createUnit(UNIT_TYPES.RIFLEMAN, 70, 50, "player_1");
+    const blockers = [
+      world.createUnit(UNIT_TYPES.RIFLEMAN, 71, 50, "player_1"),
+      world.createUnit(UNIT_TYPES.RIFLEMAN, 69, 50, "player_1"),
+      world.createUnit(UNIT_TYPES.RIFLEMAN, 70, 49, "player_1"),
+      world.createUnit(UNIT_TYPES.RIFLEMAN, 70, 51, "player_1"),
+    ];
+    mover.path = Array.from({ length: 8 }, (_, index) => ({ x: 71 + index, y: 50 }));
+    mover.pathTarget = { x: 78, y: 50 };
+    const pathFinder = vi.spyOn(PathFinder, "findPath");
+
+    for (let tick = 0; tick < 24; tick++) new MovementSystem().step(world);
+
+    expect(pathFinder.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(pathFinder.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(mover.pathTarget).toEqual({ x: 78, y: 50 });
+
+    for (const blocker of blockers) world.units.removeUnit(blocker.id);
+    for (let tick = 0; tick < 12; tick++) new MovementSystem().step(world);
+    pathFinder.mockRestore();
+
+    expect(mover.x).toBeGreaterThan(75);
+  });
+
   it("lets a tank and worker escape traffic beside an HQ instead of oscillating forever", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 11.637597859575969, 42.97192172836485, "player_1");

@@ -27,13 +27,14 @@ function createState(tick: number, x: number, logs = 0): GameState {
       }],
       buildings: [{
         id: "building_1",
-        type: "hq",
+        type: "machine_gun_turret",
         x: 2,
         y: 2,
-        hp: 1400,
-        maxHp: 1400,
+        hp: 380,
+        maxHp: 380,
         playerId: "player_1",
         exists: true,
+        heading: Math.PI / 4,
         rallyPoint: { x: 10, y: 10, mode: "move" },
         productionQueue: [{ orderId: "order_1", unitType: "worker", count: 1, remainingCount: 1 }],
       }],
@@ -69,6 +70,7 @@ describe("live state projection", () => {
     expect(serialized).not.toContain("path");
     expect(serialized).not.toContain("productionQueue");
     expect(serialized).not.toContain("rallyPoint");
+    expect(snapshot.players[0]?.buildings[0]?.heading).toBe(Math.PI / 4);
     expect(serialized.length).toBeLessThan(2_000);
   });
 
@@ -81,5 +83,20 @@ describe("live state projection", () => {
     expect(JSON.stringify(delta)).not.toContain("logs");
     expect(JSON.stringify(delta)).not.toContain("tiles");
     expect(JSON.stringify(delta).length).toBeLessThan(2_000);
+  });
+
+  it("emits a building upsert when only its turret heading changes", () => {
+    const previousState = createState(1, 3, 0);
+    const currentState = createState(2, 3, 0);
+    currentState.players[0]!.buildings[0]!.heading = Math.PI / 2;
+
+    const delta = createLiveStateProjectionDelta(
+      createLiveStateSnapshot(previousState),
+      createLiveStateSnapshot(currentState),
+    );
+
+    expect(delta.players[0]?.buildingUpserts).toEqual([
+      expect.objectContaining({ id: "building_1", heading: Math.PI / 2 }),
+    ]);
   });
 });

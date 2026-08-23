@@ -186,6 +186,12 @@ function createShowcasePlayer(
         maxHp: stats.hp,
         playerId,
         exists: true,
+        ...(
+          building.type === BUILDING_TYPES.MACHINE_GUN_TURRET
+          || building.type === BUILDING_TYPES.ANTI_TANK_TURRET
+            ? { heading: playerOne ? Math.PI / 4 : -3 * Math.PI / 4 }
+            : {}
+        ),
         productionQueue: [],
       };
     }),
@@ -277,12 +283,16 @@ function createAnimationLabPlayer(
         { type: BUILDING_TYPES.HQ, x: 46, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 50, y: 35 },
         { type: BUILDING_TYPES.BARRACKS, x: 50, y: 61 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 56, y: 28 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 56, y: 68 },
       ]
     : [
         { type: BUILDING_TYPES.HQ, x: 98, y: 48 },
         { type: BUILDING_TYPES.REFINERY, x: 94, y: 35 },
         { type: BUILDING_TYPES.BARRACKS, x: 94, y: 61 },
         { type: BUILDING_TYPES.BARRACKS, x: 78, y: 48 },
+        { type: BUILDING_TYPES.MACHINE_GUN_TURRET, x: 88, y: 68 },
+        { type: BUILDING_TYPES.ANTI_TANK_TURRET, x: 88, y: 28 },
       ];
 
   return {
@@ -338,6 +348,12 @@ function createAnimationLabPlayer(
         maxHp: stats.hp,
         playerId,
         exists: true,
+        ...(
+          building.type === BUILDING_TYPES.MACHINE_GUN_TURRET
+          || building.type === BUILDING_TYPES.ANTI_TANK_TURRET
+            ? { heading: tick * 0.08 + (playerOne ? 0 : Math.PI) }
+            : {}
+        ),
         productionQueue: [],
       };
     }),

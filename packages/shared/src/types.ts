@@ -238,6 +238,8 @@ export interface Building extends GameObject {
   hp: number;
   maxHp: number;
   playerId: PlayerId;
+  /** Authoritative defensive-turret heading in simulation XY radians; zero points toward +X. */
+  heading?: number;
   /** Persistent destination and travel order assigned to newly produced units. */
   rallyPoint?: RallyPoint;
   productionQueue: ProductionOrder[];
@@ -735,6 +737,7 @@ export interface TickDeltaRecord {
       y?: number;
       hp?: number;
       maxHp?: number;
+      heading?: number;
       rallyPoint?: RallyPoint | null;
       productionQueue?: ProductionOrder[];
       productionProgress?: Building["productionProgress"] | null;
@@ -824,6 +827,7 @@ export interface LiveBuilding {
   hp: number;
   maxHp: number;
   playerId: PlayerId;
+  heading?: number;
   /** Only the live UI-relevant construction indicator crosses the wire. */
   constructionProgress?: {
     remainingTicks: number;

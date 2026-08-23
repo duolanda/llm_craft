@@ -6,10 +6,11 @@ import {
   ProductionOrder,
   UnitType,
   canBuildingProduce,
-  getBuildingPrerequisites,
   getBuildingFootprintCells,
-  getDistanceToBuildingFootprint,
+  getBuildingPrerequisites,
   getBuildingStats,
+  getBuildingWeapon,
+  getDistanceToBuildingFootprint,
   getUnitPrerequisites,
 } from "@llmcraft/shared";
 
@@ -43,6 +44,7 @@ export class BuildingManager {
       maxHp: stats.hp,
       playerId,
       exists: true,
+      ...(getBuildingWeapon(type) ? { heading: playerId === "player_1" ? 0 : Math.PI } : {}),
       productionQueue: [],
       constructionProgress: options?.constructionProgress,
     };

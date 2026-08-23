@@ -75,6 +75,32 @@ describe("tick history", () => {
     ]);
   });
 
+  it("records authoritative defensive-building heading changes", () => {
+    const turret: Building = {
+      id: "building_turret",
+      type: BUILDING_TYPES.ANTI_TANK_TURRET,
+      x: 30,
+      y: 48,
+      hp: 520,
+      maxHp: 520,
+      playerId: "player_1",
+      exists: true,
+      heading: 0,
+      productionQueue: [],
+    };
+    const aimedTurret = { ...turret, heading: Math.PI / 2 };
+
+    const delta = buildTickDelta(snapshot(1, [], [turret]), snapshot(2, [], [aimedTurret]));
+
+    expect(delta.players[0].buildings).toEqual([
+      expect.objectContaining({
+        id: turret.id,
+        change: "updated",
+        heading: Math.PI / 2,
+      }),
+    ]);
+  });
+
   it("records authoritative continuous attack state for replay projection", () => {
     const idleTank = tank(0);
     const streamingTank: Unit = {

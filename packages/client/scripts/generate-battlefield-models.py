@@ -475,6 +475,14 @@ def infantry_base(materials: dict[str, bpy.types.Material], variant: str) -> lis
             rotation=(0.12, -0.08, 0.16),
             bevel=0.012,
         )
+        # A beret alone disappears at RTS camera distance.  The asymmetric
+        # demolition mantle and bright monocular give the commando a distinct
+        # silhouette from every viewing direction without changing its scale.
+        cube("commando_elite_mantle", (0, 0.13, 1.02), (0.66, 0.13, 0.5), materials["team"], bevel=0.055)
+        cube("commando_demolition_pauldron", (-0.34, -0.01, 1.05), (0.22, 0.36, 0.28), materials["warning"], bevel=0.055)
+        cube("commando_scarf_tail_left", (-0.11, 0.225, 0.72), (0.12, 0.07, 0.62), materials["warning"], bevel=0.025, rotation=(0.12, 0, -0.08))
+        cube("commando_scarf_tail_right", (0.08, 0.23, 0.76), (0.1, 0.065, 0.52), materials["warning"], bevel=0.022, rotation=(-0.08, 0, 0.06))
+        cylinder("commando_monocular", (-0.08, -0.245, 1.3), 0.055, 0.09, materials["glass"], vertices=14, rotation=(math.pi / 2, 0, 0))
     else:
         sphere("combat_helmet", (0, 0, 1.31), (0.21, 0.2, 0.14), helmet_material)
     cube("helmet_rail", (0, -0.19, 1.31), (0.28, 0.035, 0.055), materials["accent"], bevel=0.012)
@@ -1024,6 +1032,27 @@ def is_building_collision_body(asset_name: str, obj: bpy.types.Object) -> bool:
     return not any(part in obj.name for part in ("barrel", "cannon", "muzzle"))
 
 
+def is_defensive_building_turret_object(asset_name: str, obj: bpy.types.Object) -> bool:
+    if asset_name == "machine_gun_turret":
+        return obj.name.startswith((
+            "mg_turret_shield",
+            "mg_turret_barrel_",
+            "mg_turret_muzzle_",
+            "mg_turret_ammo_box",
+            "mg_turret_optic",
+        ))
+    if asset_name == "anti_tank_turret":
+        return obj.name.startswith((
+            "at_turret_traverse_ring",
+            "at_turret_gunhouse",
+            "at_turret_mantlet",
+            "at_turret_cannon",
+            "at_turret_muzzle_brake",
+            "at_turret_optic",
+        ))
+    return False
+
+
 def merge_objects(objects: list[bpy.types.Object], name: str) -> bpy.types.Object:
     bpy.ops.object.select_all(action="DESELECT")
     for obj in objects:
@@ -1095,9 +1124,41 @@ def export_vehicle_asset(asset_name: str, builder) -> None:
         export_scene(OUTPUT_DIR / f"{asset_name}_lod.glb", [body_lod, turret_lod])
 
 
+def export_defensive_building_asset(asset_name: str, builder) -> None:
+    clear_scene()
+    builder()
+    building_meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    body_spec = BUILDING_BODY_GEOMETRY[asset_name]
+    normalize_horizontal_footprint(
+        asset_name,
+        building_meshes,
+        [obj for obj in building_meshes if is_building_collision_body(asset_name, obj)],
+        body_spec["width"],
+        body_spec["height"],
+    )
+    ground_scene_meshes()
+    turret_meshes = [
+        obj for obj in building_meshes
+        if is_defensive_building_turret_object(asset_name, obj)
+    ]
+    body_meshes = [obj for obj in building_meshes if obj not in turret_meshes]
+    if not body_meshes or not turret_meshes:
+        raise RuntimeError(f"{asset_name} requires non-empty body and turret mesh groups")
+    body_meshes = merge_objects_by_material(body_meshes, f"{asset_name}_body")
+    turret_meshes = merge_objects_by_material(turret_meshes, f"{asset_name}_turret")
+    # Keep the combined asset for old clients while current rendering uses the
+    # split meshes so only the weapon assembly traverses.
+    export_scene(OUTPUT_DIR / f"{asset_name}.glb", body_meshes + turret_meshes)
+    export_scene(OUTPUT_DIR / f"{asset_name}_body.glb", body_meshes)
+    export_scene(OUTPUT_DIR / f"{asset_name}_turret.glb", turret_meshes)
+
+
 def export_asset(name: str, builder) -> None:
     if name in {"light_tank", "flame_tank", "heavy_tank"}:
         export_vehicle_asset(name, builder)
+        return
+    if name in {"machine_gun_turret", "anti_tank_turret"}:
+        export_defensive_building_asset(name, builder)
         return
     clear_scene()
     builder()

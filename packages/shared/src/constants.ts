@@ -284,7 +284,7 @@ export const DEFAULT_RULESET = {
     },
     [UNIT_TYPES.COMMANDO]: {
       hp: 160,
-      speed: 1.2,
+      speed: 1.3,
       attack: 1,
       cost: 600,
       attackRange: 7,

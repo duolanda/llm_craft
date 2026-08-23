@@ -691,6 +691,7 @@ describe("simulation systems", () => {
 
     new CombatSystem().step(world);
 
+    expect(turret.heading).toBe(0);
     expect(world.projectiles).toEqual([
       expect.objectContaining({
         attackerId: turret.id,
@@ -703,6 +704,25 @@ describe("simulation systems", () => {
     new ProjectileSystem().step(world);
     expect(rifleman.hp).toBe(initialHp - getAttackDamageAgainstUnit(BUILDING_TYPES.MACHINE_GUN_TURRET, UNIT_TYPES.RIFLEMAN));
     expect(flameTank.hp).toBe(flameTank.maxHp);
+  });
+
+  it("keeps defensive turrets aimed at their target while the weapon reloads", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const turret = world.createBuilding(BUILDING_TYPES.ANTI_TANK_TURRET, 40, 40, "player_1");
+    const tank = world.createUnit(UNIT_TYPES.LIGHT_TANK, 45, 40, "player_2");
+    const combat = new CombatSystem();
+
+    combat.step(world);
+    expect(turret.heading).toBe(0);
+    expect(turret.nextAttackTick).toBeGreaterThan(world.tick + 1);
+
+    world.tick += 1;
+    tank.x = 40;
+    tank.y = 45;
+    combat.step(world);
+
+    expect(turret.heading).toBeCloseTo(Math.PI / 2);
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === turret.id)).toHaveLength(1);
   });
 
   it("does not launch a flame projectile until the authoritative windup completes", () => {

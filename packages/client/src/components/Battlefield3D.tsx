@@ -202,7 +202,7 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
-const MODEL_VERSION = "production-20260820-1";
+const MODEL_VERSION = "production-20260823-1";
 const SHOW_DEBUG_INTENTS = new URLSearchParams(window.location.search).has("debug-intents");
 const MASS_BATTLE_LOD_ENABLED = new URLSearchParams(window.location.search).get("lod") === "mass";
 const FAR_READABILITY_VIEW = new URLSearchParams(window.location.search).get("view") === "far";
@@ -240,8 +240,10 @@ const MODEL_URLS = {
   barracks: modelUrl("barracks"),
   war_factory: modelUrl("war_factory"),
   refinery: modelUrl("refinery"),
-  machine_gun_turret: modelUrl("machine_gun_turret"),
-  anti_tank_turret: modelUrl("anti_tank_turret"),
+  machine_gun_turret_body: modelUrl("machine_gun_turret_body"),
+  machine_gun_turret_turret: modelUrl("machine_gun_turret_turret"),
+  anti_tank_turret_body: modelUrl("anti_tank_turret_body"),
+  anti_tank_turret_turret: modelUrl("anti_tank_turret_turret"),
   tech_center: modelUrl("tech_center"),
   resource: modelUrl("resource"),
   rock: modelUrl("rock"),
@@ -919,6 +921,43 @@ function ModelInstance({
   );
 
   return <primitive object={model} position={position} rotation={rotation} scale={scale} />;
+}
+
+function TraversingModelInstance({
+  url,
+  palette,
+  heading,
+}: {
+  url: string;
+  palette: TeamPalette;
+  heading: number;
+}) {
+  const { scene } = useGLTF(url) as { scene: THREE.Object3D };
+  const model = useMemo(
+    () => cloneModel(scene, palette),
+    [palette.accent, palette.primary, scene],
+  );
+  const groupRef = useRef<THREE.Group>(null);
+  const initialHeading = useRef(heading);
+  const targetHeading = useRef(heading);
+  targetHeading.current = heading;
+
+  useFrame((_, delta) => {
+    const group = groupRef.current;
+    if (!group) return;
+    const difference = Math.atan2(
+      Math.sin(targetHeading.current - group.rotation.y),
+      Math.cos(targetHeading.current - group.rotation.y),
+    );
+    const step = Math.min(Math.abs(difference), delta * 4.2);
+    group.rotation.y += Math.sign(difference) * step;
+  }, -35);
+
+  return (
+    <group ref={groupRef} rotation={[0, initialHeading.current, 0]}>
+      <primitive object={model} />
+    </group>
+  );
 }
 
 function InstancedPart({
@@ -2013,7 +2052,7 @@ function DestructionEffects({
 
 function BuildingModel({ building, dimensions }: { building: Building; dimensions: MapDimensions }) {
   const palette = useMemo(() => getTeamPalette(building.playerId), [building.playerId]);
-  const modelUrl =
+  const staticModelUrl =
     building.type === "hq"
       ? MODEL_URLS.hq
       : building.type === "barracks"
@@ -2022,11 +2061,18 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
           ? MODEL_URLS.war_factory
           : building.type === "refinery"
             ? MODEL_URLS.refinery
-            : building.type === "machine_gun_turret"
-              ? MODEL_URLS.machine_gun_turret
-              : building.type === "anti_tank_turret"
-                ? MODEL_URLS.anti_tank_turret
-                : MODEL_URLS.tech_center;
+            : MODEL_URLS.tech_center;
+  const defensiveModels = building.type === "machine_gun_turret"
+    ? {
+        body: MODEL_URLS.machine_gun_turret_body,
+        turret: MODEL_URLS.machine_gun_turret_turret,
+      }
+    : building.type === "anti_tank_turret"
+      ? {
+          body: MODEL_URLS.anti_tank_turret_body,
+          turret: MODEL_URLS.anti_tank_turret_turret,
+        }
+      : null;
   const presentation = building.type === "hq"
     ? { healthY: 6.65, healthWidth: 3.4 }
     : building.type === "barracks"
@@ -2040,16 +2086,22 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
             : building.type === "anti_tank_turret"
               ? { healthY: 2.3, healthWidth: 2.3 }
               : { healthY: 4.77, healthWidth: 3.0 };
-  const rotation: Vec3 = building.type === "machine_gun_turret" || building.type === "anti_tank_turret"
-    ? [0, building.playerId === "player_1" ? Math.PI : 0, 0]
-    : [0, 0, 0];
+  const defaultHeading = building.playerId === "player_1" ? 0 : Math.PI;
+  const turretHeading = Math.PI - (building.heading ?? defaultHeading);
 
   return (
     <group
       position={toWorldPosition(building.x, building.y, dimensions, 0)}
       scale={CELL_SIZE}
     >
-      <ModelInstance url={modelUrl} palette={palette} position={[0, 0, 0]} rotation={rotation} />
+      {defensiveModels ? (
+        <>
+          <ModelInstance url={defensiveModels.body} palette={palette} position={[0, 0, 0]} />
+          <TraversingModelInstance url={defensiveModels.turret} palette={palette} heading={turretHeading} />
+        </>
+      ) : (
+        <ModelInstance url={staticModelUrl} palette={palette} position={[0, 0, 0]} />
+      )}
       <HealthBar
         hp={building.hp}
         maxHp={building.maxHp}

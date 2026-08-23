@@ -291,7 +291,6 @@ export class CombatSystem {
       .sort((left, right) => left.id.localeCompare(right.id));
 
     for (const building of defensiveBuildings) {
-      if (building.nextAttackTick !== undefined && world.tick < building.nextAttackTick) continue;
       const weapon = getBuildingWeapon(building.type);
       if (!weapon) continue;
       const minRange = weapon.minRange ?? 0;
@@ -309,9 +308,15 @@ export class CombatSystem {
           || left.distance - right.distance
           || left.unit.hp - right.unit.hp
           || left.unit.id.localeCompare(right.unit.id)
-        );
+      );
       const target = targets[0]?.unit;
       if (!target) continue;
+      const heading = Math.atan2(target.y - building.y, target.x - building.x);
+      if (building.heading !== heading) {
+        building.heading = heading;
+        world.markChanged();
+      }
+      if (building.nextAttackTick !== undefined && world.tick < building.nextAttackTick) continue;
       const distance = world.buildings.getDistanceToBuilding(building, target.x, target.y);
       const flightTicks = weapon.projectileType === "instant"
         ? 1

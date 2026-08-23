@@ -437,7 +437,7 @@ interface AgentRunInput {
 - `machine_gun_turret` 是 T1 反步兵防御，要求已完成 `barracks`；`anti_tank_turret` 是 T2 反装甲防御，要求已完成 `war_factory`
 - 科技层级由已完成建筑推导：基础为 T1，完成 `war_factory` 为 T2，完成 `tech_center` 为 T3；`war_factory` 要求 `barracks`，`tech_center` 要求 `war_factory`
 - 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 560 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 1 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
-- `commando` 为 T3 特种兵：160 HP / speed 1.2 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
+- `commando` 为 T3 特种兵：160 HP / speed 1.3 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
 - 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 4 / 0.2 / 4，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 24 / 1 / 24 伤害；它以高于轻坦的生命和持续贴住目标的反步兵/攻坚 DPS 换取完全放弃载具对拼能力，而不是载具对拼升级
 - 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 1 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
@@ -1414,7 +1414,7 @@ interface MatchRecord {
 }
 ```
 
-`GameState` 中的 `Unit.heading?: number` 是模拟层权威车体朝向，单位为 XY 平面弧度，`0` 指向 `+X`。`TickDeltaRecord.players[].units[]` 在单位创建或朝向变化时携带同名字段；回放必须沿最短角度插值该值，不能根据客户端收到的 intent 重新推断坦克车体朝向。旧记录没有该字段时，读取端继续使用兼容默认朝向。
+`GameState` 中的 `Unit.heading?: number` 是模拟层权威车体朝向，`Building.heading?: number` 是防御塔权威炮塔朝向；两者均为 XY 平面弧度，`0` 指向 `+X`。相应的 `TickDeltaRecord` 在实体创建或朝向变化时携带同名字段；客户端必须沿最短角度表现该值，不能根据到达顺序不稳定的弹丸或单位 intent 重新推断。旧记录没有该字段时，读取端继续使用兼容默认朝向。
 
 记录档位：
 

@@ -102,6 +102,7 @@ function projectLiveBuilding(building: GameState["players"][number]["buildings"]
     hp: building.hp,
     maxHp: building.maxHp,
     playerId: building.playerId,
+    ...(building.heading === undefined ? {} : { heading: building.heading }),
     ...(building.constructionProgress === undefined ? {} : {
       constructionProgress: {
         remainingTicks: building.constructionProgress.remainingTicks,
@@ -158,6 +159,7 @@ function liveBuildingDiffer(previous: LiveBuilding | undefined, current: LiveBui
     || previous.y !== current.y
     || previous.hp !== current.hp
     || previous.maxHp !== current.maxHp
+    || previous.heading !== current.heading
     || previousProgress?.remainingTicks !== currentProgress?.remainingTicks
     || previousProgress?.totalTicks !== currentProgress?.totalTicks;
 }

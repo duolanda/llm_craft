@@ -119,6 +119,7 @@ function diffBuildings(
         y: building.y,
         hp: building.hp,
         maxHp: building.maxHp,
+        heading: building.heading,
         rallyPoint: building.rallyPoint ?? null,
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,
@@ -134,6 +135,7 @@ function diffBuildings(
       || JSON.stringify(previousBuilding.productionProgress) !== JSON.stringify(building.productionProgress)
       || JSON.stringify(previousBuilding.constructionProgress) !== JSON.stringify(building.constructionProgress)
       || JSON.stringify(previousBuilding.rallyPoint) !== JSON.stringify(building.rallyPoint)
+      || previousBuilding.heading !== building.heading
       || previousBuilding.lastAttackTick !== building.lastAttackTick
       || previousBuilding.nextAttackTick !== building.nextAttackTick;
 
@@ -146,6 +148,7 @@ function diffBuildings(
         y: building.y,
         hp: building.hp,
         maxHp: building.maxHp,
+        heading: building.heading,
         rallyPoint: building.rallyPoint ?? null,
         productionQueue: building.productionQueue,
         productionProgress: building.productionProgress ?? null,

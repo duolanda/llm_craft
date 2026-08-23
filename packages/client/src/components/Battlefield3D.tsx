@@ -142,6 +142,17 @@ interface DestructionBurst {
   scale: number;
 }
 
+interface FallenInfantry {
+  id: string;
+  modelUrl: string;
+  playerId: Unit["playerId"];
+  position: Vec3;
+  heading: number;
+  fallDirection: -1 | 1;
+  sideTilt: number;
+  bornAt: number;
+}
+
 type Vec3 = [number, number, number];
 
 type ProjectileFxMode = "game" | "preview";
@@ -224,6 +235,14 @@ const PREVIEW_FX_SHOT_SPECS: PreviewFxShotSpec[] = [
   },
 ];
 const PREVIEW_FX_CYCLE_GAP_MS = 620;
+const INFANTRY_FALL_DURATION_SECONDS = 0.52;
+const INFANTRY_BODY_LINGER_SECONDS = 1.25;
+const INFANTRY_FADE_DURATION_SECONDS = 0.7;
+const INFANTRY_DEATH_EFFECT_MS = (
+  INFANTRY_FALL_DURATION_SECONDS
+  + INFANTRY_BODY_LINGER_SECONDS
+  + INFANTRY_FADE_DURATION_SECONDS
+) * 1000;
 const MODEL_ROOT = "/assets/models/battlefield";
 const TEXTURE_ROOT = "/assets/textures/battlefield";
 const MODEL_VERSION = "production-20260823-1";
@@ -2036,6 +2055,77 @@ function ProjectilePreviewEffects({ dimensions }: { dimensions: MapDimensions })
   );
 }
 
+function FallenInfantryModel({ casualty }: { casualty: FallenInfantry }) {
+  const { scene } = useGLTF(casualty.modelUrl) as { scene: THREE.Object3D };
+  const palette = useMemo(() => getTeamPalette(casualty.playerId), [casualty.playerId]);
+  const model = useMemo(
+    () => cloneModel(scene, palette),
+    [palette.accent, palette.primary, scene],
+  );
+  const fadingMaterials = useMemo(() => {
+    const materials = new Set<THREE.Material>();
+    model.traverse((child) => {
+      const mesh = child as THREE.Mesh<THREE.BufferGeometry, THREE.Material | THREE.Material[]>;
+      if (!mesh.isMesh) {
+        return;
+      }
+      const meshMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of meshMaterials) {
+        material.transparent = true;
+        material.needsUpdate = true;
+        materials.add(material);
+      }
+    });
+    return [...materials].map((material) => ({ material, opacity: material.opacity }));
+  }, [model]);
+  const fallPivotRef = useRef<THREE.Group>(null);
+
+  useEffect(() => () => {
+    for (const { material } of fadingMaterials) {
+      material.dispose();
+    }
+  }, [fadingMaterials]);
+
+  useFrame(() => {
+    const fallPivot = fallPivotRef.current;
+    if (!fallPivot) {
+      return;
+    }
+
+    const age = Math.max(0, Date.now() / 1000 - casualty.bornAt);
+    const fallProgress = THREE.MathUtils.clamp(
+      age / INFANTRY_FALL_DURATION_SECONDS,
+      0,
+      1,
+    );
+    const easedFall = 1 - Math.pow(1 - fallProgress, 3);
+    const fadeProgress = THREE.MathUtils.clamp(
+      (age - INFANTRY_FALL_DURATION_SECONDS - INFANTRY_BODY_LINGER_SECONDS)
+        / INFANTRY_FADE_DURATION_SECONDS,
+      0,
+      1,
+    );
+
+    fallPivot.rotation.set(
+      casualty.fallDirection * easedFall * Math.PI * 0.49,
+      0,
+      casualty.sideTilt * easedFall,
+    );
+    fallPivot.position.y = -easedFall * 0.025 - fadeProgress * 0.08;
+    for (const entry of fadingMaterials) {
+      entry.material.opacity = entry.opacity * (1 - fadeProgress);
+    }
+  }, -5);
+
+  return (
+    <group position={casualty.position} rotation={[0, casualty.heading, 0]}>
+      <group ref={fallPivotRef}>
+        <primitive object={model} scale={CELL_SIZE} />
+      </group>
+    </group>
+  );
+}
+
 function DestructionEffects({
   units,
   buildings,
@@ -2047,6 +2137,7 @@ function DestructionEffects({
 }) {
   const previousObjects = useRef(new Map<string, Unit | Building>());
   const [bursts, setBursts] = useState<DestructionBurst[]>([]);
+  const [fallenInfantry, setFallenInfantry] = useState<FallenInfantry[]>([]);
   const fireRef = useRef<THREE.InstancedMesh>(null);
   const debrisRef = useRef<THREE.InstancedMesh>(null);
   const scratch = useMemo(() => ({
@@ -2059,27 +2150,49 @@ function DestructionEffects({
   useEffect(() => {
     const current = new Map([...units, ...buildings].map((object) => [object.id, object]));
     const destroyed: DestructionBurst[] = [];
+    const casualties: FallenInfantry[] = [];
+    const bornAt = Date.now() / 1000;
     if (previousObjects.current.size > 0) {
       for (const [id, object] of previousObjects.current) {
         if (!current.has(id)) {
-          destroyed.push({
-            id: `${id}-${Date.now()}`,
-            position: toWorldPosition(object.x, object.y, dimensions, "productionQueue" in object ? 0.86 : VEHICLE_UNIT_TYPES.has(object.type) ? 0.58 : 0.42),
-            bornAt: Date.now() / 1000,
-            scale: "productionQueue" in object ? 2.2 : VEHICLE_UNIT_TYPES.has(object.type) ? 1.35 : 0.72,
-          });
+          const isBuilding = "productionQueue" in object;
+          if (!isBuilding && !isVehicleUnit(object)) {
+            casualties.push({
+              id: `${id}-${bornAt}`,
+              modelUrl: getUnitModelUrl(object, MASS_BATTLE_LOD_ENABLED),
+              playerId: object.playerId,
+              position: toWorldPosition(object.x, object.y, dimensions, 0.08),
+              heading: getBodyHeading(object),
+              fallDirection: deterministicNoise(object.x, object.y, 91) < 0.5 ? -1 : 1,
+              sideTilt: (deterministicNoise(object.x, object.y, 92) - 0.5) * 0.22,
+              bornAt,
+            });
+          } else {
+            destroyed.push({
+              id: `${id}-${bornAt}`,
+              position: toWorldPosition(object.x, object.y, dimensions, isBuilding ? 0.86 : 0.58),
+              bornAt,
+              scale: isBuilding ? 2.2 : 1.35,
+            });
+          }
         }
       }
     }
     previousObjects.current = current;
-    if (destroyed.length === 0) {
-      return;
+    if (destroyed.length > 0) {
+      setBursts((currentBursts) => [...currentBursts, ...destroyed]);
+      const ids = new Set(destroyed.map((burst) => burst.id));
+      window.setTimeout(() => {
+        setBursts((currentBursts) => currentBursts.filter((burst) => !ids.has(burst.id)));
+      }, 1200);
     }
-    setBursts((currentBursts) => [...currentBursts, ...destroyed]);
-    const ids = new Set(destroyed.map((burst) => burst.id));
-    window.setTimeout(() => {
-      setBursts((currentBursts) => currentBursts.filter((burst) => !ids.has(burst.id)));
-    }, 1200);
+    if (casualties.length > 0) {
+      setFallenInfantry((currentCasualties) => [...currentCasualties, ...casualties]);
+      const ids = new Set(casualties.map((casualty) => casualty.id));
+      window.setTimeout(() => {
+        setFallenInfantry((currentCasualties) => currentCasualties.filter((casualty) => !ids.has(casualty.id)));
+      }, INFANTRY_DEATH_EFFECT_MS + 100);
+    }
   }, [buildings, dimensions, units]);
 
   useFrame(() => {
@@ -2116,20 +2229,27 @@ function DestructionEffects({
     debris.instanceMatrix.needsUpdate = true;
   });
 
-  if (bursts.length === 0) {
+  if (bursts.length === 0 && fallenInfantry.length === 0) {
     return null;
   }
 
   return (
     <>
-      <instancedMesh ref={fireRef} args={[undefined, undefined, bursts.length]} frustumCulled={false}>
-        <icosahedronGeometry args={[1, 2]} />
-        <meshBasicMaterial color="#ff6b1f" transparent opacity={0.78} blending={THREE.AdditiveBlending} toneMapped={false} />
-      </instancedMesh>
-      <instancedMesh ref={debrisRef} args={[undefined, undefined, bursts.length * 6]} castShadow frustumCulled={false}>
-        <boxGeometry args={[1, 0.42, 0.65]} />
-        <meshStandardMaterial color="#252826" metalness={0.72} roughness={0.46} />
-      </instancedMesh>
+      {bursts.length > 0 ? (
+        <>
+          <instancedMesh ref={fireRef} args={[undefined, undefined, bursts.length]} frustumCulled={false}>
+            <icosahedronGeometry args={[1, 2]} />
+            <meshBasicMaterial color="#ff6b1f" transparent opacity={0.78} blending={THREE.AdditiveBlending} toneMapped={false} />
+          </instancedMesh>
+          <instancedMesh ref={debrisRef} args={[undefined, undefined, bursts.length * 6]} castShadow frustumCulled={false}>
+            <boxGeometry args={[1, 0.42, 0.65]} />
+            <meshStandardMaterial color="#252826" metalness={0.72} roughness={0.46} />
+          </instancedMesh>
+        </>
+      ) : null}
+      {fallenInfantry.map((casualty) => (
+        <FallenInfantryModel key={casualty.id} casualty={casualty} />
+      ))}
     </>
   );
 }

@@ -277,6 +277,7 @@ const ACTION_TOOL_ALIASES: Record<string, string> = {
   build: "build_structure",
   train: "spawn_unit",
   gather: "start_harvest_loop",
+  stop: "stop_unit",
   hold: "hold_unit",
 };
 

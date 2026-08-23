@@ -603,24 +603,125 @@ describe("simulation systems", () => {
     expect(target.hp).toBeLessThan(initialHp);
   });
 
-  it("launches attacks and eligible retaliation using only WorldState", () => {
+  it("defers retaliation until projectile damage lands", () => {
     const world = new WorldState(createDefaultMatchDefinition());
     const attacker = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
     const defender = world.createUnit(UNIT_TYPES.SOLDIER, 41, 40, "player_2");
+    const combat = new CombatSystem();
 
-    const result = new CombatSystem().executeAttackOrder(world, attacker, "player_1", {
+    const result = combat.executeAttackOrder(world, attacker, "player_1", {
       type: "attack",
       targetId: defender.id,
     });
 
     expect(result).toBe(RESULT_CODES.OK);
-    expect(world.projectiles).toHaveLength(2);
-    expect(world.projectiles.map((projectile) => projectile.attackerId)).toEqual([
-      attacker.id,
-      defender.id,
-    ]);
+    expect(world.projectiles).toHaveLength(1);
+    expect(world.projectiles[0]?.attackerId).toBe(attacker.id);
     expect(attacker.order).toMatchObject({ type: "attack", targetId: defender.id });
-    expect(defender.order).toMatchObject({ type: "attack", targetId: attacker.id });
+    expect(defender.order).toBeUndefined();
+
+    world.tick = world.projectiles[0]!.impactTick;
+    const projectileEvents = new ProjectileSystem().step(world);
+    const damageEvents = projectileEvents.filter((event) => event.type === "unit_damaged");
+    combat.step(world, damageEvents);
+
+    expect(damageEvents).toEqual([
+      expect.objectContaining({ unitId: defender.id, attackerId: attacker.id }),
+    ]);
+    expect(world.projectiles).toHaveLength(1);
+    expect(world.projectiles[0]?.attackerId).toBe(defender.id);
+    expect(defender.order).toMatchObject({
+      type: "attack",
+      targetId: attacker.id,
+      autoEngagement: { originX: 41, originY: 40 },
+    });
+  });
+
+  it("pursues a visible attacker after damage even when it is outside weapon range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const defender = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
+    const attacker = world.createUnit(UNIT_TYPES.RIFLEMAN, 44, 40, "player_2");
+    attacker.order = { type: "move", targetX: 60, targetY: 40 };
+
+    new CombatSystem().step(world, [{
+      type: "unit_damaged",
+      playerId: defender.playerId,
+      unitId: defender.id,
+      attackerId: attacker.id,
+      damage: 10,
+    }]);
+
+    expect(defender.order).toMatchObject({
+      type: "attack",
+      targetId: attacker.id,
+      autoEngagement: { originX: 40, originY: 40 },
+    });
+    expect(defender.pathTarget).toBeDefined();
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === defender.id)).toEqual([]);
+  });
+
+  it("does not acquire a damage source outside the defender's vision", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const defender = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
+    const attacker = world.createUnit(UNIT_TYPES.RIFLEMAN, 46, 40, "player_2");
+    attacker.order = { type: "move", targetX: 60, targetY: 40 };
+
+    new CombatSystem().step(world, [{
+      type: "unit_damaged",
+      playerId: defender.playerId,
+      unitId: defender.id,
+      attackerId: attacker.id,
+      damage: 10,
+    }]);
+
+    expect(defender.order).toBeUndefined();
+    expect(defender.pathTarget).toBeUndefined();
+  });
+
+  it("auto-acquires visible enemies while idle and drops pursuit outside the guard radius", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const guard = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.WORKER, 44, 40, "player_2");
+    const combat = new CombatSystem();
+
+    combat.step(world);
+
+    expect(guard.order).toMatchObject({
+      type: "attack",
+      targetId: target.id,
+      autoEngagement: { originX: 40, originY: 40 },
+    });
+    expect(guard.pathTarget).toBeDefined();
+
+    target.x = 50;
+    world.tick += 1;
+    combat.step(world);
+
+    expect(guard.order).toBeUndefined();
+    expect(guard.pathTarget).toBeUndefined();
+    expect(guard.state).toBe("idle");
+  });
+
+  it("keeps hold position stationary while firing at enemies that enter weapon range", () => {
+    const world = new WorldState(createDefaultMatchDefinition());
+    const guard = world.createUnit(UNIT_TYPES.SOLDIER, 40, 40, "player_1");
+    const target = world.createUnit(UNIT_TYPES.WORKER, 44, 40, "player_2");
+    const combat = new CombatSystem();
+    guard.order = { type: "hold" };
+
+    combat.step(world);
+
+    expect(guard.order).toEqual({ type: "hold", targetPriority: undefined });
+    expect(guard.pathTarget).toBeUndefined();
+    expect(world.projectiles.filter((projectile) => projectile.attackerId === guard.id)).toEqual([]);
+
+    target.x = 41;
+    world.tick += 1;
+    combat.step(world);
+
+    expect(guard.order).toMatchObject({ type: "hold", targetId: target.id });
+    expect(guard.pathTarget).toBeUndefined();
+    expect(world.projectiles.some((projectile) => projectile.attackerId === guard.id)).toBe(true);
   });
 
   it("preserves an attack-move mission after acquiring and firing on a target", () => {
@@ -687,6 +788,8 @@ describe("simulation systems", () => {
     const turret = world.createBuilding(BUILDING_TYPES.MACHINE_GUN_TURRET, 40, 40, "player_1");
     const rifleman = world.createUnit(UNIT_TYPES.RIFLEMAN, 44, 40, "player_2");
     const flameTank = world.createUnit(UNIT_TYPES.FLAME_TANK, 45, 42, "player_2");
+    rifleman.order = { type: "move", targetX: 60, targetY: 40 };
+    flameTank.order = { type: "move", targetX: 60, targetY: 42 };
     const initialHp = rifleman.hp;
 
     new CombatSystem().step(world);

@@ -397,7 +397,35 @@ export async function handleTrain(
   })), flags.get("request-id"));
 }
 
-// --- hold ---
+// --- stop / hold ---
+
+export async function handleStop(
+  client: ControlClient,
+  sessionId: string,
+  flags: Map<string, string>,
+): Promise<void> {
+  const unitIds = getFlagUnitIds(flags);
+
+  if (unitIds.length > 0) {
+    await callAndPrint(client, sessionId, "stop_unit", { unitIds });
+    return;
+  }
+
+  const stdinInput = await readStdin();
+  if (!stdinInput || stdinInput.kind !== "selection") {
+    exit(ExitCode.ArgError, "stop requires --unit <id> or stdin selection (from units)");
+  }
+  const data = stdinInput.data as Record<string, unknown>;
+  const items = (data.units as Array<Record<string, unknown>>) ?? [];
+  if (items.length === 0) {
+    exit(ExitCode.ArgError, "stop: stdin selection has no units");
+  }
+
+  await callBatchAndPrint(client, sessionId, [{
+    tool: "stop_unit",
+    args: { unitIds: items.map((item) => item.id as string) },
+  }], flags.get("request-id"));
+}
 
 export async function handleHold(
   client: ControlClient,

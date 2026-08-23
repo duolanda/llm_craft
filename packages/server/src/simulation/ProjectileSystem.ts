@@ -15,12 +15,22 @@ import {
 import { WorldState } from "../WorldState";
 import type { WorldUnit } from "../WorldUnit";
 
-export type ProjectileEvent = {
-  type: "unit_destroyed";
+export type UnitDamagedEvent = {
+  type: "unit_damaged";
   playerId: PlayerId;
   unitId: string;
-  unitType: UnitType;
+  attackerId: string;
+  damage: number;
 };
+
+export type ProjectileEvent =
+  | UnitDamagedEvent
+  | {
+      type: "unit_destroyed";
+      playerId: PlayerId;
+      unitId: string;
+      unitType: UnitType;
+    };
 
 export class ProjectileSystem {
   step(world: WorldState): ProjectileEvent[] {
@@ -131,7 +141,15 @@ export class ProjectileSystem {
           Math.round(getAttackDamageAgainstUnit(projectile.attackerType, target.type) * multiplier),
         );
     if (damage <= 0) return;
+    const appliedDamage = Math.min(target.hp, damage);
     target.hp -= damage;
+    events.push({
+      type: "unit_damaged",
+      playerId: target.playerId,
+      unitId: target.id,
+      attackerId: projectile.attackerId,
+      damage: appliedDamage,
+    });
     if (target.hp <= 0 && world.destroyEntity(target.id)) {
       events.push({
         type: "unit_destroyed",

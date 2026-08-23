@@ -125,11 +125,12 @@ const ACTION_TOOL_NAMES = new Set([
   "spawn_unit",
   "build_structure",
   "start_harvest_loop",
+  "stop_unit",
   "hold_unit",
   "orchestrate_plan",
 ]);
 const COMBAT_COMMANDS = new Set(["attack", "attack_in_range", "attack_move"]);
-const ACTION_COMMANDS = new Set(["move", "attack", "attack_in_range", "attack_move", "spawn", "build", "harvest_loop", "hold"]);
+const ACTION_COMMANDS = new Set(["move", "attack", "attack_in_range", "attack_move", "spawn", "build", "harvest_loop", "stop", "hold"]);
 
 export function buildMatchDiagnosticReport(record: GameRecord, recordName: string): MatchDiagnosticReport {
   const playerIds = getPlayerIds(record);

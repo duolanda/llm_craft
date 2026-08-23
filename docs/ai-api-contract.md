@@ -441,11 +441,12 @@ interface AgentRunInput {
 - 当前采用 144x96 三战线大战场尺度。车辆为：`light_tank` 420 HP / speed 1 / 42 damage / range 5 / cost 240 / build 14 / reload 6；`flame_tank` 560 HP / speed 1 / 6 damage per tick / range 3 / vision 7 / cost 320 / build 18 / windup 1 / pulse interval 1；`heavy_tank` 850 HP / speed 0.6 / 90 damage / range 6 / cost 520 / build 26 / reload 8
 - `commando` 为 T3 特种兵：160 HP / speed 1.3 / range 7 / vision 10 / cost 600 / build 24。远程步枪命中即秒杀 infantry；攻击 structure 时会改用射程 1 的 C4，命中即摧毁建筑；对 vehicle 的伤害固定为 0。玩家的存活单位和所有生产队列中最多合计 1 名，死亡后才能再次生产；它仍属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压
 - 伤害按目标 armor 计算：`rifleman` 偏反步兵，`rocket_soldier` 偏反车辆；`light_tank` 对 infantry / vehicle / structure 的系数为 0.8 / 1 / 0.9，`flame_tank` 为 4 / 0.2 / 4，`heavy_tank` 为 0.7 / 1.35 / 1.15。火焰坦克每 tick 伤害脉冲的基础伤害为 6，直击三类护甲分别造成 24 / 1 / 24 伤害；它以高于轻坦的生命和持续贴住目标的反步兵/攻坚 DPS 换取完全放弃载具对拼能力，而不是载具对拼升级
-- 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 1 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
+- 攻击结算为 weapon/projectile/warhead 模型：单位和防御塔都生成 projectile，projectile 抵达后才造成伤害。`rocket_soldier` 的最小射程会实际阻止近身开火；指定攻击和 attack-move 遇到最小射程内的目标时会先退到合法射界。`flame_tank` 会先进入 1 tick 权威前摇，目标仍合法时进入持续喷火状态并每 tick 生成一个复用同一 warhead/splash 管线的伤害脉冲；切换目标、离开射程、移动、stop 或 hold 会立即中断，重新接敌需要再次前摇。`ok: true` 不表示目标 HP 已经立即变化。
 - `GameState.projectiles?: ActiveProjectile[]` 暴露实时弹丸，用于客户端渲染。
 - `Unit.attackWindup?: { targetId; startedTick; completesAtTick }` 暴露当前权威攻击前摇，录像 delta 同步记录该字段，客户端只据此表现点火提示。
 - `Unit.attackStream?: { targetId; startedTick }` 暴露当前权威持续攻击，录像 delta 同步记录该字段；客户端据此显示连续喷火，并有意隐藏仅用于伤害结算的逐 tick 火焰 projectile。
-- 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍用于单位自动索敌，不用于隐藏情报。
+- 当前不启用战争迷雾读取层；agent 观察工具返回全图敌方实体、地形和资源。`visionRange` 仍是服务端权威的自主战斗感知半径：无持续 intent 的 idle 战斗单位会在其中自动获取目标，实际伤害命中时会优先反应视野内的伤害来源；武器 `range/minRange` 只决定能否开火。
+- 自主获取的 `attack` intent 额外携带 `autoEngagement?: { originX; originY }`，表示警戒起点。目标离开单位当前视野或以该起点为中心的 `visionRange` 后，单位停止追击并回到无 intent 的 idle。它是模拟状态而不是可提交的命令参数，live WebSocket 精简 intent 不投影该起点。
 - 默认 `144x96` 地图暂不生成任何 `obstacle` 岩石；`obstacle` tile 语义仍保留。资源点避开中央主攻路线，当前默认坐标为：红方基地外侧 `(31,35) (34,39) (31,57) (34,61)`，蓝方基地外侧 `(112,35) (109,39) (112,57) (109,61)`，上/下侧翼 `(47,18) (50,22) (47,74) (50,78) (96,18) (93,22) (96,74) (93,78)`。
 - `UNIT_STATS` / `BUILDING_STATS` 是 `standard` ruleset 的便捷只读视图，供 UI、诊断和测试使用
 - `ENTITY_GEOMETRY` 是模拟碰撞和已发布 GLB 主体共用的格尺寸规格；车辆炮管、天线和排气附件不属于碰撞主体
@@ -687,7 +688,7 @@ interface CommandProvenance {
 }
 ```
 
-`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批闲置部队。精确微操可以继续使用 `units` 里的 unit id；即时移动、attack-move、attack 和 hold 也可使用执行时动态 `selection`，不需要先读再复制一批容易过期的 ID。`phase` 是当前 tick 的瞬时模拟阶段，`intent` 才是持续任务；例如采矿循环等待下一步时可以是 `phase: "idle"`、`intent.type: "harvest_loop"`，这不表示任务丢失。单元详情不返回完整逐格 `path`，只保留 `pathTarget` 和可选的 `remainingPathSteps`，避免长路径重复占据模型上下文。
+`groups` 按 `role + intent` 聚合，目的是让 agent 直接看见例如 `combat + hold` 或 `combat + none` 的大批部队。只有 `intent: none` 才是可自动索敌的普通 idle；`phase: idle` 只是当前 tick 的瞬时模拟阶段，例如采矿循环等待下一步时也可以是 `phase: "idle"`、`intent.type: "harvest_loop"`，这不表示任务丢失。精确微操可以继续使用 `units` 里的 unit id；即时移动、attack-move、attack、stop 和 hold 也可使用执行时动态 `selection`，不需要先读再复制一批容易过期的 ID。单元详情不返回完整逐格 `path`，只保留 `pathTarget` 和可选的 `remainingPathSteps`，避免长路径重复占据模型上下文。
 
 #### `get_army_summary`
 
@@ -775,7 +776,7 @@ Agent session 还会把少量需要立即注意的事件作为 EVA 消息插入�
 
 ### 2.2 即时动作工具
 
-`move_unit`、`attack_move_unit`、`attack` 和 `hold_unit` 接受两种互斥的单位选择方式：
+`move_unit`、`attack_move_unit`、`attack`、`stop_unit` 和 `hold_unit` 接受两种互斥的单位选择方式：
 
 ```ts
 type DynamicUnitSelection = "all_combat" | "idle_combat" | UnitType;
@@ -788,7 +789,7 @@ type UnitSubject =
 
 - `unitIds` 用于精确微操；`selection` 在工具真正执行时根据实时存活单位解析，避免同一模型响应中的状态查询与动作并行时复制到过期 ID
 - `all_combat` 选择当前全部存活战斗单位，包括已有 active plan 的单位；即时动作按后命令优先的 RTS 语义中断所有被选中单位的当前 plan
-- `idle_combat` 选择没有 active plan、瞬时为 idle，且没有持续意图或仅为 hold 的战斗单位
+- `idle_combat` 选择没有 active plan、瞬时为 idle，且没有任何持续 intent 的战斗单位；明确 hold 不再被视为普通空闲
 - 具体 `UnitType`（例如 `light_tank`）选择当前全部存活的该类己方单位；战斗工具只接受能攻击的单位类型
 - 如果特种兵、骚扰队或其他独立分队必须继续当前 plan，对主力显式传入 `unitIds` 并排除这些单位，不要使用 `all_combat`
 - 必须且只能提供 `unitIds` 或 `selection` 之一；动态选择无匹配单位时返回 `empty_unit_selection`
@@ -826,7 +827,7 @@ type UnitSubject =
 
 - 语义等同于框选多个战斗单位后下达同一无目标推进命令
 - 单位会向目标点移动，并在到达前自动攻击范围内的角色匹配目标：反步兵、反装甲、攻城单位分别按 ruleset 的目标顺序索敌；攻城单位不会攻击落入自身最小射程的目标
-- 单位到达目标点后，`attack_move_unit` 命令结束，不会继续自动攻击后续靠近或新生产的敌方单位
+- 单位到达目标点后，`attack_move_unit` 命令结束并回到无 intent 的 idle；后续敌人进入其自身视野时，仍会按普通 idle 规则自动交战
 - 这是无目标推进命令，只用于没有明确 `targetId` 时穿越危险区域或试探接敌
 - 不用于指定攻击某个目标或建筑；点杀敌军或拆指定建筑应使用 `attack`
 - 显式 `priority` 只调整索敌顺序：列出的类型会被提前，未列出的类型仍可攻击，并按该兵种的默认相对顺序作为 fallback；需要点杀某个单位或建筑时使用 `attack(targetId)`。射程外单位会持续追击；建筑目标按射程和来向为同批攻击者预约互不重叠的近侧射击位，单位进入射程后立即停止移动并开火。对同一目标重复调用不会重置仍在执行的追击路径
@@ -848,7 +849,7 @@ type UnitSubject =
 - 这是有明确目标 ID 时的默认战斗命令；即使目标很远，系统也会让单位向目标移动，进入射程后持续攻击；目标进入武器最小射程内时，单位会先退到合法射界，避免原地重复提交超近攻击
 - 聚焦目标在观察后、首次批量命令提交前死亡时，系统会从当前全图情报中选择一个替代目标，并让该批全部合法攻击者统一追击；替代目标不受各单位当时的攻击范围或自动索敌视野限制，远处单位同样先移动再攻击。成功结果携带批量级 `targetId` 和 `retargetedFrom`
 - 持续攻击中目标消失时，各单位也会从当前战场目标中重选并继续追击。排序先看正在威胁友军的目标，再按兵种默认优先级、距离、残血和稳定 ID
-- 全图没有合法替代目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则转为 hold 并清掉旧追击路径
+- 全图没有合法替代目标时，首次调用返回 `target_missing`、`targetStatus`、紧凑的 `availableEnemyTargets` 和完整 `availableEnemyTargetCount`；持续攻击则清掉旧追击路径并回到 idle
 - `targetStatus` 在目标曾被当前控制器观察且后来消失时为 `destroyed`；友军 ID 为 `not_enemy`；其他未知 ID 为 `invalid_id`
 
 #### `spawn_unit`
@@ -956,6 +957,19 @@ interface ProductionProgress {
 - 常规采矿应优先使用这个工具，不要用多步 plan 手写 worker 往返路线
 - 已经处于同一 `harvest_loop` 的 worker 即使瞬时 `phase` 为 `idle`，也视为已有任务；相同调用返回 `status: "already_active"` 且不会重启路径。只有 `path_blocked`、矿点失效或主动改派时才需要重发
 
+#### `stop_unit`
+
+```ts
+{
+  unitIds?: string[];
+  selection?: DynamicUnitSelection;
+}
+```
+
+- 取消单位当前路径、攻击前摇/持续攻击、持续 attack 追踪和 active plan，然后回到无 intent 的 idle
+- idle 战斗单位会继续按自身 `visionRange` 自动索敌；因此 stop 是“取消当前命令”，不是“禁止自动交战”
+- worker 被 stop 后也会留在普通 idle；需要恢复采矿时使用 `start_harvest_loop`
+
 #### `hold_unit`
 
 ```ts
@@ -964,6 +978,10 @@ interface ProductionProgress {
   selection?: DynamicUnitSelection;
 }
 ```
+
+- 取消单位当前路径、攻击前摇/持续攻击、持续 attack 追踪和 active plan，然后进入持久 hold intent
+- hold 战斗单位会在自身视野与武器射程内自动开火，但绝不移动追击；最小射程仍然生效
+- 系统任务完成或目标消失不再自动生成 hold；只有显式 `hold_unit` 动作（包括 plan step）才进入该状态
 
 #### `set_rally_point`
 
@@ -988,7 +1006,7 @@ interface ProductionProgress {
 
 这些工具会先做明显无效请求的即时校验，例如单位/建筑不存在、目标不是敌人、worker 不能攻击等。校验失败时返回 `ok: false`、`error`、`hint`，且不会入队。只要服务端已经掌握恢复所需事实，失败结果会直接附带紧凑候选，例如 `availableFriendlyUnits`、`availableAttackers`、`availableWorkers`、`availableProductionBuildings`、`availableEnemyTargets` 或 `nearbyResources`，hint 不再要求额外调用状态读取工具。
 
-批量 `move_unit` / `attack_move_unit` / `attack` / `hold_unit` 会把相同候选列表提升到批量结果顶层，不在每个单位的子结果中重复。批量失败也会在顶层返回具体 `error`、`message`、`hint` 和 `failedUnitIds`，不会退化成 `unknown error`；候选默认有数量上限，敌方目标返回完整计数，并优先包含敌方建筑和距离攻击者最近的单位。
+批量 `move_unit` / `attack_move_unit` / `attack` / `stop_unit` / `hold_unit` 会把相同候选列表提升到批量结果顶层，不在每个单位的子结果中重复。批量失败也会在顶层返回具体 `error`、`message`、`hint` 和 `failedUnitIds`，不会退化成 `unknown error`；候选默认有数量上限，敌方目标返回完整计数，并优先包含敌方建筑和距离攻击者最近的单位。
 
 成功和失败结果都会带当前 `tick`。如果本轮还没有调用过只读工具，动作/计划工具会附带 `no_recent_read` warning，但不会仅因为 warning 拒绝入队。读过一次之后不会因为模型推理或工具调用跨过若干 tick 而产生过期警告；动作仍使用调用时的实时状态验证对象和规则：
 
@@ -1042,6 +1060,7 @@ type PlanCallToolName =
   | "attack"
   | "build_structure"
   | "start_harvest_loop"
+  | "stop_unit"
   | "hold_unit";
 ```
 
@@ -1348,7 +1367,7 @@ Call an agent tool on behalf of the session's player. Control plane 只暴露可
 
 Read tools: `get_map_state`, `get_my_state`, `get_my_units`, `get_army_summary`, `get_production_queue`, `get_active_plans`, `get_recent_events`
 
-Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `cancel_production`, `set_rally_point`, `build_structure`, `start_harvest_loop`, `hold_unit`
+Action tools: `move_unit`, `attack_move_unit`, `attack`, `spawn_unit`, `cancel_production`, `set_rally_point`, `build_structure`, `start_harvest_loop`, `stop_unit`, `hold_unit`
 
 Plan tool: `orchestrate_plan`
 
@@ -1372,7 +1391,7 @@ interface ControlActionBatchRequest {
   clientRequestId: string;
   actions: Array<{
     tool: "move_unit" | "attack_move_unit" | "attack" |
-      "spawn_unit" | "cancel_production" | "set_rally_point" | "build_structure" | "start_harvest_loop" | "hold_unit";
+      "spawn_unit" | "cancel_production" | "set_rally_point" | "build_structure" | "start_harvest_loop" | "stop_unit" | "hold_unit";
     args?: Record<string, unknown>;
   }>;
 }

@@ -5,7 +5,7 @@ import { EconomySystem, type EconomyEvent } from "./simulation/EconomySystem";
 import { HarvestOrderSystem } from "./simulation/HarvestOrderSystem";
 import { MovementSystem, type MovementEvent } from "./simulation/MovementSystem";
 import { ProductionSystem, type ProductionEvent } from "./simulation/ProductionSystem";
-import { ProjectileSystem, type ProjectileEvent } from "./simulation/ProjectileSystem";
+import { ProjectileSystem, type ProjectileEvent, type UnitDamagedEvent } from "./simulation/ProjectileSystem";
 import { VictorySystem, type VictoryOutcome } from "./simulation/VictorySystem";
 
 export type SimulationEvent = MovementEvent | EconomyEvent | ConstructionEvent | ProductionEvent | ProjectileEvent | VictoryOutcome;
@@ -60,10 +60,14 @@ export class SimulationCore {
     const events: SimulationEvent[] = [];
 
     events.push(...this.systems.movement.step(world));
-    events.push(...this.systems.projectiles.step(world));
+    const projectileEvents = this.systems.projectiles.step(world);
+    events.push(...projectileEvents);
     events.push(...this.systems.economy.step(world));
     this.systems.harvestOrders.step(world);
-    this.systems.combat.step(world);
+    this.systems.combat.step(
+      world,
+      projectileEvents.filter((event): event is UnitDamagedEvent => event.type === "unit_damaged"),
+    );
     events.push(...this.systems.construction.step(world));
     events.push(...this.systems.production.step(world));
     const victory = this.systems.victory.step(world);

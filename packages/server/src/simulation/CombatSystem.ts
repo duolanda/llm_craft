@@ -1,6 +1,7 @@
 import {
   RESULT_CODES,
   UNIT_STATES,
+  getBuildingVisionRange,
   getBuildingWeapon,
   getBuildingArmor,
   getDefaultAttackMovePriority,
@@ -17,14 +18,18 @@ import {
 } from "@llmcraft/shared";
 import { WorldState } from "../WorldState";
 import type { WorldUnit } from "../WorldUnit";
+import type { UnitDamagedEvent } from "./ProjectileSystem";
 
 type AttackOrder = Extract<UnitIntent, { type: "attack" }>;
 type AttackMoveOrder = Extract<UnitIntent, { type: "attack_move" }>;
 
 export class CombatSystem {
-  step(world: WorldState): void {
+  step(world: WorldState, damageEvents: readonly UnitDamagedEvent[] = []): void {
+    this.processDamageReactions(world, damageEvents);
+    this.processIdleAutoAcquisition(world);
     this.processDefensiveBuildings(world);
     this.processAttackMoveOrders(world);
+    this.processHoldOrders(world);
     this.processAttackOrders(world);
   }
 
@@ -49,7 +54,7 @@ export class CombatSystem {
         : RESULT_CODES.ERR_NOT_IN_RANGE;
     }
 
-    if (result === RESULT_CODES.OK) {
+    if (result === RESULT_CODES.OK || result === RESULT_CODES.ERR_BUSY) {
       world.units.clearPath(attacker);
       const resolvedOrder = attacker.order;
       attacker.order = {
@@ -58,8 +63,9 @@ export class CombatSystem {
         targetPriority: order.targetPriority,
         targetX: resolvedOrder?.targetX,
         targetY: resolvedOrder?.targetY,
+        autoEngagement: order.autoEngagement ? { ...order.autoEngagement } : undefined,
       };
-      attacker.lastAttackTick = world.tick;
+      if (result === RESULT_CODES.OK) attacker.lastAttackTick = world.tick;
     }
     return result;
   }
@@ -71,10 +77,7 @@ export class CombatSystem {
     kind: "unit" | "building",
   ): ResultCode {
     if (kind === "building") return this.attackBuilding(world, attacker, target as Building);
-    const targetUnit = target as WorldUnit;
-    const result = this.attackUnit(world, attacker, targetUnit);
-    if (result === RESULT_CODES.OK) this.processRetaliation(world, targetUnit, attacker);
-    return result;
+    return this.attackUnit(world, attacker, target as WorldUnit);
   }
 
   private attackBuilding(world: WorldState, attacker: WorldUnit, target: Building): ResultCode {
@@ -198,34 +201,121 @@ export class CombatSystem {
     return RESULT_CODES.OK;
   }
 
-  private processRetaliation(world: WorldState, defender: WorldUnit, attacker: WorldUnit): void {
-    if (!this.canRetaliate(world, defender, attacker)) return;
-    const result = this.attackUnit(world, defender, attacker);
-    if (result === RESULT_CODES.OK) {
-      world.units.clearPath(defender);
-      defender.lastAttackTick = world.tick;
+  private processDamageReactions(world: WorldState, damageEvents: readonly UnitDamagedEvent[]): void {
+    for (const event of damageEvents) {
+      const defender = world.units.getUnit(event.unitId);
+      const attacker = world.entities.resolve(event.attackerId);
+      if (
+        !defender?.exists
+        || !attacker
+        || attacker.entity.playerId === defender.playerId
+        || !unitCanAttack(defender.type)
+        || !this.isTargetWithinVision(world, defender, attacker.entity, attacker.kind)
+      ) {
+        continue;
+      }
+
+      if (defender.order?.type === "hold") {
+        if (this.isTargetWithinWeaponRange(world, defender, attacker.entity, attacker.kind)) {
+          defender.order = {
+            ...defender.order,
+            targetId: attacker.entity.id,
+          };
+        }
+        continue;
+      }
+
+      if (
+        defender.order
+        || defender.state !== UNIT_STATES.IDLE
+        || defender.path?.length
+        || defender.pathTarget
+      ) {
+        continue;
+      }
+
+      defender.order = {
+        type: "attack",
+        targetId: attacker.entity.id,
+        autoEngagement: {
+          originX: defender.x,
+          originY: defender.y,
+        },
+      };
     }
   }
 
-  private canRetaliate(world: WorldState, defender: WorldUnit, attacker: WorldUnit): boolean {
-    if (
-      !defender.exists
-      || !attacker.exists
-      || defender.playerId === attacker.playerId
-      || defender.lastAttackTick === world.tick
-      || (defender.nextAttackTick !== undefined && world.tick < defender.nextAttackTick)
-      || !unitCanAttack(defender.type)
-      || defender.attackRange <= 0
-      || defender.path?.length
-      || defender.pathTarget
-      || (defender.order && defender.order.type !== "hold")
-    ) {
-      return false;
+  private processIdleAutoAcquisition(world: WorldState): void {
+    const idleCombatUnits = world.units.getAllUnits()
+      .filter((unit) =>
+        unit.exists
+        && unit.state === UNIT_STATES.IDLE
+        && !unit.order
+        && !unit.path?.length
+        && !unit.pathTarget
+        && unitCanAttack(unit.type)
+      )
+      .sort((left, right) => left.id.localeCompare(right.id));
+
+    for (const unit of idleCombatUnits) {
+      const target = this.findPrioritizedTarget(world, unit, unit.playerId);
+      if (!target) continue;
+      unit.order = {
+        type: "attack",
+        targetId: target.target.id,
+        autoEngagement: {
+          originX: unit.x,
+          originY: unit.y,
+        },
+      };
     }
-    const distance = this.chebyshevDistance(defender, attacker);
-    const weapon = getAttackSourceWeaponAgainstArmor(defender.type, getUnitArmor(attacker.type));
-    const minRange = weapon.minRange ?? 0;
-    return distance >= minRange && distance <= weapon.range;
+  }
+
+  private processHoldOrders(world: WorldState): void {
+    const holdingUnits = world.units.getAllUnits()
+      .filter((unit) => unit.exists && unit.order?.type === "hold" && unitCanAttack(unit.type))
+      .sort((left, right) => left.id.localeCompare(right.id));
+
+    for (const unit of holdingUnits) {
+      const holdOrder = unit.order as Extract<UnitIntent, { type: "hold" }>;
+      const resolvedTarget = holdOrder.targetId ? world.entities.resolve(holdOrder.targetId) : undefined;
+      const retainedTarget = resolvedTarget
+        && resolvedTarget.entity.playerId !== unit.playerId
+        && this.isTargetWithinVision(world, unit, resolvedTarget.entity, resolvedTarget.kind)
+        && this.isTargetWithinWeaponRange(world, unit, resolvedTarget.entity, resolvedTarget.kind)
+        ? { kind: resolvedTarget.kind, target: resolvedTarget.entity }
+        : null;
+      const target = retainedTarget ?? this.findPrioritizedTarget(
+        world,
+        unit,
+        unit.playerId,
+        holdOrder.targetPriority,
+        true,
+      );
+
+      if (!target) {
+        this.cancelAttackCycle(unit);
+        unit.order = {
+          type: "hold",
+          targetPriority: holdOrder.targetPriority,
+        };
+        unit.state = UNIT_STATES.IDLE;
+        continue;
+      }
+
+      const result = this.executeAttackTarget(world, unit, target.target, target.kind);
+      unit.order = {
+        type: "hold",
+        targetId: target.target.id,
+        targetPriority: holdOrder.targetPriority,
+      };
+      if (result === RESULT_CODES.OK || result === RESULT_CODES.ERR_BUSY) {
+        world.units.clearPath(unit);
+      } else {
+        delete unit.order.targetId;
+        unit.state = UNIT_STATES.IDLE;
+      }
+    }
   }
 
   private processAttackMoveOrders(world: WorldState): void {
@@ -237,9 +327,7 @@ export class CombatSystem {
         : null;
 
       if (!moveTarget || this.isNearPosition(unit, moveTarget)) {
-        world.units.clearPath(unit);
-        unit.order = { type: "hold" };
-        unit.state = UNIT_STATES.IDLE;
+        world.units.stopUnit(unit);
         continue;
       }
 
@@ -293,6 +381,7 @@ export class CombatSystem {
     for (const building of defensiveBuildings) {
       const weapon = getBuildingWeapon(building.type);
       if (!weapon) continue;
+      const visionRange = getBuildingVisionRange(building.type);
       const minRange = weapon.minRange ?? 0;
       const priority = weapon.targetPriority ?? [];
       const priorityIndex = (unit: WorldUnit): number => {
@@ -302,7 +391,7 @@ export class CombatSystem {
       const targets = world.units.getAllUnits()
         .filter((unit) => unit.playerId !== building.playerId)
         .map((unit) => ({ unit, distance: world.buildings.getDistanceToBuilding(building, unit.x, unit.y) }))
-        .filter(({ distance }) => distance >= minRange && distance <= weapon.range)
+        .filter(({ distance }) => distance >= minRange && distance <= weapon.range && distance <= visionRange)
         .sort((left, right) =>
           priorityIndex(left.unit) - priorityIndex(right.unit)
           || left.distance - right.distance
@@ -349,8 +438,17 @@ export class CombatSystem {
     for (const unit of world.units.getAllUnits()) {
       if (!unit.exists || unit.order?.type !== "attack" || unit.lastAttackTick === world.tick) continue;
       const attackOrder = unit.order;
+      if (attackOrder.autoEngagement && !this.isAutonomousTargetValid(world, unit, attackOrder)) {
+        this.cancelAttackCycle(unit);
+        world.units.stopUnit(unit);
+        continue;
+      }
       const result = this.executeAttackOrder(world, unit, unit.playerId, attackOrder);
       if (result === RESULT_CODES.ERR_INVALID_TARGET && unit.order?.targetId) {
+        if (attackOrder.autoEngagement) {
+          world.units.stopUnit(unit);
+          continue;
+        }
         const target = this.findPrioritizedTarget(world, unit, unit.playerId, unit.order.targetPriority);
         if (target) {
           const fallbackResult = this.executeAttackTarget(world, unit, target.target, target.kind);
@@ -363,8 +461,7 @@ export class CombatSystem {
             continue;
           }
         }
-        unit.order = { type: "hold" };
-        unit.state = UNIT_STATES.IDLE;
+        world.units.stopUnit(unit);
       } else if (result === RESULT_CODES.ERR_NOT_IN_RANGE && attackOrder.targetId) {
         const target = world.entities.resolve(attackOrder.targetId);
         if (target && this.moveIntoWeaponRange(world, unit, target.entity, target.kind)) {
@@ -385,6 +482,7 @@ export class CombatSystem {
     attacker: WorldUnit,
     playerId: PlayerId,
     targetPriority?: AttackTargetType[],
+    requireWeaponRange = false,
   ): { kind: "unit"; target: WorldUnit } | { kind: "building"; target: Building } | null {
     const priority = [...new Set([
       ...(targetPriority ?? []),
@@ -398,6 +496,7 @@ export class CombatSystem {
     const units = world.units.getAllUnits()
       .filter((unit) => unit.exists && unit.playerId !== playerId)
       .filter((unit) => this.chebyshevDistance(attacker, unit) <= acquisitionRange)
+      .filter((unit) => !requireWeaponRange || this.isTargetWithinWeaponRange(world, attacker, unit, "unit"))
       .sort((left, right) =>
         Number(Boolean(right.order?.targetId && friendlyIds.has(right.order.targetId)))
         - Number(Boolean(left.order?.targetId && friendlyIds.has(left.order.targetId)))
@@ -408,6 +507,7 @@ export class CombatSystem {
     const buildings = world.buildings.getAllBuildings()
       .filter((building) => building.exists && building.playerId !== playerId)
       .filter((building) => world.buildings.getDistanceToBuilding(building, attacker.x, attacker.y) <= acquisitionRange)
+      .filter((building) => !requireWeaponRange || this.isTargetWithinWeaponRange(world, attacker, building, "building"))
       .sort((left, right) =>
         world.buildings.getDistanceToBuilding(left, attacker.x, attacker.y)
         - world.buildings.getDistanceToBuilding(right, attacker.x, attacker.y)
@@ -424,6 +524,61 @@ export class CombatSystem {
     if (buildings[0]) return { kind: "building", target: buildings[0] };
     if (units[0]) return { kind: "unit", target: units[0] };
     return null;
+  }
+
+  private isAutonomousTargetValid(
+    world: WorldState,
+    attacker: WorldUnit,
+    order: AttackOrder,
+  ): boolean {
+    if (!order.targetId || !order.autoEngagement) return false;
+    const target = world.entities.resolve(order.targetId);
+    if (!target || target.entity.playerId === attacker.playerId) return false;
+
+    const visionRange = getUnitVisionRange(attacker.type);
+    const origin = {
+      x: order.autoEngagement.originX,
+      y: order.autoEngagement.originY,
+    };
+    return this.isTargetWithinVision(world, attacker, target.entity, target.kind)
+      && this.getTargetDistance(world, target.entity, target.kind, origin) <= visionRange;
+  }
+
+  private isTargetWithinVision(
+    world: WorldState,
+    observer: WorldUnit,
+    target: WorldUnit | Building,
+    kind: "unit" | "building",
+  ): boolean {
+    return target.exists
+      && target.playerId !== observer.playerId
+      && this.getTargetDistance(world, target, kind, observer) <= getUnitVisionRange(observer.type);
+  }
+
+  private isTargetWithinWeaponRange(
+    world: WorldState,
+    attacker: WorldUnit,
+    target: WorldUnit | Building,
+    kind: "unit" | "building",
+  ): boolean {
+    if (!target.exists || target.playerId === attacker.playerId) return false;
+    const targetArmor = kind === "building"
+      ? getBuildingArmor((target as Building).type)
+      : getUnitArmor((target as WorldUnit).type);
+    const weapon = getAttackSourceWeaponAgainstArmor(attacker.type, targetArmor);
+    const distance = this.getTargetDistance(world, target, kind, attacker);
+    return distance >= (weapon.minRange ?? 0) && distance <= weapon.range;
+  }
+
+  private getTargetDistance(
+    world: WorldState,
+    target: WorldUnit | Building,
+    kind: "unit" | "building",
+    origin: { x: number; y: number },
+  ): number {
+    return kind === "building"
+      ? world.buildings.getDistanceToBuilding(target as Building, origin.x, origin.y)
+      : this.chebyshevDistance(origin, target);
   }
 
   private moveIntoWeaponRange(

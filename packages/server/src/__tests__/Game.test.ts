@@ -621,6 +621,35 @@ describe("Game", () => {
     expect(lightTank.attackRange).toBe(5);
   });
 
+  it("distinguishes normal idle stop behavior from explicit hold position", () => {
+    const unitManager = game.getUnitManager();
+    const guard = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
+    const target = unitManager.createUnit(UNIT_TYPES.WORKER, 9, 5, "player_2");
+
+    game.queueCommand({
+      id: "explicit_hold",
+      type: "hold",
+      unitId: guard.id,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    expect(guard.order).toEqual({ type: "hold" });
+
+    game.queueCommand({
+      id: "return_to_idle",
+      type: "stop",
+      unitId: guard.id,
+      playerId: "player_1",
+    });
+    game.processCommands();
+    expect(guard.order).toBeUndefined();
+    expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.type).toBe(RESULT_TYPES.STOP_SUCCESS);
+
+    advanceTicks(1);
+    expect(guard.order).toMatchObject({ type: "attack", targetId: target.id });
+    expect(guard.pathTarget).toBeDefined();
+  });
+
   it("allows soldiers to attack diagonally adjacent targets", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
@@ -638,7 +667,7 @@ describe("Game", () => {
     game.processCommands();
 
     expect((game.getCommandResults().at(-1)?.data as CommandResultData)?.result_code).toBe(RESULT_CODES.OK);
-    expect(game.getState().projectiles).toHaveLength(2);
+    expect(game.getState().projectiles).toHaveLength(1);
     expect(target.hp).toBe(target.maxHp);
     advanceTicks(1);
     expect(target.hp).toBe(target.maxHp - expectedDamage);
@@ -759,7 +788,7 @@ describe("Game", () => {
     expect(target.hp).toBe(target.maxHp - expectedDamage * 2);
   });
 
-  it("lets idle combat units retaliate when attacked by an enemy unit", () => {
+  it("lets idle combat units retaliate after the incoming damage lands", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const defender = unitManager.createUnit(UNIT_TYPES.SOLDIER, 6, 5, "player_2");
@@ -777,8 +806,11 @@ describe("Game", () => {
     advanceTicks(1);
 
     expect(defender.hp).toBe(defender.maxHp - expectedDamage);
-    expect(attacker.hp).toBe(attacker.maxHp - expectedDamage);
+    expect(attacker.hp).toBe(attacker.maxHp);
     expect(defender.order).toMatchObject({ type: "attack", targetId: attacker.id });
+
+    advanceTicks(1);
+    expect(attacker.hp).toBe(attacker.maxHp - expectedDamage);
   });
 
   it("does not retaliate with units that have no attack", () => {
@@ -1066,7 +1098,7 @@ describe("Game", () => {
     expect(attacker.order).toMatchObject({ type: "attack_move", targetX: 30, targetY: 5 });
   });
 
-  it("attack_move stops auto-attacking after reaching its destination", () => {
+  it("attack_move returns to idle at its destination and may then auto-acquire nearby enemies", () => {
     const unitManager = game.getUnitManager();
     const attacker = unitManager.createUnit(UNIT_TYPES.SOLDIER, 5, 5, "player_1");
     const target = unitManager.createUnit(UNIT_TYPES.SOLDIER, 7, 5, "player_2");
@@ -1082,11 +1114,16 @@ describe("Game", () => {
 
     game.start();
     game.tickUpdate();
+    expect(attacker.order).toBeUndefined();
     game.tickUpdate();
     game.stop();
 
     expect(attacker.x).toBe(6);
-    expect(attacker.order?.type).toBe("hold");
+    expect(attacker.order).toMatchObject({
+      type: "attack",
+      targetId: target.id,
+      autoEngagement: { originX: 6, originY: 5 },
+    });
     expect(target.hp).toBe(target.maxHp);
   });
 
@@ -1110,7 +1147,7 @@ describe("Game", () => {
 
     expect(attacker.x).toBe(enemyHq.x - 4);
     expect(attacker.y).toBe(enemyHq.y);
-    expect(attacker.order?.type).toBe("hold");
+    expect(attacker.order).toBeUndefined();
     expect(attacker.order).not.toMatchObject({
       type: "attack_move",
       targetX: enemyHq.x,

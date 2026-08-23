@@ -358,6 +358,13 @@ function applyCommandIntentsForTick(
       unit.intent = { type: "hold" };
       continue;
     }
+
+    if (command.type === "stop") {
+      unit.intent = undefined;
+      unit.pathTarget = undefined;
+      unit.path = undefined;
+      continue;
+    }
   }
 }
 

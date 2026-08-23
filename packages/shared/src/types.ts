@@ -132,6 +132,11 @@ export type UnitIntent =
       targetY?: number;
       targetId?: string;
       targetPriority?: AttackTargetType[];
+      /** Present only for simulation-acquired targets; bounds pursuit around the acquisition point. */
+      autoEngagement?: {
+        originX: number;
+        originY: number;
+      };
     }
   | {
       type: "attack_move";
@@ -556,6 +561,7 @@ export type PlanCallToolName =
   | "attack"
   | "build_structure"
   | "start_harvest_loop"
+  | "stop_unit"
   | "hold_unit";
 
 export type PlanStepScope = "global" | "per_unit";

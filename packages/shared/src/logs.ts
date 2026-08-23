@@ -91,6 +91,7 @@ export const RESULT_TYPES = {
   RALLY_INVALID_TARGET: "rally_invalid_target",
 
   // 暂停相关
+  STOP_SUCCESS: "stop_success",
   HOLD_SUCCESS: "hold_success",
   HARVEST_LOOP_SUCCESS: "harvest_loop_success",
 
@@ -190,6 +191,9 @@ export interface CommandResultExtraDataMap {
   [RESULT_TYPES.RALLY_INVALID_TARGET]: {
     buildingId: string;
     hint: string;
+  };
+  [RESULT_TYPES.STOP_SUCCESS]: {
+    unitId: string;
   };
   [RESULT_TYPES.HOLD_SUCCESS]: {
     unitId: string;

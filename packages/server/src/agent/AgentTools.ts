@@ -124,7 +124,7 @@ const resolveUnitBatch = (
       return unitCanAttack(unit.type)
         && unit.phase === "idle"
         && unit.hasActivePlan !== true
-        && (!unit.intent || unit.intent.type === "hold");
+        && !unit.intent;
     }
     return unit.type === args.selection;
   });
@@ -565,8 +565,25 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
     },
   },
   {
+    name: "stop_unit",
+    description:
+      "Cancel current orders for explicitly listed units or a dynamic execution-time selection and return them to normal idle behavior. Idle combat units may automatically acquire and pursue enemies within their own vision. Pass exactly one of unitIds or selection.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...unitSelectionProperties(ALL_UNIT_SELECTIONS),
+      },
+      additionalProperties: false,
+    },
+    execute: (gameplayController, args) => executeUnitBatch(
+      gameplayController,
+      args,
+      (unitId) => gameplayController.stopUnit(unitId),
+    ),
+  },
+  {
     name: "hold_unit",
-    description: "Queue hold-position commands for explicitly listed units or a dynamic execution-time selection. Pass exactly one of unitIds or selection.",
+    description: "Cancel current orders and make explicitly listed units or a dynamic execution-time selection hold position. Holding combat units fire at enemies currently inside weapon range but never pursue them. Pass exactly one of unitIds or selection.",
     parameters: {
       type: "object",
       properties: {
@@ -645,7 +662,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
       "Prefer this for durable multi-tick intentions that would otherwise require repeated economy, move, build, or attack tool calls.",
       "Rules:",
       "- Step shape: { call: existing_action_tool_name, args: {...}, scope: \"per_unit\"|\"global\", when: {...}, until: {...}, retry: true/false, maxTicks: number }.",
-      "- Supported call tools in plans: move_unit, attack_move_unit, attack, build_structure, start_harvest_loop, hold_unit. Production is intentionally managed by spawn_unit/get_production_queue/cancel_production instead of plans.",
+      "- Supported call tools in plans: move_unit, attack_move_unit, attack, build_structure, start_harvest_loop, stop_unit, hold_unit. Production is intentionally managed by spawn_unit/get_production_queue/cancel_production instead of plans.",
       "- unitIds is only required for per_unit steps. Global building plans may omit it.",
       "- scope=per_unit applies the step to each unitId; scope=global runs the step once. Tool defaults are usually per_unit for unit actions and global for building actions.",
       "- In per_unit call args, use unitId: \"$unitId\" or omit unitId to apply the step to each unit in unitIds.",
@@ -676,7 +693,7 @@ const tools: Array<AgentToolDefinition & { execute: ToolExecutor }> = [
             properties: {
               call: {
                 type: "string",
-                enum: ["move_unit", "attack_move_unit", "attack", "build_structure", "start_harvest_loop", "hold_unit"],
+                enum: ["move_unit", "attack_move_unit", "attack", "build_structure", "start_harvest_loop", "stop_unit", "hold_unit"],
               },
               scope: { type: "string", enum: ["global", "per_unit"] },
               args: {

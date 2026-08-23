@@ -300,8 +300,11 @@ llmcraft train rifleman --building building_3
 llmcraft rally --building building_3 --to 32,12 --mode attack-move
 llmcraft attack --unit unit_7 --target building_2
 llmcraft attack-move --unit unit_7 --to 32,12
+llmcraft stop --unit unit_7
 llmcraft hold --unit unit_7
 ```
+
+`stop` 取消当前任务并回到会按视野自动索敌的普通 idle；`hold` 是持久原地坚守，会开火但不会移动追击。
 
 Actions also accept selector stdin:
 
@@ -477,7 +480,7 @@ If you run commands manually, always pass the matching `--session` flag for that
 | Record | `record save` |
 | State | `state`, `map`, `me`, `events`, `plans` |
 | Selectors | `units`, `buildings`, `enemies`, `resources` |
-| Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `rally`, `hold` |
+| Actions | `move`, `attack`, `attack-move`, `gather`, `build`, `train`, `rally`, `stop`, `hold` |
 | Transformers | `nearest`, `target` |
 | Plans | `plan`, `orchestrate` |
 

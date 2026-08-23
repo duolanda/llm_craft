@@ -5,7 +5,7 @@ import { ExitCode, exit } from "./io/errors.js";
 import { printJson, printError } from "./io/json.js";
 import { handleState, handleMap, handleMe, handleEvents, handlePlans } from "./commands/state.js";
 import { handleUnits, handleBuildings, handleEnemies, handleResources } from "./commands/select.js";
-import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleHold, handleRally, handleProductionQueue, handleCancelProduction } from "./commands/actions.js";
+import { handleMove, handleAttack, handleAttackMove, handleGather, handleBuild, handleTrain, handleStop, handleHold, handleRally, handleProductionQueue, handleCancelProduction } from "./commands/actions.js";
 import { handleNearest, handleTarget } from "./commands/transform.js";
 import { handlePlan, handleOrchestrate } from "./commands/plan.js";
 import { handlePlay } from "./commands/play.js";
@@ -109,6 +109,7 @@ function printHelp(): void {
     "  production-queue   Inspect finite production queues and progress",
     "  cancel-production  Cancel batches by order ID or clear building queues",
     "  rally              Set or clear move/attack-move production rally points",
+    "  stop               Cancel orders and return units to normal idle behavior",
     "  hold               Hold position",
     "  nearest            Find nearest resource/enemy for each unit",
     "  target             Pair units with enemy-hq or weakest enemy",
@@ -126,7 +127,7 @@ function printHelp(): void {
     "",
     "Action flags:",
     "  --unit <id>        Unit ID",
-    "  --units <list>     Comma-separated unit IDs for move/attack/attack-move/hold",
+    "  --units <list>     Comma-separated unit IDs for move/attack/attack-move/stop/hold",
     "  --to <x,y>         Target coordinates",
     "  --target <id>      Target ID",
     "  --resource <x,y>   Resource coordinates",
@@ -172,6 +173,8 @@ function printHelp(): void {
     "  llmcraft resources --near 5,5 --limit 2",
     "  llmcraft move --unit worker_1 --to 5,8",
     "  llmcraft attack --unit rifleman_1 --target enemy_hq",
+    "  llmcraft stop --unit rifleman_1",
+    "  llmcraft hold --unit rifleman_1",
     "  llmcraft units --idle --type worker | llmcraft gather",
     "  llmcraft buildings --type barracks --ready | llmcraft train rifleman",
     "  llmcraft rally --building building_4 --to 40,30 --mode attack-move  # omit --to to clear",
@@ -205,7 +208,7 @@ function gameOverKindForCommand(command: string): CommandKind | null {
   if (["units", "buildings", "enemies", "resources", "nearest", "target"].includes(command)) {
     return "selection";
   }
-  if (["move", "attack", "attack-move", "gather", "build", "train", "production-queue", "cancel-production", "rally", "hold"].includes(command)) {
+  if (["move", "attack", "attack-move", "gather", "build", "train", "production-queue", "cancel-production", "rally", "stop", "hold"].includes(command)) {
     return "action_result";
   }
   if (["plan", "orchestrate"].includes(command)) {
@@ -509,6 +512,10 @@ async function main(): Promise<void> {
   }
   if (parsed.command === "rally") {
     await handleRally(client, sessionId, parsed.flags);
+    return;
+  }
+  if (parsed.command === "stop") {
+    await handleStop(client, sessionId, parsed.flags);
     return;
   }
   if (parsed.command === "hold") {

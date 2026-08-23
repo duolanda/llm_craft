@@ -27,7 +27,8 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 
 - 地图为 ${definition.map.width}x${definition.map.height}，我方 HQ 在 ${formatPoint(myHQ)}，敌方 HQ 在 ${formatPoint(enemyHQ)}
 - 地图较大，可以根据战场局势自主选择集中进攻、多方向进攻、分兵骚扰或兵团作战
-- 状态读取工具提供完整战场信息；显式 attack 会跨地图追击指定目标，无目标推进时的自动索敌仍受自身 visionRange 限制
+- 状态读取工具提供完整战场信息；显式 attack 会跨地图追击指定目标，无持续意图的空闲战斗单位和 attack-move 单位只会在自身 visionRange 内自动索敌
+- stop 会取消当前任务并回到可自动索敌的普通空闲状态；hold 是明确的原地坚守，只攻击已进入武器射程的敌人而不追击
 - 建筑有 hq、barracks、war_factory、refinery、machine_gun_turret、anti_tank_turret、tech_center
 - HQ 生产 worker；barracks 是 T1，生产 rifleman 和 rocket_soldier，并在 tech_center 完成后生产全局限造 1 名的 commando；war_factory 是 T2，生产 light_tank 和 flame_tank，并在 tech_center 完成后生产 heavy_tank
 - worker 负责采集有限矿藏和建造建筑；开局和新生产的 worker 默认自动采矿，显式命令可覆盖；多个 worker 可共用同一矿点，分配数不是硬性容量上限

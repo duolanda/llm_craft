@@ -702,13 +702,37 @@ export class Game {
         break;
       }
 
+      case "stop": {
+        if (command.unitId) {
+          const unit = this.world.units.getUnit(command.unitId);
+          if (unit && unit.playerId === command.playerId) {
+            this.world.units.stopUnit(unit);
+            this.addLog(
+              LOG_TYPES.COMMAND_RESULT,
+              `Unit ${command.unitId} stopped and returned to idle`,
+              {
+                command,
+                result_code: RESULT_CODES.OK,
+                type: RESULT_TYPES.STOP_SUCCESS,
+                result_data: {
+                  unitId: command.unitId,
+                },
+              },
+              {
+                owner: command.playerId,
+                feedbackTarget: command.playerId,
+              }
+            );
+          }
+        }
+        break;
+      }
+
       case "hold": {
         if (command.unitId) {
           const unit = this.world.units.getUnit(command.unitId);
           if (unit && unit.playerId === command.playerId) {
             this.world.units.holdPosition(unit);
-            // 清除寻路路径
-            this.world.units.clearPath(unit);
             this.addLog(
               LOG_TYPES.COMMAND_RESULT,
               `Unit ${command.unitId} holding position`,
@@ -1258,6 +1282,9 @@ export class Game {
             feedbackTarget: event.playerId,
             level: LOG_LEVELS.WARNING,
           });
+          break;
+        case "unit_damaged":
+          // Damage events feed same-tick combat reactions but do not create noisy per-hit logs.
           break;
         case "unit_spawn_failed":
           this.addLog(LOG_TYPES.SPAWN_FAILED, `No empty position to spawn ${event.unitType} for ${event.playerId}`, {

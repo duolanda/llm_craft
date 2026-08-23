@@ -128,7 +128,14 @@ export class WorldState {
         const { order, ...unit } = worldUnit;
         return {
           ...unit,
-          intent: order ? { ...order } : undefined,
+          intent: order
+            ? {
+                ...order,
+                ...(order.type === "attack" && order.autoEngagement
+                  ? { autoEngagement: { ...order.autoEngagement } }
+                  : {}),
+              }
+            : undefined,
           path: unit.path?.map((position) => ({ ...position })),
           pathTarget: unit.pathTarget ? { ...unit.pathTarget } : undefined,
         };

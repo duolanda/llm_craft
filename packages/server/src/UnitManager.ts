@@ -301,11 +301,22 @@ export class UnitManager {
     unit.state = UNIT_STATES.IDLE;
     delete unit.attackWindup;
     delete unit.attackStream;
-    this.blockedTicks.delete(unit.id);
-    this.lastMovementOrigins.delete(unit.id);
-    this.routeProgress.delete(unit.id);
+    this.clearPath(unit);
     // Record hold intent for visualization
     unit.order = { type: 'hold' };
+    return RESULT_CODES.OK;
+  }
+
+  stopUnit(unit: Unit): ResultCode {
+    if (!unit.exists) {
+      return RESULT_CODES.ERR_INVALID_TARGET;
+    }
+
+    unit.state = UNIT_STATES.IDLE;
+    delete unit.attackWindup;
+    delete unit.attackStream;
+    this.clearPath(unit);
+    unit.order = undefined;
     return RESULT_CODES.OK;
   }
 

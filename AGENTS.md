@@ -154,7 +154,8 @@ flowchart LR
 
 **Agent 运行时 (server/src/controller/GameplayController.ts):**
 - 模型通过只读与动作工具观察/控制游戏，不再生成并执行 JavaScript
-- `orchestrate_plan` 与其支持的即时动作使用同一套工具名和动作参数，并暴露给 LLM；即时 move / attack-move / attack / hold 还可用执行时动态 `selection` 选择当前全部战斗单位、空闲战斗单位或具体兵种，但 per-unit 持久计划仍须在注册时用顶层 `unitIds` 固定所有权；生产不属于 plan call，由专用有限队列工具管理；其余 global 建造计划可省略 `unitIds`，由 `MissionRuntime` 在每个 committed tick 持续推进；`cancel_plan` 按 `planId` 直接终止 active plan，显式绑定的单位死亡时 plan 自动失败而不是永久等待
+- `orchestrate_plan` 与其支持的即时动作使用同一套工具名和动作参数，并暴露给 LLM；即时 move / attack-move / attack / stop / hold 还可用执行时动态 `selection` 选择当前全部战斗单位、空闲战斗单位或具体兵种，但 per-unit 持久计划仍须在注册时用顶层 `unitIds` 固定所有权；生产不属于 plan call，由专用有限队列工具管理；其余 global 建造计划可省略 `unitIds`，由 `MissionRuntime` 在每个 committed tick 持续推进；`cancel_plan` 按 `planId` 直接终止 active plan，显式绑定的单位死亡时 plan 自动失败而不是永久等待
+- 无持续意图的 idle 战斗单位会在自身 `visionRange` 内自动索敌；实际受伤时若伤害来源可见，会优先转入有警戒起点的自动追击。`stop_unit` 取消当前意图并回到 idle；`hold_unit` 是唯一进入持久 hold 的玩法工具，hold 单位只向已在武器射程内的可见目标开火，不会追击；move / harvest / build 等显式任务不被自动反击打断
 - plan 中的自动建造会自行选址、移动 worker，并在 footprint 被动态占据时立即重选
 - standard 的完成重工代表 T2，完成科技中心代表 T3；当前没有独立研究队列。T1 有 rifleman / rocket soldier / 机枪塔，T2 有 light tank / flame tank / 反坦克塔，T3 有 heavy tank 和全局限造 1 名的 commando
 - HQ、兵营和重工使用严格有序的有限生产队列；`spawn_unit` 一次追加多个 `{ unitType, count }`，`get_production_queue` 查询进度，`cancel_production` 按 order/building 取消。生产逐 tick 扣款，缺钱暂停并自动恢复，取消或建筑被摧毁时退还当前未完成单位已支付的 credits；已开始的 T3 单位会在科技中心被毁后完成，后续受锁项进入 `waiting_for_prerequisite` 并在重建后自动恢复；每建筑每兵种最多保留 100 个待生产单位，commando 另受存活加排队合计 1 名的玩家级限制

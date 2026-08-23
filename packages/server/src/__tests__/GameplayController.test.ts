@@ -36,7 +36,7 @@ describe("GameplayController", () => {
     const orchestrate = tools.find((tool) => tool.name === "orchestrate_plan")!;
     const planCalls = (((orchestrate.parameters.properties as any).steps.items.properties.call.enum) as string[]);
     expect(planCalls).not.toContain("spawn_unit");
-    for (const name of ["move_unit", "attack_move_unit", "attack", "hold_unit"]) {
+    for (const name of ["move_unit", "attack_move_unit", "attack", "stop_unit", "hold_unit"]) {
       const tool = tools.find((candidate) => candidate.name === name)!;
       const unitIds = (tool.parameters.properties as Record<string, Record<string, unknown>>).unitIds;
       const selection = (tool.parameters.properties as Record<string, Record<string, unknown>>).selection;
@@ -79,7 +79,7 @@ describe("GameplayController", () => {
     game.stop();
   });
 
-  it("selects only unplanned idle or holding combat units with idle_combat", () => {
+  it("selects only unplanned units without an intent with idle_combat", () => {
     const game = new Game();
     game.start();
     const gameplayController = new GameplayController(game, "player_1");
@@ -90,12 +90,16 @@ describe("GameplayController", () => {
     moving.state = "moving";
     moving.order = { type: "move", targetX: 20, targetY: 5 };
 
-    const result = executeAgentTool(gameplayController, "hold_unit", {
+    const result = executeAgentTool(gameplayController, "stop_unit", {
       selection: "idle_combat",
     }).result as { selectedUnitIds: string[] };
 
-    expect(new Set(result.selectedUnitIds)).toEqual(new Set([idle.id, holding.id]));
+    expect(new Set(result.selectedUnitIds)).toEqual(new Set([idle.id]));
+    expect(result.selectedUnitIds).not.toContain(holding.id);
     expect(result.selectedUnitIds).not.toContain(moving.id);
+    expect(gameplayController.takeIssuedCommands()).toEqual([
+      expect.objectContaining({ type: "stop", unitId: idle.id }),
+    ]);
     game.stop();
   });
 
@@ -1894,7 +1898,7 @@ describe("GameplayController", () => {
     }
 
     expect(gameplayController.handleCommittedTick()).toEqual([
-      expect.objectContaining({ unitId: attacker.id, type: "hold" }),
+      expect.objectContaining({ unitId: attacker.id, type: "stop" }),
     ]);
     game.stop();
   });

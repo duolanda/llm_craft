@@ -123,6 +123,36 @@ describe("SimulationCore", () => {
     expect(world.tick).toBe(0);
   });
 
+  it("passes projectile damage events into the same-tick combat phase", () => {
+    const phases: string[] = [];
+    const systems = createRecordingSystems(phases);
+    const damageEvent = {
+      type: "unit_damaged" as const,
+      playerId: "player_2" as const,
+      unitId: "unit_defender",
+      attackerId: "unit_attacker",
+      damage: 10,
+    };
+    let receivedDamageEvents: unknown = null;
+    systems.projectiles = {
+      step: () => {
+        phases.push("projectiles");
+        return [damageEvent];
+      },
+    };
+    systems.combat = {
+      step: (_world, damageEvents) => {
+        phases.push("combat");
+        receivedDamageEvents = damageEvents;
+      },
+    };
+
+    const result = new SimulationCore(systems).step(new WorldState(createDefaultMatchDefinition()));
+
+    expect(receivedDamageEvents).toEqual([damageEvent]);
+    expect(result.events).toContainEqual(damageEvent);
+  });
+
   it("propagates a system failure and does not execute later phases", () => {
     const phases: string[] = [];
     const systems = createRecordingSystems(phases);

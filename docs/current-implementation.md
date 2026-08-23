@@ -23,7 +23,7 @@
 
 车辆和建筑 GLB 在 Blender 导出前按同一份 shared 几何规格归一化，导出根变换为 1；前端不再用按类型的视觉补偿系数，只用统一 `CELL_SIZE` 把“模拟格”换算为 Three.js 世界单位。车辆碰撞只覆盖履带/底盘/车体，炮管、天线和排气附件作为装饰悬垂；生成器会验证主体没有越出 canonical footprint，服务端测试同时验证建筑规则 footprint 与模型规格一致。机枪塔和反坦克塔分别导出固定底座与可旋转炮塔；模拟层在每个 tick 索敌后写入 `Building.heading`，live 投影和 Match Record delta 都保留该朝向，前端再以最短角度平滑转动炮塔，底座不参与旋转。
 
-持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。指定目标攻击建筑时不再把被占据的建筑中心交给通用移动终点投影，而是按攻击者射程、来向和车辆碰撞半径预约互不重叠的近侧射击位；移动途中每个 committed tick 都会先重算是否已进入射程，满足后立即停止追击并开火。对相同目标重复调用 `attack` 会复用正在执行的追击路径，不会重新分配终点。attack-move 的可选 `priority` 只把指定目标类型提前，未列出的类型继续按兵种默认相对顺序参与兜底索敌，不再充当严格目标白名单。指定目标攻击无论是在首次调用实时校验时，还是在后续持续攻击过程中发现目标已消失，都会只在攻击者自身视野内确定性地重选附近敌人；没有候选时后续持续攻击转为 hold 并清掉旧追击路径，首次调用则返回目标已消失。大部分无明确点杀目标的推进仍应直接使用 attack-move。
+持续攻击和 attack-move 追逐移动目标时，目标的连续坐标会先转换为边界内整数网格，再交由寻路层选择可达终点。指定目标攻击建筑时不再把被占据的建筑中心交给通用移动终点投影，而是按攻击者射程、来向和车辆碰撞半径预约互不重叠的近侧射击位；移动途中每个 committed tick 都会先重算是否已进入射程，满足后立即停止追击并开火。对相同目标重复调用 `attack` 会复用正在执行的追击路径，不会重新分配终点。attack-move 的可选 `priority` 只把指定目标类型提前，未列出的类型继续按兵种默认相对顺序参与兜底索敌，不再充当严格目标白名单。无持续意图的 idle 战斗单位会在自身 `visionRange` 内自动获取目标；自动交战以获取点为警戒起点，目标离开当前视野或警戒半径后立即清掉追击并回到 idle。实际弹丸或溅射伤害命中时，idle 单位会优先锁定自身视野内的伤害来源，即使对方尚在武器射程外也会追进后反击；move / harvest / build 等显式任务不被打断。指定目标消失且不存在合法替代目标时会清理追击并回到 idle，attack-move 抵达目的地后也回到 idle；系统流程不再自动进入 hold。大部分无明确点杀目标的推进仍应直接使用 attack-move。
 
 采矿循环会向最近的已完成 HQ 或 refinery 交付。省略矿点时，自动选择以反复交付路程为主、worker 初始路程和当前分配为辅；单格矿点最多保留 2 个 worker，超额分配会自动改派，矿点耗尽后也会自动切换路线。worker 在矿格边缘的交互范围内即可采集，不再要求共享同一个格心；因此第二个 worker 的落点被终点预约投影到相邻格时仍能完成采集。满载 worker 进入交付建筑范围即可卸货。Refinery 只缩短交付路线，不增加采集速度；省略建造坐标时会按预计路线节省选址。自动建造任务以 worker 与建筑完整 footprint 实际相邻为移动步骤的完成条件。
 
@@ -61,7 +61,7 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 - T2：已完成兵营后可建重工；重工完成即解锁 `light_tank` / `flame_tank`，同时允许建反坦克塔。
 - T3：已完成重工后可建科技中心；科技中心完成后，重工解锁 `heavy_tank`，兵营解锁玩家级限造 1 名的 `commando`。
 
-机枪塔和反坦克塔都是服务端权威战斗单位：完工后按自身视野、目标优先级和冷却自动索敌，冷却期间也会持续跟踪当前最优目标的朝向，并通过与移动单位相同的 projectile/warhead 管线造成伤害。火箭兵的最小射程由战斗系统强制执行；指定目标或 attack-move 发现目标位于最小射程内时，会先退到合法射界再开火。火焰坦克为 T2 近程反步兵/攻坚车辆：560 HP 高于轻坦的 420，射程 3，攻击前有 1 tick 权威前摇，完成后建立持续喷火状态并每 tick 生成一次伤害脉冲；目标失效、离开射程、切换目标或收到移动/hold 命令会立即中断，重新接敌必须再次前摇。每次脉冲基础伤害为 6，infantry / vehicle / structure 系数为 4 / 0.2 / 4（直击分别为 24 / 1 / 24），因此持续贴住步兵和建筑时伤害很高，却不会替代轻坦参与载具对拼；单辆持续喷火约 30 秒摧毁满血 HQ、9 秒摧毁兵营，机枪塔几乎无法阻挡它，反坦克塔则是硬克制。客户端根据权威 `attackStream` 绘制双喷口连续火焰，不显示用于逐 tick 结算的火焰 projectile。
+机枪塔和反坦克塔都是服务端权威战斗单位：完工后按自身视野、目标优先级和冷却自动索敌，冷却期间也会持续跟踪当前最优目标的朝向，并通过与移动单位相同的 projectile/warhead 管线造成伤害。火箭兵的最小射程由战斗系统强制执行；指定目标或 attack-move 发现目标位于最小射程内时，会先退到合法射界再开火。火焰坦克为 T2 近程反步兵/攻坚车辆：560 HP 高于轻坦的 420，射程 3，攻击前有 1 tick 权威前摇，完成后建立持续喷火状态并每 tick 生成一次伤害脉冲；目标失效、离开射程、切换目标或收到移动/stop/hold 命令会立即中断，重新接敌必须再次前摇。每次脉冲基础伤害为 6，infantry / vehicle / structure 系数为 4 / 0.2 / 4（直击分别为 24 / 1 / 24），因此持续贴住步兵和建筑时伤害很高，却不会替代轻坦参与载具对拼；单辆持续喷火约 30 秒摧毁满血 HQ、9 秒摧毁兵营，机枪塔几乎无法阻挡它，反坦克塔则是硬克制。客户端根据权威 `attackStream` 绘制双喷口连续火焰，不显示用于逐 tick 结算的火焰 projectile。
 
 特种兵为 T3 唯一单位：160 HP、1.3 格/tick、600 credits、24 tick 生产时间。它比工人、步枪兵、火箭兵、轻坦和火焰坦克的 1.0 格/tick 快 30%，约是重坦 0.6 格/tick 的 2.17 倍。步枪射程 7，命中任意 infantry 即秒杀；对建筑会自动切换为射程 1 的 C4，命中即摧毁目标；对 vehicle 的伤害固定为 0，自身属于 infantry，但免疫轻坦、火焰坦克和重坦的移动碾压，仍会受到常规武器伤害。玩家的存活特种兵与所有兵营已排队数量合计不得超过 1，死亡后名额释放。GameplayController 在入队前返回结构化 `unit_limit_reached`，Simulation 层仍会让兼容导入的超额订单以 `waiting_for_unit_limit` 暂停，避免绕过权威限制。客户端模型保留橙色贝雷帽、长瞄准步枪和 C4 包，另增大型非对称拆弹披肩、高亮目镜与两条长色带，使远景轮廓不再只靠帽子区分。
 
@@ -71,14 +71,14 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 
 - 模型通过 OpenAI-compatible tool calling 观察和控制游戏，不生成可执行 JavaScript。
 - 只读工具：`get_map_state`、`get_my_state`、`get_my_units`、`get_army_summary`、`get_production_queue`、`get_active_plans`、`get_recent_events`。
-- 动作工具：移动、attack move、指定目标攻击、有限批次生产、取消生产、集结点、建造、持续采矿和 hold。即时移动、attack move、attack 与 hold 可在精确 `unitIds` 和执行时动态 `selection` 之间二选一；动态选择支持 `all_combat`、`idle_combat` 或具体单位类型，并在执行 tick 解析当前存活单位，避免查询与并行动作之间的 ID 过期。`all_combat` 严格包含所有存活战斗单位，不会暗中排除已有 plan 的分队；后下发的即时命令会中断被选中单位的 plan。保留独立分队时由调用者显式传入主力 `unitIds` 并排除该分队。子 Agent 为保持 unit lease 边界仍只允许显式 `unitIds`；集结点和整队列取消接受 `buildingIds` 数组。
+- 动作工具：移动、attack move、指定目标攻击、有限批次生产、取消生产、集结点、建造、持续采矿、stop 和 hold。即时移动、attack move、attack、stop 与 hold 可在精确 `unitIds` 和执行时动态 `selection` 之间二选一；动态选择支持 `all_combat`、`idle_combat` 或具体单位类型，其中 `idle_combat` 仅包含无 active plan、瞬时为 idle 且没有持续 intent 的战斗单位，不再把明确 hold 算作普通空闲。所有动态选择都在执行 tick 解析当前存活单位，避免查询与并行动作之间的 ID 过期。`all_combat` 严格包含所有存活战斗单位，不会暗中排除已有 plan 的分队；后下发的即时命令会中断被选中单位的 plan。保留独立分队时由调用者显式传入主力 `unitIds` 并排除该分队。子 Agent 为保持 unit lease 边界仍只允许显式 `unitIds`；集结点和整队列取消接受 `buildingIds` 数组。
 - `spawn_unit` 给一座建筑追加严格有序的 `{ unitType, count }[]`。生产按 tick 扣款，余额不够时保留进度暂停，有收入后自动继续；取消订单或生产建筑被摧毁时，当前未完成单位已经支付的 credits 全额退回。T3 单位一旦开始会在科技中心被毁后完成，队列中后续受锁单位进入 `waiting_for_prerequisite`，重建科技中心后自动恢复。每座建筑每种单位最多有 100 个待生产单位；`commando` 另受玩家级 1 名限造约束。
 - LLM、HTTP control 与 CLI 共用 `orchestrate_plan`；step 的 `call` 和 `args` 复用其支持的即时动作工具名与动作参数，但 per-unit 持久计划仍在注册时用顶层 `unitIds` 固定所有权，不接受只适合单次即时解析的动态 `selection`。`cancel_plan` 可按 ID 立即终止 active plan，显式绑定的单位死亡时计划自动失败。新 plan 的首个移动或追击 step 会接管注册前遗留的单位命令，但已由当前 step 下发的移动不会每 tick 重发。绕后、分兵多线、夹击或避开正面交战等对路线敏感的分队行动由独立 `unitIds` plan 和连续移动 step 表达：先到己方一侧的路线入口点，再沿所选路线通过战场；单个远端点不约束实际行进路线。生产不再进入 plan，改由 `spawn_unit` / `get_production_queue` / `cancel_production` 管理有限队列；global 建造计划可省略 `unitIds`，内部 `MissionRuntime` 在每个 committed tick 推进。
 - plan 建造步骤可省略坐标自动选址，并负责 worker 走位；行军期间 footprint 被临时占据时立即重选。同批未落地工地会预留 footprint 外一格，普通生产建筑沿 HQ 朝战场方向横向展开，避免相邻计划贴边形成采矿封锁。
 - HQ、兵营和重工持久保存带模式的可选 rally point。默认 `move`；兵营和重工可设 `attack_move`，该模式会穿过命令规范化与 tick 队列原样保留，新战斗单位会边推进边索敌；HQ worker 集结只支持 `move`。目标格被占时寻路层为每个单位选择附近可达落点；清除 rally point 不影响已经出发的单位。
-- 开局 worker、无 rally point 的新 worker，以及完工后没有原任务可恢复的建造 worker 会自动选择高效矿路并进入 `harvest_loop`。显式集结点、hold、移动和手动改派仍覆盖自动任务。
+- 开局 worker、无 rally point 的新 worker，以及完工后没有原任务可恢复的建造 worker 会自动选择高效矿路并进入 `harvest_loop`。显式集结点、stop、hold、移动和手动改派仍覆盖自动任务。
 - group attack move 会一次提交所有编队命令，不做跨 tick pending group release。
-- 指定目标 `attack` 采用传统 RTS 追击语义：目标在射程外时先寻路进入合法射界再持续攻击；若已观察目标在批量工具执行前死亡，则从当前全图目标中选出一个替代目标供整批攻击者统一追击，不再按每个单位当时的自动索敌视野分别决定是否停下。持续攻击中的目标消失后，各单位也会从当前战场目标继续重选；只有不存在任何合法目标时才清理追击并 hold。
+- 指定目标 `attack` 采用传统 RTS 追击语义：目标在射程外时先寻路进入合法射界再持续攻击；若已观察目标在批量工具执行前死亡，则从当前全图目标中选出一个替代目标供整批攻击者统一追击，不再按每个单位当时的自动索敌视野分别决定是否停下。持续攻击中的目标消失后，各单位也会从当前战场目标继续重选；只有不存在任何合法目标时才清理追击并回到 idle，不再自动进入 hold。`attack_move` 到达目的地后同样回到 idle，因此仍可按普通空闲规则自动应对后续接近的敌人。
 - `get_map_state` 和 `get_my_units` 用 `phase` 表示瞬时模拟阶段，保留 `intent` 表示持续任务，避免把 `phase: idle` 误解为没有采矿任务。`get_my_units` 不再返回完整逐格路径，只返回终点与剩余步数；`get_my_state` 区分 assigned/active/stalled harvesters 并报告矿点余量，harvest loop 连续 12 tick 没有位移或 credits 变化时报告 `path_blocked`。LLM 的 `start_harvest_loop` 接受 `unitIds` 数组，相同有效任务返回 `already_active` 而不重启。
 - `no_recent_read` 只提示本轮从未读取过状态；一旦读取，模型推理跨过若干 tick 不再产生纯时间阈值的过期噪音。所有动作仍在调用时使用实时状态校验。
 - Agent session 会把 building complete、unit ready、unit lost 和任一己方建筑遭攻击四类关键 EVA 消息插入模型上下文并去重。
@@ -91,7 +91,7 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 - control session 固定绑定 `matchId + playerId`，观察对象变化不会迁移 session。
 - 单 tool 请求直接进入绑定玩家的 `GameplayController`。
 - `/sessions/:id/actions` 接受带 `clientRequestId` 的 action 数组并提供请求级幂等；每个 action 独立执行和返回。部分失败时保留成功动作并返回 `partialSuccess: true`。
-- CLI 的 move、attack、attack-move、gather 和 hold 支持 `--units`，stdin 选择会合并为 `unitIds` 数组；`train --count` 追加有限生产批次，`production-queue` 查询队列，`cancel-production` 按订单或建筑取消；rally 支持 `move` / `attack-move` 两种模式；`orchestrate` 以正式工具名接收 `{ actions: [...] }`，只为旧脚本保留短别名归一化。
+- CLI 的 move、attack、attack-move、gather、stop 和 hold 支持 `--units`，stdin 选择会合并为 `unitIds` 数组；`train --count` 追加有限生产批次，`production-queue` 查询队列，`cancel-production` 按订单或建筑取消；rally 支持 `move` / `attack-move` 两种模式；`orchestrate` 以正式工具名接收 `{ actions: [...] }`，只为旧脚本保留短别名归一化。
 - MatchRegistry HTTP API 支持列表、切换观察、停止和保存指定对局。
 
 ## 6. Match Record

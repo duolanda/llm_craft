@@ -107,6 +107,7 @@ const PLAN_CALL_TOOL_NAMES = [
   "attack",
   "build_structure",
   "start_harvest_loop",
+  "stop_unit",
   "hold_unit",
 ] as const satisfies readonly PlanCallToolName[];
 
@@ -565,6 +566,15 @@ export class GameplayController {
         },
         diagnoseWait: (context) => this.diagnosePlanWait("start_harvest_loop", context),
       },
+      stop_unit: {
+        defaultScope: "per_unit",
+        validateArgs: (args) => this.hasOptionalPlanUnitId(args),
+        createCommand: (context) => {
+          const unitId = this.resolvePlanUnitId(context);
+          return unitId ? this.createCommand("stop", { unitId }) : null;
+        },
+        diagnoseWait: (context) => this.diagnosePlanWait("stop_unit", context),
+      },
       hold_unit: {
         defaultScope: "per_unit",
         validateArgs: (args) => this.hasOptionalPlanUnitId(args),
@@ -584,7 +594,7 @@ export class GameplayController {
       : undefined;
     const unitDetails = unitId ? { unitId } : undefined;
 
-    if (["move_unit", "attack_move_unit", "attack", "start_harvest_loop", "hold_unit"].includes(call) && !unit) {
+    if (["move_unit", "attack_move_unit", "attack", "start_harvest_loop", "stop_unit", "hold_unit"].includes(call) && !unit) {
       return {
         code: "assigned_unit_missing",
         message: `Assigned unit ${unitId ?? "(unresolved)"} is not alive or does not exist.`,
@@ -1789,6 +1799,30 @@ export class GameplayController {
     };
   }
 
+  stopUnit(unitId: string): ExecutedToolResult {
+    const state = this.getReadState();
+    const unit = this.getFriendlyUnit(unitId);
+    if (!unit) {
+      return this.actionResult({
+        ok: false,
+        error: "invalid_unit",
+        hint: "No living friendly unit matches this unitId; use one of availableFriendlyUnits.",
+        availableFriendlyUnits: this.getFriendlyUnitOptions(state),
+      });
+    }
+
+    this.missionRuntime.interruptUnit(unitId);
+    this.attackOrders.delete(unitId);
+    const command = this.enqueue(this.createCommand("stop", { unitId }));
+    return {
+      effect: "action",
+      result: this.withActionMetadata({
+        ok: true,
+        commandId: command.id,
+      }),
+    };
+  }
+
   orchestratePlan(input: OrchestratePlanInput): ExecutedToolResult {
     const validated = this.validatePlanInput(input);
     if (!validated.ok) {
@@ -2077,7 +2111,7 @@ export class GameplayController {
         }
         this.attackOrders.delete(unitId);
         if (unit.intent?.type === "move" || unit.intent?.type === "attack") {
-          commands.push(this.createCommand("hold", { unitId }));
+          commands.push(this.createCommand("stop", { unitId }));
         }
         continue;
       }

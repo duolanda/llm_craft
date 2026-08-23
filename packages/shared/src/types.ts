@@ -828,6 +828,9 @@ export interface LiveBuilding {
   maxHp: number;
   playerId: PlayerId;
   heading?: number;
+  /** Spectator-facing production state; excludes rally points and simulation-only bookkeeping. */
+  productionQueue: ProductionOrder[];
+  productionProgress?: ProductionProgress;
   /** Only the live UI-relevant construction indicator crosses the wire. */
   constructionProgress?: {
     remainingTicks: number;

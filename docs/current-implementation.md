@@ -17,7 +17,7 @@
 
 拥堵恢复另行跟踪整条路线剩余距离的历史最佳值，因此在同一小区域前后挪动不会伪装成有效进展。一次拥堵重规划后必须再经历完整的无进展窗口才能再试；全局移动循环优先处理拥堵时间最长的单位，从而在每 tick 4 次的重规划预算下保持确定性和公平轮转。
 
-实时 WebSocket 使用独立的 `LiveStateProjectionFrame` 作为动态状态投影；完整 `GameState` 只属于服务端模拟、Match Record 和 Replay。live frame 不携带历史日志、静态地图、寻路缓存、生产队列或 AI 输出：地图通过一次性的 `map_init`，日志通过有界 `state_events`，最新 AI 输出通过可替换的 `ai_output` 消息传递。Live 与 Replay 都通过 `SimulationVisualTimeline` 消费同一个 frame sampler：Live clock 使用单调服务器时间和 2 tick 固定显示缓冲，Replay clock 用 `requestAnimationFrame` 连续推进可暂停、变速和 seek 的 playhead；React 的 replay frame index 只用于界面、tick 级元数据和滚动缓冲窗口，不充当模型渲染时钟，正常播放也不再每 tick 清空 frame buffer。客户端按 frame sequence 丢弃晚到旧帧，采样位置与最短角度 heading；超过 10 格的状态跳变立即 snap。
+实时 WebSocket 使用独立的 `LiveStateProjectionFrame` 作为动态状态投影；完整 `GameState` 只属于服务端模拟、Match Record 和 Replay。live frame 保留当前实体、资源、投射物、胜负状态，以及观战 UI 所需的逐建筑生产队列、生产进度和精简施工进度；不携带历史日志、静态地图、寻路缓存、rally point 或 AI 输出。地图通过一次性的 `map_init`，日志通过有界 `state_events`，最新 AI 输出通过可替换的 `ai_output` 消息传递。Live 与 Replay 都通过 `SimulationVisualTimeline` 消费同一个 frame sampler：Live clock 使用单调服务器时间和 2 tick 固定显示缓冲，Replay clock 用 `requestAnimationFrame` 连续推进可暂停、变速和 seek 的 playhead；React 的 replay frame index 只用于界面、tick 级元数据和滚动缓冲窗口，不充当模型渲染时钟，正常播放也不再每 tick 清空 frame buffer。客户端按 frame sequence 丢弃晚到旧帧，采样位置与最短角度 heading；超过 10 格的状态跳变立即 snap。
 
 逐帧视觉状态由 `VisualWorld` 持有。每个 R3F render frame 只读取一次 timeline 和每个实体的 transform，再由稳定的实例 batch 直接调用 Three.js `setMatrixAt` / `instanceMatrix.needsUpdate`；单位坐标不进入 React state，不克隆逐帧 `Unit[]`，也没有 30fps 动作限流。模型、车体/炮塔朝向、血条、地面环、intent 和战斗提示在同一 render frame 读取同一份 mutable transform。React 只负责 Canvas/批次结构、HUD 和 tick 级属性；视觉层只读权威状态，不反向修改模拟。WebSocket 断开后每秒重连，换局或重连时清空旧 live frame buffer。
 

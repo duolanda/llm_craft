@@ -1,34 +1,31 @@
-import { BUILDING_TYPES, GameState, UNIT_TYPES, UnitType } from "@llmcraft/shared";
+import { useState } from "react";
+import {
+  BUILDING_TYPES,
+  getProductionOptions,
+  type Building,
+  type GameState,
+  type Player,
+  type UnitType,
+  UNIT_TYPES,
+} from "@llmcraft/shared";
+import {
+  BUILDING_LABELS,
+  formatTickDuration,
+  getBuildingDisplayName,
+  PLAYER_LABELS,
+  PRODUCTION_STATUS_LABELS,
+  UNIT_COLORS,
+  UNIT_LABELS,
+  UNIT_SHORT_LABELS,
+} from "../lib/entityPresentation";
 
 interface StatsPanelProps {
   state: GameState | null;
   tickIntervalMs?: number;
 }
 
-const UNIT_COLORS: Record<string, string> = {
-  worker: "#ffb300",
-  soldier: "#ff2a4a",
-  rifleman: "#8df2a6",
-  rocket_soldier: "#ff8840",
-  commando: "#facc15",
-  light_tank: "#7dd3fc",
-  flame_tank: "#fb923c",
-  heavy_tank: "#a78bfa",
-};
-
-const UNIT_LABELS: Record<string, string> = {
-  worker: "工人",
-  soldier: "士兵",
-  rifleman: "步兵",
-  rocket_soldier: "火箭",
-  commando: "特种",
-  light_tank: "轻坦",
-  flame_tank: "火焰",
-  heavy_tank: "重坦",
-};
-
-const ACTIVE_DISPLAY_UNIT_TYPES: UnitType[] = [
-  UNIT_TYPES.WORKER,
+const COMBAT_UNIT_TYPES: UnitType[] = [
+  UNIT_TYPES.SOLDIER,
   UNIT_TYPES.RIFLEMAN,
   UNIT_TYPES.ROCKET_SOLDIER,
   UNIT_TYPES.COMMANDO,
@@ -37,186 +34,329 @@ const ACTIVE_DISPLAY_UNIT_TYPES: UnitType[] = [
   UNIT_TYPES.HEAVY_TANK,
 ];
 
-export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
-  if (!state) {
-    return (
-      <div className="stats-grid">
-        <div className="stat-block" style={{ gridColumn: "1 / -1" }}>
-          <div className="empty-state">等待游戏数据...</div>
-        </div>
-      </div>
-    );
+const VEHICLE_UNIT_TYPES = new Set<UnitType>([
+  UNIT_TYPES.LIGHT_TANK,
+  UNIT_TYPES.FLAME_TANK,
+  UNIT_TYPES.HEAVY_TANK,
+]);
+
+const BUILDING_ORDER = [
+  BUILDING_TYPES.HQ,
+  BUILDING_TYPES.BARRACKS,
+  BUILDING_TYPES.WAR_FACTORY,
+  BUILDING_TYPES.REFINERY,
+  BUILDING_TYPES.MACHINE_GUN_TURRET,
+  BUILDING_TYPES.ANTI_TANK_TURRET,
+  BUILDING_TYPES.TECH_CENTER,
+] as const;
+
+function formatTime(tick: number, tickIntervalMs: number): string {
+  const seconds = Math.floor((tick * tickIntervalMs) / 1_000);
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${(seconds % 60).toString().padStart(2, "0")}`;
+}
+
+function getTechTier(player: Player): 1 | 2 | 3 {
+  const completedBuildings = player.buildings.filter((building) => building.exists && !building.constructionProgress);
+  if (completedBuildings.some((building) => building.type === BUILDING_TYPES.TECH_CENTER)) return 3;
+  if (completedBuildings.some((building) => building.type === BUILDING_TYPES.WAR_FACTORY)) return 2;
+  return 1;
+}
+
+function ForceCard({ player }: { player: Player }) {
+  const [hoveredUnitType, setHoveredUnitType] = useState<UnitType | null>(null);
+  const livingUnits = player.units.filter((unit) => unit.exists);
+  const combatUnits = livingUnits.filter((unit) => unit.type !== UNIT_TYPES.WORKER);
+  const workers = livingUnits.length - combatUnits.length;
+  const vehicles = combatUnits.filter((unit) => VEHICLE_UNIT_TYPES.has(unit.type)).length;
+  const infantry = combatUnits.length - vehicles;
+  const buildings = player.buildings.filter((building) => building.exists);
+  const hq = buildings.find((building) => building.type === BUILDING_TYPES.HQ);
+  const hqRatio = hq ? Math.max(0, Math.min(1, hq.hp / Math.max(1, hq.maxHp))) : 0;
+  const unitCounts = new Map<UnitType, number>();
+  for (const unit of livingUnits) {
+    unitCounts.set(unit.type, (unitCounts.get(unit.type) ?? 0) + 1);
   }
-
-  const [player1, player2] = state.players;
-  const hasLegacySoldiers = state.players.some((player) =>
-    player.units.some((unit) => unit.exists && unit.type === UNIT_TYPES.SOLDIER)
+  const composition = COMBAT_UNIT_TYPES
+    .map((unitType) => ({ unitType, count: unitCounts.get(unitType) ?? 0 }))
+    .filter((entry) => entry.count > 0);
+  const activeComposition = composition.find((entry) =>
+    entry.unitType === hoveredUnitType
   );
-  const displayUnitTypes = hasLegacySoldiers
-    ? [UNIT_TYPES.WORKER, UNIT_TYPES.SOLDIER, ...ACTIVE_DISPLAY_UNIT_TYPES.slice(1)]
-    : ACTIVE_DISPLAY_UNIT_TYPES;
-
-  const getUnitCounts = (player: (typeof state.players)[0]) => {
-    const units = player.units.filter((u) => u.exists);
-    return Object.fromEntries([
-      ...displayUnitTypes.map((unitType) => [unitType, units.filter((unit) => unit.type === unitType).length]),
-      ["total", units.length],
-    ]) as Record<UnitType, number> & { total: number };
-  };
-
-  const getBuildingCounts = (player: (typeof state.players)[0]) => {
-    const buildings = player.buildings.filter((b) => b.exists);
-    return {
-      hq: buildings.filter((b) => b.type === BUILDING_TYPES.HQ).length,
-      barracks: buildings.filter((b) => b.type === BUILDING_TYPES.BARRACKS).length,
-      warFactory: buildings.filter((b) => b.type === BUILDING_TYPES.WAR_FACTORY).length,
-      refinery: buildings.filter((b) => b.type === BUILDING_TYPES.REFINERY).length,
-      defenses: buildings.filter((b) => b.type === BUILDING_TYPES.MACHINE_GUN_TURRET || b.type === BUILDING_TYPES.ANTI_TANK_TURRET).length,
-      techCenter: buildings.filter((b) => b.type === BUILDING_TYPES.TECH_CENTER).length,
-      techTier: buildings.some((b) => b.type === BUILDING_TYPES.TECH_CENTER && !b.constructionProgress)
-        ? 3
-        : buildings.some((b) => b.type === BUILDING_TYPES.WAR_FACTORY && !b.constructionProgress)
-          ? 2
-          : 1,
-      total: buildings.length,
-    };
-  };
-
-  const getHQHealth = (player: (typeof state.players)[0]) => {
-    const hq = player.buildings.find((b) => b.type === BUILDING_TYPES.HQ);
-    if (!hq) {
-      return "0/0";
-    }
-
-    return `${Math.max(0, Math.floor(hq.hp))}/${Math.floor(hq.maxHp)}`;
-  };
-
-  const p1Units = getUnitCounts(player1);
-  const p2Units = getUnitCounts(player2);
-  const p1Buildings = getBuildingCounts(player1);
-  const p2Buildings = getBuildingCounts(player2);
-  const p1HQHealth = getHQHealth(player1);
-  const p2HQHealth = getHQHealth(player2);
-
-  const formatTime = (tick: number) => {
-    const seconds = Math.floor((tick * tickIntervalMs) / 1000);
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
+  const sideClass = player.id === "player_1" ? "red" : "blue";
 
   return (
-    <div className="stats-grid">
-      <div className="stat-block">
-        <div className="stat-block-title">
-          <span style={{ color: "var(--accent-amber)" }}>◈</span> 模拟进程
+    <article className={`force-card ${sideClass}`}>
+      <header className="force-card-header">
+        <span className="force-side-mark" />
+        <span>{PLAYER_LABELS[player.id]}</span>
+        <span className="force-tier">T{getTechTier(player)}</span>
+      </header>
+
+      <div className="force-card-main">
+        <div className="force-total">
+          <strong>{combatUnits.length}</strong>
+          <span>作战单位</span>
         </div>
-        <div className="stat-row">
-          <span style={{ color: "var(--text-secondary)" }}>Tick</span>
-          <span className="stat-value-pair">
-            <span className="stat-p1">{state.tick}</span>
-            <span className="stat-vs">｜</span>
-            <span className="stat-p2">{formatTime(state.tick)}</span>
-          </span>
+        <div className="force-quick-stats">
+          <span><b>{workers}</b> 工人</span>
+          <span><b>{Math.floor(player.resources.credits)}</b> 资金</span>
         </div>
       </div>
 
-      <div className="stat-block">
-        <div className="stat-block-title">
-          <span style={{ color: "var(--accent-purple)" }}>◈</span> 单位编制
+      <div className="force-breakdown" aria-label={`步兵 ${infantry}，载具 ${vehicles}，建筑 ${buildings.length}`}>
+        <span>步兵 <b>{infantry}</b></span>
+        <span>载具 <b>{vehicles}</b></span>
+        <span>建筑 <b>{buildings.length}</b></span>
+      </div>
+
+      <div className="hq-status">
+        <div className="hq-status-label">
+          <span>总部完整度</span>
+          <b>{hq ? `${Math.ceil(hq.hp)} / ${hq.maxHp}` : "已摧毁"}</b>
         </div>
-        <div className="unit-legend-bar">
-          {displayUnitTypes.map((unitType) => (
-            <UnitLegend key={unitType} type={unitType} />
+        <div className="hq-health-track">
+          <span style={{ width: `${hqRatio * 100}%` }} />
+        </div>
+      </div>
+
+      <div className="composition-row">
+        <span className="composition-label">兵种构成</span>
+        <div className="composition-track">
+          {composition.length > 0 ? composition.map(({ unitType, count }) => (
+            <span
+              key={unitType}
+              className="composition-segment"
+              style={{
+                background: UNIT_COLORS[unitType],
+                flexGrow: count,
+              }}
+              aria-label={`${UNIT_LABELS[unitType]} ${count}`}
+              onPointerEnter={() => setHoveredUnitType(unitType)}
+              onPointerLeave={() => setHoveredUnitType(null)}
+            />
+          )) : <span className="composition-empty">暂无作战单位</span>}
+        </div>
+        <div className="composition-detail" aria-live="polite">
+          {activeComposition ? (
+            <>
+              <span>
+                <i style={{ background: UNIT_COLORS[activeComposition.unitType] }} />
+                {UNIT_LABELS[activeComposition.unitType]}
+              </span>
+              <b>× {activeComposition.count}</b>
+            </>
+          ) : (
+            <span className="composition-detail-hint">
+              {composition.length > 0 ? "悬停色块查看兵种" : "暂无作战单位"}
+            </span>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function progressRatio(remainingTicks: number, totalTicks: number): number {
+  if (totalTicks <= 0) return 1;
+  return Math.max(0, Math.min(1, 1 - remainingTicks / totalTicks));
+}
+
+function ProductionBuildingCard({
+  building,
+  tickIntervalMs,
+}: {
+  building: Building;
+  tickIntervalMs: number;
+}) {
+  const progress = building.productionProgress;
+  const construction = building.constructionProgress;
+  const isWaiting = progress?.status !== undefined && progress.status !== "producing";
+  const activeUnitType = progress?.unitType ?? building.productionQueue[0]?.unitType;
+  const percent = progress
+    ? Math.round(progressRatio(progress.remainingTicks, progress.totalTicks) * 100)
+    : 0;
+  const queuedOrders = building.productionQueue
+    .map((order) => ({
+      ...order,
+      remainingCount: Math.max(
+        0,
+        order.remainingCount - (progress?.orderId === order.orderId ? 1 : 0),
+      ),
+    }))
+    .filter((order) => order.remainingCount > 0);
+  const visibleOrders = queuedOrders.slice(0, 3);
+  const hiddenOrderCount = queuedOrders.length - visibleOrders.length;
+  const hpRatio = Math.max(0, Math.min(1, building.hp / Math.max(1, building.maxHp)));
+
+  return (
+    <article className={`production-card${isWaiting ? " waiting" : ""}`} title={building.id}>
+      <header className="production-card-header">
+        <div>
+          <strong>{getBuildingDisplayName(building)}</strong>
+          <span>{Math.ceil(building.hp)} / {building.maxHp} HP</span>
+        </div>
+        <div className="building-health-mini" aria-label={`建筑生命值 ${Math.round(hpRatio * 100)}%`}>
+          <span style={{ width: `${hpRatio * 100}%` }} />
+        </div>
+      </header>
+
+      {construction ? (
+        <div className="production-active construction-active">
+          <div className="production-active-line">
+            <span className="production-state-dot" />
+            <strong>建筑施工中</strong>
+            <b>{Math.round(progressRatio(construction.remainingTicks, construction.totalTicks) * 100)}%</b>
+          </div>
+          <div className="production-progress-track">
+            <span style={{ width: `${progressRatio(construction.remainingTicks, construction.totalTicks) * 100}%` }} />
+          </div>
+          <span className="production-detail">
+            预计 {formatTickDuration(construction.remainingTicks, tickIntervalMs)} 完成
+          </span>
+        </div>
+      ) : activeUnitType ? (
+        <div className="production-active">
+          <div className="production-active-line">
+            <span className="production-state-dot" />
+            <strong>{UNIT_LABELS[activeUnitType]}</strong>
+            <b>{progress ? `${percent}%` : "待启动"}</b>
+          </div>
+          <div className="production-progress-track">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+          <span className="production-detail">
+            {progress
+              ? `${PRODUCTION_STATUS_LABELS[progress.status]} · ${formatTickDuration(progress.remainingTicks, tickIntervalMs)}`
+              : "订单已进入生产线"}
+            {progress?.missingPrerequisites?.length
+              ? ` · 缺少 ${progress.missingPrerequisites.map((type) => BUILDING_LABELS[type]).join("、")}`
+              : ""}
+          </span>
+        </div>
+      ) : (
+        <div className="production-idle">
+          <span className="production-state-dot" />
+          <span>生产线空闲</span>
+        </div>
+      )}
+
+      {!construction && (
+        <div className="production-queue-row">
+          <span className="queue-label">后续</span>
+          <div className="queue-chips">
+            {visibleOrders.length > 0 ? visibleOrders.map((order) => (
+              <span key={order.orderId} className="queue-chip" title={order.orderId}>
+                {UNIT_SHORT_LABELS[order.unitType]} ×{order.remainingCount}
+              </span>
+            )) : <span className="queue-empty">无排队订单</span>}
+            {hiddenOrderCount > 0 && <span className="queue-more">+{hiddenOrderCount} 项</span>}
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ConstructionProject({
+  building,
+  tickIntervalMs,
+}: {
+  building: Building;
+  tickIntervalMs: number;
+}) {
+  const progress = building.constructionProgress;
+  if (!progress) return null;
+  const percent = Math.round(progressRatio(progress.remainingTicks, progress.totalTicks) * 100);
+  return (
+    <div className="construction-project" title={building.id}>
+      <span>{getBuildingDisplayName(building)}</span>
+      <div className="construction-project-progress">
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <b>{percent}% · {formatTickDuration(progress.remainingTicks, tickIntervalMs)}</b>
+    </div>
+  );
+}
+
+function ProductionLane({ player, tickIntervalMs }: { player: Player; tickIntervalMs: number }) {
+  const sideClass = player.id === "player_1" ? "red" : "blue";
+  const livingBuildings = player.buildings.filter((building) => building.exists);
+  const productionBuildings = livingBuildings
+    .filter((building) => getProductionOptions(building.type).length > 0)
+    .sort((left, right) => {
+      const typeDifference = BUILDING_ORDER.indexOf(left.type) - BUILDING_ORDER.indexOf(right.type);
+      return typeDifference || left.id.localeCompare(right.id);
+    });
+  const otherConstruction = livingBuildings.filter((building) =>
+    building.constructionProgress && getProductionOptions(building.type).length === 0
+  );
+  const activeLines = productionBuildings.filter((building) =>
+    building.constructionProgress || building.productionProgress || building.productionQueue.length > 0
+  ).length;
+
+  return (
+    <section className={`production-lane ${sideClass}`}>
+      <header className="production-lane-header">
+        <div>
+          <span className="force-side-mark" />
+          <strong>{PLAYER_LABELS[player.id]}生产</strong>
+        </div>
+        <span>{activeLines} / {productionBuildings.length} 条生产线活动</span>
+      </header>
+      <div className="production-card-list">
+        {productionBuildings.length > 0 ? productionBuildings.map((building) => (
+          <ProductionBuildingCard
+            key={building.id}
+            building={building}
+            tickIntervalMs={tickIntervalMs}
+          />
+        )) : <div className="production-lane-empty">暂无生产建筑</div>}
+      </div>
+      {otherConstruction.length > 0 && (
+        <div className="construction-projects">
+          <span className="construction-projects-title">在建项目</span>
+          {otherConstruction.map((building) => (
+            <ConstructionProject key={building.id} building={building} tickIntervalMs={tickIntervalMs} />
           ))}
         </div>
-        <div className="stat-row" style={{ justifyContent: "center", gap: "12px", marginTop: 4 }}>
-          <UnitChips counts={p1Units} unitTypes={displayUnitTypes} align="end" />
-          <span className="stat-vs">VS</span>
-          <UnitChips counts={p2Units} unitTypes={displayUnitTypes} align="start" />
+      )}
+    </section>
+  );
+}
+
+export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
+  if (!state) {
+    return <div className="spectator-overview empty-state">等待游戏数据...</div>;
+  }
+
+  return (
+    <div className="spectator-overview">
+      <div className="match-pulse">
+        <div>
+          <span className="match-pulse-live" />
+          <span>战局时间</span>
+          <strong>{formatTime(state.tick, tickIntervalMs)}</strong>
         </div>
-        <div className="stat-row" style={{ justifyContent: "center", marginTop: 4 }}>
-          <span className="stat-value-pair">
-            <span className="stat-p1">{p1Units.total}</span>
-            <span className="stat-vs">总计</span>
-            <span className="stat-p2">{p2Units.total}</span>
-          </span>
-        </div>
+        <span className="match-pulse-tick">TICK {state.tick}</span>
       </div>
 
-      <div className="stat-block">
-        <div className="stat-block-title">
-          <span style={{ color: "var(--accent-cyan)" }}>◈</span> 建筑设施
-        </div>
-        <BuildingRow label="HQ" p1={p1Buildings.hq} p2={p2Buildings.hq} />
-        <BuildingRow label="HP" p1={p1HQHealth} p2={p2HQHealth} />
-        <BuildingRow label="兵营" p1={p1Buildings.barracks} p2={p2Buildings.barracks} />
-        <BuildingRow label="战车工厂" p1={p1Buildings.warFactory} p2={p2Buildings.warFactory} />
-        <BuildingRow label="科技等级" p1={`T${p1Buildings.techTier}`} p2={`T${p2Buildings.techTier}`} />
-        <BuildingRow label="防御塔" p1={p1Buildings.defenses} p2={p2Buildings.defenses} />
-        <BuildingRow label="科技中心" p1={p1Buildings.techCenter} p2={p2Buildings.techCenter} />
+      <div className="force-comparison">
+        {state.players.map((player) => <ForceCard key={player.id} player={player} />)}
       </div>
 
-      <div className="stat-block">
-        <div className="stat-block-title">
-          <span style={{ color: "var(--accent-green)" }}>◈</span> Credits
-        </div>
-        <div className="stat-row">
-          <span style={{ color: "var(--text-secondary)" }}>当前</span>
-          <span className="stat-value-pair">
-            <span className="stat-p1">{Math.floor(player1.resources.credits)}</span>
-            <span className="stat-vs">｜</span>
-            <span className="stat-p2">{Math.floor(player2.resources.credits)}</span>
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function UnitLegend({ type }: { type: string }) {
-  const color = UNIT_COLORS[type];
-  return (
-    <div className="unit-legend-item">
-      <span className="unit-legend-dot" style={{ background: color, boxShadow: `0 0 6px ${color}66` }} />
-      <span className="unit-legend-text">{UNIT_LABELS[type]}</span>
-    </div>
-  );
-}
-
-function UnitChips({ counts, unitTypes, align }: {
-  counts: Record<UnitType, number> & { total: number };
-  unitTypes: UnitType[];
-  align: "start" | "end";
-}) {
-  return (
-    <div className="unit-chips" style={{ justifyContent: align === "end" ? "flex-end" : "flex-start" }}>
-      {unitTypes.map((unitType) => (
-        <Chip key={unitType} type={unitType} count={counts[unitType]} />
-      ))}
-    </div>
-  );
-}
-
-function Chip({ type, count }: { type: string; count: number }) {
-  const color = UNIT_COLORS[type];
-  return (
-    <span className="unit-chip" style={{ color }}>
-      <span className="unit-chip-dot" style={{ background: color }} />
-      {count}
-    </span>
-  );
-}
-
-function BuildingRow({ label, p1, p2 }: { label: string; p1: number | string; p2: number | string }) {
-  return (
-    <div className="stat-row">
-      <span style={{ color: "var(--text-secondary)" }}>{label}</span>
-      <span className="stat-value-pair">
-        <span className="stat-p1">{p1}</span>
-        <span className="stat-vs">｜</span>
-        <span className="stat-p2">{p2}</span>
-      </span>
+      <section className="production-board">
+        <header className="production-board-header">
+          <div>
+            <span className="production-board-kicker">Production intelligence</span>
+            <strong>生产与建设态势</strong>
+          </div>
+          <span>悬停战场实体查看详情</span>
+        </header>
+        {state.players.map((player) => (
+          <ProductionLane key={player.id} player={player} tickIntervalMs={tickIntervalMs} />
+        ))}
+      </section>
     </div>
   );
 }

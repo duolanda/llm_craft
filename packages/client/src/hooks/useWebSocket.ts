@@ -40,7 +40,15 @@ function materializeLiveBuilding(
   const materialized: Building = {
     ...baseBuilding,
     exists: true,
-    productionQueue: [],
+    productionQueue: baseBuilding.productionQueue.map((order) => ({ ...order })),
+    productionProgress: baseBuilding.productionProgress
+      ? {
+          ...baseBuilding.productionProgress,
+          missingPrerequisites: baseBuilding.productionProgress.missingPrerequisites
+            ? [...baseBuilding.productionProgress.missingPrerequisites]
+            : undefined,
+        }
+      : undefined,
   };
   if (constructionProgress) {
     materialized.constructionProgress = {

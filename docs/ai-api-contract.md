@@ -198,7 +198,9 @@ interface ServerStateMessage {
 }
 ```
 
-`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；历史 `logs`、静态 `tiles`、寻路缓存、生产队列和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；其中 `LiveBuilding` 会携带观战 UI 所需的 `productionQueue`、`productionProgress` 和精简后的 `constructionProgress`，使实时观战与 Replay 都能展示逐建筑生产态势。历史 `logs`、静态 `tiles`、寻路缓存、rally point 和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+
+生产状态沿用共享类型：`productionQueue` 是有序的 `ProductionOrder[]`，`productionProgress` 包含当前 `orderId / unitType / remainingTicks / totalTicks / paidCredits / totalCost / status` 及可选的 `missingPrerequisites`。生产中的建筑会因此在进度变化时进入 live delta；该数据是当前状态，不是历史生产记录。
 
 地图通过一次性的 `map_init` 消息发送，日志通过有界的 `state_events` 增量消息发送，最新 AI 输出通过可替换的 `ai_output` 消息发送。完整 `GameState` 仍只属于服务端模拟、Match Record 和 Replay，不作为 live WebSocket 的 wire type。
 

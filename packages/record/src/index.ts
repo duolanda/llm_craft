@@ -103,6 +103,15 @@ function projectLiveBuilding(building: GameState["players"][number]["buildings"]
     maxHp: building.maxHp,
     playerId: building.playerId,
     ...(building.heading === undefined ? {} : { heading: building.heading }),
+    productionQueue: building.productionQueue.map((order) => ({ ...order })),
+    ...(building.productionProgress === undefined ? {} : {
+      productionProgress: {
+        ...building.productionProgress,
+        ...(building.productionProgress.missingPrerequisites === undefined
+          ? {}
+          : { missingPrerequisites: [...building.productionProgress.missingPrerequisites] }),
+      },
+    }),
     ...(building.constructionProgress === undefined ? {} : {
       constructionProgress: {
         remainingTicks: building.constructionProgress.remainingTicks,
@@ -160,6 +169,8 @@ function liveBuildingDiffer(previous: LiveBuilding | undefined, current: LiveBui
     || previous.hp !== current.hp
     || previous.maxHp !== current.maxHp
     || previous.heading !== current.heading
+    || valuesDiffer(previous.productionQueue, current.productionQueue)
+    || valuesDiffer(previous.productionProgress, current.productionProgress)
     || previousProgress?.remainingTicks !== currentProgress?.remainingTicks
     || previousProgress?.totalTicks !== currentProgress?.totalTicks;
 }
@@ -185,16 +196,25 @@ function liveProjectilesDiffer(
   return false;
 }
 
-/** Flat copies suffice: live entities carry no nested collections. */
 function copyLiveUnit(unit: LiveUnit): LiveUnit {
   return { ...unit, intent: unit.intent ? { ...unit.intent } : undefined };
 }
 
 function copyLiveBuilding(building: LiveBuilding): LiveBuilding {
-  if (!building.constructionProgress) return building;
   return {
     ...building,
-    constructionProgress: { ...building.constructionProgress },
+    productionQueue: building.productionQueue.map((order) => ({ ...order })),
+    productionProgress: building.productionProgress
+      ? {
+          ...building.productionProgress,
+          missingPrerequisites: building.productionProgress.missingPrerequisites
+            ? [...building.productionProgress.missingPrerequisites]
+            : undefined,
+        }
+      : undefined,
+    constructionProgress: building.constructionProgress
+      ? { ...building.constructionProgress }
+      : undefined,
   };
 }
 

@@ -61,14 +61,16 @@ function createState(tick: number, x: number, logs = 0): GameState {
 }
 
 describe("live state projection", () => {
-  it("omits historical, static, and server-only fields", () => {
+  it("omits historical, static, and server-only fields while keeping spectator production state", () => {
     const snapshot = createLiveStateSnapshot(createState(1, 3, 500));
     const serialized = JSON.stringify(snapshot);
 
     expect(serialized).not.toContain("logs");
     expect(serialized).not.toContain("tiles");
     expect(serialized).not.toContain("path");
-    expect(serialized).not.toContain("productionQueue");
+    expect(snapshot.players[0]?.buildings[0]?.productionQueue).toEqual([
+      { orderId: "order_1", unitType: "worker", count: 1, remainingCount: 1 },
+    ]);
     expect(serialized).not.toContain("rallyPoint");
     expect(snapshot.players[0]?.buildings[0]?.heading).toBe(Math.PI / 4);
     expect(serialized.length).toBeLessThan(2_000);
@@ -97,6 +99,37 @@ describe("live state projection", () => {
 
     expect(delta.players[0]?.buildingUpserts).toEqual([
       expect.objectContaining({ id: "building_1", heading: Math.PI / 2 }),
+    ]);
+  });
+
+  it("emits a building upsert when only production progress changes", () => {
+    const previousState = createState(1, 3, 0);
+    const currentState = createState(2, 3, 0);
+    previousState.players[0]!.buildings[0]!.productionProgress = {
+      orderId: "order_1",
+      unitType: "worker",
+      remainingTicks: 4,
+      totalTicks: 4,
+      paidCredits: 0,
+      totalCost: 50,
+      status: "producing",
+    };
+    currentState.players[0]!.buildings[0]!.productionProgress = {
+      ...previousState.players[0]!.buildings[0]!.productionProgress,
+      remainingTicks: 3,
+      paidCredits: 12.5,
+    };
+
+    const delta = createLiveStateProjectionDelta(
+      createLiveStateSnapshot(previousState),
+      createLiveStateSnapshot(currentState),
+    );
+
+    expect(delta.players[0]?.buildingUpserts).toEqual([
+      expect.objectContaining({
+        id: "building_1",
+        productionProgress: expect.objectContaining({ remainingTicks: 3, paidCredits: 12.5 }),
+      }),
     ]);
   });
 });

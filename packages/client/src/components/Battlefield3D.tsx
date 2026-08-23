@@ -1,6 +1,7 @@
-import { memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentRef, ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import type { ThreeEvent } from "@react-three/fiber";
 import { Billboard, OrbitControls, useGLTF, useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import {
@@ -14,8 +15,19 @@ import {
   Tile,
   Unit,
   UNIT_TYPES,
+  getProductionOptions,
 } from "@llmcraft/shared";
 import { type SimulationVisualTimeline, VisualWorld } from "@llmcraft/record";
+import {
+  BUILDING_LABELS,
+  formatTickDuration,
+  getBuildingDisplayName,
+  getUnitActivityLabel,
+  getUnitDisplayName,
+  PLAYER_LABELS,
+  PRODUCTION_STATUS_LABELS,
+  UNIT_LABELS,
+} from "../lib/entityPresentation";
 
 interface Battlefield3DProps {
   state: GameState | null;
@@ -37,6 +49,18 @@ interface CameraFocus {
   target: Vec3;
   position: Vec3;
 }
+
+interface HoveredEntityPointer {
+  entityId: string;
+  x: number;
+  y: number;
+}
+
+type EntityHoverHandler = (
+  entityId: string,
+  clientX: number,
+  clientY: number,
+) => void;
 
 interface ModelTransform {
   entityId?: string;
@@ -966,12 +990,16 @@ function InstancedPart({
   castShadow,
   visualWorld,
   dimensions,
+  onEntityHover,
+  onEntityLeave,
 }: {
   part: InstancedModelPart;
   transforms: ModelTransform[];
   castShadow: boolean;
   visualWorld?: VisualWorld;
   dimensions?: MapDimensions;
+  onEntityHover?: EntityHoverHandler;
+  onEntityLeave?: () => void;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const scratch = useMemo(() => ({
@@ -1059,6 +1087,18 @@ function InstancedPart({
       castShadow={castShadow}
       receiveShadow
       frustumCulled={!isDynamic}
+      onPointerMove={onEntityHover ? (event: ThreeEvent<PointerEvent>) => {
+        const entityId = event.instanceId === undefined
+          ? undefined
+          : transforms[event.instanceId]?.entityId;
+        if (!entityId) return;
+        event.stopPropagation();
+        onEntityHover(entityId, event.nativeEvent.clientX, event.nativeEvent.clientY);
+      } : undefined}
+      onPointerOut={onEntityLeave ? (event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        onEntityLeave();
+      } : undefined}
     />
   );
 }
@@ -1070,6 +1110,8 @@ function InstancedModelBatch({
   castShadow = false,
   visualWorld,
   dimensions,
+  onEntityHover,
+  onEntityLeave,
 }: {
   url: string;
   palette: TeamPalette;
@@ -1077,6 +1119,8 @@ function InstancedModelBatch({
   castShadow?: boolean;
   visualWorld?: VisualWorld;
   dimensions?: MapDimensions;
+  onEntityHover?: EntityHoverHandler;
+  onEntityLeave?: () => void;
 }) {
   const { scene } = useGLTF(url) as { scene: THREE.Object3D };
   const parts = useMemo(() => {
@@ -1111,6 +1155,8 @@ function InstancedModelBatch({
           castShadow={castShadow}
           visualWorld={visualWorld}
           dimensions={dimensions}
+          onEntityHover={onEntityHover}
+          onEntityLeave={onEntityLeave}
         />
       ))}
     </>
@@ -1388,12 +1434,16 @@ function UnitBatches({
   dimensions,
   tick,
   visualWorld,
+  onEntityHover,
+  onEntityLeave,
 }: {
   units: Unit[];
   buildings: Building[];
   dimensions: MapDimensions;
   tick: number;
   visualWorld: VisualWorld;
+  onEntityHover: EntityHoverHandler;
+  onEntityLeave: () => void;
 }) {
   const objectPositions = useMemo(() => new Map(
     [...units, ...buildings].map((object) => [object.id, { x: object.x, y: object.y }]),
@@ -1461,6 +1511,8 @@ function UnitBatches({
           castShadow
           visualWorld={visualWorld}
           dimensions={dimensions}
+          onEntityHover={onEntityHover}
+          onEntityLeave={onEntityLeave}
         />
       ))}
       {units
@@ -1495,11 +1547,15 @@ function GroundRingBatch({
   dimensions,
   color,
   visualWorld,
+  onEntityHover,
+  onEntityLeave,
 }: {
   units: Unit[];
   dimensions: MapDimensions;
   color: string;
   visualWorld: VisualWorld;
+  onEntityHover: EntityHoverHandler;
+  onEntityLeave: () => void;
 }) {
   const geometry = useMemo(() => new THREE.RingGeometry(0.48, 0.64, 24), []);
   const material = useMemo(() => new THREE.MeshBasicMaterial({
@@ -1514,6 +1570,17 @@ function GroundRingBatch({
     material,
     localMatrix: new THREE.Matrix4(),
   }), [geometry, material]);
+  const hitPart = useMemo<InstancedModelPart>(() => ({
+    geometry: new THREE.CircleGeometry(0.76, 24),
+    material: new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      colorWrite: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+    localMatrix: new THREE.Matrix4(),
+  }), []);
   const transforms = useMemo<ModelTransform[]>(() => units.map((unit) => ({
     entityId: unit.id,
     visualRotation: "fixed",
@@ -1523,13 +1590,24 @@ function GroundRingBatch({
   })), [dimensions, units]);
 
   return (
-    <InstancedPart
-      part={part}
-      transforms={transforms}
-      castShadow={false}
-      visualWorld={visualWorld}
-      dimensions={dimensions}
-    />
+    <>
+      <InstancedPart
+        part={part}
+        transforms={transforms}
+        castShadow={false}
+        visualWorld={visualWorld}
+        dimensions={dimensions}
+      />
+      <InstancedPart
+        part={hitPart}
+        transforms={transforms}
+        castShadow={false}
+        visualWorld={visualWorld}
+        dimensions={dimensions}
+        onEntityHover={onEntityHover}
+        onEntityLeave={onEntityLeave}
+      />
+    </>
   );
 }
 
@@ -1537,10 +1615,14 @@ function UnitReadabilityLayer({
   units,
   dimensions,
   visualWorld,
+  onEntityHover,
+  onEntityLeave,
 }: {
   units: Unit[];
   dimensions: MapDimensions;
   visualWorld: VisualWorld;
+  onEntityHover: EntityHoverHandler;
+  onEntityLeave: () => void;
 }) {
   const teamGroups = useMemo(() => {
     const groups = new Map<string, Unit[]>();
@@ -1561,6 +1643,8 @@ function UnitReadabilityLayer({
           dimensions={dimensions}
           color={getPlayerColor(playerId)}
           visualWorld={visualWorld}
+          onEntityHover={onEntityHover}
+          onEntityLeave={onEntityLeave}
         />
       ))}
     </>
@@ -2050,7 +2134,17 @@ function DestructionEffects({
   );
 }
 
-function BuildingModel({ building, dimensions }: { building: Building; dimensions: MapDimensions }) {
+function BuildingModel({
+  building,
+  dimensions,
+  onEntityHover,
+  onEntityLeave,
+}: {
+  building: Building;
+  dimensions: MapDimensions;
+  onEntityHover: EntityHoverHandler;
+  onEntityLeave: () => void;
+}) {
   const palette = useMemo(() => getTeamPalette(building.playerId), [building.playerId]);
   const staticModelUrl =
     building.type === "hq"
@@ -2093,6 +2187,14 @@ function BuildingModel({ building, dimensions }: { building: Building; dimension
     <group
       position={toWorldPosition(building.x, building.y, dimensions, 0)}
       scale={CELL_SIZE}
+      onPointerMove={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        onEntityHover(building.id, event.nativeEvent.clientX, event.nativeEvent.clientY);
+      }}
+      onPointerOut={(event: ThreeEvent<PointerEvent>) => {
+        event.stopPropagation();
+        onEntityLeave();
+      }}
     >
       {defensiveModels ? (
         <>
@@ -2228,10 +2330,14 @@ const BattlefieldScene = memo(function BattlefieldScene({
   state,
   projectileFxMode = "game",
   timeline,
+  onEntityHover,
+  onEntityLeave,
 }: {
   state: GameState;
   projectileFxMode?: ProjectileFxMode;
   timeline?: SimulationVisualTimeline;
+  onEntityHover: EntityHoverHandler;
+  onEntityLeave: () => void;
 }) {
   const dimensions = useMemo(() => getMapDimensions(state), [state]);
   const terrainWidth = dimensions.width * CELL_SIZE;
@@ -2309,7 +2415,13 @@ const BattlefieldScene = memo(function BattlefieldScene({
           <BasePlatform key={`platform-${building.id}`} building={building} dimensions={dimensions} />
         ))}
         {buildings.map((building) => (
-          <BuildingModel key={building.id} building={building} dimensions={dimensions} />
+          <BuildingModel
+            key={building.id}
+            building={building}
+            dimensions={dimensions}
+            onEntityHover={onEntityHover}
+            onEntityLeave={onEntityLeave}
+          />
         ))}
         <UnitBatches
           units={units}
@@ -2317,8 +2429,16 @@ const BattlefieldScene = memo(function BattlefieldScene({
           dimensions={dimensions}
           tick={state.tick}
           visualWorld={visualWorld}
+          onEntityHover={onEntityHover}
+          onEntityLeave={onEntityLeave}
         />
-        <UnitReadabilityLayer units={units} dimensions={dimensions} visualWorld={visualWorld} />
+        <UnitReadabilityLayer
+          units={units}
+          dimensions={dimensions}
+          visualWorld={visualWorld}
+          onEntityHover={onEntityHover}
+          onEntityLeave={onEntityLeave}
+        />
         <AttackWindupEffects units={units} dimensions={dimensions} visualWorld={visualWorld} />
         <FlameStreamEffects units={units} buildings={buildings} dimensions={dimensions} visualWorld={visualWorld} />
         <DemolitionChargeEffects projectiles={state.projectiles ?? []} buildings={buildings} dimensions={dimensions} />
@@ -2343,7 +2463,135 @@ const BattlefieldScene = memo(function BattlefieldScene({
   );
 });
 
+function EntityHoverCard({
+  entity,
+  pointer,
+}: {
+  entity: Unit | Building;
+  pointer: HoveredEntityPointer;
+}) {
+  const isBuilding = "productionQueue" in entity;
+  const sideClass = entity.playerId === "player_1" ? "red" : "blue";
+  const hpRatio = Math.max(0, Math.min(1, entity.hp / Math.max(1, entity.maxHp)));
+
+  if (!isBuilding) {
+    return (
+      <aside
+        className={`entity-hover-card ${sideClass}`}
+        style={{ left: pointer.x, top: pointer.y }}
+        role="tooltip"
+      >
+        <div className="entity-hover-kicker">
+          <span>单位</span>
+          <b>{PLAYER_LABELS[entity.playerId]}</b>
+        </div>
+        <strong className="entity-hover-name">{getUnitDisplayName(entity)}</strong>
+        <span className="entity-hover-type">{UNIT_LABELS[entity.type]}</span>
+        <div className="entity-hover-health-label">
+          <span>生命值</span>
+          <b>{Math.ceil(entity.hp)} / {entity.maxHp}</b>
+        </div>
+        <div className="entity-hover-health">
+          <span style={{ width: `${hpRatio * 100}%` }} />
+        </div>
+        <div className="entity-hover-meta">
+          <span>状态 <b>{getUnitActivityLabel(entity)}</b></span>
+          <span>坐标 <b>{entity.x.toFixed(1)}, {entity.y.toFixed(1)}</b></span>
+        </div>
+        <code>{entity.id}</code>
+      </aside>
+    );
+  }
+
+  const construction = entity.constructionProgress;
+  const production = entity.productionProgress;
+  const productionRatio = production
+    ? Math.max(0, Math.min(1, 1 - production.remainingTicks / Math.max(1, production.totalTicks)))
+    : 0;
+  const constructionRatio = construction
+    ? Math.max(0, Math.min(1, 1 - construction.remainingTicks / Math.max(1, construction.totalTicks)))
+    : 0;
+  const queuedUnits = Math.max(
+    0,
+    entity.productionQueue.reduce((total, order) => total + order.remainingCount, 0) - (production ? 1 : 0),
+  );
+  const canProduce = getProductionOptions(entity.type).length > 0;
+
+  return (
+    <aside
+      className={`entity-hover-card ${sideClass}`}
+      style={{ left: pointer.x, top: pointer.y }}
+      role="tooltip"
+    >
+      <div className="entity-hover-kicker">
+        <span>建筑</span>
+        <b>{PLAYER_LABELS[entity.playerId]}</b>
+      </div>
+      <strong className="entity-hover-name">{getBuildingDisplayName(entity)}</strong>
+      <span className="entity-hover-type">{BUILDING_LABELS[entity.type]}</span>
+      <div className="entity-hover-health-label">
+        <span>结构完整度</span>
+        <b>{Math.ceil(entity.hp)} / {entity.maxHp}</b>
+      </div>
+      <div className="entity-hover-health">
+        <span style={{ width: `${hpRatio * 100}%` }} />
+      </div>
+
+      {construction ? (
+        <div className="entity-hover-operation">
+          <div><span>施工中</span><b>{Math.round(constructionRatio * 100)}%</b></div>
+          <div className="entity-hover-operation-track">
+            <span style={{ width: `${constructionRatio * 100}%` }} />
+          </div>
+          <small>剩余 {formatTickDuration(construction.remainingTicks, TICK_INTERVAL_MS)}</small>
+        </div>
+      ) : production ? (
+        <div className={`entity-hover-operation${production.status === "producing" ? "" : " waiting"}`}>
+          <div><span>生产 {UNIT_LABELS[production.unitType]}</span><b>{Math.round(productionRatio * 100)}%</b></div>
+          <div className="entity-hover-operation-track">
+            <span style={{ width: `${productionRatio * 100}%` }} />
+          </div>
+          <small>
+            {PRODUCTION_STATUS_LABELS[production.status]} · 剩余 {formatTickDuration(production.remainingTicks, TICK_INTERVAL_MS)}
+            {production.missingPrerequisites?.length
+              ? ` · 缺少 ${production.missingPrerequisites.map((type) => BUILDING_LABELS[type]).join("、")}`
+              : ""}
+          </small>
+        </div>
+      ) : canProduce ? (
+        <div className="entity-hover-idle">生产线空闲</div>
+      ) : null}
+
+      <div className="entity-hover-meta">
+        {canProduce && <span>后续队列 <b>{queuedUnits}</b></span>}
+        <span>坐标 <b>{entity.x.toFixed(1)}, {entity.y.toFixed(1)}</b></span>
+      </div>
+      <code>{entity.id}</code>
+    </aside>
+  );
+}
+
 export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Battlefield3DProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [hoveredPointer, setHoveredPointer] = useState<HoveredEntityPointer | null>(null);
+  const handleEntityHover = useCallback<EntityHoverHandler>((entityId, clientX, clientY) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const cardWidth = 238;
+    const cardHeight = 190;
+    const preferredX = clientX - rect.left + 15;
+    const preferredY = clientY - rect.top + 15;
+    setHoveredPointer({
+      entityId,
+      x: Math.max(8, Math.min(preferredX, rect.width - cardWidth - 8)),
+      y: Math.max(8, Math.min(preferredY, rect.height - cardHeight - 8)),
+    });
+  }, []);
+  const clearHoveredEntity = useCallback(() => setHoveredPointer(null), []);
+  useEffect(() => {
+    window.addEventListener("resize", clearHoveredEntity);
+    return () => window.removeEventListener("resize", clearHoveredEntity);
+  }, [clearHoveredEntity]);
   const dimensions = state ? getMapDimensions(state) : { width: 96, height: 64 };
   const cameraFocus = state
     ? getInitialCameraFocus(state, dimensions)
@@ -2353,8 +2601,19 @@ export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Ba
     return <div className="battlefield-3d empty-state">等待战场状态</div>;
   }
 
+  const hoveredEntity = hoveredPointer
+    ? state.players
+        .flatMap((player) => [...player.units, ...player.buildings])
+        .find((entity) => entity.exists && entity.id === hoveredPointer.entityId)
+    : undefined;
+
   return (
-    <div className="battlefield-3d" data-testid="battlefield-3d">
+    <div
+      ref={containerRef}
+      className="battlefield-3d"
+      data-testid="battlefield-3d"
+      onPointerLeave={clearHoveredEntity}
+    >
       <Canvas
         shadows="percentage"
         dpr={1}
@@ -2365,6 +2624,7 @@ export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Ba
           far: 260,
         }}
         gl={{ antialias: true, powerPreference: "high-performance" }}
+        onPointerMissed={clearHoveredEntity}
         onCreated={({ gl }) => {
           gl.toneMapping = THREE.ACESFilmicToneMapping;
           gl.toneMappingExposure = 1.08;
@@ -2374,8 +2634,13 @@ export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Ba
           state={state}
           projectileFxMode={projectileFxMode}
           timeline={timeline}
+          onEntityHover={handleEntityHover}
+          onEntityLeave={clearHoveredEntity}
         />
       </Canvas>
+      {hoveredEntity && hoveredPointer ? (
+        <EntityHoverCard entity={hoveredEntity} pointer={hoveredPointer} />
+      ) : null}
     </div>
   );
 }

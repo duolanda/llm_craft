@@ -1107,7 +1107,7 @@ function App() {
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
-                <span className="panel-header-accent accent-amber">战场数据</span>
+                <span className="panel-header-accent accent-amber">观战情报</span>
               </div>
               <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
             </div>

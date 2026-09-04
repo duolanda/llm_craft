@@ -1278,20 +1278,20 @@ function useRepeatedTexture(url: string, repeatX: number, repeatY: number, nonCo
 function BattlefieldGround({ width, height }: { width: number; height: number }) {
   const terrainRepeatX = Math.max(1, width / 52);
   const terrainRepeatY = Math.max(1, height / 52);
-  const terrainMap = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_albedo.jpg`, terrainRepeatX, terrainRepeatY);
-  const terrainNormal = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_normal.jpg`, terrainRepeatX, terrainRepeatY, true);
-  const terrainRoughness = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_roughness.jpg`, terrainRepeatX, terrainRepeatY, true);
-  const outerTerrainMap = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_albedo.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6);
-  const outerTerrainNormal = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_normal.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6, true);
-  const outerTerrainRoughness = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_ph_roughness.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6, true);
+  const terrainMap = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_albedo.jpg`, terrainRepeatX, terrainRepeatY);
+  const terrainNormal = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_normal.jpg`, terrainRepeatX, terrainRepeatY, true);
+  const terrainRoughness = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_roughness.jpg`, terrainRepeatX, terrainRepeatY, true);
+  const outerTerrainMap = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_albedo.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6);
+  const outerTerrainNormal = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_normal.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6, true);
+  const outerTerrainRoughness = useRepeatedTexture(`${TEXTURE_ROOT}/terrain_industrial_roughness.jpg`, terrainRepeatX * 2.6, terrainRepeatY * 2.6, true);
 
   return (
     <>
       <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[width, height]} />
         <meshStandardMaterial
-          map={outerTerrainMap}
-          normalMap={outerTerrainNormal}
+          map={terrainMap}
+          normalMap={terrainNormal}
           normalScale={new THREE.Vector2(0.68, 0.68)}
           roughnessMap={terrainRoughness}
           roughness={0.94}
@@ -1301,8 +1301,8 @@ function BattlefieldGround({ width, height }: { width: number; height: number })
       <mesh receiveShadow position={[0, -0.055, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[width * 2.6, height * 2.6]} />
         <meshStandardMaterial
-          map={terrainMap}
-          normalMap={terrainNormal}
+          map={outerTerrainMap}
+          normalMap={outerTerrainNormal}
           normalScale={new THREE.Vector2(0.35, 0.35)}
           roughnessMap={outerTerrainRoughness}
           roughness={0.98}

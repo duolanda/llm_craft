@@ -130,7 +130,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [terminalHistoryEvents, setTerminalHistoryEvents] = useState<AITerminalEvent[]>([]);
   const [terminalHistoryHasMore, setTerminalHistoryHasMore] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [lastSavedRecordPath, setLastSavedRecordPath] = useState<string | null>(null);
+  const [lastSavedRecord, setLastSavedRecord] = useState<{ matchId: string; fileName: string } | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [observedMatch, setObservedMatch] = useState<ServerStateMessage["observedMatch"]>(null);
   const [matchStatus, setMatchStatus] = useState<
@@ -139,6 +139,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [serverMessage, setServerMessage] = useState<string | null>(null);
   const [benchmarkProgress, setBenchmarkProgress] = useState<ServerBenchmarkProgressMessage | null>(null);
   const [benchmarkResult, setBenchmarkResult] = useState<ServerBenchmarkCompleteMessage | null>(null);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [warmupStatuses, setWarmupStatuses] = useState<Partial<Record<PlayerId, MatchWarmupState>>>({});
   const [warmupMessage, setWarmupMessage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -149,10 +150,13 @@ export function useWebSocket(url: string, enabled = true) {
   const liveLogsRef = useRef<LiveLogEvent[]>([]);
   const aiOutputsRef = useRef<Record<string, string>>({});
 
-  const send = useCallback((message: ClientMessage) => {
+  const send = useCallback((message: ClientMessage): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message));
+      return true;
     }
+    setServerMessage("连接已断开，操作未发送。");
+    return false;
   }, []);
 
   const clearServerMessage = useCallback(() => {
@@ -211,7 +215,6 @@ export function useWebSocket(url: string, enabled = true) {
             break;
 
           case "state":
-            setServerMessage(null);
             const nextObservedMatchId = parsed.observedMatch?.matchId ?? null;
             const matchChanged = observedMatchIdRef.current !== null
               && nextObservedMatchId !== observedMatchIdRef.current;
@@ -235,6 +238,10 @@ export function useWebSocket(url: string, enabled = true) {
             setLiveEnabled(parsed.liveEnabled);
             setObservedMatch(parsed.observedMatch);
             setMatchStatus(parsed.matchStatus);
+            setBenchmarkRunning(parsed.benchmarkRunning);
+            setLastSavedRecord((current) => (
+              current && current.matchId === nextObservedMatchId ? current : null
+            ));
             break;
 
           case "ai_terminal_events":
@@ -264,14 +271,16 @@ export function useWebSocket(url: string, enabled = true) {
             break;
 
           case "record_saved":
-            setLastSavedRecordPath(parsed.filePath);
+            setLastSavedRecord({ matchId: parsed.matchId, fileName: parsed.fileName });
             break;
 
           case "benchmark_progress":
+            setBenchmarkRunning(true);
             setBenchmarkProgress(parsed);
             break;
 
           case "benchmark_complete":
+            setBenchmarkRunning(false);
             setBenchmarkProgress(null);
             setBenchmarkResult(parsed);
             break;
@@ -327,6 +336,10 @@ export function useWebSocket(url: string, enabled = true) {
         console.log("WebSocket 已断开");
         if (wsRef.current === ws) wsRef.current = null;
         setConnected(false);
+        setMatchStatus(null);
+        setBenchmarkRunning(false);
+        setWarmupStatuses({});
+        setWarmupMessage(null);
         observedMatchIdRef.current = null;
         frameBufferRef.current.clear();
         mapTilesRef.current = [];
@@ -396,13 +409,14 @@ export function useWebSocket(url: string, enabled = true) {
     terminalHistoryHasMore,
     loadEarlierTerminalEvents,
     connected,
-    lastSavedRecordPath,
+    lastSavedRecord,
     liveEnabled,
     observedMatch,
     matchStatus,
     serverMessage,
     benchmarkProgress,
     benchmarkResult,
+    benchmarkRunning,
     warmupStatuses,
     warmupMessage,
     setWarmupStatuses,

@@ -22,7 +22,6 @@ export type DiagnosticTag =
 
 export interface RecordListEntry {
   fileName: string;
-  fullPath: string;
   size: number;
   modifiedAt: string;
 }

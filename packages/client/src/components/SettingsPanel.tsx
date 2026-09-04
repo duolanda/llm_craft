@@ -30,6 +30,7 @@ interface SettingsPanelProps {
   onUpdate: (presetId: string, input: UpdateLLMPresetRequest) => Promise<void>;
   onDelete: (presetId: string) => Promise<void>;
   onTest: (input: TestLLMPresetRequest) => Promise<TestLLMPresetResponse>;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const DEFAULT_FORM: PresetFormState = {
@@ -47,6 +48,19 @@ const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "t
 
 function formatExtraRequestParams(params: Record<string, unknown> | null | undefined): string {
   return params && Object.keys(params).length > 0 ? JSON.stringify(params, null, 2) : "";
+}
+
+function formFromPreset(preset: LLMPresetSummary): PresetFormState {
+  return {
+    name: preset.name,
+    providerType: preset.providerType,
+    baseURL: preset.baseURL,
+    model: preset.model,
+    apiKey: "",
+    rpm: preset.rpm ? String(preset.rpm) : "",
+    reasoningEffort: preset.reasoningEffort ?? "",
+    extraRequestParams: formatExtraRequestParams(preset.extraRequestParams),
+  };
 }
 
 function parseExtraRequestParams(raw: string): Record<string, unknown> | null {
@@ -79,6 +93,7 @@ export function SettingsPanel({
   onUpdate,
   onDelete,
   onTest,
+  onDirtyChange,
 }: SettingsPanelProps) {
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [selectionInitialized, setSelectionInitialized] = useState(false);
@@ -93,6 +108,15 @@ export function SettingsPanel({
     () => presets.find((preset) => preset.id === selectedPresetId) ?? null,
     [presets, selectedPresetId]
   );
+  const baselineForm = useMemo(
+    () => selectedPreset ? formFromPreset(selectedPreset) : DEFAULT_FORM,
+    [selectedPreset],
+  );
+  const dirty = JSON.stringify(form) !== JSON.stringify(baselineForm);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   useEffect(() => {
     if (presets.length === 0) {
@@ -123,16 +147,7 @@ export function SettingsPanel({
       return;
     }
 
-    setForm({
-      name: selectedPreset.name,
-      providerType: selectedPreset.providerType,
-      baseURL: selectedPreset.baseURL,
-      model: selectedPreset.model,
-      apiKey: "",
-      rpm: selectedPreset.rpm ? String(selectedPreset.rpm) : "",
-      reasoningEffort: selectedPreset.reasoningEffort ?? "",
-      extraRequestParams: formatExtraRequestParams(selectedPreset.extraRequestParams),
-    });
+    setForm(formFromPreset(selectedPreset));
   }, [selectedPreset]);
 
   const resetForm = (options?: { clearStatus?: boolean }) => {
@@ -233,6 +248,9 @@ export function SettingsPanel({
     if (!selectedPresetId) {
       return;
     }
+    if (!window.confirm(`确定删除预设“${selectedPreset?.name ?? selectedPresetId}”吗？此操作无法撤销。`)) {
+      return;
+    }
 
     setDeleting(true);
     setLocalError(null);
@@ -286,6 +304,32 @@ export function SettingsPanel({
 
   const effectiveError = localError ?? error;
 
+  const handlePresetSelection = (nextPresetId: string) => {
+    if (dirty && !window.confirm("当前有未保存的修改，确定放弃吗？")) {
+      return;
+    }
+    setSelectedPresetId(nextPresetId);
+    const nextPreset = presets.find((preset) => preset.id === nextPresetId);
+    setForm(nextPreset ? formFromPreset(nextPreset) : DEFAULT_FORM);
+    setSelectionInitialized(true);
+    setLocalError(null);
+    setStatusMessage(null);
+  };
+
+  const handleRefresh = () => {
+    if (dirty && !window.confirm("当前有未保存的修改，确定刷新并放弃它们吗？")) {
+      return;
+    }
+    void onRefresh();
+  };
+
+  const handleNewPreset = () => {
+    if (dirty && !window.confirm("当前有未保存的修改，确定放弃吗？")) {
+      return;
+    }
+    resetForm();
+  };
+
   return (
     <div className="settings-panel">
       <div className="settings-toolbar">
@@ -294,12 +338,7 @@ export function SettingsPanel({
           <select
             className="settings-select"
             value={selectedPresetId}
-            onChange={(event) => {
-              setSelectedPresetId(event.target.value);
-              setSelectionInitialized(true);
-              setLocalError(null);
-              setStatusMessage(null);
-            }}
+            onChange={(event) => handlePresetSelection(event.target.value)}
             disabled={loading || presets.length === 0}
           >
             <option value="">新建预设</option>
@@ -310,7 +349,7 @@ export function SettingsPanel({
             ))}
           </select>
         </label>
-        <button className="hud-btn hud-btn-ghost" onClick={() => void onRefresh()} disabled={loading || saving || deleting || testing}>
+        <button className="hud-btn hud-btn-ghost" onClick={handleRefresh} disabled={loading || saving || deleting || testing}>
           {loading ? "刷新中" : "刷新"}
         </button>
       </div>
@@ -458,10 +497,10 @@ export function SettingsPanel({
           <button
             className="hud-btn hud-btn-ghost"
             type="button"
-            onClick={() => resetForm()}
+            onClick={handleNewPreset}
             disabled={saving || deleting || testing}
           >
-            清空
+            新建预设
           </button>
           <button
             className="hud-btn hud-btn-stop"

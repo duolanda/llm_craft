@@ -62,6 +62,10 @@ export class BenchmarkOrchestrator {
     this.ws = ws;
   }
 
+  isRunning(): boolean {
+    return this.currentRun !== null;
+  }
+
   async start(): Promise<void> {
     if (this.currentRun) {
       return;

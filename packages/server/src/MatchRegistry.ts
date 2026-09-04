@@ -3,6 +3,7 @@ import type {
   GameLogDataMap,
   GameSnapshot,
   GameState,
+  LiveMatchSetupSnapshot,
   LOG_TYPES,
   MatchRegistryKind,
   MatchRegistryStatus,
@@ -53,6 +54,7 @@ export interface MatchRegistration {
   label?: string;
   parentId?: string;
   signature?: string;
+  liveSetup?: LiveMatchSetupSnapshot;
   observe?: boolean;
   terminalPolicy?: "save" | "none";
 }
@@ -100,6 +102,7 @@ export class MatchRegistry {
       ...(registration.label ? { label: registration.label } : {}),
       ...(registration.parentId ? { parentId: registration.parentId } : {}),
       ...(registration.signature ? { signature: registration.signature } : {}),
+      ...(registration.liveSetup ? { liveSetup: registration.liveSetup } : {}),
       ...(registration.terminalPolicy ? { terminalPolicy: registration.terminalPolicy } : {}),
     };
     this.entries.set(matchId, entry);

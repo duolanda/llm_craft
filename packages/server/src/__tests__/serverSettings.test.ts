@@ -389,6 +389,12 @@ describe("server settings", () => {
     expect(start).toHaveBeenCalledTimes(1);
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("不会重复启动"));
     expect(state.matchRegistry.getObservedMatchId()).toBe("match_started");
+    expect(state.matchRegistry.getObserved()?.liveSetup).toEqual({
+      player1PresetId: player1Preset.id,
+      player2PresetId: player2Preset.id,
+      recordingProfile: "evaluation",
+      includeTranscript: false,
+    });
   });
 
   it("keeps the previous orchestrator if starting the next one fails", async () => {
@@ -450,6 +456,67 @@ describe("server settings", () => {
     expect(previousOrchestrator.stop).not.toHaveBeenCalled();
     expect(state.matchRegistry.getObserved()?.handle).toBe(previousOrchestrator);
     expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("处理客户端消息失败"));
+  });
+
+  it("resets only the explicitly identified live match and leaves the replacement waiting", async () => {
+    const presetStore = await createStore();
+    const player1Preset = await presetStore.create({
+      name: "Red",
+      providerType: "openai-compatible",
+      baseURL: "https://api.one.test/v1",
+      model: "model-one",
+      apiKey: "token-one",
+    });
+    const player2Preset = await presetStore.create({
+      name: "Blue",
+      providerType: "openai-compatible",
+      baseURL: "https://api.two.test/v1",
+      model: "model-two",
+      apiKey: "token-two",
+    });
+    const targetStop = vi.fn();
+    const unrelatedStop = vi.fn();
+    const replacementStart = vi.fn(async () => undefined);
+    const state = createServerState(presetStore, vi.fn(() => ({
+      getMatchId: () => "match_replacement",
+      getMatchStatus: () => "waiting_for_players" as const,
+      getGame: () => ({ getState: () => createMockGameState(0) }),
+      start: replacementStart,
+      stop: vi.fn(),
+      saveRecord: vi.fn(async () => "logs/records/replacement.match.json"),
+    })));
+    state.matchRegistry.register({
+      getMatchId: () => "match_target",
+      getMatchStatus: () => "stopped",
+      getGame: () => ({ getState: () => createMockGameState(20) }),
+      stop: targetStop,
+      saveRecord: vi.fn(async () => "logs/records/target.match.json"),
+    }, { kind: "live" });
+    state.matchRegistry.register({
+      getMatchId: () => "match_unrelated",
+      getMatchStatus: () => "stopped",
+      getGame: () => ({ getState: () => createMockGameState(10) }),
+      stop: unrelatedStop,
+      saveRecord: vi.fn(async () => "logs/records/unrelated.match.json"),
+    }, { kind: "control", observe: true });
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "reset",
+        matchId: "match_target",
+        player1PresetId: player1Preset.id,
+        player2PresetId: player2Preset.id,
+      }),
+      ws: { send: vi.fn() } as any,
+      state,
+    });
+
+    expect(targetStop).toHaveBeenCalledTimes(1);
+    expect(unrelatedStop).not.toHaveBeenCalled();
+    expect(replacementStart).not.toHaveBeenCalled();
+    expect(state.matchRegistry.get("match_target")).toBeUndefined();
+    expect(state.matchRegistry.getObserved()?.matchId).toBe("match_replacement");
+    expect(state.matchRegistry.getObserved()?.handle.getMatchStatus?.()).toBe("waiting_for_players");
   });
 
   it("returns a readable error when a preset can no longer be decrypted", async () => {
@@ -750,6 +817,7 @@ describe("server settings", () => {
       recordingEnabled: true,
     });
     expect(payload.matchStatus).toBeNull();
+    expect(payload.benchmarkRunning).toBe(false);
     expect(payload.frame).toEqual(expect.objectContaining({
       kind: "keyframe",
       metadata: expect.objectContaining({
@@ -791,8 +859,67 @@ describe("server settings", () => {
     expect(benchmarkSaveRecord).not.toHaveBeenCalled();
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
       type: "record_saved",
-      filePath: "logs/records/live.match.json",
+      matchId: "match_live",
+      fileName: "live.match.json",
     }));
+  });
+
+  it("pauses only the explicitly identified live match", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+    const liveStop = vi.fn();
+    const benchmarkStop = vi.fn();
+    state.matchRegistry.register({
+      getMatchId: () => "match_live_running",
+      getMatchStatus: () => "running",
+      getGame: () => ({ getState: () => createMockGameState(12) }),
+      stop: liveStop,
+      saveRecord: vi.fn(async () => "logs/records/live.match.json"),
+    }, { kind: "live", observe: true });
+    state.activeBenchmark = {
+      start: vi.fn(async () => undefined),
+      stop: benchmarkStop,
+      isRunning: () => true,
+    };
+
+    await handleClientMessage({
+      data: JSON.stringify({ type: "pause_match", matchId: "match_live_running" }),
+      ws: { send: vi.fn() } as any,
+      state,
+    });
+
+    expect(liveStop).toHaveBeenCalledTimes(1);
+    expect(benchmarkStop).not.toHaveBeenCalled();
+    expect(state.activeBenchmark).not.toBeNull();
+  });
+
+  it("stops a benchmark without pausing the observed live match", async () => {
+    const presetStore = await createStore();
+    const state = createServerState(presetStore);
+    const liveStop = vi.fn();
+    const benchmarkStop = vi.fn();
+    state.matchRegistry.register({
+      getMatchId: () => "match_live_running",
+      getMatchStatus: () => "running",
+      getGame: () => ({ getState: () => createMockGameState(12) }),
+      stop: liveStop,
+      saveRecord: vi.fn(async () => "logs/records/live.match.json"),
+    }, { kind: "live", observe: true });
+    state.activeBenchmark = {
+      start: vi.fn(async () => undefined),
+      stop: benchmarkStop,
+      isRunning: () => true,
+    };
+
+    await handleClientMessage({
+      data: JSON.stringify({ type: "stop_benchmark" }),
+      ws: { send: vi.fn() } as any,
+      state,
+    });
+
+    expect(benchmarkStop).toHaveBeenCalledTimes(1);
+    expect(liveStop).not.toHaveBeenCalled();
+    expect(state.activeBenchmark).toBeNull();
   });
 
   it("rejects save requests for a non-recorded benchmark before calling its recorder", async () => {

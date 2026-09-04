@@ -154,6 +154,7 @@ interface TestLLMPresetResponse {
 ```json
 {
   "type": "reset",
+  "matchId": "match_...",
   "player1PresetId": "preset-red",
   "player2PresetId": "preset-blue",
   "debug": {
@@ -163,13 +164,24 @@ interface TestLLMPresetResponse {
 }
 ```
 
-### 0.8 WebSocket `stop`
+`reset` 只替换 `matchId` 明确指定的 live match；新 match 创建后处于 `waiting_for_players`，需要再发送 `start` 才会启动。
+
+### 0.8 WebSocket `pause_match` / `stop_benchmark`
 
 ```json
 {
-  "type": "stop"
+  "type": "pause_match",
+  "matchId": "match_..."
 }
 ```
+
+```json
+{
+  "type": "stop_benchmark"
+}
+```
+
+`pause_match` 只暂停指定的正在运行的 live match；`stop_benchmark` 只停止 Benchmark。两者不再共用会同时影响对局与 Benchmark 的模糊 `stop` 命令。
 
 ### 0.9 WebSocket `save_record`
 
@@ -193,12 +205,19 @@ interface ServerStateMessage {
     matchId: string;
     kind: "live" | "control" | "benchmark";
     recordingEnabled: boolean;
+    setup?: {
+      player1PresetId: string;
+      player2PresetId: string;
+      recordingProfile: "off" | "replay" | "evaluation";
+      includeTranscript: boolean;
+    };
   } | null;
   matchStatus: "warming_up" | "waiting_for_players" | "running" | "stopped" | "finished" | "failed" | null;
+  benchmarkRunning: boolean;
 }
 ```
 
-`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；其中 `LiveBuilding` 会携带观战 UI 所需的 `productionQueue`、`productionProgress` 和精简后的 `constructionProgress`，使实时观战与 Replay 都能展示逐建筑生产态势。历史 `logs`、静态 `tiles`、寻路缓存、rally point 和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
+`frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；其中 `LiveBuilding` 会携带观战 UI 所需的 `productionQueue`、`productionProgress` 和精简后的 `constructionProgress`，使实时观战与 Replay 都能展示逐建筑生产态势。历史 `logs`、静态 `tiles`、寻路缓存、rally point 和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live match 还会携带不可变的 `setup` 快照，供 UI 在运行和暂停期间显示真实配置。`benchmarkRunning` 是 Benchmark 的服务端真值，重连后仍可恢复正确控件状态。live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
 
 生产状态沿用共享类型：`productionQueue` 是有序的 `ProductionOrder[]`，`productionProgress` 包含当前 `orderId / unitType / remainingTicks / totalTicks / paidCredits / totalCost / status` 及可选的 `missingPrerequisites`。生产中的建筑会因此在进度变化时进入 live delta；该数据是当前状态，不是历史生产记录。
 
@@ -323,9 +342,12 @@ interface ServerTerminalHistoryPageMessage {
 ```ts
 interface ServerRecordSavedMessage {
   type: "record_saved";
-  filePath: string;
+  matchId: string;
+  fileName: string;
 }
 ```
+
+浏览器只接收当前 match 可用的文件名，不暴露服务端绝对路径。
 
 ### 0.15 WebSocket `start_benchmark`
 
@@ -352,6 +374,8 @@ interface ServerRecordSavedMessage {
 - `decisionIntervalTicks` 只控制 built-in CPU，允许 `1` 到 `60`，省略时统一使用 `10`；LLM 仍在每个 committed tick 空闲时获得新决策机会
 - `concurrency` 可选，默认 `1`，允许 `1` 到 `10`；并发运行时完成顺序可能不同于 round 编号，最终结果按 round 编号输出
 - `recordReplay=false` 表示 round 不生成 Match Record
+- live match 正在运行或预热时不允许启动 Benchmark；需先暂停 live match
+- 停止运行中的 Benchmark 使用独立的 `stop_benchmark`
 
 ### 0.16 WebSocket `benchmark_progress`
 

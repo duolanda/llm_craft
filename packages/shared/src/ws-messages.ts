@@ -2,6 +2,7 @@ import type { PlayerId } from "./constants.js";
 import type {
   AITerminalEvent,
   CPUStrategyType,
+  LiveMatchSetupSnapshot,
   LiveStateProjectionFrame,
   MatchDebugOptions,
   MatchRegistryKind,
@@ -37,14 +38,21 @@ export interface ClientWarmupMatchMessage {
 /** 重置当前对局（需指定红蓝双方 LLM 预设） */
 export interface ClientResetMatchMessage {
   type: "reset";
+  matchId: string;
   player1PresetId: string;
   player2PresetId: string;
   debug?: MatchDebugOptions;
 }
 
-/** 停止 AI 对战模拟 */
-export interface ClientStopMessage {
-  type: "stop";
+/** 暂停指定的实时对局 */
+export interface ClientPauseMatchMessage {
+  type: "pause_match";
+  matchId: string;
+}
+
+/** 停止当前 benchmark */
+export interface ClientStopBenchmarkMessage {
+  type: "stop_benchmark";
 }
 
 /** 保存当前对局记录 */
@@ -77,7 +85,8 @@ export type ClientMessage =
   | ClientStartMatchMessage
   | ClientWarmupMatchMessage
   | ClientResetMatchMessage
-  | ClientStopMessage
+  | ClientPauseMatchMessage
+  | ClientStopBenchmarkMessage
   | ClientSaveRecordMessage
   | ClientLoadTerminalHistoryMessage
   | ClientStartBenchmarkMessage;
@@ -96,6 +105,7 @@ export interface ServerStateMessage {
     matchId: string;
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
+    setup?: LiveMatchSetupSnapshot;
   } | null;
   matchStatus:
     | "warming_up"
@@ -105,6 +115,7 @@ export interface ServerStateMessage {
     | "finished"
     | "failed"
     | null;
+  benchmarkRunning: boolean;
 }
 
 /** Static map data sent once when the observed match changes. */
@@ -155,7 +166,8 @@ export interface ServerErrorMessage {
 /** 对局记录保存成功通知 */
 export interface ServerRecordSavedMessage {
   type: "record_saved";
-  filePath: string;
+  matchId: string;
+  fileName: string;
 }
 
 export interface ServerBenchmarkProgressMessage {

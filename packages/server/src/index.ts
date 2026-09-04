@@ -13,6 +13,7 @@ import {
   DEFAULT_CPU_DECISION_INTERVAL_TICKS,
   GameSnapshot,
   GameState,
+  LiveMatchSetupSnapshot,
   LiveStateProjectionFrame,
   LiveStateSnapshot,
   MatchDebugOptions,
@@ -119,6 +120,8 @@ interface OrchestratorLike {
 interface BenchmarkCoordinatorLike {
   start(): Promise<void>;
   stop(): void;
+  isRunning(): boolean;
+  setWebSocket?(ws: Pick<WebSocket, "send"> | null): void;
 }
 
 export interface ServerState {
@@ -249,8 +252,10 @@ type StateMessagePayload = {
     matchId: string;
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
+    setup?: LiveMatchSetupSnapshot;
   } | null;
   matchStatus: RegisteredMatchStatus | null;
+  benchmarkRunning: boolean;
 };
 
 type AITerminalMessagePayload = {
@@ -321,9 +326,11 @@ export function buildStateMessagePayload(
           matchId: currentMatch.matchId,
           kind: currentMatch.kind,
           recordingEnabled: currentMatch.terminalPolicy !== "none",
+          ...(currentMatch.liveSetup ? { setup: currentMatch.liveSetup } : {}),
         }
       : null,
     matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
+    benchmarkRunning: state.activeBenchmark?.isRunning() ?? false,
   };
 }
 
@@ -364,6 +371,20 @@ function buildMatchSignature(input: {
     player2PresetId: input.player2PresetId,
     debug: input.debug ?? null,
   });
+}
+
+function buildLiveMatchSetup(input: {
+  player1PresetId: string;
+  player2PresetId: string;
+  debug?: MatchDebugOptions;
+}): LiveMatchSetupSnapshot {
+  const recordingProfile = input.debug?.recordingProfile ?? "evaluation";
+  return {
+    player1PresetId: input.player1PresetId,
+    player2PresetId: input.player2PresetId,
+    recordingProfile,
+    includeTranscript: recordingProfile === "evaluation" && Boolean(input.debug?.includeTranscript),
+  };
 }
 
 function liveTerminalPolicy(debug?: MatchDebugOptions): "save" | "none" {
@@ -582,7 +603,6 @@ async function listRecordEntries() {
           const stat = await fs.stat(fullPath);
           return {
             fileName: entry.name,
-            fullPath,
             size: stat.size,
             modifiedAt: stat.mtime.toISOString(),
             encoding: recordFileEncoding(entry.name),
@@ -822,6 +842,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         }), {
           kind: "live",
           signature,
+          liveSetup: buildLiveMatchSetup(message),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         });
@@ -907,6 +928,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         {
           kind: "live",
           signature,
+          liveSetup: buildLiveMatchSetup(message),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         },
@@ -932,12 +954,34 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       return;
     }
 
-    if (message.type === "stop") {
+    if (message.type === "pause_match") {
+      const targetMatch = state.matchRegistry.get(message.matchId);
+      if (!targetMatch || targetMatch.kind !== "live") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "指定的实时对局不存在。",
+        } satisfies ServerMessage));
+        return;
+      }
+      const targetStatus = state.matchRegistry.list()
+        .find((match) => match.matchId === targetMatch.matchId)?.status;
+      if (targetStatus !== "running") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "只能暂停正在运行的实时对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      state.matchRegistry.stop(targetMatch.matchId);
+      if (state.warmupMatch?.matchId === targetMatch.matchId) {
+        state.warmupMatch = null;
+      }
+      return;
+    }
+
+    if (message.type === "stop_benchmark") {
       state.activeBenchmark?.stop();
       state.activeBenchmark = null;
-      const observedMatchId = state.matchRegistry.getObservedMatchId();
-      if (observedMatchId) state.matchRegistry.stop(observedMatchId);
-      state.warmupMatch = null;
       return;
     }
 
@@ -965,23 +1009,32 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      const targetMatch = state.matchRegistry.get(message.matchId);
+      if (!targetMatch || targetMatch.kind !== "live") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "指定的实时对局不存在。",
+        } satisfies ServerMessage));
+        return;
+      }
+
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
-      const previousMatchId = state.matchRegistry.getObservedMatchId();
       const nextOrchestrator = registerOrchestrator(
         state,
         state.createOrchestrator({ player1, player2, debug: message.debug }),
         {
           kind: "live",
           signature: buildMatchSignature(message),
+          liveSetup: buildLiveMatchSetup(message),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         },
       );
       state.warmupMatch = null;
-      if (previousMatchId && previousMatchId !== nextOrchestrator.getMatchId!()) {
-        await state.matchRegistry.stopAndSave(previousMatchId);
-        state.matchRegistry.remove(previousMatchId);
+      if (targetMatch.matchId !== nextOrchestrator.getMatchId!()) {
+        await state.matchRegistry.stopAndSave(targetMatch.matchId);
+        state.matchRegistry.remove(targetMatch.matchId);
       }
       return;
     }
@@ -1006,7 +1059,8 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       const filePath = await state.matchRegistry.save(targetMatch.matchId);
       ws.send(JSON.stringify({
         type: "record_saved",
-        filePath,
+        matchId: targetMatch.matchId,
+        fileName: path.basename(filePath),
       } satisfies ServerMessage));
       return;
     }
@@ -1054,13 +1108,29 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+
+      const activeLive = getActiveLiveMatch(state);
+      if (activeLive?.status === "running" || activeLive?.status === "warming_up") {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "启动 Benchmark 前请先暂停实时对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+      if (state.activeBenchmark?.isRunning()) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "Benchmark 已在运行。",
+        } satisfies ServerMessage));
+        return;
+      }
+
       const llmConfig = await state.presetStore.getRuntimeConfig(message.presetId);
       if (llmConfig.providerType !== "openai-compatible") {
         throw new Error("BENCHMARK_PRESET_INVALID");
       }
 
       const previousObservedId = state.matchRegistry.getObservedMatchId();
-      state.activeBenchmark?.stop();
       const benchmarkOrchestrator = state.createBenchmarkOrchestrator(
         {
           presetId: message.presetId,
@@ -1136,12 +1206,15 @@ function createServer(state: ServerState) {
 
   wss.on("connection", (ws) => {
     console.log("客户端已连接");
+    state.activeBenchmark?.setWebSocket?.(ws);
     let isSendingState = false;
     let lastAITerminalSessionId: string | null = null;
     let lastAITerminalEventSequence = 0;
     let lastStateTick: number | null | undefined;
     let lastStateOrchestrator: RegisteredMatchHandle | null = null;
     let lastStateLiveEnabled: boolean | null = null;
+    let lastStateMatchStatus: RegisteredMatchStatus | null = null;
+    let lastStateBenchmarkRunning: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
     let lastProjectedState: LiveStateSnapshot | null = null;
@@ -1196,11 +1269,15 @@ function createServer(state: ServerState) {
       }
       const currentOrchestrator = state.matchRegistry.getObserved()?.handle ?? null;
       const currentTick = currentOrchestrator?.getGame().getTick?.();
+      const currentMatchStatus = currentOrchestrator?.getMatchStatus?.() ?? null;
+      const currentBenchmarkRunning = state.activeBenchmark?.isRunning() ?? false;
       if (
         !force
         && currentOrchestrator === lastStateOrchestrator
         && currentTick === lastStateTick
         && state.liveEnabled === lastStateLiveEnabled
+        && currentMatchStatus === lastStateMatchStatus
+        && currentBenchmarkRunning === lastStateBenchmarkRunning
       ) {
         return;
       }
@@ -1257,6 +1334,8 @@ function createServer(state: ServerState) {
         lastStateOrchestrator = currentOrchestrator;
         lastStateTick = currentTick;
         lastStateLiveEnabled = state.liveEnabled;
+        lastStateMatchStatus = currentMatchStatus;
+        lastStateBenchmarkRunning = currentBenchmarkRunning;
         const sendMs = performance.now() - sendStartedAt;
         const elapsedMs = performance.now() - startedAt;
         lastStateBroadcastWarningAtMs = logBroadcastPerfWarning(

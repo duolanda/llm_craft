@@ -171,7 +171,13 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
           <input
             type="checkbox"
             checked={recordReplay}
-            onChange={(event) => setRecordReplay(event.target.checked)}
+            onChange={(event) => {
+              const nextRecordReplay = event.target.checked;
+              setRecordReplay(nextRecordReplay);
+              if (!nextRecordReplay) {
+                setRecordLLMTranscript(false);
+              }
+            }}
             disabled={running}
           />
           <span>保存回放</span>
@@ -182,7 +188,7 @@ export function BenchmarkPanel({ presets, initialPresetId = "", running, onStart
             type="checkbox"
             checked={recordLLMTranscript}
             onChange={(event) => setRecordLLMTranscript(event.target.checked)}
-            disabled={running}
+            disabled={running || !recordReplay}
           />
           <span>记录完整 transcript</span>
         </label>

@@ -254,7 +254,7 @@ function LiveEventStream({
 
   useLayoutEffect(() => {
     const scrollElement = scrollRef.current;
-    if (!scrollElement || !pinnedToBottomRef.current) return;
+    if (!autoScroll || !scrollElement || !pinnedToBottomRef.current) return;
     const animationFrame = requestAnimationFrame(() => {
       scrollElement.scrollTop = scrollElement.scrollHeight;
       setViewport({

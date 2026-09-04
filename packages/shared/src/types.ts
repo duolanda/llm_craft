@@ -29,6 +29,14 @@ export interface MatchDebugOptions {
   includeTranscript?: boolean;
 }
 
+/** Immutable setup shown for the currently observed live match. */
+export interface LiveMatchSetupSnapshot {
+  player1PresetId: string;
+  player2PresetId: string;
+  recordingProfile: MatchRecordingProfile;
+  includeTranscript: boolean;
+}
+
 export interface MatchWarmupOptions {
   player_1?: boolean;
   player_2?: boolean;

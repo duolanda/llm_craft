@@ -1285,6 +1285,17 @@ body {
   font-size: 9px;
 }
 
+.force-model {
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .force-card-main {
   display: flex;
   align-items: flex-end;

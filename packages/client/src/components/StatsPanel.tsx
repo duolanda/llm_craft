@@ -3,8 +3,10 @@ import {
   BUILDING_TYPES,
   getProductionOptions,
   type Building,
+  type GameRecord,
   type GameState,
   type Player,
+  type PlayerId,
   type UnitType,
   UNIT_TYPES,
 } from "@llmcraft/shared";
@@ -22,6 +24,7 @@ import {
 interface StatsPanelProps {
   state: GameState | null;
   tickIntervalMs?: number;
+  recordedPlayers?: GameRecord["metadata"]["players"];
 }
 
 const COMBAT_UNIT_TYPES: UnitType[] = [
@@ -63,7 +66,13 @@ function getTechTier(player: Player): 1 | 2 | 3 {
   return 1;
 }
 
-function ForceCard({ player }: { player: Player }) {
+function getRecordedModel(players: GameRecord["metadata"]["players"], playerId: PlayerId): string {
+  const participant = Array.isArray(players) ? players.find((player) => player?.playerId === playerId) : undefined;
+  const model = typeof participant?.model === "string" ? participant.model.trim() : undefined;
+  return !model || model === "unknown" || model === "legacy-record" ? "模型未记录" : model;
+}
+
+function ForceCard({ player, model }: { player: Player; model?: string }) {
   const [hoveredUnitType, setHoveredUnitType] = useState<UnitType | null>(null);
   const livingUnits = player.units.filter((unit) => unit.exists);
   const combatUnits = livingUnits.filter((unit) => unit.type !== UNIT_TYPES.WORKER);
@@ -92,6 +101,11 @@ function ForceCard({ player }: { player: Player }) {
         <span>{PLAYER_LABELS[player.id]}</span>
         <span className="force-tier">T{getTechTier(player)}</span>
       </header>
+      {model && (
+        <div className="force-model" title={model} aria-label={`${PLAYER_LABELS[player.id]}对战模型`}>
+          {model}
+        </div>
+      )}
 
       <div className="force-card-main">
         <div className="force-total">
@@ -325,7 +339,7 @@ function ProductionLane({ player, tickIntervalMs }: { player: Player; tickInterv
   );
 }
 
-export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
+export function StatsPanel({ state, tickIntervalMs = 500, recordedPlayers }: StatsPanelProps) {
   if (!state) {
     return <div className="spectator-overview empty-state">等待游戏数据...</div>;
   }
@@ -342,7 +356,13 @@ export function StatsPanel({ state, tickIntervalMs = 500 }: StatsPanelProps) {
       </div>
 
       <div className="force-comparison">
-        {state.players.map((player) => <ForceCard key={player.id} player={player} />)}
+        {state.players.map((player) => (
+          <ForceCard
+            key={player.id}
+            player={player}
+            model={recordedPlayers === undefined ? undefined : getRecordedModel(recordedPlayers, player.id)}
+          />
+        ))}
       </div>
 
       <section className="production-board">

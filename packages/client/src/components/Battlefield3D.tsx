@@ -33,6 +33,7 @@ interface Battlefield3DProps {
   state: GameState | null;
   projectileFxMode?: ProjectileFxMode;
   timeline?: SimulationVisualTimeline;
+  effectsResetKey?: string;
 }
 
 interface MapDimensions {
@@ -2135,7 +2136,9 @@ function DestructionEffects({
   buildings: Building[];
   dimensions: MapDimensions;
 }) {
+  const { gl } = useThree();
   const previousObjects = useRef(new Map<string, Unit | Building>());
+  const cleanupTimers = useRef(new Set<number>());
   const [bursts, setBursts] = useState<DestructionBurst[]>([]);
   const [fallenInfantry, setFallenInfantry] = useState<FallenInfantry[]>([]);
   const fireRef = useRef<THREE.InstancedMesh>(null);
@@ -2146,6 +2149,20 @@ function DestructionEffects({
     scale: new THREE.Vector3(),
     quaternion: new THREE.Quaternion(),
   }), []);
+
+  useEffect(() => () => {
+    for (const timer of cleanupTimers.current) window.clearTimeout(timer);
+    cleanupTimers.current.clear();
+  }, []);
+
+  useEffect(() => {
+    gl.domElement.dataset.destructionBursts = String(bursts.length);
+    gl.domElement.dataset.fallenInfantry = String(fallenInfantry.length);
+    return () => {
+      delete gl.domElement.dataset.destructionBursts;
+      delete gl.domElement.dataset.fallenInfantry;
+    };
+  }, [bursts.length, fallenInfantry.length, gl]);
 
   useEffect(() => {
     const current = new Map([...units, ...buildings].map((object) => [object.id, object]));
@@ -2182,16 +2199,20 @@ function DestructionEffects({
     if (destroyed.length > 0) {
       setBursts((currentBursts) => [...currentBursts, ...destroyed]);
       const ids = new Set(destroyed.map((burst) => burst.id));
-      window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
+        cleanupTimers.current.delete(timer);
         setBursts((currentBursts) => currentBursts.filter((burst) => !ids.has(burst.id)));
       }, 1200);
+      cleanupTimers.current.add(timer);
     }
     if (casualties.length > 0) {
       setFallenInfantry((currentCasualties) => [...currentCasualties, ...casualties]);
       const ids = new Set(casualties.map((casualty) => casualty.id));
-      window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
+        cleanupTimers.current.delete(timer);
         setFallenInfantry((currentCasualties) => currentCasualties.filter((casualty) => !ids.has(casualty.id)));
       }, INFANTRY_DEATH_EFFECT_MS + 100);
+      cleanupTimers.current.add(timer);
     }
   }, [buildings, dimensions, units]);
 
@@ -2450,12 +2471,14 @@ const BattlefieldScene = memo(function BattlefieldScene({
   state,
   projectileFxMode = "game",
   timeline,
+  effectsResetKey,
   onEntityHover,
   onEntityLeave,
 }: {
   state: GameState;
   projectileFxMode?: ProjectileFxMode;
   timeline?: SimulationVisualTimeline;
+  effectsResetKey?: string;
   onEntityHover: EntityHoverHandler;
   onEntityLeave: () => void;
 }) {
@@ -2573,7 +2596,7 @@ const BattlefieldScene = memo(function BattlefieldScene({
           />
         ) : null}
         {projectileFxMode === "preview" ? <ProjectilePreviewEffects dimensions={dimensions} /> : null}
-        <DestructionEffects units={units} buildings={buildings} dimensions={dimensions} />
+        <DestructionEffects key={effectsResetKey} units={units} buildings={buildings} dimensions={dimensions} />
       </Suspense>
       {SHOW_DEBUG_INTENTS ? (
         <IntentLines units={units} dimensions={dimensions} visualWorld={visualWorld} />
@@ -2691,7 +2714,7 @@ function EntityHoverCard({
   );
 }
 
-export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Battlefield3DProps) {
+export function Battlefield3D({ state, projectileFxMode = "game", timeline, effectsResetKey }: Battlefield3DProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredPointer, setHoveredPointer] = useState<HoveredEntityPointer | null>(null);
   const handleEntityHover = useCallback<EntityHoverHandler>((entityId, clientX, clientY) => {
@@ -2754,6 +2777,7 @@ export function Battlefield3D({ state, projectileFxMode = "game", timeline }: Ba
           state={state}
           projectileFxMode={projectileFxMode}
           timeline={timeline}
+          effectsResetKey={effectsResetKey}
           onEntityHover={handleEntityHover}
           onEntityLeave={clearHoveredEntity}
         />

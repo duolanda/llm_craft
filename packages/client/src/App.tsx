@@ -242,6 +242,7 @@ function App() {
   const [activeReplayRecord, setActiveReplayRecord] = useState<GameRecord | null>(null);
   const [replayFrames, setReplayFrames] = useState<ReplayFrame[]>([]);
   const [replayFrameIndex, setReplayFrameIndex] = useState(0);
+  const [replaySeekRevision, setReplaySeekRevision] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [replaySourceName, setReplaySourceName] = useState<string | null>(null);
@@ -556,16 +557,26 @@ function App() {
     setWarmupMessage(null);
   }, [observedMatch?.matchId, setWarmupMessage, setWarmupStatuses]);
 
+  const seekReplayFrame = (
+    index: number,
+    frames = replayFrames,
+    tickIntervalMs = activeReplayRecord?.definition.tickIntervalMs ?? 500,
+  ) => {
+    replayClock.seek((frames[index]?.tick ?? 0) * tickIntervalMs, performance.now());
+    setReplayFrameIndex(index);
+    // A seek starts a new visual history even when it lands on the same or next tick.
+    setReplaySeekRevision((revision) => revision + 1);
+  };
+
   const loadReplayRecord = (record: GameRecord, sourceName: string) => {
     const frames = buildReplayFrames(record);
     const tickIntervalMs = record.definition.tickIntervalMs;
     const now = performance.now();
     replayClock.setPlaying(false, now);
     replayClock.setBounds(0, (frames.at(-1)?.tick ?? 0) * tickIntervalMs, now);
-    replayClock.seek((frames[0]?.tick ?? 0) * tickIntervalMs, now);
+    seekReplayFrame(0, frames, tickIntervalMs);
     setActiveReplayRecord(record);
     setReplayFrames(frames);
-    setReplayFrameIndex(0);
     setReplayPlaying(false);
     setReplaySourceName(sourceName);
     setReplayError(null);
@@ -585,8 +596,7 @@ function App() {
         if (REQUESTED_REPLAY_TICK !== null && Number.isFinite(REQUESTED_REPLAY_TICK)) {
           const index = frames.findIndex((frame) => frame.tick >= REQUESTED_REPLAY_TICK);
           const resolvedIndex = index >= 0 ? index : Math.max(0, frames.length - 1);
-          replayClock.seek((frames[resolvedIndex]?.tick ?? 0) * record.definition.tickIntervalMs, performance.now());
-          setReplayFrameIndex(resolvedIndex);
+          seekReplayFrame(resolvedIndex, frames, record.definition.tickIntervalMs);
         }
       })
       .catch((error) => setReplayError(`加载回放记录失败: ${error instanceof Error ? error.message : String(error)}`));
@@ -1215,8 +1225,7 @@ function App() {
                   className={`hud-btn ${replayPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
                   onClick={() => {
                     if (!replayPlaying && replayFrameIndex >= replayFrames.length - 1) {
-                      replayClock.seek((replayFrames[0]?.tick ?? 0) * replayTickIntervalMs, performance.now());
-                      setReplayFrameIndex(0);
+                      seekReplayFrame(0);
                     }
                     setReplayPlaying((value) => !value);
                   }}
@@ -1228,8 +1237,7 @@ function App() {
                   className="hud-btn hud-btn-ghost"
                   onClick={() => {
                     setReplayPlaying(false);
-                    replayClock.seek((replayFrames[0]?.tick ?? 0) * replayTickIntervalMs, performance.now());
-                    setReplayFrameIndex(0);
+                    seekReplayFrame(0);
                   }}
                   disabled={replayFrames.length === 0}
                 >
@@ -1255,6 +1263,7 @@ function App() {
             <div className="replay-progress">
               <input
                 type="range"
+                aria-label="录像进度"
                 min={0}
                 max={Math.max(replayFrames.length - 1, 0)}
                 step={1}
@@ -1262,8 +1271,7 @@ function App() {
                 onChange={(event) => {
                   setReplayPlaying(false);
                   const index = Number(event.target.value);
-                  replayClock.seek((replayFrames[index]?.tick ?? 0) * replayTickIntervalMs, performance.now());
-                  setReplayFrameIndex(index);
+                  seekReplayFrame(index);
                 }}
                 disabled={replayFrames.length <= 1}
               />
@@ -1284,7 +1292,13 @@ function App() {
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">观战情报</span>
               </div>
-              <StatsPanel state={displayState} tickIntervalMs={displayTickIntervalMs} />
+              <StatsPanel
+                state={displayState}
+                tickIntervalMs={displayTickIntervalMs}
+                recordedPlayers={mode === "replay" && activeReplayRecord
+                  ? activeReplayRecord.metadata.players ?? []
+                  : undefined}
+              />
             </div>
           </div>
 
@@ -1303,6 +1317,9 @@ function App() {
                 <Battlefield3D
                   state={displayState}
                   timeline={mode === "replay" ? replayVisualTimeline : liveVisualTimeline}
+                  effectsResetKey={mode === "replay"
+                    ? `replay:${replaySeekRevision}`
+                    : `live:${observedMatch?.matchId ?? "idle"}`}
                 />
               </div>
             </div>

@@ -52,7 +52,7 @@ import {
   type RegisteredMatchHandle,
   type RegisteredMatchStatus,
 } from "./MatchRegistry";
-import { isSupportedRecordFileName, readRecordJsonText, recordFileEncoding } from "./RecordFile";
+import { decodeMatchRecord, isSupportedRecordFileName, readRecordJsonText, recordFileEncoding } from "./RecordFile";
 import {
   MAX_WEBSOCKET_BUFFERED_BYTES,
   shouldDeferLatestProjection,
@@ -67,6 +67,8 @@ const WORKSPACE_ROOT = path.resolve(SERVER_PACKAGE_DIR, "..", "..");
 
 const PORT = parseInt(process.env.PORT || "3101", 10);
 const RECORDS_DIR = path.resolve(SERVER_PACKAGE_DIR, "logs", "records");
+const MAX_RECORD_IMPORT_BYTES = 64 * 1024 * 1024;
+const MAX_RECORD_IMPORT_DECODED_BYTES = 256 * 1024 * 1024;
 const VALID_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set(["model", "messages", "tools", "tool_choice", "stream", "signal"]);
 const BROADCAST_TOTAL_WARNING_MS = 250;
@@ -637,6 +639,31 @@ export async function handleHttpRequest(
     }
 
     const url = new URL(req.url, `http://localhost:${PORT}`);
+
+    if (req.method === "POST" && url.pathname === "/api/replay/import") {
+      try {
+        const chunks: Buffer[] = [];
+        let length = 0;
+        for await (const chunk of req) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          length += bytes.length;
+          if (length > MAX_RECORD_IMPORT_BYTES) {
+            sendJson(res, 413, { error: "录像文件超过 64 MiB 导入限制。" });
+            return;
+          }
+          chunks.push(bytes);
+        }
+        const record = await decodeMatchRecord(Buffer.concat(chunks), MAX_RECORD_IMPORT_DECODED_BYTES);
+        sendJson(res, 200, record);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") {
+          sendJson(res, 413, { error: "录像解压后超过 256 MiB 导入限制。" });
+        } else {
+          sendJson(res, 400, { error: "无法导入录像：文件格式无效或内容已损坏。" });
+        }
+      }
+      return;
+    }
 
     if (req.method === "GET" && url.pathname === "/api/replay/records") {
       const records = await listRecordEntries();

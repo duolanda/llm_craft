@@ -2,8 +2,11 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GameState } from "@llmcraft/shared";
+import { GameState, type MatchRecord } from "@llmcraft/shared";
+import { createDefaultMatchDefinition } from "../MatchDefinition";
+import { encodeMatchRecord } from "../RecordFile";
 import { PresetStore } from "../PresetStore";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 import {
@@ -38,14 +41,18 @@ function createRequest({
 }: {
   method: string;
   url: string;
-  body?: string;
+  body?: string | Buffer | Buffer[];
 }) {
   const req = Object.assign([], {
     method,
     url,
     [Symbol.asyncIterator]: async function* () {
       if (body) {
-        yield Buffer.from(body);
+        if (Array.isArray(body)) {
+          yield* body;
+        } else {
+          yield Buffer.from(body);
+        }
       }
     },
   });
@@ -102,6 +109,82 @@ function createMockGameState(tick: number): GameState {
 }
 
 describe("server settings", () => {
+  it.each(["current.match.zst", "legacy.match.json"])(
+    "serves %s as JSON for replay, diagnostics, and transcript readers",
+    async (fileName) => {
+      const state = createServerState(await createStore());
+      const response = createResponseCapture();
+      const json = JSON.stringify({ recordFormat: "match-record", marker: "压缩录像" });
+      const bytes = fileName.endsWith(".zst") ? zstdCompressSync(json) : Buffer.from(json);
+      vi.spyOn(fs, "readFile").mockResolvedValueOnce(bytes);
+
+      await handleHttpRequest(
+        createRequest({ method: "GET", url: `/api/replay/records/${fileName}` }),
+        response.res,
+        state,
+      );
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.payload).toBe(json);
+    },
+  );
+
+  it.each(["zstd", "json"])("imports opaque %s file bytes on the server without persisting a file", async (encoding) => {
+    const state = createServerState(await createStore());
+    const response = createResponseCapture();
+    const record: MatchRecord = {
+      recordFormat: "match-record",
+      matchId: "match_import_test",
+      definition: createDefaultMatchDefinition(),
+      metadata: {
+        startedAt: "2026-09-06T00:00:00.000Z",
+        savedAt: "2026-09-06T00:00:00.500Z",
+        status: "stopped",
+        winner: null,
+        recordingProfile: "evaluation",
+        includeTranscript: false,
+        players: [{ playerId: "player_1", model: "导入测试" }],
+      },
+      initialState: createMockGameState(0),
+      finalState: createMockGameState(1),
+      tickDeltas: [{ tick: 1, players: [], newLogs: [], aiOutputs: {} }],
+      aiTurns: [],
+      commandResults: [],
+    };
+    const bytes = encoding === "zstd" ? await encodeMatchRecord(record) : Buffer.from(JSON.stringify(record));
+    const write = vi.spyOn(fs, "writeFile");
+    await handleHttpRequest(
+      createRequest({
+        method: "POST", url: "/api/replay/import",
+        body: [bytes.subarray(0, 2), bytes.subarray(2, 11), bytes.subarray(11)],
+      }),
+      response.res,
+      state,
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(JSON.parse(response.payload)).toEqual(record);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty", Buffer.alloc(0)],
+    ["invalid schema", zstdCompressSync(JSON.stringify({ recordFormat: "match-record" }))],
+    ["truncated", zstdCompressSync('{"recordFormat":"match-record"}').subarray(0, 8)],
+    ["invalid JSON", Buffer.from("not a Match Record")],
+  ] as const)("rejects %s uploads with a client error", async (_name, bytes) => {
+    const state = createServerState(await createStore());
+    const response = createResponseCapture();
+    await handleHttpRequest(
+      createRequest({ method: "POST", url: "/api/replay/import", body: bytes }),
+      response.res,
+      state,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.payload)).toHaveProperty("error");
+  });
+
   it("uses the built-in preset secret without creating a separate secret file", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-secret-bootstrap-"));
     tempDirs.push(dir);
@@ -832,7 +915,7 @@ describe("server settings", () => {
   it("saves the explicitly identified live match instead of the observed benchmark", async () => {
     const presetStore = await createStore();
     const state = createServerState(presetStore);
-    const liveSaveRecord = vi.fn(async () => "logs/records/live.match.json");
+    const liveSaveRecord = vi.fn(async () => "logs/records/live.match.zst");
     const benchmarkSaveRecord = vi.fn(async () => "logs/records/benchmark.match.json");
     const game = { getState: () => createMockGameState(42) };
     state.matchRegistry.register({
@@ -860,7 +943,7 @@ describe("server settings", () => {
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({
       type: "record_saved",
       matchId: "match_live",
-      fileName: "live.match.json",
+      fileName: "live.match.zst",
     }));
   });
 

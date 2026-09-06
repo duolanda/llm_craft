@@ -1,16 +1,22 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { analyzeMatchRecord, detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
+import { analyzeMatchRecord, detectRecordFormat, projectRecordToMatchRecord, validateZstdRecordFrame } from "@llmcraft/record";
 
 const args = process.argv.slice(2);
 const options = parseArgs(args);
 const file = options.file;
+const compressionOptions = {
+  params: {
+    [constants.ZSTD_c_compressionLevel]: 6,
+    [constants.ZSTD_c_checksumFlag]: 1,
+  },
+};
 
 if (!file) {
   console.error([
-    "Usage: pnpm --filter @llmcraft/server analyze:record <record.json[.gz]> [options]",
+    "Usage: pnpm --filter @llmcraft/server analyze:record <record.match.zst|record.json> [options]",
     "",
     "Options:",
     "  --debug <llm-debug.log>      Merge rough model/tool metrics from an LLM debug log",
@@ -21,6 +27,7 @@ if (!file) {
     "  --format human|json|csv      Select machine-readable or human output",
     "  --json / --csv               Short aliases for --format",
     "  --compare <record|directory> Compare metric means against a baseline",
+    "  --storage                    Report file size, zstd savings, and decoded section sizes",
     "  Directories are analyzed as deterministic filename-sorted batches.",
   ].join("\n"));
   process.exit(1);
@@ -31,9 +38,11 @@ const repoRoot = resolve(scriptDir, "../../..");
 const filePath = resolveInputPath(file);
 if (statSync(filePath).isDirectory() || options.format !== "human" || options.compareFile) {
   printBatchAnalysis(filePath, options);
+  // Drain piped output before exiting so machine-readable reports are complete.
+  await new Promise((resolve) => process.stdout.write("", resolve));
   process.exit(0);
 }
-const sourceRecord = JSON.parse(readRecordText(filePath));
+const { source: sourceRecord, storage } = readRecordSource(filePath, options.storage);
 const sourceFormat = detectRecordFormat(sourceRecord);
 const record = projectRecordToMatchRecord(sourceRecord);
 const debugPath = options.debugFile ? resolveInputPath(options.debugFile) : null;
@@ -45,10 +54,49 @@ const commandFacts = record.commandResults ?? [];
 const analysis = buildReplayAnalysis(record, players, options.skill, commandFacts);
 const registryReport = analyzeMatchRecord(record);
 
-function readRecordText(recordPath) {
+function readRecordSource(recordPath, includeStorage) {
   const bytes = readFileSync(recordPath);
-  const content = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
-  return content.toString("utf8");
+  const zstdEncoded = bytes.length >= 4 && bytes.readUInt32LE(0) === 0xfd2fb528;
+  if (zstdEncoded) validateZstdRecordFrame(bytes);
+  const content = zstdEncoded ? zstdDecompressSync(bytes) : bytes;
+  const source = JSON.parse(content.toString("utf8"));
+  if (!includeStorage) return { source };
+
+  const valueBytes = (value) => Buffer.byteLength(JSON.stringify(value));
+  const sections = Object.entries(source).map(([name, value]) => ({ name, bytes: valueBytes(value) }));
+  const tickDeltaSections = { units: 0, buildings: 0, newLogs: 0, aiOutputs: 0 };
+  for (const delta of source.tickDeltas ?? []) {
+    tickDeltaSections.newLogs += valueBytes(delta.newLogs ?? []);
+    tickDeltaSections.aiOutputs += valueBytes(delta.aiOutputs ?? {});
+    for (const player of delta.players ?? []) {
+      tickDeltaSections.units += valueBytes(player.units ?? []);
+      tickDeltaSections.buildings += valueBytes(player.buildings ?? []);
+    }
+  }
+  const zstdBytes = zstdEncoded ? bytes.length : zstdCompressSync(content, compressionOptions).length;
+  return {
+    source,
+    storage: {
+      encoding: zstdEncoded ? "zstd" : "identity",
+      fileBytes: bytes.length,
+      decodedBytes: content.length,
+      zstdBytes,
+      zstdSavingsPercent: (1 - zstdBytes / content.length) * 100,
+      sections: sections.sort((a, b) => b.bytes - a.bytes),
+      tickDeltaSections,
+    },
+  };
+}
+
+function printStorage(storage) {
+  console.log(`Storage: encoding=${storage.encoding}; file=${storage.fileBytes} bytes; decoded=${storage.decodedBytes} bytes; zstd=${storage.zstdBytes} bytes; saved=${storage.zstdSavingsPercent.toFixed(1)}%`);
+  console.log("  Sections: compact JSON value bytes; percentages use decoded bytes; nested rows are not additive.");
+  for (const section of storage.sections) {
+    console.log(`    ${section.name}: ${section.bytes} bytes (${(section.bytes / storage.decodedBytes * 100).toFixed(1)}%)`);
+  }
+  for (const [name, bytes] of Object.entries(storage.tickDeltaSections)) {
+    console.log(`    tickDeltas.${name}: ${bytes} bytes (${(bytes / storage.decodedBytes * 100).toFixed(1)}%)`);
+  }
 }
 
 if (sourceFormat !== "unknown") {
@@ -185,6 +233,7 @@ const durationSeconds = registryReport.match.durationSeconds;
 
 console.log(`Record: ${basename(filePath)}`);
 console.log(`Status: ${record.metadata?.status ?? "unknown"}; winner: ${record.metadata?.winner ?? "none"}; duration: ${durationTicks} ticks (${durationSeconds.toFixed(1)}s)`);
+if (storage) printStorage(storage);
 if (debugText && debugPath) {
   console.log(`Debug: ${basename(debugPath)}; chars=${debugText.length}; roughTokens=${Math.ceil(debugText.length / 4)}`);
 }
@@ -262,6 +311,7 @@ function parseArgs(rawArgs) {
     skill: null,
     format: "human",
     compareFile: null,
+    storage: false,
   };
 
   for (let i = 0; i < rawArgs.length; i++) {
@@ -290,6 +340,8 @@ function parseArgs(rawArgs) {
       parsed.format = "csv";
     } else if (arg === "--compare") {
       parsed.compareFile = rawArgs[++i] ?? null;
+    } else if (arg === "--storage") {
+      parsed.storage = true;
     } else if (!arg.startsWith("--") && parsed.file === null) {
       parsed.file = arg;
     }
@@ -299,9 +351,9 @@ function parseArgs(rawArgs) {
 }
 
 function printBatchAnalysis(inputPath, batchOptions) {
-  const reports = analyzePath(inputPath);
+  const reports = analyzePath(inputPath, batchOptions.storage);
   const baselineReports = batchOptions.compareFile
-    ? analyzePath(resolveInputPath(batchOptions.compareFile))
+    ? analyzePath(resolveInputPath(batchOptions.compareFile), false)
     : [];
   const comparison = baselineReports.length > 0
     ? compareReportSets(reports, baselineReports)
@@ -324,11 +376,28 @@ function printBatchAnalysis(inputPath, batchOptions) {
           metric.value,
         ].join(","));
       }
+      if (entry.storage) {
+        const metrics = {
+          file_bytes: entry.storage.fileBytes,
+          decoded_bytes: entry.storage.decodedBytes,
+          zstd_bytes: entry.storage.zstdBytes,
+          zstd_savings_percent: entry.storage.zstdSavingsPercent,
+          ...Object.fromEntries(entry.storage.sections.map((section) => [`${section.name}_bytes`, section.bytes])),
+          ...Object.fromEntries(Object.entries(entry.storage.tickDeltaSections).map(([name, bytes]) => [`tickDeltas.${name}_bytes`, bytes])),
+        };
+        for (const [metric, value] of Object.entries(metrics)) {
+          console.log([
+            csv(entry.file), csv(entry.report.match.status), csv(entry.report.match.winner ?? ""),
+            csv(entry.report.match.rulesetId), "storage", csv(metric), value,
+          ].join(","));
+        }
+      }
     }
     return;
   }
   for (const entry of reports) {
     console.log(`${entry.file}: status=${entry.report.match.status} winner=${entry.report.match.winner ?? "none"} duration=${entry.report.match.durationSeconds.toFixed(1)}s`);
+    if (entry.storage) printStorage(entry.storage);
     for (const finding of entry.report.findings) {
       console.log(`  [${finding.severity}] ${finding.scopeId}:${finding.detectorId} ${finding.value} (threshold ${finding.threshold})`);
     }
@@ -339,16 +408,20 @@ function printBatchAnalysis(inputPath, batchOptions) {
   }
 }
 
-function analyzePath(inputPath) {
+function analyzePath(inputPath, includeStorage) {
   const files = statSync(inputPath).isDirectory()
     ? readdirSync(inputPath)
-        .filter((name) => name.endsWith(".json") || name.endsWith(".json.gz"))
+        .filter((name) => name.endsWith(".json") || name.endsWith(".match.zst"))
         .sort()
         .map((name) => resolve(inputPath, name))
     : [inputPath];
   return files.map((recordPath) => {
-    const source = JSON.parse(readRecordText(recordPath));
-    return { file: basename(recordPath), report: analyzeMatchRecord(projectRecordToMatchRecord(source)) };
+    const { source, storage } = readRecordSource(recordPath, includeStorage);
+    return {
+      file: basename(recordPath),
+      report: analyzeMatchRecord(projectRecordToMatchRecord(source)),
+      ...(storage ? { storage } : {}),
+    };
   });
 }
 

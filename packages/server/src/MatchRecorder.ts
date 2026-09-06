@@ -7,6 +7,7 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { MatchRuntime } from "./MatchRuntime";
+import { encodeMatchRecord } from "./RecordFile";
 
 export interface MatchRecordContext {
   startedAt: string;
@@ -21,8 +22,8 @@ export interface MatchRecordContext {
 }
 
 /**
- * Writes one terminal Match Record. Runtime state remains in memory while the
- * match is active; recording does not rewrite an in-progress large file.
+ * Writes one losslessly compressed terminal Match Record. Runtime state remains
+ * in memory while the match is active; recording does not rewrite an in-progress file.
  */
 export class MatchRecorder {
   private savedPath: string | null = null;
@@ -106,10 +107,10 @@ export class MatchRecorder {
     await fs.mkdir(this.recordDir, { recursive: true });
     const timestamp = savedAt.replace(/[:.]/g, "-");
     const matchSuffix = this.runtime.getMatchId().replace(/^match_/, "").slice(0, 8);
-    const fileName = `match-${timestamp}-${matchSuffix}.match.json`;
+    const fileName = `match-${timestamp}-${matchSuffix}.match.zst`;
     const finalPath = path.join(this.recordDir, fileName);
     const tempPath = `${finalPath}.tmp-${process.pid}`;
-    await fs.writeFile(tempPath, JSON.stringify(record));
+    await fs.writeFile(tempPath, await encodeMatchRecord(record));
     await fs.rename(tempPath, finalPath);
     return finalPath;
   }

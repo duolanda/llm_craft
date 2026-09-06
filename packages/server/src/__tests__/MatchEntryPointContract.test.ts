@@ -82,7 +82,7 @@ describe("Match entry-point contract", () => {
 
     const filePath = await handle.saveRecord();
     const record = await readMatchRecordFile(filePath);
-    expect(filePath).toMatch(/\.match\.json$/);
+    expect(filePath).toMatch(/\.match\.zst$/);
     expect(record.definition).toMatchObject({
       rulesetId: "standard",
       map: {

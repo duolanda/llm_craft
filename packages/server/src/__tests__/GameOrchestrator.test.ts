@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { zstdDecompressSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunInput } from "@llmcraft/shared";
 import { TICK_INTERVAL_MS } from "@llmcraft/shared";
@@ -220,7 +221,7 @@ describe("GameOrchestrator", () => {
     expect(oldestAvailable.events.at(-1)?.id).toBe("evt_200");
   });
 
-  it("writes one Match Record and reuses it for repeated terminal saves", async () => {
+  it("writes one lossless zstd Match Record and reuses it for repeated terminal saves", async () => {
     const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-record-"));
     const orchestrator = new GameOrchestrator({
       ...createMatchConfig(),
@@ -237,7 +238,15 @@ describe("GameOrchestrator", () => {
     ]);
     const secondPath = await orchestrator.saveRecord();
     const record = await readMatchRecordFile(firstPath);
+    const compressed = await fs.readFile(firstPath);
+    const json = Buffer.from(JSON.stringify(record));
 
+    expect(firstPath).toMatch(/\.match\.zst$/);
+    expect(zstdDecompressSync(compressed)).toEqual(json);
+    expect(compressed.length).toBeLessThan(json.length);
+    expect(record.initialState).toEqual(runtime.getGame().getInitialSnapshot()?.state);
+    expect(record.finalState).toEqual(runtime.getGame().getState());
+    expect(record.tickDeltas).toEqual(await runtime.getGame().getTickDeltasAsync());
     expect(firstPath).toBe(concurrentPath);
     expect(secondPath).toBe(firstPath);
     expect(await fs.readdir(recordDir)).toHaveLength(1);

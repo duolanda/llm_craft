@@ -1,31 +1,55 @@
 import fs from "node:fs/promises";
-import { gunzip } from "node:zlib";
+import { constants, zstdCompress, zstdDecompress } from "node:zlib";
 import { promisify } from "node:util";
 import type { MatchRecord } from "@llmcraft/shared";
-import { parseMatchRecord } from "@llmcraft/record";
+import { parseMatchRecord, validateZstdRecordFrame } from "@llmcraft/record";
 
-const gunzipAsync = promisify(gunzip);
-const GZIP_MAGIC_0 = 0x1f;
-const GZIP_MAGIC_1 = 0x8b;
+const compressAsync = promisify(zstdCompress);
+const decompressAsync = promisify(zstdDecompress);
+const ZSTD_MAGIC = 0xfd2fb528;
 
 export function isSupportedRecordFileName(fileName: string): boolean {
-  return fileName.endsWith(".json") || fileName.endsWith(".json.gz");
+  return fileName.endsWith(".json") || fileName.endsWith(".match.zst");
 }
 
-export function recordFileEncoding(fileName: string): "identity" | "gzip" {
-  return fileName.endsWith(".gz") ? "gzip" : "identity";
+export function recordFileEncoding(fileName: string): "identity" | "zstd" {
+  return fileName.endsWith(".zst") ? "zstd" : "identity";
 }
 
-/** Reads current JSON Match Records and historical gzip-compressed records. */
+export async function encodeMatchRecord(record: MatchRecord): Promise<Buffer> {
+  return encodeRecordJson(JSON.stringify(record));
+}
+
+/** Preserves an existing JSON document's bytes when compressing historical records. */
+export async function encodeRecordJson(json: string | Buffer): Promise<Buffer> {
+  return compressAsync(json, {
+    params: {
+      [constants.ZSTD_c_compressionLevel]: 6,
+      [constants.ZSTD_c_checksumFlag]: 1,
+    },
+  });
+}
+
+/** File imports and stored records share the server-side decoding boundary. */
+export async function decodeRecordJsonBytes(bytes: Buffer, maxOutputLength?: number): Promise<Buffer> {
+  const zstdEncoded = bytes.length >= 4 && bytes.readUInt32LE(0) === ZSTD_MAGIC;
+  if (!zstdEncoded) return bytes;
+  validateZstdRecordFrame(bytes);
+  return decompressAsync(bytes, { maxOutputLength });
+}
+
+export async function decodeRecordJsonText(bytes: Buffer, maxOutputLength?: number): Promise<string> {
+  return (await decodeRecordJsonBytes(bytes, maxOutputLength)).toString("utf8");
+}
+
+export async function decodeMatchRecord(bytes: Buffer, maxOutputLength?: number): Promise<MatchRecord> {
+  return parseMatchRecord(await decodeRecordJsonText(bytes, maxOutputLength));
+}
+
 export async function readRecordJsonText(filePath: string): Promise<string> {
-  const bytes = await fs.readFile(filePath);
-  const gzipEncoded = bytes.length >= 2
-    && bytes[0] === GZIP_MAGIC_0
-    && bytes[1] === GZIP_MAGIC_1;
-  if (!gzipEncoded) return bytes.toString("utf8");
-  return (await gunzipAsync(bytes)).toString("utf8");
+  return decodeRecordJsonText(await fs.readFile(filePath));
 }
 
 export async function readMatchRecordFile(filePath: string): Promise<MatchRecord> {
-  return parseMatchRecord(await readRecordJsonText(filePath));
+  return decodeMatchRecord(await fs.readFile(filePath));
 }

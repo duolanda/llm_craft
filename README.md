@@ -6,7 +6,7 @@ LLMCraft 是一个服务端权威的 RTS 原型。两个 Agent 在同一个确�
 
 ## 技术栈
 
-- Node.js 22+、TypeScript 5.9 strict、pnpm workspace
+- Node.js `^22.15.0 || >=23.8.0`（原生 zstd）、TypeScript 5.9 strict、pnpm workspace；安装时强制检查 Node 版本
 - React、Vite、React Three Fiber
 - WebSocket 实时投影与 HTTP control API
 - OpenAI-compatible tool-calling Agent Runtime
@@ -140,24 +140,40 @@ CLI session 绑定的 match 与 Web UI 当前观察的 match 相互独立。完�
 正式对局产物统一称为 Match Record：
 
 - 格式身份：`match-record`
-- 文件名：`match-<ISO timestamp>-<short match id>.match.json`
+- 文件名：`match-<ISO timestamp>-<short match id>.match.zst`，zstd 6 无损压缩并启用校验和
 - `replay`：定义、元数据、初末状态和 tick delta
 - `evaluation`：在 replay 上增加命令结果、Agent turn、工具和模型请求指标
 - `includeTranscript`：仅在 evaluation 中可选保留完整 messages 和 assistant 输出
 
-运行中 delta 在共享 worker thread 中按块压缩留存；终局或显式保存时写一次 JSON。当前没有独立 Trace v3、MatchJournal、DomainEvent 事实流、state hash、journal workspace 或自动 retention 平台。
+运行中 delta 在共享 worker thread 中按块压缩留存；终局或显式保存时异步压缩完整记录，原子写入一次。服务端和分析脚本可直接读取 `.match.zst` 与已有普通 JSON；浏览器导入时上传原始文件，由服务端解压、校验后返回记录。当前没有独立 Trace v3、MatchJournal、DomainEvent 事实流、state hash、journal workspace 或自动 retention 平台。
 
 记录目录：
 
-- Live/control：`packages/server/logs/records/*.match.json`
-- Benchmark：`packages/server/logs/benchmark-records/*.match.json`
+- Live/control：`packages/server/logs/records/*.match.zst`
+- Benchmark：`packages/server/logs/benchmark-records/*.match.zst`
 
 分析保存的对局：
 
 ```bash
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json --timeline
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --timeline
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --storage --json
 ```
+
+批量压缩旧 JSON 录像：
+
+```bash
+# 支持一个或多个文件/目录，默认在原目录生成 .match.zst，保留原 JSON
+pnpm --filter @llmcraft/server compress:records packages/server/logs/records packages/server/logs/benchmark-records
+
+# 包含子目录；加 --json 可输出机器可读的处理结果
+pnpm --filter @llmcraft/server compress:records packages/server/logs --recursive
+
+# 压缩文件写入并解压校验一致后，删除对应原 JSON
+pnpm --filter @llmcraft/server compress:records packages/server/logs/records --delete-originals
+```
+
+转换使用 zstd 6 和校验和，保留原 JSON 的全部字节。重复运行会核对已有 `.match.zst`，内容一致时跳过；目标文件冲突、损坏或输入无效时保留原文件并报告失败，其余文件继续处理。任一失败会返回非零退出码。
 
 调试页面：
 

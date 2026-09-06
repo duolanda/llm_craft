@@ -2,7 +2,7 @@ import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import type { AgentModelRequestRecord, MatchRecord, SavedAITurnRecord } from "@llmcraft/shared";
 import { detectRecordFormat, projectRecordToMatchRecord } from "@llmcraft/record";
-import { readLocalRecordText } from "./lib/readRecordFile";
+import { importMatchRecord } from "./lib/recordApi";
 import { API_BASE_URL } from "./lib/serverConnection";
 import { buildMatchDiagnosticReport, type MatchDiagnosticReport } from "./diagnostics";
 import "./transcriptViewer.css";
@@ -43,7 +43,7 @@ type RecordListEntry = {
   fileName: string;
   size: number;
   modifiedAt: string;
-  encoding?: "identity" | "gzip";
+  encoding?: "identity" | "zstd";
 };
 
 type ContextTurn = {
@@ -399,12 +399,17 @@ function App() {
     }
 
     try {
-      commitSource(await readLocalRecordText(file), file.name);
+      setLoading(true);
+      const text = /\.(log|txt)$/i.test(file.name)
+        ? await file.text()
+        : JSON.stringify(await importMatchRecord(file));
+      commitSource(text, file.name);
     } catch (readError) {
       setError(readError instanceof Error ? readError.message : String(readError));
       setEntries([]);
       setSelectedId(null);
     } finally {
+      setLoading(false);
       event.target.value = "";
     }
   }
@@ -436,7 +441,7 @@ function App() {
             {loading ? "读取中" : "打开 Match Record"}
           </button>
           <label className="tv-upload">
-            <input type="file" accept=".json,.gz,.log,.txt,application/json,application/gzip" onChange={handleFileChange} />
+            <input type="file" accept=".zst,.json,.log,.txt,application/json,application/zstd" onChange={handleFileChange} disabled={loading} />
             导入本地文件
           </label>
           <div className="tv-filter">

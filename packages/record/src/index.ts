@@ -680,6 +680,32 @@ export function parseMatchRecord(json: string): MatchRecord {
   return projectRecordToMatchRecord(JSON.parse(json));
 }
 
+/** Checks the single zstd frame boundary before native decoding, which older Node versions can truncate silently. */
+export function validateZstdRecordFrame(bytes: Uint8Array): void {
+  const invalid = () => fail("$record.compression", "must contain one complete zstd frame");
+  if (bytes.length < 6) invalid();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0xfd2fb528) invalid();
+  const descriptor = bytes[4]!;
+  if (descriptor & 0x08) invalid();
+  const singleSegment = Boolean(descriptor & 0x20);
+  const contentSizeBytes = [singleSegment ? 1 : 0, 2, 4, 8][descriptor >>> 6]!;
+  const dictionaryBytes = [0, 1, 2, 4][descriptor & 0x03]!;
+  let offset = 5 + (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+  while (offset + 3 <= bytes.length) {
+    const header = bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16);
+    const blockType = (header >>> 1) & 0x03;
+    if (blockType === 3) invalid();
+    offset += 3 + (blockType === 1 ? 1 : header >>> 3);
+    if (header & 1) {
+      const checksumBytes = descriptor & 0x04 ? 4 : 0;
+      if (offset + checksumBytes !== bytes.length) invalid();
+      return;
+    }
+  }
+  invalid();
+}
+
 export function projectRecordToMatchRecord(value: unknown): MatchRecord {
   const format = detectRecordFormat(value);
   if (format === "match-record") {

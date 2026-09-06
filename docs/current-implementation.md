@@ -96,7 +96,7 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 
 ## 6. Match Record
 
-正式产物是单个 `match-<ISO timestamp>-<short match id>.match.json`：
+正式产物是单个 `match-<ISO timestamp>-<short match id>.match.zst`，以 zstd 6 无损压缩完整 Match Record 并启用校验和，不删减 tick、命令或评估数据：
 
 - `off`：不保存；
 - `replay`：定义、元数据、初末状态和 tick delta；
@@ -105,11 +105,13 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 
 Control-plane match 默认使用 `evaluation` 且关闭 transcript，因此 CLI/HTTP 命令及 controller provenance 默认可复盘。
 
-终局只写一次文件，不重写大 JSON。运行中每个 tick 只向 worker thread 投递一个小 delta，由 worker 每 100 条封块并执行 JSON + gzip，压缩后留存；保存前也由 worker 解压解析。分块边界不再从模拟线程搬运整个大数组；worker 失败则保留 raw chunk，不影响对局。不生成单独 transcript、详细因果记录、临时事实工作区、状态 hash 或自动 retention 产物。
+终局只写一次文件，不重写大 JSON。运行中每个 tick 只向 worker thread 投递一个小 delta，由 worker 每 100 条封块并执行 JSON + gzip，压缩后留存；保存前也由 worker 解压解析。最终组装的记录经异步 zstd 6 压缩并启用校验和后写临时文件，再 rename 原子发布，磁盘上保留压缩结果。分块边界不再从模拟线程搬运整个大数组；worker 失败则保留 raw chunk，不影响对局。不生成单独 transcript、详细因果记录、临时事实工作区、状态 hash 或自动 retention 产物。
 
-`@llmcraft/record` 是 server/client 共用的 Match Record 读取与状态投影包。它能导入项目已有的普通旧 JSON；不实现已删除的详细记录格式兼容。
+`@llmcraft/record` 是 server/client 共用的 Match Record 校验与状态投影包。文件解压属于服务端 `RecordFile` 与离线分析脚本；它们按 zstd 文件头解压，也能读取项目已有的普通 JSON，不支持 gzip 录像。浏览器本地导入通过 `lib/recordApi.ts` 原样上传二进制至 `POST /api/replay/import`，由服务端解压、校验后返回 Match Record，不持久保存上传文件。前端不携带解码器。录像列表显示磁盘实际字节数；HTTP 读取接口返回解压后的 JSON，供回放、诊断和 transcript 页面使用。不实现已删除的详细记录格式兼容。
 
-`analyze-record.mjs` 是供开发者或 Agent 离线分析已有 Match Record 的工具。它报告逐玩家 request status/finish reason、错误总量与最长同类 streak、零输出、latency p50/p90/max、input/output/reasoning/cache tokens、context drop/truncate，以及工具和命令推进；`--timeline` 会列出请求错误段。它与 benchmark runner 相互独立。
+`analyze-record.mjs` 是供开发者或 Agent 离线分析已有 Match Record 的工具。它报告逐玩家 request status/finish reason、错误总量与最长同类 streak、零输出、latency p50/p90/max、input/output/reasoning/cache tokens、context drop/truncate，以及工具和命令推进；`--timeline` 会列出请求错误段。`--storage` 增加文件编码、磁盘/解压/zstd 字节数、压缩收益、顶层字段和 tick delta 的体积分解，支持单文件、目录及 human/JSON/CSV 输出。字段大小按紧凑 JSON 值统计，嵌套项是父项的分解，不能重复相加；压缩后各字段大小不可简单相加。分析工具与 benchmark runner 相互独立，机器应通过脚本读取压缩记录。
+
+旧录像批量压缩入口为 `pnpm --filter @llmcraft/server compress:records <file|directory>...`，由 `RecordCompression` 复用 `RecordFile` 的 zstd 6 和校验和参数。转换前校验录像可读取，压缩原始 JSON 字节，临时文件落盘后解压逐字节核对，再原子发布到同目录的 `.match.zst`，不覆盖已有目标。默认保留 JSON；显式 `--delete-originals` 仅在目标文件校验一致且原文件未变化时删除对应 JSON。重复运行核对并跳过相同目标，损坏或内容不同的目标报告失败；逐文件处理并汇总失败，支持多个输入、`--recursive` 和机器可读 `--json`。
 
 ## 7. Benchmark
 

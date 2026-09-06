@@ -10,7 +10,7 @@ LLMCraft —— 一个基于 LLM AI 代理的实时战略游戏。两个 AI 控�
 
 ## 环境要求
 
-- Node.js 22+
+- Node.js `^22.15.0 || >=23.8.0`（原生 zstd 所需版本）；`package.json` engines 与 pnpm `engineStrict` 在安装时强制检查
 - pnpm 8+ (包管理器)
 - TypeScript 5.9+ (启用 strict 模式)
 
@@ -51,23 +51,37 @@ pnpm --filter @llmcraft/server test -- --grep "Game"
 
 ### 分析保存的对局录像
 
-排查 `packages/server/logs/records/*.match.json` 时，优先使用内置分析脚本，不要先临时手写解析器：
+排查 `packages/server/logs/records/*.match.zst`（或已有 `.json`）时，优先使用内置分析脚本，不要先临时手写解析器或要求人工解压。脚本自动识别 zstd；机器消费用 `--json` / `--csv`，能力不足时扩展此脚本或 `@llmcraft/record` 的分析函数：
 
 ```bash
 # 总览：经济、命令、结果、胜负
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst
 
 # 关键时间线：总部压力、掉血、技能、关键命令
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json --timeline
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --timeline
 
 # 指定 tick 快照，适合复盘某次交战
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json --snapshots "54,59,62,82" --focus player_1
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --snapshots "54,59,62,82" --focus player_1
 
 # 分析一次性命令/技能释放时机
-pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.json --skill <command_type> --focus player_1
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --skill <command_type> --focus player_1
+
+# 体积分析：磁盘字节、解压字节、zstd 收益与各字段占比；支持目录批量和 --json / --csv
+pnpm --filter @llmcraft/server analyze:record packages/server/logs/records/<record>.match.zst --storage --json
 ```
 
 当怀疑模型“反应慢”时，先对齐：敌军进入 HQ 5/3/2 格的 tick、HQ 首次掉血 tick、关键技能成功 tick、HQ 死亡 tick。`aiTurns` 为空的旧记录只能反推行为，不能还原模型原文和工具调用链。
+
+旧 JSON 录像批量压缩使用内置命令，支持多个文件或目录；默认保留原文件，`--recursive` 包含子目录，`--json` 输出机器可读结果：
+
+```bash
+pnpm --filter @llmcraft/server compress:records packages/server/logs/records packages/server/logs/benchmark-records
+pnpm --filter @llmcraft/server compress:records packages/server/logs --recursive --json
+# 显式选择删除原文件：压缩文件落盘、解压逐字节校验一致后才删除对应 JSON
+pnpm --filter @llmcraft/server compress:records packages/server/logs/records --delete-originals
+```
+
+转换沿用 zstd 6 和校验和，完整保留原 JSON 字节（包括历史字段和排版），不迁移记录结构。目标文件在原目录，`*.match.json` / `*.json` 转为 `*.match.zst`；已有目标须完整且内容一致才跳过，否则报错并保留原文件。单文件失败不阻断其余文件，有失败时退出码为非零。不要在提供工具或验证工具时擅自删除用户原录像。
 
 ## 架构概览
 
@@ -179,9 +193,9 @@ flowchart LR
 **对局身份与记录:**
 - `MatchRegistry` 管理 live/control/benchmark 多个稳定 `matchId`；WebSocket 只投影 observed match
 - live WebSocket 使用独立的 `LiveStateProjectionFrame` 动态投影；逐建筑生产队列/进度作为当前观战状态保留，地图、日志和最新 AI 输出分别通过 `map_init`、有界 `state_events` 和可替换 `ai_output` 消息发送，完整 `GameState` 只用于模拟、Match Record 与 Replay
-- 正式产物统一称为 Match Record，格式身份为 `match-record`，文件名为 `match-<timestamp>-<short-id>.match.json`
+- 正式产物统一称为 Match Record，格式身份为 `match-record`；新文件为 `match-<timestamp>-<short-id>.match.zst`，以 zstd 6 无损压缩完整记录并启用校验和，读取端继续兼容历史普通 JSON
 - `MatchRecorder` 支持 `off` / `replay` / `evaluation` 档位；transcript 只是 evaluation record 中的可选内容
-- 运行中 delta 在共享 worker 中按块压缩留存，终局或显式保存时只写一次 JSON；不要重新引入 Journal workspace、事实流或 artifact retention 平台
+- 运行中 delta 在共享 worker 中按块压缩留存，终局或显式保存时组装完整记录，异步 zstd 后原子写入一次；不要为了人工阅读恢复未压缩落盘，也不要重新引入 Journal workspace、事实流或 artifact retention 平台
 - CLI stdin batch 必须使用 `/sessions/:id/actions` 形成单个 CommandEnvelope；禁止重新引入逐 action HTTP 循环
 - control-plane match 默认使用 `evaluation` 档位且关闭 transcript，以保存 CLI/HTTP 命令结果与 controller provenance
 - 当前没有每 actor 每 tick 命令数或全局路径命令额度；batch 中每条 action 独立执行，一条失败不会回滚其他成功动作
@@ -206,6 +220,8 @@ flowchart LR
 | `packages/server/src/model/OpenAICompatibleModelTransport.ts` | OpenAI 兼容 SDK 传输实现 |
 | `packages/server/src/PresetStore.ts` | 加密存储 Web UI 配置的模型 preset |
 | `packages/server/src/MatchRecorder.ts` | Match Record 档位、投影与终局保存 |
+| `packages/server/src/RecordFile.ts` | Match Record zstd 编解码、文件读取与上传导入校验 |
+| `packages/server/src/RecordCompression.ts` | 旧 JSON 录像批量压缩、落盘校验与显式删除原文件 |
 | `packages/record/src/` | Match Record 校验、旧 JSON 导入与 replay 投影 |
 | `packages/shared/src/types.ts` | 共享 TypeScript 接口 |
 | `packages/shared/src/constants.ts` | 游戏常量（HP、造价、地图大小等） |
@@ -262,7 +278,7 @@ game.start();
 - WebSocket 消息按类型路由，新消息类型需在 `types.ts` 中定义
 
 ### `packages/client/src/`
-- 使用 `useWebSocket` 钩子进行通信，禁止直接调用 fetch
+- 实时通信使用 `useWebSocket` 钩子；录像文件上传由 `lib/recordApi.ts` 封装 HTTP，组件中不新增直接 fetch。录像解压和导入校验属于服务端，前端只上传原始文件字节、接收结构化记录并显示回放，不引入浏览器压缩 API 或 JS/WASM 解码器
 - 战场使用 React Three Fiber；`VisualWorld` 在每个 render frame 只读 `SimulationVisualTimeline`，模型与附着视觉直接 mutation Three.js 对象/实例矩阵。禁止在 `useFrame` 中 setState、逐帧克隆 `Unit[]`，或让 replay tick index 成为模型位置时钟
 - 车辆和建筑 GLB 必须在 Blender 导出时按 shared 几何规格归一化；运行时只允许统一 `CELL_SIZE` 单位换算，不要重新增加按单位/建筑类型的视觉补偿 scale
 - 状态更新通过 `GameState` 类型约束，不要扩展未定义字段

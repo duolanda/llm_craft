@@ -1429,7 +1429,7 @@ interface ControlActionBatchRequest {
 
 ## 4. 记录格式
 
-保存文件统一称为 Match Record，格式为单个 `.match.json`：
+保存文件统一称为 Match Record，新文件为单个 `.match.zst`，用 zstd 6 无损压缩下述完整结构并启用校验和。压缩只改变存储编码，不改变记录档位或回放语义；服务端与分析脚本自动识别文件头，也能读取已有普通 `.json`，不支持 gzip 录像。HTTP 读取接口返回解压后的 JSON。机器分析使用 `analyze:record <file> --json`；加 `--storage` 可查询文件大小及字段体积：
 
 ```ts
 interface MatchRecord {
@@ -1458,6 +1458,8 @@ interface MatchRecord {
   aiTurns?: SavedAITurnRecord[];
 }
 ```
+
+`POST /api/replay/import` 接收 `Content-Type: application/octet-stream` 的原始文件字节。服务端自动识别 zstd / 普通 JSON、解压并校验后，以 `application/json` 返回上述 Match Record；不创建服务器文件或对局。无效或损坏文件返回 `400`，上传超过 64 MiB 或解压超过 256 MiB 返回 `413`。浏览器本地导入统一走此入口，不在前端解压；录像列表和现有 `GET /api/replay/records/:fileName` 保持原有读取语义。
 
 `GameState` 中的 `Unit.heading?: number` 是模拟层权威车体朝向，`Building.heading?: number` 是防御塔权威炮塔朝向；两者均为 XY 平面弧度，`0` 指向 `+X`。相应的 `TickDeltaRecord` 在实体创建或朝向变化时携带同名字段；客户端必须沿最短角度表现该值，不能根据到达顺序不稳定的弹丸或单位 intent 重新推断。旧记录没有该字段时，读取端继续使用兼容默认朝向。
 

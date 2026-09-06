@@ -19,7 +19,7 @@
 
 ### Match Record 运行中历史仍占内存
 
-- **现状**：完整 delta 分块在 worker thread 完成 JSON + gzip 后以压缩形式留存；Match Record 仍只在终局写一次。
+- **现状**：完整 delta 分块在 worker thread 完成 JSON + gzip 后以压缩形式留存；终局完整 Match Record 经异步 zstd 6 压缩，以 `.match.zst` 原子写入一次。落盘压缩已补齐，运行中历史和终局组装的内存峰值仍需独立评估。
 - **风险**：未完成的 delta buffer、turn 和命令结果仍会在极长 evaluation 对局累积，终局组装完整 JSON 也有峰值。
 - **下一步**：先以真实长局数据证明问题，再选择有界采样或简单分段文件；不预建恢复/审计平台。
 

@@ -1,5 +1,6 @@
 packages:
   - 'packages/*'
+engineStrict: true
 packageExtensions:
   tunnel-rat@0.1.2:
     peerDependencies:

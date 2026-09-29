@@ -26,9 +26,7 @@ import {
   SimulationVisualTimeline,
 } from "@llmcraft/record";
 import { Battlefield3D } from "./components/Battlefield3D";
-import { AIOutputPanel } from "./components/AIOutputPanel";
-import { GameLog } from "./components/GameLog";
-import { StatsPanel } from "./components/StatsPanel";
+import { SpectatorWorkspace } from "./components/SpectatorWorkspace";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
@@ -343,6 +341,9 @@ function App() {
   const [recordingProfile, setRecordingProfile] = useState<MatchRecordingProfile>("evaluation");
   const [includeTranscript, setIncludeTranscript] = useState(false);
   const [pendingMatchAction, setPendingMatchAction] = useState<PendingMatchAction>(null);
+  const [matchSetupOpen, setMatchSetupOpen] = useState(false);
+  const [replayLibraryOpen, setReplayLibraryOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDetailsElement>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [promptsOpen, setPromptsOpen] = useState(false);
@@ -710,6 +711,7 @@ function App() {
     setReplayFrames(frames);
     setReplayPlaying(false);
     setReplaySourceName(sourceName);
+    setReplayLibraryOpen(false);
     setReplayError(null);
     setMode("replay");
   };
@@ -781,6 +783,7 @@ function App() {
   };
 
   const handleEnterReplayMode = async () => {
+    if (!activeReplayRecord) setReplayLibraryOpen(true);
     setReplayPlaying(false);
     setReplayError(null);
     setMode("replay");
@@ -866,6 +869,7 @@ function App() {
       debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     })) {
       setPendingMatchAction("start");
+      setMatchSetupOpen(false);
     }
   };
 
@@ -1160,6 +1164,10 @@ function App() {
         observedMatch?.setup?.prompts?.player_2?.promptId,
       ].filter((promptId): promptId is string => Boolean(promptId))
     : [];
+  const player1PresetName = presets.find((preset) => preset.id === player1PresetId)?.name
+    ?? (player1PresetId ? "当前对局预设" : "红方未选择");
+  const player2PresetName = presets.find((preset) => preset.id === player2PresetId)?.name
+    ?? (player2PresetId ? "当前对局预设" : "蓝方未选择");
 
   if (LOCAL_SHOWCASE) {
     return (
@@ -1178,211 +1186,47 @@ function App() {
   return (
     <>
       <div className="noise-overlay" />
-      <DevQuickNav />
       <div className="app-shell">
         <header className="app-header">
           <div className="brand">
             <h1>LLMCraft</h1>
           </div>
+          <nav className="mode-switch" aria-label="观战模式">
+            <button
+              onClick={handleEnterLiveMode}
+              className={`mode-pill ${mode === "live" ? "active" : ""}`}
+              aria-pressed={mode === "live"}
+            >
+              实时对局
+            </button>
+            <button
+              onClick={() => void handleEnterReplayMode()}
+              className={`mode-pill ${mode === "replay" ? "active" : ""}`}
+              aria-pressed={mode === "replay"}
+            >
+              对局回放
+            </button>
+          </nav>
+          <span className={`connection-pill ${connected ? "connected" : ""}`}>
+            {connected ? (liveEnabled ? "ONLINE" : "REPLAY ONLY") : "OFFLINE"}
+          </span>
           <div className="controls">
-            <div className="mode-switch">
-              <button
-                onClick={handleEnterLiveMode}
-                className={`mode-pill ${mode === "live" ? "active" : ""}`}
-              >
-                实时对局
-              </button>
-              <button
-                onClick={() => void handleEnterReplayMode()}
-                className={`mode-pill ${mode === "replay" ? "active" : ""}`}
-              >
-                对局回放
-              </button>
-            </div>
-            <span className={`connection-pill ${connected ? "connected" : ""}`}>
-              {connected ? (liveEnabled ? "ONLINE" : "REPLAY ONLY") : "OFFLINE"}
-            </span>
-            {mode === "live" && (
+            {mode === "live" ? (
               <>
-                <div className="match-preset-bar">
-                  <div className="settings-field compact match-side-setup">
-                    <span>红方配置</span>
-                    <div className="preset-select-row">
-                      <div className="preset-select-stack">
-                        <select
-                          aria-label="红方模型预设"
-                          className="settings-select live-preset-select red"
-                          value={player1PresetId}
-                          onChange={(event) => setPlayer1PresetId(event.target.value)}
-                          disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
-                        >
-                          <option value="">模型 · 请选择</option>
-                          {player1PresetId && !presets.some((preset) => preset.id === player1PresetId) && (
-                            <option value={player1PresetId}>模型 · 当前对局预设</option>
-                          )}
-                          {presets.map((preset) => (
-                            <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
-                          ))}
-                        </select>
-                        <PromptSelector
-                          side="red"
-                          value={player1PromptId}
-                          prompts={prompts}
-                          frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_1 : undefined}
-                          onChange={setPlayer1PromptId}
-                          disabled={promptsLoading || matchSetupLocked}
-                          viewDisabled={benchmarkBusy}
-                          onView={handleOpenPrompts}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_1)}`}
-                        onClick={() => handleWarmup("player_1")}
-                        disabled={!connected || !canStartLiveMatch || matchSetupLocked || warmupStatuses.player_1 === "warming_up"}
-                      >
-                        {getWarmupButtonLabel(warmupStatuses.player_1)}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="settings-field compact match-side-setup">
-                    <span>蓝方配置</span>
-                    <div className="preset-select-row">
-                      <div className="preset-select-stack">
-                        <select
-                          aria-label="蓝方模型预设"
-                          className="settings-select live-preset-select blue"
-                          value={player2PresetId}
-                          onChange={(event) => setPlayer2PresetId(event.target.value)}
-                          disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
-                        >
-                          <option value="">模型 · 请选择</option>
-                          {player2PresetId && !presets.some((preset) => preset.id === player2PresetId) && (
-                            <option value={player2PresetId}>模型 · 当前对局预设</option>
-                          )}
-                          {presets.map((preset) => (
-                            <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
-                          ))}
-                        </select>
-                        <PromptSelector
-                          side="blue"
-                          value={player2PromptId}
-                          prompts={prompts}
-                          frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_2 : undefined}
-                          onChange={setPlayer2PromptId}
-                          disabled={promptsLoading || matchSetupLocked}
-                          viewDisabled={benchmarkBusy}
-                          onView={handleOpenPrompts}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_2)}`}
-                        onClick={() => handleWarmup("player_2")}
-                        disabled={!connected || !canStartLiveMatch || matchSetupLocked || warmupStatuses.player_2 === "warming_up"}
-                      >
-                        {getWarmupButtonLabel(warmupStatuses.player_2)}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div className="match-action-bar">
-                  <details className="match-options">
-                    <summary className="hud-btn hud-btn-ghost">选项</summary>
-                    <div className="match-options-menu">
-                      <label className="settings-field compact">
-                        <span>记录档位</span>
-                        <select
-                          className="settings-select"
-                          value={recordingProfile}
-                          onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
-                          disabled={matchSetupLocked}
-                        >
-                          <option value="off">关闭</option>
-                          <option value="replay">回放</option>
-                          <option value="evaluation">评估</option>
-                        </select>
-                      </label>
-                      <label className="benchmark-inline-toggle-row">
-                        <input
-                          type="checkbox"
-                          checked={includeTranscript}
-                          onChange={(event) => setIncludeTranscript(event.target.checked)}
-                          disabled={matchSetupLocked || recordingProfile !== "evaluation"}
-                        />
-                        完整 transcript
-                      </label>
-                      <div className="match-options-section">
-                        <span className="match-options-section-title">AI 策略沉淀</span>
-                        <label className="benchmark-inline-toggle-row">
-                          <input
-                            type="checkbox"
-                            checked={player1ReflectAfterMatch}
-                            onChange={(event) => setPlayer1ReflectAfterMatch(event.target.checked)}
-                            disabled={matchSetupLocked}
-                          />
-                          红方赛后自动沉淀
-                        </label>
-                        <label className="benchmark-inline-toggle-row">
-                          <input
-                            type="checkbox"
-                            checked={player2ReflectAfterMatch}
-                            onChange={(event) => setPlayer2ReflectAfterMatch(event.target.checked)}
-                            disabled={matchSetupLocked}
-                          />
-                          蓝方赛后自动沉淀
-                        </label>
-                        <small className="settings-help">每方额外调用一次对应模型。未选策略时创建新策略；已选时生成待采用版本。</small>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleSaveRecord}
-                        disabled={!canSaveLiveMatch}
-                        className="hud-btn"
-                      >
-                        保存记录
-                      </button>
-                    </div>
-                  </details>
-                  <button
-                    type="button"
-                    className="hud-btn hud-btn-ghost"
-                    onClick={() => setMatchesOpen(true)}
-                    disabled={!connected}
-                  >
-                    对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
-                  </button>
-                  <button
-                    type="button"
-                    className="hud-btn hud-btn-ghost"
-                    onClick={() => handleOpenPrompts()}
-                    disabled={benchmarkBusy}
-                  >
-                    策略库
-                  </button>
-                  <button
-                    type="button"
-                    className="hud-btn hud-btn-ghost"
-                    onClick={() => {
-                      setSettingsDirty(false);
-                      setSettingsOpen(true);
-                    }}
-                    disabled={benchmarkBusy}
-                  >
-                    设置
-                  </button>
-                  <button
-                    type="button"
-                    className="hud-btn hud-btn-ghost"
-                    onClick={() => {
-                      clearBenchmarkResult();
-                      setBenchmarkOpen(true);
-                    }}
-                    disabled={!canOpenBenchmark}
-                    title={isLiveRunning || matchStatus === "warming_up" ? "请先暂停实时对局" : undefined}
-                  >
-                    Benchmark
-                  </button>
+                <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost match-setup-trigger"
+                  aria-haspopup="dialog"
+                  onClick={() => setMatchSetupOpen(true)}
+                >
+                  <span>对局配置</span>
+                  <span className="match-setup-summary" title={`${player1PresetName} vs ${player2PresetName}`}>
+                    <span className="red">{player1PresetName}</span>
+                    <span className="match-setup-vs">vs</span>
+                    <span className="blue">{player2PresetName}</span>
+                  </span>
+                </button>
+                {!benchmarkBusy && (
                   <button
                     onClick={isLiveRunning ? handlePauseMatch : startLiveMatch}
                     disabled={!canUsePrimaryMatchAction}
@@ -1390,28 +1234,113 @@ function App() {
                   >
                     {primaryMatchLabel}
                   </button>
-                  {benchmarkBusy && (
+                )}
+                {benchmarkBusy && (
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-stop"
+                    onClick={handleStopBenchmark}
+                    disabled={!connected || benchmarkStartPending || benchmarkStopPending}
+                  >
+                    {benchmarkStopPending ? "停止中" : "停止 Benchmark"}
+                  </button>
+                )}
+                <details
+                  className="match-options match-tools"
+                  ref={toolsMenuRef}
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.currentTarget.open = false;
+                      event.currentTarget.querySelector("summary")?.focus();
+                    }
+                  }}
+                >
+                  <summary className="hud-btn hud-btn-ghost">更多</summary>
+                  <div
+                    className="match-options-menu match-tools-menu"
+                    onClick={() => {
+                      const menu = toolsMenuRef.current;
+                      if (!menu) return;
+                      menu.open = false;
+                      menu.querySelector("summary")?.focus();
+                    }}
+                  >
                     <button
                       type="button"
-                      className="hud-btn hud-btn-stop"
-                      onClick={handleStopBenchmark}
-                      disabled={!connected || benchmarkStartPending || benchmarkStopPending}
+                      className="hud-btn hud-btn-ghost"
+                      onClick={() => setMatchesOpen(true)}
+                      disabled={!connected}
                     >
-                      {benchmarkStopPending ? "停止中" : "停止 Benchmark"}
+                      对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
                     </button>
-                  )}
-                  {canRestartLiveMatch && (
                     <button
-                      onClick={handleRestart}
-                      disabled={!canRestartLiveMatch}
+                      type="button"
+                      className="hud-btn hud-btn-ghost"
+                      onClick={() => {
+                        handleOpenPrompts();
+                      }}
+                      disabled={benchmarkBusy}
+                    >
+                      策略库
+                    </button>
+                    <button
+                      type="button"
+                      className="hud-btn hud-btn-ghost"
+                      onClick={() => {
+                        setSettingsDirty(false);
+                        setSettingsOpen(true);
+                      }}
+                      disabled={benchmarkBusy}
+                    >
+                      设置
+                    </button>
+                    <button
+                      type="button"
+                      className="hud-btn hud-btn-ghost"
+                      onClick={() => {
+                        clearBenchmarkResult();
+                        setBenchmarkOpen(true);
+                      }}
+                      disabled={!canOpenBenchmark}
+                      title={isLiveRunning || matchStatus === "warming_up" ? "请先暂停实时对局" : undefined}
+                    >
+                      Benchmark
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveRecord}
+                      disabled={!canSaveLiveMatch}
                       className="hud-btn hud-btn-ghost"
                     >
-                      重置
+                      保存记录
                     </button>
-                  )}
-                </div>
+                    {canRestartLiveMatch && (
+                      <button
+                        onClick={handleRestart}
+                        disabled={!canRestartLiveMatch}
+                        className="hud-btn hud-btn-ghost"
+                      >
+                        重置
+                      </button>
+                    )}
+                  </div>
+                </details>
               </>
+            ) : (
+              <button
+                type="button"
+                className="hud-btn hud-btn-ghost replay-source-trigger"
+                aria-haspopup="dialog"
+                onClick={() => setReplayLibraryOpen(true)}
+              >
+                <span>选择回放</span>
+                <span className="replay-source-name" title={replaySourceName ?? undefined}>{replaySourceName ?? "尚未加载记录"}</span>
+              </button>
             )}
+            <DevQuickNav />
           </div>
         </header>
 
@@ -1458,9 +1387,275 @@ function App() {
         )}
 
         {mode === "replay" && (
-          <section className="replay-toolbar">
-            <div className="hud-panel-top-corners" />
-            <div className="hud-panel-bottom-corners" />
+          <section className="replay-toolbar" aria-label="回放控制">
+            <div className="replay-controls">
+              <button
+                className={`hud-btn ${replayPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
+                onClick={() => {
+                  if (!replayPlaying && replayFrameIndex >= replayFrames.length - 1) {
+                    seekReplayFrame(0);
+                  }
+                  setReplayPlaying((value) => !value);
+                }}
+                disabled={replayFrames.length <= 1}
+              >
+                {replayPlaying ? "暂停" : "播放"}
+              </button>
+              <button
+                className="hud-btn hud-btn-ghost"
+                onClick={() => {
+                  setReplayPlaying(false);
+                  seekReplayFrame(0);
+                }}
+                disabled={replayFrames.length === 0}
+              >
+                回到开头
+              </button>
+              <label className="speed-control">
+                速度
+                <select
+                  className="replay-select speed-select"
+                  value={replaySpeed}
+                  onChange={(event) => setReplaySpeed(Number(event.target.value))}
+                  disabled={replayFrames.length <= 1}
+                >
+                  <option value={0.5}>0.5x</option>
+                  <option value={1}>1x</option>
+                  <option value={2}>2x</option>
+                  <option value={4}>4x</option>
+                </select>
+              </label>
+            </div>
+            <div className="replay-progress">
+              <input
+                aria-label="录像进度"
+                type="range"
+                min={0}
+                max={Math.max(replayFrames.length - 1, 0)}
+                step={1}
+                value={Math.min(replayFrameIndex, Math.max(replayFrames.length - 1, 0))}
+                onChange={(event) => {
+                  setReplayPlaying(false);
+                  const index = Number(event.target.value);
+                  seekReplayFrame(index);
+                }}
+                disabled={replayFrames.length <= 1}
+              />
+              <div className="replay-progress-labels">
+                <span>{formatTickTime(replayFrame?.tick ?? 0, replayTickIntervalMs)}</span>
+                {activeReplayRecord?.metadata.winner && (
+                  <span>胜者：{activeReplayRecord.metadata.winner === PLAYER_IDS.PLAYER_1 ? "红方" : "蓝方"}</span>
+                )}
+                <span>Tick {replayFrame?.tick ?? 0} / {activeReplayRecord?.finalState.tick ?? 0} · {Math.round(replayProgress * 100)}%</span>
+              </div>
+            </div>
+          </section>
+        )}
+
+        <SpectatorWorkspace
+          state={displayState}
+          timeline={mode === "replay" ? replayVisualTimeline : liveVisualTimeline}
+          tickIntervalMs={displayTickIntervalMs}
+          recordedPlayers={mode === "replay" && activeReplayRecord
+            ? activeReplayRecord.metadata.players ?? []
+            : undefined}
+          effectsResetKey={mode === "replay"
+            ? `replay:${replaySeekRevision}`
+            : `live:${observedMatch?.matchId ?? "idle"}`}
+          aiOutputs={displayAIOutputs}
+          terminalEvents={displayAITerminalEvents}
+          terminalAutoScroll={terminalAutoScroll}
+          canLoadEarlier={mode === "live" && terminalHistoryHasMore}
+          onLoadEarlier={loadEarlierTerminalEvents}
+          logs={mode === "replay" ? undefined : liveLogs}
+        />
+
+        <SettingsOverlay
+          open={mode === "live" && matchSetupOpen}
+          title="对局配置"
+          onClose={() => setMatchSetupOpen(false)}
+        >
+          <div className="match-setup-content">
+            <p className="match-setup-intro">选择双方模型与策略，准备好后启动对局。</p>
+            <div className="match-preset-bar">
+              <div className="settings-field compact match-side-setup">
+                <span>红方配置</span>
+                <div className="preset-select-row">
+                  <div className="preset-select-stack">
+                    <select
+                      aria-label="红方模型预设"
+                      className="settings-select live-preset-select red"
+                      value={player1PresetId}
+                      onChange={(event) => setPlayer1PresetId(event.target.value)}
+                      disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
+                    >
+                      <option value="">模型 · 请选择</option>
+                      {player1PresetId && !presets.some((preset) => preset.id === player1PresetId) && (
+                        <option value={player1PresetId}>模型 · 当前对局预设</option>
+                      )}
+                      {presets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
+                      ))}
+                    </select>
+                    <PromptSelector
+                      side="red"
+                      value={player1PromptId}
+                      prompts={prompts}
+                      frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_1 : undefined}
+                      onChange={setPlayer1PromptId}
+                      disabled={promptsLoading || matchSetupLocked}
+                      viewDisabled={benchmarkBusy}
+                      onView={(selection) => {
+                        setMatchSetupOpen(false);
+                        handleOpenPrompts(selection);
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_1)}`}
+                    onClick={() => handleWarmup("player_1")}
+                    disabled={!connected || !canStartLiveMatch || matchSetupLocked || warmupStatuses.player_1 === "warming_up"}
+                  >
+                    {getWarmupButtonLabel(warmupStatuses.player_1)}
+                  </button>
+                </div>
+              </div>
+              <div className="settings-field compact match-side-setup">
+                <span>蓝方配置</span>
+                <div className="preset-select-row">
+                  <div className="preset-select-stack">
+                    <select
+                      aria-label="蓝方模型预设"
+                      className="settings-select live-preset-select blue"
+                      value={player2PresetId}
+                      onChange={(event) => setPlayer2PresetId(event.target.value)}
+                      disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
+                    >
+                      <option value="">模型 · 请选择</option>
+                      {player2PresetId && !presets.some((preset) => preset.id === player2PresetId) && (
+                        <option value={player2PresetId}>模型 · 当前对局预设</option>
+                      )}
+                      {presets.map((preset) => (
+                        <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
+                      ))}
+                    </select>
+                    <PromptSelector
+                      side="blue"
+                      value={player2PromptId}
+                      prompts={prompts}
+                      frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_2 : undefined}
+                      onChange={setPlayer2PromptId}
+                      disabled={promptsLoading || matchSetupLocked}
+                      viewDisabled={benchmarkBusy}
+                      onView={(selection) => {
+                        setMatchSetupOpen(false);
+                        handleOpenPrompts(selection);
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_2)}`}
+                    onClick={() => handleWarmup("player_2")}
+                    disabled={!connected || !canStartLiveMatch || matchSetupLocked || warmupStatuses.player_2 === "warming_up"}
+                  >
+                    {getWarmupButtonLabel(warmupStatuses.player_2)}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="match-setup-options">
+              <label className="settings-field compact">
+                <span>记录档位</span>
+                <select
+                  className="settings-select"
+                  value={recordingProfile}
+                  onChange={(event) => setRecordingProfile(event.target.value as MatchRecordingProfile)}
+                  disabled={matchSetupLocked}
+                >
+                  <option value="off">关闭</option>
+                  <option value="replay">回放</option>
+                  <option value="evaluation">评估</option>
+                </select>
+              </label>
+              <label className="benchmark-inline-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={includeTranscript}
+                  onChange={(event) => setIncludeTranscript(event.target.checked)}
+                  disabled={matchSetupLocked || recordingProfile !== "evaluation"}
+                />
+                完整 transcript
+              </label>
+              <div className="match-options-section">
+                <span className="match-options-section-title">AI 策略沉淀</span>
+                <label className="benchmark-inline-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={player1ReflectAfterMatch}
+                    onChange={(event) => setPlayer1ReflectAfterMatch(event.target.checked)}
+                    disabled={matchSetupLocked}
+                  />
+                  红方赛后自动沉淀
+                </label>
+                <label className="benchmark-inline-toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={player2ReflectAfterMatch}
+                    onChange={(event) => setPlayer2ReflectAfterMatch(event.target.checked)}
+                    disabled={matchSetupLocked}
+                  />
+                  蓝方赛后自动沉淀
+                </label>
+                <small className="settings-help">每方额外调用一次对应模型。未选策略时创建新策略；已选时生成待采用版本。</small>
+              </div>
+            </div>
+            <div className="match-setup-footer">
+              <div className="match-setup-links">
+                <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
+                  disabled={benchmarkBusy}
+                  onClick={() => {
+                    setMatchSetupOpen(false);
+                    handleOpenPrompts();
+                  }}
+                >
+                  策略库
+                </button>
+                <button
+                  type="button"
+                  className="hud-btn hud-btn-ghost"
+                  disabled={benchmarkBusy}
+                  onClick={() => {
+                    setMatchSetupOpen(false);
+                    setSettingsDirty(false);
+                    setSettingsOpen(true);
+                  }}
+                >
+                  模型设置
+                </button>
+              </div>
+              <button
+                onClick={isLiveRunning ? handlePauseMatch : startLiveMatch}
+                disabled={!canUsePrimaryMatchAction}
+                className={`hud-btn ${isLiveRunning ? "hud-btn-stop" : "hud-btn-start"}`}
+              >
+                {primaryMatchLabel}
+              </button>
+            </div>
+            {!hasSelectedLivePresets && <p className="settings-help">请先选择双方模型。没有可选模型时，可在「模型设置」中添加。</p>}
+            {mode === "live" && warmupMessage && <p className="settings-help">{warmupMessage}</p>}
+          </div>
+        </SettingsOverlay>
+
+        <SettingsOverlay
+          open={mode === "replay" && replayLibraryOpen}
+          title="选择回放"
+          onClose={() => setReplayLibraryOpen(false)}
+        >
+          <div className="replay-library-content">
             <div className="replay-toolbar-top">
               <div className="replay-loader">
                 <label className="replay-label">
@@ -1494,155 +1689,9 @@ function App() {
               </label>
             </div>
 
-            <div className="replay-toolbar-bottom">
-              <div className="replay-meta">
-                <span className="replay-meta-chip">
-                  源文件: {replaySourceName ?? "未加载"}
-                </span>
-                <span className="replay-meta-chip">
-                  Tick: {replayFrame?.tick ?? 0} / {activeReplayRecord?.finalState.tick ?? 0}
-                </span>
-                <span className="replay-meta-chip">
-                  时间: {formatTickTime(replayFrame?.tick ?? 0, replayTickIntervalMs)}
-                </span>
-                {activeReplayRecord?.metadata.winner && (
-                  <span className="replay-meta-chip">
-                    胜者: {activeReplayRecord.metadata.winner === "player_1" ? "红方" : "蓝方"}
-                  </span>
-                )}
-              </div>
-
-              <div className="replay-controls">
-                <button
-                  className={`hud-btn ${replayPlaying ? "hud-btn-stop" : "hud-btn-start"}`}
-                  onClick={() => {
-                    if (!replayPlaying && replayFrameIndex >= replayFrames.length - 1) {
-                      seekReplayFrame(0);
-                    }
-                    setReplayPlaying((value) => !value);
-                  }}
-                  disabled={replayFrames.length <= 1}
-                >
-                  {replayPlaying ? "暂停" : "播放"}
-                </button>
-                <button
-                  className="hud-btn hud-btn-ghost"
-                  onClick={() => {
-                    setReplayPlaying(false);
-                    seekReplayFrame(0);
-                  }}
-                  disabled={replayFrames.length === 0}
-                >
-                  回到开头
-                </button>
-                <label className="speed-control">
-                  速度
-                  <select
-                    className="replay-select speed-select"
-                    value={replaySpeed}
-                    onChange={(event) => setReplaySpeed(Number(event.target.value))}
-                    disabled={replayFrames.length <= 1}
-                  >
-                    <option value={0.5}>0.5x</option>
-                    <option value={1}>1x</option>
-                    <option value={2}>2x</option>
-                    <option value={4}>4x</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-
-            <div className="replay-progress">
-              <input
-                type="range"
-                aria-label="录像进度"
-                min={0}
-                max={Math.max(replayFrames.length - 1, 0)}
-                step={1}
-                value={Math.min(replayFrameIndex, Math.max(replayFrames.length - 1, 0))}
-                onChange={(event) => {
-                  setReplayPlaying(false);
-                  const index = Number(event.target.value);
-                  seekReplayFrame(index);
-                }}
-                disabled={replayFrames.length <= 1}
-              />
-              <div className="replay-progress-labels">
-                <span>0%</span>
-                <span>{Math.round(replayProgress * 100)}%</span>
-                <span>100%</span>
-              </div>
-            </div>
-          </section>
-        )}
-
-        <div className="dashboard">
-          <div className="stats-col">
-            <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
-              <div className="hud-panel-top-corners" />
-              <div className="hud-panel-bottom-corners" />
-              <div className="panel-header">
-                <span className="panel-header-accent accent-amber">观战情报</span>
-              </div>
-              <StatsPanel
-                state={displayState}
-                tickIntervalMs={displayTickIntervalMs}
-                recordedPlayers={mode === "replay" && activeReplayRecord
-                  ? activeReplayRecord.metadata.players ?? []
-                  : undefined}
-              />
-            </div>
+            {visibleReplayError && <p className="status-error">{visibleReplayError}</p>}
           </div>
-
-          <div className="tactical-col">
-            <div className="hud-panel">
-              <div className="hud-panel-top-corners" />
-              <div className="hud-panel-bottom-corners" />
-              <div className="scanlines" />
-              <div className="viewport-data-lines">
-                <span className="data-line dl-tl" />
-                <span className="data-line dl-tr" />
-                <span className="data-line dl-bl" />
-                <span className="data-line dl-br" />
-              </div>
-              <div className="viewport">
-                <Battlefield3D
-                  state={displayState}
-                  timeline={mode === "replay" ? replayVisualTimeline : liveVisualTimeline}
-                  effectsResetKey={mode === "replay"
-                    ? `replay:${replaySeekRevision}`
-                    : `live:${observedMatch?.matchId ?? "idle"}`}
-                />
-              </div>
-            </div>
-
-            <div className="hud-panel">
-              <div className="hud-panel-top-corners" />
-              <div className="hud-panel-bottom-corners" />
-              <div className="panel-header">
-                <span className="panel-header-accent accent-amber">战术日志</span>
-              </div>
-              <GameLog state={displayState} logs={mode === "replay" ? undefined : liveLogs} />
-            </div>
-          </div>
-
-          <div className="terminal-col">
-            <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
-              <div className="hud-panel-top-corners" />
-              <div className="hud-panel-bottom-corners" />
-              <div className="panel-header">
-                <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
-              </div>
-              <AIOutputPanel
-                aiOutputs={displayAIOutputs}
-                events={displayAITerminalEvents}
-                autoScroll={terminalAutoScroll}
-                canLoadEarlier={mode === "live" && terminalHistoryHasMore}
-                onLoadEarlier={loadEarlierTerminalEvents}
-              />
-            </div>
-          </div>
-        </div>
+        </SettingsOverlay>
 
         <SettingsOverlay
           open={mode === "live" && matchesOpen}

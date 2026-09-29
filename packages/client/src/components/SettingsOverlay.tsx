@@ -9,6 +9,7 @@ interface SettingsOverlayProps {
 
 export function SettingsOverlay({ open, title, onClose, children }: SettingsOverlayProps) {
   const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
 
@@ -26,6 +27,23 @@ export function SettingsOverlay({ open, title, onClose, children }: SettingsOver
       if (event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
+        return;
+      }
+      if (event.key === "Tab") {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+        const focusableElements = Array.from(dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], summary, input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )).filter((element) => element.getClientRects().length > 0);
+        const first = focusableElements[0];
+        const last = focusableElements.at(-1);
+        if (!first || !last) return;
+        if (!dialog.contains(document.activeElement)
+          || (event.shiftKey && document.activeElement === first)
+          || (!event.shiftKey && document.activeElement === last)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -48,6 +66,7 @@ export function SettingsOverlay({ open, title, onClose, children }: SettingsOver
       }}
     >
       <div
+        ref={dialogRef}
         className="settings-dialog hud-panel"
         role="dialog"
         aria-modal="true"

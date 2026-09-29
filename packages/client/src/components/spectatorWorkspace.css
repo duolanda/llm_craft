@@ -1,0 +1,256 @@
+.spectator-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 6px;
+}
+
+.spectator-toolbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-height: 36px;
+  gap: 16px;
+  padding: 0 2px;
+}
+
+.spectator-clock {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.spectator-clock strong {
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.spectator-kicker {
+  padding-left: 8px;
+  border-left: 3px solid var(--accent-green);
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+.spectator-scoreboard,
+.spectator-score {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.spectator-scoreboard {
+  gap: 20px;
+  margin-inline: auto;
+}
+
+.spectator-score {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.spectator-score b {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.spectator-side {
+  font-weight: 600;
+}
+
+.spectator-score.red .spectator-side { color: var(--accent-red); }
+.spectator-score.blue .spectator-side { color: var(--accent-cyan); }
+
+.spectator-panel-switch {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.spectator-panel-button,
+.inspector-close {
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.spectator-panel-button:hover,
+.inspector-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.spectator-panel-button.active {
+  border-color: rgba(0, 229, 255, 0.2);
+  background: rgba(0, 229, 255, 0.08);
+  color: var(--accent-cyan);
+}
+
+.spectator-focus {
+  margin-left: 4px;
+  border-color: var(--border-base);
+}
+
+.spectator-focus.active {
+  border-color: var(--border-highlight);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-primary);
+}
+
+.spectator-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+
+.spectator-content.with-panel {
+  grid-template-columns: minmax(0, 1fr) 340px;
+}
+
+.battlefield-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.battlefield-panel .battlefield-3d {
+  min-height: 0;
+}
+
+.spectator-inspector {
+  min-height: 0;
+  min-width: 0;
+}
+
+.spectator-inspector > .panel-header {
+  flex-shrink: 0;
+  padding: 7px 12px;
+}
+
+.inspector-close {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.spectator-panel-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.spectator-workspace [hidden] {
+  display: none;
+}
+
+.spectator-panel-body > .spectator-overview,
+.spectator-panel-body > .log-terminal {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.spectator-panel-body .log-entry {
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.spectator-panel-body .log-msg {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .spectator-tick {
+    display: none;
+  }
+
+  .spectator-scoreboard {
+    gap: 14px;
+  }
+
+  .spectator-score {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 900px) {
+  .spectator-content.with-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .spectator-inspector {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 100;
+    width: min(360px, 100%);
+    background: rgba(13, 16, 20, 0.97);
+    box-shadow: -16px 0 40px rgba(0, 0, 0, 0.4);
+  }
+
+  .spectator-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .spectator-scoreboard {
+    order: 1;
+    justify-content: center;
+    width: 100%;
+    padding-bottom: 4px;
+    gap: 24px;
+  }
+}
+
+@media (max-width: 480px) {
+  .spectator-kicker {
+    display: none;
+  }
+
+  .spectator-clock {
+    padding-left: 4px;
+  }
+
+  .spectator-panel-button {
+    padding-inline: 8px;
+    font-size: 11px;
+  }
+
+  .spectator-scoreboard {
+    gap: 16px;
+  }
+
+  .spectator-score,
+  .spectator-score b {
+    font-size: 10px;
+  }
+}

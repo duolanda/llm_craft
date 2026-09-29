@@ -103,6 +103,63 @@ describe("ModelTransport", () => {
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { baseURL: "https://opencode.ai/zen/go/v1/", field: "reasoning", replayField: "reasoning_content" },
+    { baseURL: "https://example.test/v1", field: "reasoning", replayField: "reasoning" },
+    { baseURL: "https://example.test/v1", field: "reasoning_content", replayField: "reasoning_content" },
+    { baseURL: "https://example.test/v1", field: "reasoning_text", replayField: "reasoning_text" },
+    { baseURL: "https://opencode.ai.example.test/zen/go/v1", field: "reasoning", replayField: "reasoning" },
+  ])("round-trips $field at $baseURL without changing the session history", async ({ baseURL, field, replayField }) => {
+    const transport = new OpenAICompatibleModelTransport({ providerType: "openai-compatible", apiKey: "test-key", model: "test-model", baseURL });
+    const details = [{ type: "reasoning.encrypted", data: "opaque-test-data", signature: "opaque-signature" }];
+    const message = {
+      role: "assistant", content: null, [field]: "test reasoning", reasoning_details: details,
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: "{}" } }],
+    };
+    const create = vi.fn(async (_request: unknown) => ({
+      choices: [{ finish_reason: "tool_calls", message }],
+    }));
+    Object.defineProperty(transport, "client", { value: { chat: { completions: { create } } } });
+
+    const response = await transport.complete(createRequest());
+    expect(response.message).toEqual(message);
+    const messages = [response.message, { role: "tool", tool_call_id: "call-1", content: "result" }];
+    const original = structuredClone(messages);
+    await transport.complete({ ...createRequest(), messages });
+
+    const sent = create.mock.calls[1]![0] as { messages: Array<Record<string, unknown>> };
+    expect(sent.messages[0]).toMatchObject({ [replayField]: "test reasoning", reasoning_details: details });
+    if (replayField !== field) expect(sent.messages[0]).not.toHaveProperty(field);
+    expect(messages).toEqual(original);
+  });
+
+  it("filters empty assistant history at the request boundary without breaking tool pairs", async () => {
+    const transport = new OpenAICompatibleModelTransport({ providerType: "openai-compatible", apiKey: "test-key", model: "test-model", baseURL: "https://example.test/v1" });
+    const create = vi.fn(async (_request: unknown) => ({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "done" } }],
+    }));
+    Object.defineProperty(transport, "client", { value: { chat: { completions: { create } } } });
+    const user = { role: "user", content: "test" };
+    const declaration = {
+      role: "assistant", content: null, reasoning_content: "test reasoning",
+      tool_calls: [{ id: "call-1", function: { name: "read", arguments: "{}" } }],
+    };
+    const result = { role: "tool", tool_call_id: "call-1", content: "result" };
+    const messages = [user, declaration, result,
+      { role: "assistant", content: null },
+      { role: "assistant", content: " \n ", tool_calls: [] },
+      { role: "assistant", content: [], reasoning: "unfinished reasoning only" },
+      { role: "assistant", content: [{ type: "text", text: "" }] },
+      user,
+    ];
+    const original = structuredClone(messages);
+
+    await transport.complete({ ...createRequest(), messages });
+
+    expect((create.mock.calls[0]![0] as { messages: unknown[] }).messages).toEqual([user, declaration, result, user]);
+    expect(messages).toEqual(original);
+  });
+
   it("does not start a queued request after its signal is aborted", async () => {
     vi.useFakeTimers();
     const complete = vi.fn(async () => createResult());

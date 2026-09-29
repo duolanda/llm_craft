@@ -6,6 +6,7 @@ import {
   AITurnRecord,
   GameState,
   MatchLLMConfig,
+  MatchPromptSnapshot,
   PlayerId,
   PLAYER_IDS,
   SavedAITurnRecord,
@@ -21,6 +22,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Game } from "./Game";
 import { SubAgentParentContext } from "./LLMProvider";
+import type { PromptReflectionOptions, PromptReflectionResult } from "./PromptReflection";
 import { createSystemPrompt } from "./SystemPrompt";
 import { GameplayController } from "./controller/GameplayController";
 import type { AgentRuntimeResult } from "./agent/AgentRuntime";
@@ -67,6 +69,10 @@ export interface GameOrchestratorRuntimeOptions {
 }
 
 export type GameOrchestratorConfig = MatchLLMConfig & {
+  strategyPrompts?: Partial<Record<PlayerId, {
+    content: string;
+    snapshot: MatchPromptSnapshot;
+  }>>;
   runtime?: GameOrchestratorRuntimeOptions;
 };
 
@@ -75,6 +81,7 @@ export class GameOrchestrator {
   private readonly matchRuntime: MatchRuntime;
   private controllerByPlayer: ControllerMap;
   private readonly systemPromptByPlayer: Record<PlayerId, string>;
+  private readonly strategyPromptSnapshots: Partial<Record<PlayerId, MatchPromptSnapshot>>;
   private gameplayControllerByPlayer: GameplayControllerMap;
   private readonly cpuDecisionIntervalTicks: number;
   private lastAIDispatchTick = { player_1: -1, player_2: -1 };
@@ -123,9 +130,12 @@ export class GameOrchestrator {
       }),
     };
     const definition = this.matchRuntime.getDefinition();
+    this.strategyPromptSnapshots = Object.fromEntries(
+      Object.entries(config.strategyPrompts ?? {}).map(([playerId, prompt]) => [playerId, prompt.snapshot]),
+    ) as Partial<Record<PlayerId, MatchPromptSnapshot>>;
     this.systemPromptByPlayer = {
-      player_1: createSystemPrompt(definition, PLAYER_IDS.PLAYER_1),
-      player_2: createSystemPrompt(definition, PLAYER_IDS.PLAYER_2),
+      player_1: createSystemPrompt(definition, PLAYER_IDS.PLAYER_1, config.strategyPrompts?.player_1?.content),
+      player_2: createSystemPrompt(definition, PLAYER_IDS.PLAYER_2, config.strategyPrompts?.player_2?.content),
     };
     this.controllerByPlayer = {
       player_1: createDecisionController(PLAYER_IDS.PLAYER_1, config.player1, this.gameplayControllerByPlayer.player_1, this.systemPromptByPlayer.player_1),
@@ -385,6 +395,25 @@ export class GameOrchestrator {
     return this.matchRuntime.waitForEnd();
   }
 
+  async reflectPrompt(playerId: PlayerId, options?: PromptReflectionOptions): Promise<PromptReflectionResult> {
+    options?.signal?.throwIfAborted();
+    const state = this.game.getState();
+    if (this.getMatchStatus() !== "finished" || !state.winner) {
+      throw new Error("PROMPT_REFLECTION_MATCH_NOT_FINISHED");
+    }
+    const controller = this.controllerByPlayer[playerId];
+    if (!controller.reflectPrompt) throw new Error("PROMPT_REFLECTION_SESSION_UNAVAILABLE");
+    // The final game request may still be unwinding after the victory tick.
+    // Wait for its history checkpoint before continuing the same session.
+    await this.quiesce(options?.signal);
+    options?.signal?.throwIfAborted();
+    return controller.reflectPrompt({
+      playerId,
+      winner: state.winner,
+      finalTick: state.tick,
+    }, options);
+  }
+
   private handleCommittedTick(state: GameState, sessionId: number): void {
     if (!this.isStarted || sessionId !== this.runSession) return;
     for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
@@ -453,9 +482,10 @@ export class GameOrchestrator {
     this.unsubscribeEnded = null;
   }
 
-  async quiesce(): Promise<void> {
+  async quiesce(signal?: AbortSignal): Promise<void> {
     this.stop();
     for (let attempt = 0; attempt < 3_000; attempt++) {
+      signal?.throwIfAborted();
       if (
         !this.isRunningAI.player_1
         && !this.isRunningAI.player_2
@@ -546,6 +576,7 @@ export class GameOrchestrator {
       startedAt: this.startedAt,
       recording: this.recording,
       systemPrompt: JSON.stringify(this.systemPromptByPlayer),
+      strategyPrompts: structuredClone(this.strategyPromptSnapshots),
       players: [
         {
           playerId: PLAYER_IDS.PLAYER_1,

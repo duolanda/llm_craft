@@ -3,9 +3,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GameState } from "@llmcraft/shared";
+import { GameState, type ClientMessage, type PlayerId } from "@llmcraft/shared";
+import type WebSocket from "ws";
 import { PresetStore } from "../PresetStore";
+import { PromptStore } from "../PromptStore";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
+import type { PromptReflectionOptions, PromptReflectionResult } from "../PromptReflection";
 import {
   buildStateMessagePayload,
   createPresetStore,
@@ -29,6 +32,36 @@ async function createStore() {
     filePath: path.join(dir, "llm-presets.json"),
     encryptionSecret: "0123456789abcdef0123456789abcdef",
   });
+}
+
+async function createPromptStore() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-server-prompts-"));
+  tempDirs.push(dir);
+  return new PromptStore({ filePath: path.join(dir, "strategy-prompts.json") });
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+async function createReflectionFixture(reflectPrompt: (playerId: PlayerId, options?: PromptReflectionOptions) => Promise<PromptReflectionResult>) {
+  const promptStore = await createPromptStore();
+  const state = createServerState(await createStore(), undefined, undefined, promptStore);
+  const matchId = "match_cancellable_reflection";
+  const orchestrator = {
+    getMatchId: () => matchId, getMatchStatus: () => "finished" as const,
+    getGame: () => ({ getState: () => ({ ...createMockGameState(88), winner: "player_1" as const }) }),
+    reflectPrompt, stop: vi.fn(), saveRecord: vi.fn(async () => "unused.match.json"),
+  };
+  state.matchRegistry.register(orchestrator, { kind: "live", observe: true });
+  const ws = { send: vi.fn() };
+  const send = (message: ClientMessage) => handleClientMessage({ data: JSON.stringify(message), ws: ws as unknown as WebSocket, state });
+  const statuses = () => buildStateMessagePayload(state).observedMatch?.promptReflections;
+  return { state, promptStore, matchId, ws, send, statuses };
 }
 
 function createRequest({
@@ -301,6 +334,101 @@ describe("server settings", () => {
     expect(response.payload).toContain("高级请求参数不能覆盖 model");
   });
 
+  it("supports named strategy prompt revisions through HTTP", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const state = createServerState(presetStore, undefined, undefined, promptStore);
+
+    const createResponse = createResponseCapture();
+    await handleHttpRequest(createRequest({
+      method: "POST",
+      url: "/api/prompts",
+      body: JSON.stringify({ name: "Rush", content: "Attack early." }),
+    }), createResponse.res, state);
+    expect(createResponse.statusCode).toBe(201);
+    const created = JSON.parse(createResponse.payload) as { prompt: { id: string; activeVersionId: string } };
+
+    const updateResponse = createResponseCapture();
+    await handleHttpRequest(createRequest({
+      method: "PUT",
+      url: `/api/prompts/${created.prompt.id}`,
+      body: JSON.stringify({ content: "Scout, then attack early." }),
+    }), updateResponse.res, state);
+    const updated = JSON.parse(updateResponse.payload) as { prompt: { versions: Array<{ id: string }> } };
+    expect(updated.prompt.versions).toHaveLength(2);
+
+    const activateResponse = createResponseCapture();
+    await handleHttpRequest(createRequest({
+      method: "POST",
+      url: `/api/prompts/${created.prompt.id}/versions/${created.prompt.activeVersionId}/activate`,
+    }), activateResponse.res, state);
+    expect(JSON.parse(activateResponse.payload)).toMatchObject({
+      prompt: { activeVersionId: created.prompt.activeVersionId },
+    });
+  });
+
+  it("exposes reflection provenance for edited revisions without changing the prompt", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const created = await promptStore.createFromReflection({ name: "侦察后推进", content: "Scout first.", model: "reflection-model", matchId: "match_not_recorded", playerId: "player_2" });
+    const edited = await promptStore.update(created.id, { content: "先侦察再推进。" });
+    const state = createServerState(presetStore, undefined, undefined, promptStore);
+    const response = createResponseCapture();
+
+    await handleHttpRequest(createRequest({ method: "GET", url: `/api/prompts/${created.id}/provenance` }), response.res, state);
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.payload)).toMatchObject({ provenance: {
+      [edited.activeVersionId]: { sourceVersionId: created.activeVersionId, sourceVersion: 1, model: "reflection-model", matchId: "match_not_recorded", playerId: "player_2" },
+    } });
+    expect(await promptStore.list()).toEqual([edited]);
+
+    const missingResponse = createResponseCapture();
+    await handleHttpRequest(createRequest({ method: "GET", url: "/api/prompts/missing/provenance" }), missingResponse.res, state);
+    expect(missingResponse.statusCode).toBe(404);
+  });
+
+  it("does not delete a prompt frozen into a running or paused live match", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const prompt = await promptStore.create({ name: "Protected", content: "Hold the line." });
+    const version = prompt.versions[0]!;
+    const state = createServerState(presetStore, undefined, undefined, promptStore);
+    state.matchRegistry.register({
+      getMatchId: () => "match_using_prompt",
+      getMatchStatus: () => "stopped",
+      getGame: () => ({ getState: () => createMockGameState(12) }),
+      stop: vi.fn(),
+      saveRecord: vi.fn(async () => "logs/records/protected.match.json"),
+    }, {
+      kind: "live",
+      liveSetup: {
+        player1PresetId: "preset-red",
+        player2PresetId: "preset-blue",
+        prompts: {
+          player_1: {
+            promptId: prompt.id,
+            promptName: prompt.name,
+            versionId: version.id,
+            version: version.version,
+          },
+        },
+        recordingProfile: "evaluation",
+        includeTranscript: false,
+      },
+    });
+
+    const response = createResponseCapture();
+    await handleHttpRequest(createRequest({
+      method: "DELETE",
+      url: `/api/prompts/${prompt.id}`,
+    }), response.res, state);
+
+    expect(response.statusCode).toBe(409);
+    expect(response.payload).toContain("正在被运行中或暂停中的对局使用");
+    expect(await promptStore.list()).toHaveLength(1);
+  });
+
   it("rejects start when a preset id is missing", async () => {
     const presetStore = await createStore();
     const state = createServerState(presetStore);
@@ -395,6 +523,412 @@ describe("server settings", () => {
       recordingProfile: "evaluation",
       includeTranscript: false,
     });
+  });
+
+  it("binds an exact prompt revision and saves post-match reflection as an inactive version", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const preset = await presetStore.create({
+      name: "Model",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.test/v1",
+      model: "model-one",
+      apiKey: "token",
+    });
+    const prompt = await promptStore.create({ name: "Rush", content: "Attack early." });
+    const version = prompt.versions[0]!;
+    const ended = createDeferred<{ status: string; state: GameState }>();
+    const reflectPrompt = vi.fn(async () => ({ title: "侦察后推进", content: "Scout before the early attack.", model: "model-one" }));
+    const createOrchestrator = vi.fn((config) => ({
+      getMatchId: () => "match_prompt",
+      getMatchStatus: () => "running" as const,
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(),
+      waitForEnd: () => ended.promise,
+      reflectPrompt,
+      saveRecord: vi.fn(async () => "logs/records/prompt.match.json"),
+      getGame: () => ({ getState: () => createMockGameState(0) }),
+      config,
+    }));
+    const state = createServerState(presetStore, createOrchestrator, undefined, promptStore);
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: preset.id,
+        player2PresetId: preset.id,
+        prompts: {
+          player_1: {
+            promptId: prompt.id,
+            versionId: version.id,
+          },
+        },
+        promptReflection: { player_1: true },
+      }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(createOrchestrator).toHaveBeenCalledWith(expect.objectContaining({
+      strategyPrompts: {
+        player_1: {
+          content: "Attack early.",
+          snapshot: expect.objectContaining({
+            promptId: prompt.id,
+            versionId: version.id,
+            version: 1,
+          }),
+        },
+      },
+    }));
+
+    const finalState = { ...createMockGameState(42), winner: "player_1" as const };
+    ended.resolve({ status: "finished", state: finalState });
+    await vi.waitFor(() => expect(reflectPrompt).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => {
+      const stored = (await promptStore.list())[0];
+      expect(stored?.versions).toHaveLength(2);
+    });
+
+    const stored = (await promptStore.list())[0]!;
+    expect(stored.activeVersionId).toBe(version.id);
+    expect(stored.versions[1]).toMatchObject({
+      source: "reflection",
+      content: "Scout before the early attack.",
+      basedOnVersionId: version.id,
+      matchId: "match_prompt",
+      playerId: "player_1",
+    });
+    expect(reflectPrompt).toHaveBeenCalledWith("player_1", expect.objectContaining({ signal: expect.any(AbortSignal), onRetry: expect.any(Function) }));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"status":"completed"'));
+  });
+
+  it("creates a strategy-library entry from reflection when the match used the default strategy", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const preset = await presetStore.create({
+      name: "Model",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.test/v1",
+      model: "model-one",
+      apiKey: "token",
+    });
+    const ended = createDeferred<{ status: string; state: GameState }>();
+    const reflectPrompt = vi.fn(async () => ({
+      title: "侦察后反制",
+      content: "Keep early vision and counter the revealed army composition.",
+      model: "model-one",
+    }));
+    const createOrchestrator = vi.fn((config) => ({
+      getMatchId: () => "match_seed_prompt",
+      getMatchStatus: () => "running" as const,
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(),
+      quiesce: vi.fn(async () => undefined),
+      waitForEnd: () => ended.promise,
+      reflectPrompt,
+      saveRecord: vi.fn(async () => "logs/records/seed-prompt.match.json"),
+      getGame: () => ({ getState: () => createMockGameState(0) }),
+      config,
+    }));
+    const state = createServerState(presetStore, createOrchestrator, undefined, promptStore);
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({
+        type: "start",
+        player1PresetId: preset.id,
+        player2PresetId: preset.id,
+        promptReflection: { player_1: true },
+      }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(createOrchestrator.mock.calls[0]?.[0]).not.toHaveProperty("strategyPrompts");
+    ended.resolve({
+      status: "finished",
+      state: { ...createMockGameState(31), winner: "player_2" },
+    });
+    await vi.waitFor(async () => {
+      expect(await promptStore.list()).toHaveLength(1);
+    });
+
+    const [created] = await promptStore.list();
+    expect(created?.name).toBe("侦察后反制");
+    expect(created?.versions[0]).toMatchObject({
+      source: "reflection",
+      content: "Keep early vision and counter the revealed army composition.",
+      title: "侦察后反制",
+      model: "model-one",
+      matchId: "match_seed_prompt",
+      playerId: "player_1",
+    });
+    expect(reflectPrompt).toHaveBeenCalledWith("player_1", expect.objectContaining({ signal: expect.any(AbortSignal), onRetry: expect.any(Function) }));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining("已将本局经验沉淀为新策略"));
+  });
+
+  it("continues the completed match after preset deletion and deduplicates running and completed reflections", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const preset = await presetStore.create({
+      name: "Model",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.test/v1",
+      model: "model-one",
+      apiKey: "token",
+    });
+    const finalState = { ...createMockGameState(88), winner: "player_2" as const };
+    const reflection = createDeferred<{ title: string; content: string; model: string }>();
+    const reflectPrompt = vi.fn(() => reflection.promise);
+    const state = createServerState(presetStore, undefined, undefined, promptStore);
+    const orchestrator = {
+      getMatchId: () => "match_posthoc_reflection",
+      getMatchStatus: () => "finished" as const,
+      getGame: () => ({ getState: () => finalState }),
+      reflectPrompt,
+      stop: vi.fn(),
+      saveRecord: vi.fn(async () => "logs/records/posthoc-reflection.match.json"),
+    };
+    state.matchRegistry.register(orchestrator, {
+      kind: "live",
+      observe: true,
+      liveSetup: {
+        player1PresetId: preset.id,
+        player2PresetId: preset.id,
+        recordingProfile: "evaluation",
+        includeTranscript: false,
+      },
+    });
+    const ws = { send: vi.fn() };
+    const request = JSON.stringify({
+      type: "reflect_prompt",
+      matchId: "match_posthoc_reflection",
+      playerId: "player_1",
+    });
+
+    await presetStore.delete(preset.id);
+    await handleClientMessage({ data: request, ws: ws as any, state });
+    await handleClientMessage({ data: request, ws: ws as any, state });
+    expect(reflectPrompt).toHaveBeenCalledTimes(1);
+    reflection.resolve({ title: "反制进攻节奏", content: "Turn the observed enemy timing into a reusable counter-plan.", model: "model-one" });
+    await vi.waitFor(async () => expect(await promptStore.list()).toHaveLength(1));
+    await handleClientMessage({ data: request, ws: ws as any, state });
+
+    expect(reflectPrompt).toHaveBeenCalledTimes(1);
+    expect(reflectPrompt).toHaveBeenCalledWith("player_1", expect.objectContaining({ signal: expect.any(AbortSignal), onRetry: expect.any(Function) }));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"status":"running"'));
+    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('"status":"completed"'));
+    expect(buildStateMessagePayload(state).observedMatch?.promptReflections?.player_1)
+      .toMatchObject({ status: "completed", playerId: "player_1" });
+  });
+
+  it("projects safe retry progress, cancels only the requested side and ignores its late result", async () => {
+    const pending = { player_1: createDeferred<PromptReflectionResult>(), player_2: createDeferred<PromptReflectionResult>() };
+    const reflectPrompt = vi.fn((playerId: PlayerId, _options?: PromptReflectionOptions) => pending[playerId].promise);
+    const { state, promptStore, matchId, ws, send, statuses } = await createReflectionFixture(reflectPrompt);
+    const request = { type: "reflect_prompt", matchId, playerId: "player_1" } as const;
+    await send(request);
+    await send({ ...request, playerId: "player_2" });
+    const red = reflectPrompt.mock.calls[0]![1]!;
+    const blue = reflectPrompt.mock.calls[1]![1]!;
+    expect(red.signal).not.toBe(blue.signal);
+    const progress = { phase: "waiting" as const, attempt: 2, maxAttempts: 3, delayMs: 4000, error: new Error("Connection error: private-provider-secret") };
+    red.onRetry?.(progress);
+    expect(statuses()?.player_1).toMatchObject({ status: "running", canCancel: true });
+    expect(statuses()?.player_1?.message).toContain("4 秒后重试（2/3）");
+    expect(JSON.stringify(statuses())).not.toContain("private-provider-secret");
+    red.onRetry?.({ ...progress, phase: "retrying", delayMs: 0 });
+    expect(statuses()?.player_1?.message).toContain("正在重试策略沉淀（2/3）");
+    await send({ ...request, type: "cancel_prompt_reflection", matchId: "another-match" });
+    expect(red.signal?.aborted).toBe(false);
+    await send({ ...request, type: "cancel_prompt_reflection" });
+    expect(red.signal?.aborted).toBe(true);
+    expect(blue.signal?.aborted).toBe(false);
+    expect(statuses()?.player_1).toMatchObject({ status: "running", canCancel: false });
+    await send(request);
+    expect(reflectPrompt).toHaveBeenCalledTimes(2); // Still locked while the aborted call unwinds.
+    pending.player_1.resolve({ title: "迟到结果", content: "不能保存", model: "test-model" });
+    await vi.waitFor(() => expect(statuses()?.player_1?.status).toBe("cancelled"));
+    red.onRetry?.(progress); // A late callback must not resurrect the cancelled job.
+    expect(statuses()?.player_1?.status).toBe("cancelled");
+    expect(await promptStore.list()).toHaveLength(0);
+    expect(state.promptReflectionControllers.size).toBe(1);
+
+    // A disconnected initiating socket does not cancel the other side's work.
+    ws.send.mockImplementation(() => { throw new Error("closed socket"); });
+    pending.player_2.resolve({ title: "蓝方策略", content: "蓝方结果", model: "test-model" });
+    await vi.waitFor(() => expect(statuses()?.player_2?.status).toBe("completed"));
+    expect(await promptStore.list()).toHaveLength(1);
+    ws.send.mockImplementation(() => undefined);
+    reflectPrompt.mockResolvedValueOnce({ title: "重新复盘", content: "红方重试结果", model: "test-model" });
+    await send(request);
+    await vi.waitFor(() => expect(statuses()?.player_1?.status).toBe("completed"));
+    expect(await promptStore.list()).toHaveLength(2);
+    expect(state.promptReflectionControllers.size).toBe(0);
+  });
+
+  it("does not claim cancellation once persistence has started, or write a duplicate version", async () => {
+    const reflectPrompt = vi.fn(async () => ({ title: "稳健推进", content: "策略正文", model: "test-model" }));
+    const { state, promptStore, matchId, send, statuses } = await createReflectionFixture(reflectPrompt);
+    const saveGate = createDeferred<void>();
+    const persist = promptStore.createFromReflection.bind(promptStore);
+    const save = vi.spyOn(promptStore, "createFromReflection").mockImplementation(async (input) => {
+      await saveGate.promise;
+      return persist(input);
+    });
+    const request = { type: "reflect_prompt", matchId, playerId: "player_1" } as const;
+    await send(request);
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(statuses()?.player_1).toMatchObject({ status: "running", canCancel: false });
+    expect(state.promptReflectionControllers.size).toBe(0);
+    await send({ ...request, type: "cancel_prompt_reflection" });
+    await send(request);
+    expect(statuses()?.player_1?.status).toBe("running");
+    expect(reflectPrompt).toHaveBeenCalledOnce();
+    saveGate.resolve();
+    await vi.waitFor(() => expect(statuses()?.player_1?.status).toBe("completed"));
+    await send({ ...request, type: "cancel_prompt_reflection" });
+    expect(statuses()?.player_1?.status).toBe("completed");
+    expect(await promptStore.list()).toHaveLength(1);
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it("reports exhausted retries without leaking provider content or changing the library", async () => {
+    const reflectPrompt = vi.fn(async (_playerId: PlayerId, options?: PromptReflectionOptions) => {
+      const error = new Error("Connection error: private-provider-secret");
+      options?.onRetry?.({ phase: "retrying", attempt: 3, maxAttempts: 3, delayMs: 0, error });
+      throw error;
+    });
+    const { state, promptStore, matchId, send, statuses } = await createReflectionFixture(reflectPrompt);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await send({ type: "reflect_prompt", matchId, playerId: "player_1" });
+    await vi.waitFor(() => expect(statuses()?.player_1?.status).toBe("failed"));
+    expect(statuses()?.player_1?.message).toContain("已自动重试 3 次");
+    expect(statuses()?.player_1?.message).not.toContain("private-provider-secret");
+    expect(await promptStore.list()).toHaveLength(0);
+    expect(state.promptReflectionControllers.size).toBe(0);
+  });
+
+  it("reports a missing original session instead of starting an independent reflection", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const state = createServerState(presetStore, undefined, undefined, promptStore);
+    const createOrchestrator = vi.spyOn(state, "createOrchestrator");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    state.matchRegistry.register({
+      getMatchId: () => "match_without_session",
+      getMatchStatus: () => "finished",
+      getGame: () => ({ getState: () => ({ ...createMockGameState(88), winner: "player_2" }) }),
+      stop: vi.fn(),
+      saveRecord: vi.fn(async () => "logs/records/no-session.match.json"),
+    }, { kind: "live", observe: true });
+    const ws = { send: vi.fn() };
+
+    await handleClientMessage({
+      data: JSON.stringify({ type: "reflect_prompt", matchId: "match_without_session", playerId: "player_1" }),
+      ws: ws as any,
+      state,
+    });
+
+    expect(buildStateMessagePayload(state).observedMatch?.promptReflections?.player_1)
+      .toMatchObject({ status: "failed", playerId: "player_1" });
+    expect(await promptStore.list()).toHaveLength(0);
+    expect(createOrchestrator).not.toHaveBeenCalled();
+  });
+
+  it("reports the provider's empty-message failure safely and allows a same-session retry", async () => {
+    const promptStore = await createPromptStore();
+    const state = createServerState(await createStore(), undefined, undefined, promptStore);
+    const reflectPrompt = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("private provider body"), {
+        status: 400, param: "messages[5] assistant must provide content, reasoning_content or tool_calls",
+      }))
+      .mockResolvedValueOnce({ title: "稳健推进", content: "复盘策略", model: "test-model" });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const orchestrator = {
+      getMatchId: () => "match_failed_reflection", getMatchStatus: () => "finished" as const,
+      getGame: () => ({ getState: () => ({ ...createMockGameState(88), winner: "player_1" as const }) }),
+      reflectPrompt, stop: vi.fn(), saveRecord: vi.fn(async () => "unused.match.json"),
+    };
+    state.matchRegistry.register(orchestrator, { kind: "live", observe: true });
+    const ws = { send: vi.fn() };
+    const request = JSON.stringify({ type: "reflect_prompt", matchId: "match_failed_reflection", playerId: "player_2" });
+
+    await handleClientMessage({ data: request, ws: ws as any, state });
+    await vi.waitFor(() => expect(buildStateMessagePayload(state).observedMatch?.promptReflections?.player_2?.status).toBe("failed"));
+    const failed = buildStateMessagePayload(state).observedMatch?.promptReflections?.player_2;
+    expect(failed?.message).toContain("HTTP 400");
+    expect(failed?.message).toContain("第 6 条空会话消息");
+    expect(failed?.message).not.toContain("private provider body");
+    expect(await promptStore.list()).toHaveLength(0);
+
+    await handleClientMessage({ data: request, ws: ws as any, state });
+    await vi.waitFor(async () => expect(await promptStore.list()).toHaveLength(1));
+    expect(reflectPrompt).toHaveBeenCalledTimes(2);
+    expect(buildStateMessagePayload(state).observedMatch?.promptReflections?.player_2?.status).toBe("completed");
+  });
+
+  it("resumes a paused match with its frozen prompt version after a newer version is saved", async () => {
+    const presetStore = await createStore();
+    const promptStore = await createPromptStore();
+    const preset = await presetStore.create({
+      name: "Model",
+      providerType: "openai-compatible",
+      baseURL: "https://api.example.test/v1",
+      model: "model-one",
+      apiKey: "token",
+    });
+    const prompt = await promptStore.create({ name: "Stable", content: "Use version one." });
+    const frozenVersion = prompt.versions[0]!;
+    let status: "running" | "stopped" = "stopped";
+    const start = vi.fn(async () => {
+      status = "running";
+    });
+    const stop = vi.fn(() => {
+      status = "stopped";
+    });
+    const createOrchestrator = vi.fn((config) => ({
+      getMatchId: () => "match_resumable_prompt",
+      getMatchStatus: () => status,
+      start,
+      stop,
+      saveRecord: vi.fn(async () => "logs/records/resumable-prompt.match.json"),
+      getGame: () => ({ getState: () => createMockGameState(12) }),
+      config,
+    }));
+    const state = createServerState(presetStore, createOrchestrator, undefined, promptStore);
+    const ws = { send: vi.fn() };
+    const startMessage = {
+      type: "start",
+      player1PresetId: preset.id,
+      player2PresetId: preset.id,
+      prompts: {
+        player_1: {
+          promptId: prompt.id,
+          versionId: frozenVersion.id,
+        },
+      },
+    };
+
+    await handleClientMessage({ data: JSON.stringify(startMessage), ws: ws as any, state });
+    await handleClientMessage({
+      data: JSON.stringify({ type: "pause_match", matchId: "match_resumable_prompt" }),
+      ws: ws as any,
+      state,
+    });
+    await promptStore.update(prompt.id, { content: "Use version two." });
+    await handleClientMessage({ data: JSON.stringify(startMessage), ws: ws as any, state });
+
+    expect(createOrchestrator).toHaveBeenCalledTimes(1);
+    expect(createOrchestrator).toHaveBeenCalledWith(expect.objectContaining({
+      strategyPrompts: {
+        player_1: expect.objectContaining({ content: "Use version one." }),
+      },
+    }));
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(status).toBe("running");
   });
 
   it("keeps the previous orchestrator if starting the next one fails", async () => {

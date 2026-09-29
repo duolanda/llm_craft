@@ -10,6 +10,7 @@ import type {
   AgentRuntimeCallbacks,
   AgentRuntimeResult,
 } from "../agent/AgentRuntime";
+import type { PromptReflectionInput, PromptReflectionOptions, PromptReflectionResult } from "../PromptReflection";
 
 export type DecisionControllerKind = "llm" | "cpu";
 
@@ -39,4 +40,5 @@ export interface DecisionController {
     signal?: AbortSignal,
   ): Promise<AgentRuntimeResult>;
   runSubAgentTask?(input: RunSubAgentTaskInput): Promise<string>;
+  reflectPrompt?(input: PromptReflectionInput, options?: PromptReflectionOptions): Promise<PromptReflectionResult>;
 }

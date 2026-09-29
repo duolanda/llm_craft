@@ -10,6 +10,7 @@ import {
   ClientMessage,
   ClientStartBenchmarkMessage,
   CreateLLMPresetRequest,
+  CreateStrategyPromptRequest,
   DEFAULT_CPU_DECISION_INTERVAL_TICKS,
   GameSnapshot,
   GameState,
@@ -18,6 +19,8 @@ import {
   LiveStateSnapshot,
   MatchDebugOptions,
   MatchLLMConfig,
+  MatchPromptSelection,
+  MatchPromptSnapshot,
   MatchRegistryKind,
   MatchWarmupState,
   MatchWarmupOptions,
@@ -29,10 +32,12 @@ import {
   MAX_CPU_DECISION_INTERVAL_TICKS,
   MIN_CPU_DECISION_INTERVAL_TICKS,
   ServerWarmupStatusMessage,
+  ServerPromptReflectionStatusMessage,
   ServerMessage,
   TestLLMPresetRequest,
   TestLLMPresetResponse,
   UpdateLLMPresetRequest,
+  UpdateStrategyPromptRequest,
   isClientMessage,
 } from "@llmcraft/shared";
 import {
@@ -41,7 +46,16 @@ import {
 } from "@llmcraft/record";
 import WebSocket, { WebSocketServer } from "ws";
 import { GameOrchestrator, GameOrchestratorConfig, MATCH_START_ABORTED } from "./GameOrchestrator";
-import { PresetStore } from "./PresetStore";
+import { BUILTIN_PRESET_SECRET, PresetStore } from "./PresetStore";
+import {
+  PromptStore,
+  STRATEGY_PROMPT_CONTENT_MAX_LENGTH,
+  STRATEGY_PROMPT_NAME_MAX_LENGTH,
+  type ResolvedStrategyPrompt,
+} from "./PromptStore";
+import { describePromptReflectionError, type PromptReflectionOptions, type PromptReflectionResult } from "./PromptReflection";
+import { classifyModelRequestError } from "./agent/ModelRequestRetry";
+import { getPromptProvenance } from "./PromptProvenance";
 import { BenchmarkOrchestrator } from "./benchmark/BenchmarkOrchestrator";
 import { createLLMProvider } from "./createLLMProvider";
 import { ControlSessionManager } from "./ControlHandler";
@@ -80,8 +94,14 @@ export function getDefaultPresetPaths() {
   };
 }
 
+export function getDefaultPromptPaths() {
+  return {
+    filePath: path.resolve(SERVER_PACKAGE_DIR, "data", "strategy-prompts.json"),
+  };
+}
+
 const { filePath: PRESETS_FILE } = getDefaultPresetPaths();
-const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
+const { filePath: PROMPTS_FILE } = getDefaultPromptPaths();
 
 interface OrchestratorLike {
   getMatchId?(): string;
@@ -90,6 +110,8 @@ interface OrchestratorLike {
   start(): Promise<void>;
   stop(): void;
   quiesce?: () => Promise<void>;
+  waitForEnd?: () => Promise<{ status: string; state: GameState }>;
+  reflectPrompt?: (playerId: PlayerId, options?: PromptReflectionOptions) => Promise<PromptReflectionResult>;
   saveRecord(): Promise<string>;
   getAITerminalFeed?: (sinceSequence?: number) => {
     sessionId: string;
@@ -126,12 +148,15 @@ interface BenchmarkCoordinatorLike {
 
 export interface ServerState {
   presetStore: PresetStore;
+  promptStore: PromptStore;
   matchRegistry: MatchRegistry;
   warmupMatch: {
     signature: string;
     matchId: string;
   } | null;
   activeBenchmark: BenchmarkCoordinatorLike | null;
+  promptReflectionStatuses: Map<string, ServerPromptReflectionStatusMessage>;
+  promptReflectionControllers: Map<string, AbortController>;
   controlSessions: ControlSessionManager;
   createOrchestrator: (config: GameOrchestratorConfig) => OrchestratorLike;
   createBenchmarkOrchestrator: (
@@ -163,18 +188,26 @@ export function createPresetStore(options?: {
   });
 }
 
+export function createPromptStore(options?: { filePath?: string }): PromptStore {
+  return new PromptStore({ filePath: options?.filePath || PROMPTS_FILE });
+}
+
 export function createServerState(
   presetStore: PresetStore,
   createOrchestrator?: (config: GameOrchestratorConfig) => OrchestratorLike,
   createBenchmarkOrchestrator?: ServerState["createBenchmarkOrchestrator"],
+  promptStore: PromptStore = createPromptStore(),
 ): ServerState {
   const matchRegistry = new MatchRegistry();
   const orchestratorFactory = createOrchestrator ?? ((config: GameOrchestratorConfig) => new GameOrchestrator(config));
   return {
     presetStore,
+    promptStore,
     matchRegistry,
     warmupMatch: null,
     activeBenchmark: null,
+    promptReflectionStatuses: new Map(),
+    promptReflectionControllers: new Map(),
     controlSessions: new ControlSessionManager(),
     createOrchestrator: orchestratorFactory,
     createBenchmarkOrchestrator: createBenchmarkOrchestrator
@@ -206,6 +239,10 @@ function asRegisteredMatchHandle(orchestrator: OrchestratorLike): OrchestratorLi
     start: () => orchestrator.start(),
     stop: () => orchestrator.stop(),
     quiesce: orchestrator.quiesce ? () => orchestrator.quiesce!() : undefined,
+    waitForEnd: orchestrator.waitForEnd ? () => orchestrator.waitForEnd!() : undefined,
+    reflectPrompt: orchestrator.reflectPrompt
+      ? (playerId, options) => orchestrator.reflectPrompt!(playerId, options)
+      : undefined,
     saveRecord: () => orchestrator.saveRecord(),
     getGame: () => orchestrator.getGame(),
     getAITerminalFeed: orchestrator.getAITerminalFeed
@@ -244,6 +281,10 @@ function getActiveLiveMatch(state: ServerState) {
     )) ?? null;
 }
 
+function promptReflectionKey(matchId: string, playerId: PlayerId): string {
+  return `${matchId}:${playerId}`;
+}
+
 type StateMessagePayload = {
   type: "state";
   frame: LiveStateProjectionFrame | null;
@@ -253,6 +294,7 @@ type StateMessagePayload = {
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
     setup?: LiveMatchSetupSnapshot;
+    promptReflections?: Partial<Record<PlayerId, ServerPromptReflectionStatusMessage>>;
   } | null;
   matchStatus: RegisteredMatchStatus | null;
   benchmarkRunning: boolean;
@@ -327,11 +369,24 @@ export function buildStateMessagePayload(
           kind: currentMatch.kind,
           recordingEnabled: currentMatch.terminalPolicy !== "none",
           ...(currentMatch.liveSetup ? { setup: currentMatch.liveSetup } : {}),
+          ...buildPromptReflectionSnapshot(state, currentMatch.matchId),
         }
       : null,
     matchStatus: currentMatch?.handle.getMatchStatus?.() ?? null,
     benchmarkRunning: state.activeBenchmark?.isRunning() ?? false,
   };
+}
+
+function buildPromptReflectionSnapshot(
+  state: ServerState,
+  matchId: string,
+): { promptReflections?: Partial<Record<PlayerId, ServerPromptReflectionStatusMessage>> } {
+  const promptReflections = Object.fromEntries(
+    [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]
+      .map((playerId) => [playerId, state.promptReflectionStatuses.get(promptReflectionKey(matchId, playerId))] as const)
+      .filter((entry): entry is readonly [PlayerId, ServerPromptReflectionStatusMessage] => Boolean(entry[1])),
+  );
+  return Object.keys(promptReflections).length > 0 ? { promptReflections } : {};
 }
 
 function buildAITerminalMessagePayload(
@@ -364,11 +419,27 @@ function projectLiveLog(log: GameState["logs"][number]) {
 function buildMatchSignature(input: {
   player1PresetId: string;
   player2PresetId: string;
+  prompts?: Partial<Record<PlayerId, MatchPromptSelection>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   debug?: MatchDebugOptions;
 }): string {
+  const prompts = Object.fromEntries(
+    [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]
+      .filter((playerId) => Boolean(input.prompts?.[playerId]))
+      .map((playerId) => {
+        const selection = input.prompts![playerId]!;
+        return [playerId, {
+          promptId: selection.promptId,
+          versionId: selection.versionId,
+        }];
+      }),
+  );
+  const promptReflection = normalizePromptReflection(input.promptReflection);
   return JSON.stringify({
     player1PresetId: input.player1PresetId,
     player2PresetId: input.player2PresetId,
+    prompts: Object.keys(prompts).length > 0 ? prompts : null,
+    promptReflection: Object.keys(promptReflection).length > 0 ? promptReflection : null,
     debug: input.debug ?? null,
   });
 }
@@ -376,15 +447,78 @@ function buildMatchSignature(input: {
 function buildLiveMatchSetup(input: {
   player1PresetId: string;
   player2PresetId: string;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   debug?: MatchDebugOptions;
-}): LiveMatchSetupSnapshot {
+}, prompts: Partial<Record<PlayerId, MatchPromptSnapshot>>): LiveMatchSetupSnapshot {
   const recordingProfile = input.debug?.recordingProfile ?? "evaluation";
+  const promptReflection = normalizePromptReflection(input.promptReflection);
   return {
     player1PresetId: input.player1PresetId,
     player2PresetId: input.player2PresetId,
+    ...(Object.keys(prompts).length > 0 ? { prompts } : {}),
+    ...(Object.keys(promptReflection).length > 0 ? { promptReflection } : {}),
     recordingProfile,
     includeTranscript: recordingProfile === "evaluation" && Boolean(input.debug?.includeTranscript),
   };
+}
+
+function normalizePromptReflection(
+  input?: Partial<Record<PlayerId, boolean>>,
+): Partial<Record<PlayerId, boolean>> {
+  return Object.fromEntries(
+    [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]
+      .filter((playerId) => input?.[playerId] === true)
+      .map((playerId) => [playerId, true]),
+  );
+}
+
+interface ResolvedMatchPrompts {
+  configured: GameOrchestratorConfig["strategyPrompts"];
+  snapshots: Partial<Record<PlayerId, MatchPromptSnapshot>>;
+  byPlayer: Partial<Record<PlayerId, ResolvedStrategyPrompt>>;
+}
+
+async function resolveMatchPrompts(
+  promptStore: PromptStore,
+  selections?: Partial<Record<PlayerId, MatchPromptSelection>>,
+): Promise<ResolvedMatchPrompts> {
+  const byPlayer: Partial<Record<PlayerId, ResolvedStrategyPrompt>> = {};
+  for (const playerId of [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2]) {
+    const selection = selections?.[playerId];
+    if (!selection) continue;
+    if (
+      typeof selection.promptId !== "string"
+      || !selection.promptId.trim()
+      || typeof selection.versionId !== "string"
+      || !selection.versionId.trim()
+    ) {
+      throw new Error("PROMPT_SELECTION_INVALID");
+    }
+    byPlayer[playerId] = await promptStore.resolve({
+      promptId: selection.promptId,
+      versionId: selection.versionId,
+    });
+  }
+
+  const configured = Object.fromEntries(
+    Object.entries(byPlayer).map(([playerId, prompt]) => [playerId, {
+      content: prompt.content,
+      snapshot: prompt.snapshot,
+    }]),
+  ) as GameOrchestratorConfig["strategyPrompts"];
+  const snapshots = Object.fromEntries(
+    Object.entries(byPlayer).map(([playerId, prompt]) => [playerId, prompt.snapshot]),
+  ) as Partial<Record<PlayerId, MatchPromptSnapshot>>;
+  return { configured, snapshots, byPlayer };
+}
+
+function withResolvedPrompts(
+  config: MatchLLMConfig,
+  prompts: ResolvedMatchPrompts,
+): GameOrchestratorConfig {
+  return Object.keys(prompts.configured ?? {}).length > 0
+    ? { ...config, strategyPrompts: prompts.configured }
+    : config;
 }
 
 function liveTerminalPolicy(debug?: MatchDebugOptions): "save" | "none" {
@@ -592,6 +726,101 @@ function sendPresetError(res: http.ServerResponse, error: unknown) {
   sendJson(res, 500, { error: "预设操作失败。" });
 }
 
+function validatePromptName(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("策略名称不能为空。");
+  const name = value.trim();
+  if (name.length > STRATEGY_PROMPT_NAME_MAX_LENGTH) {
+    throw new Error(`策略名称不能超过 ${STRATEGY_PROMPT_NAME_MAX_LENGTH} 个字符。`);
+  }
+  return name;
+}
+
+function validatePromptContent(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Prompt 内容不能为空。");
+  const content = value.trim();
+  if (content.length > STRATEGY_PROMPT_CONTENT_MAX_LENGTH) {
+    throw new Error(`Prompt 内容不能超过 ${STRATEGY_PROMPT_CONTENT_MAX_LENGTH} 个字符。`);
+  }
+  return content;
+}
+
+function validateCreatePromptRequest(body: unknown): CreateStrategyPromptRequest {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("Prompt 请求格式无效。");
+  }
+  const input = body as Record<string, unknown>;
+  return {
+    name: validatePromptName(input.name),
+    content: validatePromptContent(input.content),
+  };
+}
+
+function validateUpdatePromptRequest(body: unknown): UpdateStrategyPromptRequest {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("Prompt 请求格式无效。");
+  }
+  const input = body as Record<string, unknown>;
+  if (input.name === undefined && input.content === undefined) {
+    throw new Error("请至少提供名称或 Prompt 内容。");
+  }
+  return {
+    ...(input.name !== undefined ? { name: validatePromptName(input.name) } : {}),
+    ...(input.content !== undefined ? { content: validatePromptContent(input.content) } : {}),
+  };
+}
+
+function parsePromptId(urlPath: string): string {
+  const promptId = decodeURIComponent(urlPath.replace("/api/prompts/", ""));
+  if (!promptId || promptId.includes("/")) throw new Error("Prompt ID 无效。");
+  return promptId;
+}
+
+function parsePromptActivationPath(urlPath: string): { promptId: string; versionId: string } | null {
+  const match = urlPath.match(/^\/api\/prompts\/([^/]+)\/versions\/([^/]+)\/activate$/);
+  if (!match) return null;
+  return {
+    promptId: decodeURIComponent(match[1]!),
+    versionId: decodeURIComponent(match[2]!),
+  };
+}
+
+function sendPromptError(res: http.ServerResponse, error: unknown): void {
+  if (error instanceof SyntaxError) {
+    sendJson(res, 400, { error: "请求体不是有效的 JSON。" });
+    return;
+  }
+  if (error instanceof Error) {
+    if (error.message === "PROMPT_NOT_FOUND") {
+      sendJson(res, 404, { error: "指定的策略 Prompt 不存在。" });
+      return;
+    }
+    if (error.message === "PROMPT_VERSION_NOT_FOUND") {
+      sendJson(res, 404, { error: "指定的 Prompt 版本不存在。" });
+      return;
+    }
+    if (error.message === "PROMPT_IN_USE") {
+      sendJson(res, 409, { error: "这个策略正在被运行中或暂停中的对局使用，暂时不能删除。" });
+      return;
+    }
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+  sendJson(res, 500, { error: "Prompt 操作失败。" });
+}
+
+function isPromptInUse(state: ServerState, promptId: string): boolean {
+  return state.matchRegistry.list().some((match) => {
+    if (
+      match.kind !== "live"
+      || (match.status !== "warming_up" && match.status !== "running" && match.status !== "stopped")
+    ) {
+      return false;
+    }
+    const prompts = state.matchRegistry.get(match.matchId)?.liveSetup?.prompts;
+    return prompts?.player_1?.promptId === promptId || prompts?.player_2?.promptId === promptId;
+  });
+}
+
 async function listRecordEntries() {
   try {
     const entries = await fs.readdir(RECORDS_DIR, { withFileTypes: true });
@@ -755,6 +984,70 @@ export async function handleHttpRequest(
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/prompts") {
+      sendJson(res, 200, { prompts: await state.promptStore.list() });
+      return;
+    }
+
+    const provenancePath = /^\/api\/prompts\/([^/]+)\/provenance$/.exec(url.pathname);
+    if (req.method === "GET" && provenancePath) {
+      const promptId = decodeURIComponent(provenancePath[1]!);
+      const prompt = (await state.promptStore.list()).find((item) => item.id === promptId);
+      if (!prompt) {
+        sendJson(res, 404, { error: "策略不存在。" });
+        return;
+      }
+      sendJson(res, 200, { provenance: await getPromptProvenance(prompt, RECORDS_DIR) });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/prompts") {
+      try {
+        const body = validateCreatePromptRequest(await readJsonBody<CreateStrategyPromptRequest>(req));
+        sendJson(res, 201, { prompt: await state.promptStore.create(body) });
+      } catch (error) {
+        sendPromptError(res, error);
+      }
+      return;
+    }
+
+    const activationPath = parsePromptActivationPath(url.pathname);
+    if (req.method === "POST" && activationPath) {
+      try {
+        const prompt = await state.promptStore.activateVersion(
+          activationPath.promptId,
+          activationPath.versionId,
+        );
+        sendJson(res, 200, { prompt });
+      } catch (error) {
+        sendPromptError(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "PUT" && url.pathname.startsWith("/api/prompts/")) {
+      try {
+        const promptId = parsePromptId(url.pathname);
+        const body = validateUpdatePromptRequest(await readJsonBody<UpdateStrategyPromptRequest>(req));
+        sendJson(res, 200, { prompt: await state.promptStore.update(promptId, body) });
+      } catch (error) {
+        sendPromptError(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname.startsWith("/api/prompts/")) {
+      try {
+        const promptId = parsePromptId(url.pathname);
+        if (isPromptInUse(state, promptId)) throw new Error("PROMPT_IN_USE");
+        await state.promptStore.delete(promptId);
+        sendJson(res, 200, { ok: true });
+      } catch (error) {
+        sendPromptError(res, error);
+      }
+      return;
+    }
+
     if (await handleControlHttpRequest(req, res, url, state, { sendJson, readJsonBody })) {
       return;
     }
@@ -771,6 +1064,162 @@ type ClientMessageContext = {
   ws: WebSocket;
   state: ServerState;
 };
+
+function schedulePromptReflections(options: {
+  orchestrator: OrchestratorLike;
+  state: ServerState;
+  ws: Pick<WebSocket, "send">;
+  prompts: ResolvedMatchPrompts;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
+}): void {
+  const targets = [PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2].filter(
+    (playerId) => options.promptReflection?.[playerId] === true,
+  );
+  if (targets.length === 0 || !options.orchestrator.waitForEnd) return;
+
+  void options.orchestrator.waitForEnd().then(async ({ status, state: finalState }) => {
+    if (status !== "finished" || !finalState.winner) return;
+    await Promise.all(targets.map((playerId) => runPromptReflection({
+      orchestrator: options.orchestrator,
+      state: options.state,
+      ws: options.ws,
+      playerId,
+      prompt: options.prompts.byPlayer[playerId],
+    })));
+  }).catch((error) => {
+    console.error("Prompt reflection scheduling failed:", error);
+  });
+}
+
+async function runPromptReflection(options: {
+  orchestrator: OrchestratorLike;
+  state: ServerState;
+  ws: Pick<WebSocket, "send">;
+  playerId: PlayerId;
+  prompt?: ResolvedStrategyPrompt;
+}): Promise<void> {
+  const matchId = options.orchestrator.getMatchId?.() ?? "unknown";
+  const key = promptReflectionKey(matchId, options.playerId);
+  const existing = options.state.promptReflectionStatuses.get(key);
+  if (existing?.status === "running" || existing?.status === "completed") {
+    sendPromptReflectionStatus(options.state, options.ws, existing);
+    return;
+  }
+
+  const side = options.playerId === PLAYER_IDS.PLAYER_1 ? "红方" : "蓝方";
+  const controller = new AbortController();
+  options.state.promptReflectionControllers.set(key, controller);
+  let retryCount = 0;
+  const statusBase = {
+    type: "prompt_reflection_status" as const,
+    matchId,
+    playerId: options.playerId,
+    ...(options.prompt ? { promptId: options.prompt.snapshot.promptId } : {}),
+  };
+  sendPromptReflectionStatus(options.state, options.ws, {
+    ...statusBase,
+    status: "running",
+    canCancel: true,
+    message: `${side}正在沉淀本局策略…`,
+  });
+
+  try {
+    if (!options.orchestrator.reflectPrompt) throw new Error("PROMPT_REFLECTION_SESSION_UNAVAILABLE");
+    const { title, content, model } = await options.orchestrator.reflectPrompt(options.playerId, {
+      signal: controller.signal,
+      onRetry: (progress) => {
+        if (controller.signal.aborted) return;
+        if (progress.phase === "retrying") retryCount = progress.attempt;
+        sendPromptReflectionStatus(options.state, options.ws, {
+          ...statusBase,
+          status: "running",
+          canCancel: true,
+          message: progress.phase === "waiting"
+            ? `${side}${describePromptReflectionError(progress.error)}；${progress.delayMs / 1000} 秒后重试（${progress.attempt}/${progress.maxAttempts}）…`
+            : `${side}正在重试策略沉淀（${progress.attempt}/${progress.maxAttempts}）…`,
+        });
+      },
+    });
+    controller.signal.throwIfAborted();
+    // Once persistence starts, finish that commit instead of claiming a cancelled write.
+    options.state.promptReflectionControllers.delete(key);
+    if (options.prompt && content.trim() === options.prompt.content.trim()) {
+      sendPromptReflectionStatus(options.state, options.ws, {
+        ...statusBase,
+        status: "completed",
+        message: `${side}复盘后认为当前策略无需调整。`,
+      });
+      return;
+    }
+    sendPromptReflectionStatus(options.state, options.ws, {
+      ...statusBase,
+      status: "running",
+      canCancel: false,
+      message: `${side}正在保存策略…`,
+    });
+    if (options.prompt) {
+      const version = await options.state.promptStore.addVersion(options.prompt.snapshot.promptId, {
+        title,
+        model,
+        content,
+        source: "reflection",
+        basedOnVersionId: options.prompt.snapshot.versionId,
+        matchId,
+        playerId: options.playerId,
+        activate: false,
+      });
+      sendPromptReflectionStatus(options.state, options.ws, {
+        ...statusBase,
+        status: "completed",
+        versionId: version.id,
+        message: `${side}已生成策略 v${version.version}，需手动采用。`,
+      });
+      return;
+    }
+
+    const created = await options.state.promptStore.createFromReflection({
+      name: title,
+      model,
+      content,
+      matchId,
+      playerId: options.playerId,
+    });
+    sendPromptReflectionStatus(options.state, options.ws, {
+      ...statusBase,
+      promptId: created.id,
+      status: "completed",
+      versionId: created.activeVersionId,
+      message: `${side}已将本局经验沉淀为新策略“${created.name}”。`,
+    });
+  } catch (error) {
+    const cancelled = controller.signal.aborted || classifyModelRequestError(error) === "cancelled";
+    if (!cancelled) console.error(`Prompt reflection failed for ${options.playerId}:`, error);
+    sendPromptReflectionStatus(options.state, options.ws, {
+      ...statusBase,
+      status: cancelled ? "cancelled" : "failed",
+      message: cancelled
+        ? `${side}已取消策略沉淀，策略库未发生变化。`
+        : `${side}策略沉淀失败${retryCount > 0 ? `（已自动重试 ${retryCount} 次）` : ""}：${describePromptReflectionError(error)}。策略库未发生变化。`,
+    });
+  } finally {
+    if (options.state.promptReflectionControllers.get(key) === controller) {
+      options.state.promptReflectionControllers.delete(key);
+    }
+  }
+}
+
+function sendPromptReflectionStatus(
+  state: ServerState,
+  ws: Pick<WebSocket, "send">,
+  payload: ServerPromptReflectionStatusMessage,
+): void {
+  state.promptReflectionStatuses.set(promptReflectionKey(payload.matchId, payload.playerId), payload);
+  try {
+    ws.send(JSON.stringify(payload));
+  } catch {
+    // A closed initiating socket must not cancel the persisted reflection.
+  }
+}
 
 export async function handleClientMessage({ data, ws, state }: ClientMessageContext): Promise<void> {
   try {
@@ -804,6 +1253,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      const resolvedPrompts = await resolveMatchPrompts(state.promptStore, message.prompts);
       const signature = buildMatchSignature(message);
       const activeLive = getActiveLiveMatch(state);
       if (activeLive?.status === "running") {
@@ -835,14 +1285,14 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           : null;
 
       if (!orchestrator) {
-        orchestrator = registerOrchestrator(state, state.createOrchestrator({
+        orchestrator = registerOrchestrator(state, state.createOrchestrator(withResolvedPrompts({
           player1,
           player2,
           debug: message.debug,
-        }), {
+        }, resolvedPrompts)), {
           kind: "live",
           signature,
-          liveSetup: buildLiveMatchSetup(message),
+          liveSetup: buildLiveMatchSetup(message, resolvedPrompts.snapshots),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         });
@@ -885,6 +1335,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         return;
       }
 
+      const resolvedPrompts = await resolveMatchPrompts(state.promptStore, message.prompts);
       const signature = buildMatchSignature(message);
       const activeLive = getActiveLiveMatch(state);
       const observedLive = state.matchRegistry.list().find((match) => match.kind === "live" && match.observed) ?? null;
@@ -917,18 +1368,22 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           && state.matchRegistry.get(activeLive.matchId)?.signature === signature
           ? getRegisteredOrchestrator(state, activeLive.matchId)
           : resumableMatch;
+      const configs: Record<PlayerId, OpenAICompatibleRuntimeConfig> = {
+        player_1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
+        player_2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
+      };
       const createdNew = !warmedMatch;
       const nextOrchestrator = warmedMatch ?? registerOrchestrator(
         state,
-        state.createOrchestrator({
-          player1: await state.presetStore.getRuntimeConfig(message.player1PresetId),
-          player2: await state.presetStore.getRuntimeConfig(message.player2PresetId),
+        state.createOrchestrator(withResolvedPrompts({
+          player1: configs.player_1,
+          player2: configs.player_2,
           debug: message.debug,
-        }),
+        }, resolvedPrompts)),
         {
           kind: "live",
           signature,
-          liveSetup: buildLiveMatchSetup(message),
+          liveSetup: buildLiveMatchSetup(message, resolvedPrompts.snapshots),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         },
@@ -951,6 +1406,13 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       }
 
       state.warmupMatch = null;
+      schedulePromptReflections({
+        orchestrator: nextOrchestrator,
+        state,
+        ws,
+        prompts: resolvedPrompts,
+        promptReflection: message.promptReflection,
+      });
       return;
     }
 
@@ -976,6 +1438,94 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
       if (state.warmupMatch?.matchId === targetMatch.matchId) {
         state.warmupMatch = null;
       }
+      return;
+    }
+
+    if (message.type === "cancel_prompt_reflection") {
+      if (
+        typeof message.matchId !== "string" || !message.matchId
+        || (message.playerId !== PLAYER_IDS.PLAYER_1 && message.playerId !== PLAYER_IDS.PLAYER_2)
+      ) {
+        ws.send(JSON.stringify({ type: "error", message: "取消策略沉淀的对局或玩家无效。" } satisfies ServerMessage));
+        return;
+      }
+      const key = promptReflectionKey(message.matchId, message.playerId);
+      const existing = state.promptReflectionStatuses.get(key);
+      const controller = state.promptReflectionControllers.get(key);
+      if (existing?.status === "running" && controller) {
+        sendPromptReflectionStatus(state, ws, { ...existing, canCancel: false, message: "正在取消策略沉淀…" });
+        controller.abort();
+      } else if (existing) {
+        sendPromptReflectionStatus(state, ws, existing);
+      } else {
+        ws.send(JSON.stringify({ type: "error", message: "没有可取消的策略沉淀。" } satisfies ServerMessage));
+      }
+      return;
+    }
+
+    if (message.type === "reflect_prompt") {
+      if (message.playerId !== PLAYER_IDS.PLAYER_1 && message.playerId !== PLAYER_IDS.PLAYER_2) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "策略沉淀的玩家无效。",
+        } satisfies ServerMessage));
+        return;
+      }
+      const targetMatch = state.matchRegistry.get(message.matchId);
+      const targetStatus = state.matchRegistry.list()
+        .find((match) => match.matchId === message.matchId)?.status;
+      const orchestrator = getRegisteredOrchestrator(state, message.matchId);
+      const finalState = orchestrator?.getGame().getState() ?? null;
+      if (
+        !targetMatch
+        || targetMatch.kind !== "live"
+        || targetStatus !== "finished"
+        || !orchestrator
+        || !finalState?.winner
+      ) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "只能复盘已经正常分出胜负的实时对局。",
+        } satisfies ServerMessage));
+        return;
+      }
+
+      const existingReflection = state.promptReflectionStatuses.get(
+        promptReflectionKey(message.matchId, message.playerId),
+      );
+      if (existingReflection?.status === "running" || existingReflection?.status === "completed") {
+        sendPromptReflectionStatus(state, ws, existingReflection);
+        return;
+      }
+
+      const promptSnapshot = targetMatch.liveSetup?.prompts?.[message.playerId];
+      let prompt: ResolvedStrategyPrompt | undefined;
+      try {
+        prompt = promptSnapshot
+          ? await state.promptStore.resolve({
+              promptId: promptSnapshot.promptId,
+              versionId: promptSnapshot.versionId,
+            })
+          : undefined;
+      } catch (error) {
+        console.error(`Prompt reflection setup failed for ${message.playerId}:`, error);
+        sendPromptReflectionStatus(state, ws, {
+          type: "prompt_reflection_status",
+          matchId: message.matchId,
+          playerId: message.playerId,
+          ...(promptSnapshot ? { promptId: promptSnapshot.promptId } : {}),
+          status: "failed",
+          message: `${message.playerId === PLAYER_IDS.PLAYER_1 ? "红方" : "蓝方"}的原策略已不可用，无法沉淀本局。`,
+        });
+        return;
+      }
+      void runPromptReflection({
+        orchestrator,
+        state,
+        ws,
+        playerId: message.playerId,
+        prompt,
+      });
       return;
     }
 
@@ -1020,13 +1570,14 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
 
       const player1 = await state.presetStore.getRuntimeConfig(message.player1PresetId);
       const player2 = await state.presetStore.getRuntimeConfig(message.player2PresetId);
+      const resolvedPrompts = await resolveMatchPrompts(state.promptStore, message.prompts);
       const nextOrchestrator = registerOrchestrator(
         state,
-        state.createOrchestrator({ player1, player2, debug: message.debug }),
+        state.createOrchestrator(withResolvedPrompts({ player1, player2, debug: message.debug }, resolvedPrompts)),
         {
           kind: "live",
           signature: buildMatchSignature(message),
-          liveSetup: buildLiveMatchSetup(message),
+          liveSetup: buildLiveMatchSetup(message, resolvedPrompts.snapshots),
           observe: true,
           terminalPolicy: liveTerminalPolicy(message.debug),
         },
@@ -1171,11 +1722,15 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
           ? "所选预设不存在或已被删除。"
           : error.message === "PRESET_DECRYPT_FAILED"
             ? "预设中的 API Key 无法解密。请重新填写该预设的 API Key。"
-            : error.message === "BENCHMARK_PRESET_INVALID"
-              ? "Benchmark 只能使用 OpenAI-compatible 预设。"
-              : error.message.startsWith("模型预热失败")
-                ? error.message
-                : "处理客户端消息失败。"
+            : error.message === "PROMPT_NOT_FOUND" || error.message === "PROMPT_VERSION_NOT_FOUND"
+              ? "所选策略 Prompt 或版本不存在，请重新选择。"
+              : error.message === "PROMPT_SELECTION_INVALID"
+                ? "策略 Prompt 选择无效，请重新选择。"
+                : error.message === "BENCHMARK_PRESET_INVALID"
+                  ? "Benchmark 只能使用 OpenAI-compatible 预设。"
+                  : error.message.startsWith("模型预热失败")
+                    ? error.message
+                    : "处理客户端消息失败。"
         : "处理客户端消息失败。",
     } satisfies ServerMessage));
   }
@@ -1503,6 +2058,7 @@ export function startServer() {
     forcedExit.unref();
 
     state.activeBenchmark?.stop();
+    for (const controller of state.promptReflectionControllers.values()) controller.abort();
     const results = await state.matchRegistry.stopAndSaveAll();
     for (const result of results) {
       if (!result.ok) console.error(`对局 ${result.matchId} 关闭保存失败: ${result.error}`);

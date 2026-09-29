@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRunInput, DEFAULT_MAP_LAYOUT } from "@llmcraft/shared";
 import { OpenAICompatibleProvider } from "../OpenAICompatibleProvider";
 import { ContextWindowLimiter } from "../agent/ContextWindowLimiter";
@@ -40,7 +40,10 @@ function createProviderWithResponses(responses: unknown[]) {
 }
 
 describe("OpenAICompatibleProvider", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
   it("persists completed tool results before a later request failure so the next turn has no orphan tool calls", async () => {
+    vi.useFakeTimers();
     const provider = new OpenAICompatibleProvider({
       providerType: "openai-compatible",
       apiKey: "test-key",
@@ -63,6 +66,7 @@ describe("OpenAICompatibleProvider", () => {
       .mockRejectedValueOnce(connectionError)
       .mockRejectedValueOnce(connectionError)
       .mockRejectedValueOnce(connectionError)
+      .mockRejectedValueOnce(connectionError)
       .mockResolvedValueOnce({
         choices: [{ finish_reason: "stop", message: { role: "assistant", content: "recovered", tool_calls: [] } }],
         usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
@@ -75,12 +79,14 @@ describe("OpenAICompatibleProvider", () => {
     };
 
     await provider.warmupAgent(createInput(), options);
-    await expect(provider.runAgent(createInput(), options)).rejects.toThrow("Connection error");
+    const failed = expect(provider.runAgent(createInput(), options)).rejects.toThrow("Connection error");
+    await vi.runAllTimersAsync();
+    await failed;
     await expect(provider.runAgent({ ...createInput(), tick: 43 }, options)).resolves.toMatchObject({
       stopReason: "stop",
     });
 
-    const recoveryRequest = (create.mock.calls[4]?.[0] as { messages?: Array<Record<string, any>> } | undefined)?.messages ?? [];
+    const recoveryRequest = (create.mock.calls[5]?.[0] as { messages?: Array<Record<string, any>> } | undefined)?.messages ?? [];
     const assistantIndex = recoveryRequest.findIndex((message) => (
       message.role === "assistant"
       && Array.isArray(message.tool_calls)
@@ -92,6 +98,7 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   it("records explicit retries and the exact message snapshot for each model attempt", async () => {
+    vi.useFakeTimers();
     const provider = new OpenAICompatibleProvider({
       providerType: "openai-compatible",
       apiKey: "test-key",
@@ -109,12 +116,14 @@ describe("OpenAICompatibleProvider", () => {
       });
     (provider as any).transport.client = { chat: { completions: { create } } };
 
-    const result = await provider.runAgent(createInput(), {
+    const running = provider.runAgent(createInput(), {
       tools: [],
       executeTool: async () => ({ effect: "read" as const, result: {} }),
       getRuntimeState: () => ({ mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null }),
       runContext: { turnId: "turn-1", controllerId: "llm:player_1" },
     });
+    await vi.runAllTimersAsync();
+    const result = await running;
 
     expect(result.metrics.modelRequests).toBe(2);
     expect(result.metrics.modelRequestRecords).toEqual([

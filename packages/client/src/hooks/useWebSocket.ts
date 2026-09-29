@@ -142,6 +142,8 @@ export function useWebSocket(url: string, enabled = true) {
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [warmupStatuses, setWarmupStatuses] = useState<Partial<Record<PlayerId, MatchWarmupState>>>({});
   const [warmupMessage, setWarmupMessage] = useState<string | null>(null);
+  const [promptReflectionMessage, setPromptReflectionMessage] = useState<string | null>(null);
+  const [promptReflectionRevision, setPromptReflectionRevision] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const terminalSessionIdRef = useRef<string | null>(null);
   const observedMatchIdRef = useRef<string | null>(null);
@@ -161,6 +163,10 @@ export function useWebSocket(url: string, enabled = true) {
 
   const clearServerMessage = useCallback(() => {
     setServerMessage(null);
+  }, []);
+
+  const clearPromptReflectionMessage = useCallback(() => {
+    setPromptReflectionMessage(null);
   }, []);
 
   const clearBenchmarkResult = useCallback(() => {
@@ -224,6 +230,7 @@ export function useWebSocket(url: string, enabled = true) {
               setLiveLogs([]);
               aiOutputsRef.current = {};
               setAIOutputs({});
+              setPromptReflectionMessage(null);
             }
             observedMatchIdRef.current = nextObservedMatchId;
             if (parsed.frame) {
@@ -291,6 +298,22 @@ export function useWebSocket(url: string, enabled = true) {
               ...parsed.statuses,
             }));
             setWarmupMessage(parsed.message ?? null);
+            break;
+
+          case "prompt_reflection_status":
+            setPromptReflectionMessage(parsed.message ?? null);
+            setObservedMatch((current) => current?.matchId === parsed.matchId
+              ? {
+                  ...current,
+                  promptReflections: {
+                    ...current.promptReflections,
+                    [parsed.playerId]: parsed,
+                  },
+                }
+              : current);
+            if (parsed.status === "completed") {
+              setPromptReflectionRevision((current) => current + 1);
+            }
             break;
       }
     };
@@ -419,8 +442,11 @@ export function useWebSocket(url: string, enabled = true) {
     benchmarkRunning,
     warmupStatuses,
     warmupMessage,
+    promptReflectionMessage,
+    promptReflectionRevision,
     setWarmupStatuses,
     setWarmupMessage,
+    clearPromptReflectionMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,

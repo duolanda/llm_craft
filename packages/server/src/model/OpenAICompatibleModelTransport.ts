@@ -1,11 +1,13 @@
 import OpenAI from "openai";
 import type { OpenAIProviderConfig } from "../LLMProvider";
 import type {
+  ModelAssistantMessage,
   ModelCompletionRequest,
   ModelCompletionResult,
   ModelTransport,
   ModelTransportDescriptor,
 } from "./ModelTransport";
+import { hasAssistantOutput } from "./ModelResponse";
 
 const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set([
   "model",
@@ -15,6 +17,34 @@ const FORBIDDEN_EXTRA_REQUEST_PARAMS = new Set([
   "stream",
   "signal",
 ]);
+
+function normalizeAssistantMessage(message: ModelAssistantMessage): ModelAssistantMessage {
+  const normalized: ModelAssistantMessage = {
+    role: message.role ?? "assistant",
+    content: message.content,
+    tool_calls: message.tool_calls?.map((call) => ({
+      id: call.id, type: call.type,
+      function: { name: call.function.name, arguments: call.function.arguments },
+    })),
+  };
+  for (const field of ["reasoning_content", "reasoning", "reasoning_text", "refusal"] as const) {
+    if (typeof message[field] === "string" || message[field] === null) normalized[field] = message[field];
+  }
+  if (Array.isArray(message.reasoning_details)) {
+    normalized.reasoning_details = structuredClone(message.reasoning_details);
+  }
+  return normalized;
+}
+
+function isOpenCodeGoEndpoint(baseURL: string | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    const url = new URL(baseURL);
+    return url.hostname === "opencode.ai" && /^\/zen\/go\/v1\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
 
 export class OpenAICompatibleModelTransport implements ModelTransport {
   private client: OpenAI;
@@ -43,7 +73,7 @@ export class OpenAICompatibleModelTransport implements ModelTransport {
     const response = await this.client.chat.completions.create(
       {
         model: this.descriptor.model,
-        messages: request.messages,
+        messages: this.prepareMessages(request.messages),
         ...(request.tools
           ? {
               tools: request.tools.map((tool) => ({
@@ -74,20 +104,7 @@ export class OpenAICompatibleModelTransport implements ModelTransport {
 
     const completedAtMs = Date.now();
     return {
-      message: choice?.message
-        ? {
-            role: choice.message.role,
-            content: choice.message.content,
-            tool_calls: choice.message.tool_calls?.map((toolCall) => ({
-              id: toolCall.id,
-              type: toolCall.type,
-              function: {
-                name: toolCall.function.name,
-                arguments: toolCall.function.arguments,
-              },
-            })),
-          }
-        : null,
+      message: choice?.message ? normalizeAssistantMessage(choice.message) : null,
       finishReason: choice?.finish_reason ? String(choice.finish_reason) : "model_stopped",
       requestId: response.id,
       responseModel: response.model,
@@ -108,6 +125,27 @@ export class OpenAICompatibleModelTransport implements ModelTransport {
 
   getDescriptor(): ModelTransportDescriptor {
     return { ...this.descriptor };
+  }
+
+  private prepareMessages(messages: readonly unknown[]): unknown[] {
+    const openCodeGo = isOpenCodeGoEndpoint(this.descriptor.baseURL);
+    return messages.flatMap((message): unknown[] => {
+      if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") {
+        return [message];
+      }
+      const assistant = message as ModelAssistantMessage;
+      // Session/diagnostic history need not be valid wire history. In particular,
+      // never replay an empty or thinking-only assistant as a completed answer.
+      if (!hasAssistantOutput(assistant)) return [];
+      const wire = normalizeAssistantMessage(assistant);
+      // OpenCode Go returns `reasoning` but expects `reasoning_content` on replay.
+      // Keep this endpoint-specific conversion out of the session and game loop.
+      if (openCodeGo && typeof wire.reasoning === "string") {
+        if (!wire.reasoning_content) wire.reasoning_content = wire.reasoning;
+        delete wire.reasoning;
+      }
+      return [wire];
+    });
   }
 
   private buildOptionalRequestParams(): Record<string, unknown> {

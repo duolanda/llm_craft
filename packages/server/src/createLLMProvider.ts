@@ -2,8 +2,11 @@ import { AgentSession, LLMProvider, LLMProviderConfig } from "./LLMProvider";
 import { OpenAIAgentSession, OpenAICompatibleProvider, type OpenAIAgentSessionOptions } from "./OpenAICompatibleProvider";
 import { OpenAICompatibleModelTransport } from "./model/OpenAICompatibleModelTransport";
 import { RateLimitedModelTransport } from "./model/RateLimitedModelTransport";
+import type { ModelTransport } from "./model/ModelTransport";
 
-function createTransport(config: Extract<LLMProviderConfig, { providerType: "openai-compatible" }>) {
+function createModelTransport(
+  config: Extract<LLMProviderConfig, { providerType: "openai-compatible" }>,
+): ModelTransport {
   return new RateLimitedModelTransport(
     new OpenAICompatibleModelTransport(config),
     config.rpm ?? null,
@@ -20,7 +23,7 @@ export function createAgentSession(
 
   switch (config.providerType) {
     case "openai-compatible":
-      return new OpenAIAgentSession(config, createTransport(config), options);
+      return new OpenAIAgentSession(config, createModelTransport(config), options);
     default:
       throw new Error(`不支持的 provider 类型: ${(config as { providerType: string }).providerType}`);
   }
@@ -31,5 +34,5 @@ export function createLLMProvider(config: LLMProviderConfig): LLMProvider {
   if (config.providerType === "builtin-cpu") {
     throw new Error("builtin-cpu is not an LLM provider and cannot test model connectivity");
   }
-  return new OpenAICompatibleProvider(config, createTransport(config));
+  return new OpenAICompatibleProvider(config, createModelTransport(config));
 }

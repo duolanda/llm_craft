@@ -29,10 +29,75 @@ export interface MatchDebugOptions {
   includeTranscript?: boolean;
 }
 
+export type StrategyPromptVersionSource = "user" | "reflection";
+
+/** An immutable revision of a named strategy prompt. */
+export interface StrategyPromptVersion {
+  id: string;
+  version: number;
+  /** Short title generated with this reflection; absent on older or user revisions. */
+  title?: string;
+  content: string;
+  source: StrategyPromptVersionSource;
+  createdAt: string;
+  basedOnVersionId?: string;
+  matchId?: string;
+  playerId?: PlayerId;
+  /** Actual reflection response model, falling back to the session's configured model. */
+  model?: string;
+}
+
+/** Provenance resolved on demand, including the origin of edited/translated revisions. */
+export interface StrategyPromptVersionProvenance {
+  sourceVersionId: string;
+  sourceVersion: number;
+  model?: string;
+  matchId?: string;
+  playerId?: PlayerId;
+  recordFileName?: string;
+}
+
+/** A named prompt whose active revision is used when configuring a match. */
+export interface StrategyPrompt {
+  id: string;
+  name: string;
+  activeVersionId: string;
+  versions: StrategyPromptVersion[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateStrategyPromptRequest {
+  name: string;
+  content: string;
+}
+
+export interface UpdateStrategyPromptRequest {
+  name?: string;
+  /** When changed, this is saved as a new active user revision. */
+  content?: string;
+}
+
+/** Exact immutable revision selected for one side of a match. */
+export interface MatchPromptSelection {
+  promptId: string;
+  versionId: string;
+}
+
+/** Display and record-safe prompt identity; prompt contents remain in PromptStore. */
+export interface MatchPromptSnapshot {
+  promptId: string;
+  promptName: string;
+  versionId: string;
+  version: number;
+}
+
 /** Immutable setup shown for the currently observed live match. */
 export interface LiveMatchSetupSnapshot {
   player1PresetId: string;
   player2PresetId: string;
+  prompts?: Partial<Record<PlayerId, MatchPromptSnapshot>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   recordingProfile: MatchRecordingProfile;
   includeTranscript: boolean;
 }
@@ -915,6 +980,7 @@ export interface MatchRecord {
     recordingProfile: Exclude<MatchRecordingProfile, "off">;
     includeTranscript: boolean;
     systemPrompt?: string;
+    strategyPrompts?: Partial<Record<PlayerId, MatchPromptSnapshot>>;
     players: Array<{
       playerId: PlayerId;
       model: string;

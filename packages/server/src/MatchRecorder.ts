@@ -1,6 +1,7 @@
 import {
   type MatchRecord,
   type MatchRecordingOptions,
+  type MatchPromptSnapshot,
   type PlayerId,
   type SavedAITurnRecord,
 } from "@llmcraft/shared";
@@ -12,6 +13,7 @@ export interface MatchRecordContext {
   startedAt: string;
   recording: MatchRecordingOptions;
   systemPrompt: string;
+  strategyPrompts?: Partial<Record<PlayerId, MatchPromptSnapshot>>;
   players: Array<{
     playerId: PlayerId;
     model: string;
@@ -90,6 +92,9 @@ export class MatchRecorder {
         recordingProfile: profile,
         includeTranscript: context.recording.includeTranscript,
         ...(context.recording.includeTranscript ? { systemPrompt: context.systemPrompt } : {}),
+        ...(context.strategyPrompts && Object.keys(context.strategyPrompts).length > 0
+          ? { strategyPrompts: structuredClone(context.strategyPrompts) }
+          : {}),
         players: structuredClone(context.players),
       },
       initialState,

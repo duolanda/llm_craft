@@ -9,6 +9,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { decryptString, encryptString } from "./crypto";
 
+export const BUILTIN_PRESET_SECRET = "llms-rule-the-world-oneday";
+
 interface StoredPresetRecord {
   id: string;
   name: string;

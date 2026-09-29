@@ -163,8 +163,10 @@ export class ContextWindowLimiter {
 
     const role = getRole(message);
     const originalBytes = messageBytes(message);
-    if (role === "assistant" && Array.isArray(message.tool_calls)) {
-      // Tool results must keep their matching assistant tool-call declaration.
+    const hasReplayData = ["reasoning_content", "reasoning", "reasoning_text"].some((field) => typeof message[field] === "string")
+      || Array.isArray(message.reasoning_details);
+    if (role === "assistant" && (Array.isArray(message.tool_calls) || hasReplayData)) {
+      // Preserve paired tool declarations and provider-owned replay data intact.
       // The enclosing user segment will be omitted as a unit if it cannot fit.
       return { message: structuredClone(message), truncated: false };
     }

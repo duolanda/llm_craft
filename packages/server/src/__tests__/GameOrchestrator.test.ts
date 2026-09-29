@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunInput } from "@llmcraft/shared";
 import { TICK_INTERVAL_MS } from "@llmcraft/shared";
 import { GameOrchestrator } from "../GameOrchestrator";
+import { OpenAIAgentSession } from "../OpenAICompatibleProvider";
 import { readMatchRecordFile } from "../RecordFile";
 
 function createMatchConfig() {
@@ -64,6 +65,77 @@ describe("GameOrchestrator", () => {
       model: "model-two",
       baseURL: "https://api.two.test/v1",
     });
+  });
+
+  it("waits for the final run to settle and reflects through the same player's session", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    let playingSession: OpenAIAgentSession | undefined;
+    let notifyRunning!: () => void;
+    const running = new Promise<void>((resolve) => { notifyRunning = resolve; });
+    vi.spyOn(OpenAIAgentSession.prototype, "runAgent").mockImplementation(async function (this: OpenAIAgentSession, input, options) {
+      playingSession = this;
+      expect(input.playerId).toBe("player_2");
+      notifyRunning();
+      await new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return createRunResult("aborted");
+    });
+    let reflectingSession: OpenAIAgentSession | undefined;
+    const reflect = vi.spyOn(OpenAIAgentSession.prototype, "reflectPrompt").mockImplementation(async function (this: OpenAIAgentSession) {
+      reflectingSession = this;
+      return { title: "稳健推进", content: "中文策略", model: "model-two" };
+    });
+    const run = orchestrator.runAI("player_2");
+    await running;
+    vi.spyOn(orchestrator, "getMatchStatus").mockReturnValue("finished");
+    vi.spyOn(orchestrator.getGame(), "getState").mockReturnValue({
+      ...orchestrator.getGame().getState(), tick: 120, winner: "player_1",
+    });
+
+    const reflectionOptions = { signal: new AbortController().signal, onRetry: vi.fn() };
+    const reflection = orchestrator.reflectPrompt("player_2", reflectionOptions);
+    expect(reflect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10);
+    await run;
+
+    await expect(reflection).resolves.toEqual({ title: "稳健推进", content: "中文策略", model: "model-two" });
+    expect(reflect).toHaveBeenCalledOnce();
+    expect(reflectingSession).toBe(playingSession);
+    expect(reflect).toHaveBeenCalledWith({ playerId: "player_2", winner: "player_1", finalTick: 120 }, reflectionOptions);
+  });
+
+  it("can cancel while waiting for the final game request to unwind without starting reflection", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    let finishRun!: () => void;
+    const pending = new Promise<void>((resolve) => { finishRun = resolve; });
+    vi.spyOn(OpenAIAgentSession.prototype, "runAgent").mockImplementation(async () => {
+      await pending;
+      return createRunResult("aborted");
+    });
+    const reflect = vi.spyOn(OpenAIAgentSession.prototype, "reflectPrompt");
+    const run = orchestrator.runAI("player_2");
+    vi.spyOn(orchestrator, "getMatchStatus").mockReturnValue("finished");
+    vi.spyOn(orchestrator.getGame(), "getState").mockReturnValue({
+      ...orchestrator.getGame().getState(), tick: 120, winner: "player_1",
+    });
+    const controller = new AbortController();
+    const cancelled = expect(orchestrator.reflectPrompt("player_2", { signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10);
+    await cancelled;
+    expect(reflect).not.toHaveBeenCalled();
+    finishRun();
+    await run;
+  });
+
+  it("does not reflect an unfinished match or interrupt its session", async () => {
+    const orchestrator = new GameOrchestrator(createMatchConfig());
+    const stop = vi.spyOn(orchestrator, "stop");
+    const reflect = vi.spyOn(OpenAIAgentSession.prototype, "reflectPrompt");
+
+    await expect(orchestrator.reflectPrompt("player_1")).rejects.toThrow("PROMPT_REFLECTION_MATCH_NOT_FINISHED");
+    expect(stop).not.toHaveBeenCalled();
+    expect(reflect).not.toHaveBeenCalled();
   });
 
   it("starts once and schedules decisions from committed ticks, not a 100ms poll", async () => {
@@ -255,6 +327,17 @@ describe("GameOrchestrator", () => {
     const recordDir = await fs.mkdtemp(path.join(os.tmpdir(), "llmcraft-record-"));
     const orchestrator = new GameOrchestrator({
       ...createMatchConfig(),
+      strategyPrompts: {
+        player_1: {
+          content: "CUSTOM_MATCH_STRATEGY",
+          snapshot: {
+            promptId: "prompt-1",
+            promptName: "Test strategy",
+            versionId: "version-2",
+            version: 2,
+          },
+        },
+      },
       debug: { recordingProfile: "evaluation", includeTranscript: true },
       runtime: { recordDir },
     });
@@ -268,6 +351,13 @@ describe("GameOrchestrator", () => {
     expect(record.aiTurns).toHaveLength(1);
     expect(record.aiTurns?.[0]?.assistantMessages).toEqual(["thinking"]);
     expect(record.metadata.systemPrompt).toContain("player_1");
+    expect(record.metadata.systemPrompt).toContain("CUSTOM_MATCH_STRATEGY");
+    expect(record.metadata.strategyPrompts?.player_1).toEqual({
+      promptId: "prompt-1",
+      promptName: "Test strategy",
+      versionId: "version-2",
+      version: 2,
+    });
     await fs.rm(recordDir, { recursive: true, force: true });
   });
 

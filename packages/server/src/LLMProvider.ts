@@ -7,6 +7,7 @@ import {
   AgentToolCallRecord,
 } from "@llmcraft/shared";
 import { MatchPlayerLLMConfig, OpenAICompatibleRuntimeConfig } from "@llmcraft/shared";
+import type { PromptReflectionInput, PromptReflectionOptions, PromptReflectionResult } from "./PromptReflection";
 
 export type LLMProviderConfig = MatchPlayerLLMConfig;
 export type OpenAIProviderConfig = OpenAICompatibleRuntimeConfig;
@@ -112,6 +113,7 @@ export interface AgentSession {
   runAgent(input: AgentRunInput, options: RunAgentOptions): Promise<RunAgentResult>;
   runSubAgentTask(input: RunSubAgentTaskInput): Promise<string>;
   warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult>;
+  reflectPrompt(input: PromptReflectionInput, options?: PromptReflectionOptions): Promise<PromptReflectionResult>;
   getModel(): string;
   getBaseURL(): string | undefined;
 }

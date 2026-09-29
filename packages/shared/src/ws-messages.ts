@@ -5,6 +5,7 @@ import type {
   LiveMatchSetupSnapshot,
   LiveStateProjectionFrame,
   MatchDebugOptions,
+  MatchPromptSelection,
   MatchRegistryKind,
   MatchWarmupOptions,
   Tile,
@@ -23,6 +24,8 @@ export interface ClientStartMatchMessage {
   type: "start";
   player1PresetId: string;
   player2PresetId: string;
+  prompts?: Partial<Record<PlayerId, MatchPromptSelection>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   debug?: MatchDebugOptions;
 }
 
@@ -31,6 +34,8 @@ export interface ClientWarmupMatchMessage {
   type: "warmup";
   player1PresetId: string;
   player2PresetId: string;
+  prompts?: Partial<Record<PlayerId, MatchPromptSelection>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   debug?: MatchDebugOptions;
   warmup?: MatchWarmupOptions;
 }
@@ -41,6 +46,8 @@ export interface ClientResetMatchMessage {
   matchId: string;
   player1PresetId: string;
   player2PresetId: string;
+  prompts?: Partial<Record<PlayerId, MatchPromptSelection>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
   debug?: MatchDebugOptions;
 }
 
@@ -59,6 +66,20 @@ export interface ClientStopBenchmarkMessage {
 export interface ClientSaveRecordMessage {
   type: "save_record";
   matchId: string;
+}
+
+/** Generate or revise one side's strategy prompt from a completed live match. */
+export interface ClientReflectPromptMessage {
+  type: "reflect_prompt";
+  matchId: string;
+  playerId: PlayerId;
+}
+
+/** Cancel generation/backoff for one side; a result already being saved cannot be cancelled. */
+export interface ClientCancelPromptReflectionMessage {
+  type: "cancel_prompt_reflection";
+  matchId: string;
+  playerId: PlayerId;
 }
 
 export interface ClientLoadTerminalHistoryMessage {
@@ -88,6 +109,8 @@ export type ClientMessage =
   | ClientPauseMatchMessage
   | ClientStopBenchmarkMessage
   | ClientSaveRecordMessage
+  | ClientReflectPromptMessage
+  | ClientCancelPromptReflectionMessage
   | ClientLoadTerminalHistoryMessage
   | ClientStartBenchmarkMessage;
 
@@ -106,6 +129,7 @@ export interface ServerStateMessage {
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
     setup?: LiveMatchSetupSnapshot;
+    promptReflections?: Partial<Record<PlayerId, ServerPromptReflectionStatusMessage>>;
   } | null;
   matchStatus:
     | "warming_up"
@@ -216,6 +240,17 @@ export interface ServerWarmupStatusMessage {
   message?: string;
 }
 
+export interface ServerPromptReflectionStatusMessage {
+  type: "prompt_reflection_status";
+  matchId: string;
+  playerId: PlayerId;
+  promptId?: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  canCancel?: boolean;
+  versionId?: string;
+  message?: string;
+}
+
 /** 所有服务端发送的消息联合类型 */
 export type ServerMessage =
   | ServerStateMessage
@@ -228,7 +263,8 @@ export type ServerMessage =
   | ServerRecordSavedMessage
   | ServerBenchmarkProgressMessage
   | ServerBenchmarkCompleteMessage
-  | ServerWarmupStatusMessage;
+  | ServerWarmupStatusMessage
+  | ServerPromptReflectionStatusMessage;
 
 /** 服务端消息类型字符串（用于路由） */
 export type ServerMessageType = ServerMessage["type"];

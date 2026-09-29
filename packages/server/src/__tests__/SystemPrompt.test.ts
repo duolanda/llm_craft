@@ -4,6 +4,16 @@ import { createDefaultMatchDefinition } from "../MatchDefinition";
 import { createSystemPrompt } from "../SystemPrompt";
 
 describe("createSystemPrompt", () => {
+  it("appends the selected strategy without changing the core player-relative prompt", () => {
+    const definition = createDefaultMatchDefinition();
+    const core = createSystemPrompt(definition, "player_1");
+    const strategy = "CUSTOM_STRATEGY_SENTINEL";
+    const composed = createSystemPrompt(definition, "player_1", strategy);
+
+    expect(composed.startsWith(core)).toBe(true);
+    expect(composed.endsWith(strategy)).toBe(true);
+  });
+
   it("generates mirrored factual guidance without a fixed opening strategy", () => {
     const definition = createDefaultMatchDefinition();
     const player1 = createSystemPrompt(definition, "player_1");

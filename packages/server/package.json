@@ -8,6 +8,7 @@
     "build": "tsc --build",
     "start": "node dist/index.js",
     "analyze:record": "node scripts/analyze-record.mjs",
+    "eval:reflection": "tsx scripts/reflection-eval.ts",
     "check:strategic": "tsx scripts/strategic-scale-check.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"

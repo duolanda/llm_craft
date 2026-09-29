@@ -1,6 +1,6 @@
 # LLMCraft AI API Contract
 
-日期: 2026-08-09
+日期: 2026-09-05
 
 这份文档只描述当前 AI 可依赖的接口契约。
 
@@ -418,6 +418,114 @@ interface ServerBenchmarkCompleteMessage {
 }
 ```
 
+### 0.18 策略 Prompt 与版本
+
+策略 Prompt 是独立于模型 preset 的命名资源。版本内容不可变；编辑已有内容会追加新版本并将它设为当前版本，也可以重新激活历史版本。
+
+```ts
+interface StrategyPromptVersion {
+  id: string;
+  version: number;
+  title?: string; // 与正文一起生成的短标题，旧版本或手动版本可缺省
+  content: string;
+  source: "user" | "reflection";
+  createdAt: string;
+  basedOnVersionId?: string;
+  matchId?: string;
+  playerId?: PlayerId;
+  model?: string; // 复盘响应中的实际模型；未返回时使用原 session 的模型名
+}
+
+interface StrategyPromptVersionProvenance {
+  sourceVersionId: string;
+  sourceVersion: number;
+  model?: string;
+  matchId?: string;
+  playerId?: PlayerId;
+  recordFileName?: string;
+}
+
+interface StrategyPrompt {
+  id: string;
+  name: string;
+  activeVersionId: string;
+  versions: StrategyPromptVersion[];
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+HTTP 接口：
+
+- `GET /api/prompts`：返回全部策略及版本历史。
+- `GET /api/prompts/:id/provenance`：按需返回 `{ provenance: Record<versionId, StrategyPromptVersionProvenance> }`。编辑/翻译版沿 `basedOnVersionId` 追溯最近一次 AI 复盘；旧版本的模型信息可从对应 Match Record 的玩家元数据读取。服务端按完整 `matchId` 校验录像关联，找不到时不返回 `recordFileName`，不修改历史版本或录像。
+- `POST /api/prompts`：传入 `{ name, content }` 创建 v1。
+- `PUT /api/prompts/:id`：传入可选 `{ name, content }`；内容变化时创建新的当前版本。
+- `POST /api/prompts/:id/versions/:versionId/activate`：将历史版本设为当前版本。
+- `DELETE /api/prompts/:id`：删除该命名策略及其所有版本。
+
+`warmup` / `start` / `reset` 可选携带双方的精确版本选择：
+
+```ts
+interface MatchPromptSelection {
+  promptId: string;
+  versionId: string;
+}
+
+interface MatchPromptSnapshot {
+  promptId: string;
+  promptName: string;
+  versionId: string;
+  version: number;
+}
+
+interface PromptAwareMatchMessage {
+  prompts?: Partial<Record<PlayerId, MatchPromptSelection>>;
+  promptReflection?: Partial<Record<PlayerId, boolean>>;
+}
+
+interface ClientReflectPromptMessage {
+  type: "reflect_prompt";
+  matchId: string;
+  playerId: PlayerId;
+}
+
+interface ClientCancelPromptReflectionMessage {
+  type: "cancel_prompt_reflection";
+  matchId: string;
+  playerId: PlayerId;
+}
+
+interface ServerPromptReflectionStatusMessage {
+  type: "prompt_reflection_status";
+  matchId: string;
+  playerId: PlayerId;
+  promptId?: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  canCancel?: boolean; // 仅生成/等待重试时为 true，取消中或已开始保存时不可取消
+  versionId?: string;
+  message?: string;
+}
+```
+
+对局创建时服务端立即解析并冻结所选版本；后续编辑或切换当前版本不会改变已创建对局。`promptReflection` 与是否选择自定义 Prompt 相互独立，默认关闭。开启后，只在对局正常分出胜负时继续该方的原对战 session，追加一次中文复盘请求。终局后也可通过 `reflect_prompt` 为指定一方手动触发同一流程；同一局同一方的运行中或已完成请求不会重复执行。
+
+复盘链路为 `GameOrchestrator.reflectPrompt → 原 DecisionController → 原 AgentSession.reflectPrompt`。先等待终局时仍在收尾的决策完成历史保存，再复用原 ModelTransport、system prompt、会话历史和工具定义，追加包含阵营、胜负和最终 tick 的复盘指令；不重新读取 preset、不另建模型连接，也不以最后若干条日志或工具调用替代会话。保留工具定义以维持请求前缀，设置 `toolChoice: none`，且复盘阶段没有工具执行入口。一次响应同时生成 `# 简短策略标题`、空行和完整中文正文；解析为独立的 `title`（不超过 24 个字符）和 `content`，不另发命名请求。空输出、未完成输出、缺少标题或正文、意外工具调用都不会保存为策略。
+
+复盘沿用的是对战 session 当前保留的历史，不额外截断；对战阶段已经过期的观察或被 ContextWindowLimiter 裁剪的消息不会自动恢复，模型未公开的内部推理也不在会话内。原 session 不可用时返回失败，不降级为独立复盘请求。缓存命中取决于供应商实际支持与缓存状态。
+
+Transport 保留供应商实际返回的 reasoning 字段及不透明 replay 数据，仅在发送边界做必要协议适配（例如 OpenCode Go 的 `reasoning → reasoning_content`）并过滤没有正文、拒绝信息或工具调用的空 assistant。预热、对战、子 Agent 与复盘统一校验响应：失败、中断、空输出和被截断的纯文本不写入有效历史；`length` / `max_tokens` 响应中的整批工具都不执行，而是逐个补齐失败结果。非法 JSON 工具参数也返回失败，不能当作 `{}` 执行。后续对战或复盘从最后一个有效历史点继续，不通过新增独立 session 绕过错误。
+
+未选择策略时，AI 会从本局表现生成策略，用生成的短标题作为策略名称并创建到策略库；已选择策略时，内容有实质变化才以 `source: "reflection"` 追加为待采用版本，保留该版本的短标题和模型信息，不覆盖原策略名称，**不会自动切换 `activeVersionId`**。进度和结果通过 `prompt_reflection_status` WebSocket 消息返回，并投影到当前对局状态供终局 UI 恢复展示。
+
+失败状态的 `message` 提供安全的中文原因（如空输出、输出截断、会话不可用、鉴权失败或限流），不向客户端转发供应商原始响应、请求头或凭据。失败请求可在原 session 仍可用时重试；运行中或成功的请求保持幂等。
+
+预热、主 Agent 决策与复盘共用单次模型请求重试逻辑：网络断连、超时、HTTP 408/409、临时 429 与 5xx 最多自动追加 3 次请求，退避 2/4/8 秒，SDK 本身不重试。OpenCode Go 使用额度及通用配额/账单耗尽即使返回 429 也不自动重试；鉴权、非法参数、无效/截断输出及主动取消同样直接结束。每次重发保持原请求上下文，工具执行、有效历史提交和策略落盘均在重试循环之外，避免重复动作或重复版本。
+
+复盘重试期间保持 `status: "running"`，`message` 展示原因、等待时间与重试次数，`canCancel: true`。`cancel_prompt_reflection` 只取消指定 match/player 的生成或等待，不影响另一方；取消完成为 `cancelled`，不提交迟到响应或新增策略，原 session 可再次手动复盘。取消中仍保持运行中去重，开始保存后 `canCancel: false` 并完成该次落盘，不声称已取消保存中的结果。进度保存在对局状态中供刷新/重连恢复，关闭覆盖层或断开 WebSocket 不取消后台复盘。
+
+Web UI 的策略选择与策略库按 `promptId` 对应，选择项显示策略名称和当前采用版本，不追加哈希编号；已开始对局显示其冻结版本，并可直接打开对应策略。策略库按版本显示生成模型、来源阵营及录像链接；编辑/翻译版标明基于哪个 AI 复盘版本，来源未知或录像缺失时明确提示，不从名称猜测模型。版本时间始终来自该版本的 `createdAt`，按浏览器本地时区展示，不附加 GMT/UTC 后缀，不使用策略级 `createdAt` / `updatedAt` 代替。非当前版本统一显示为“其他版本”，不根据 `source: "reflection"` 猜测它是否曾被采用。单独改名只更新策略名称，不追加版本或改写历史正文。
+
 ## 1. Agent Run 输入
 
 每次 AI 被唤醒时，不再收到完整 `AIPromptPayload + JavaScript 执行环境`；旧 `full/delta` 兼容输入已从代码中移除。
@@ -425,6 +533,7 @@ interface ServerBenchmarkCompleteMessage {
 当前模型收到的是：
 
 - 从 `MatchDefinition + playerId` 生成的阵营相对 `system prompt`；我方/敌方 HQ、开局工地与推进方向会镜像，不再复用 player_1 坐标
+- 如果对局选择了策略 Prompt，在固定规则和工具契约之后附加该方冻结的精确版本
 - 持续对话历史
 - 当前新的 `user` 消息，内容是 `AgentRunInput`
 
@@ -450,7 +559,11 @@ interface AgentRunInput {
 
 当前 `summary` 不承载完整状态快照。模型应通过工具主动读取战场信息。
 
-### 1.1 当前规则来源
+### 1.1 自定义策略的边界
+
+固定 system prompt 仍是游戏规则、工具语义和安全边界的权威来源。用户策略 Prompt 只描述经济、兵种、进攻节奏、分兵方式等偏好，不能覆盖固定规则或工具契约。未选择策略时，模型行为与原固定 system prompt 完全一致。
+
+### 1.2 当前规则来源
 
 当前规则由 shared 的 `standard` ruleset 描述：
 
@@ -477,7 +590,7 @@ interface AgentRunInput {
 
 服务端核心逻辑通过 ruleset helper 读取单位数值、建筑数值、当前生产关系、成本和攻击能力判断；standard 的生产 helper 会过滤兼容性退役单位，即使底层 legacy ruleset 数据仍保留其历史数值和建筑关联。工具 schema 已接受新增 unit/building 类型。
 
-### 1.2 服务端命令交付契约
+### 1.3 服务端命令交付契约
 
 Agent、CLI 和 built-in CPU 都通过 `GameplayController` 生成命令，再由当前 `MatchRuntime` 提交到对局专属 `CommandGateway`：
 
@@ -1445,6 +1558,7 @@ interface MatchRecord {
     recordingProfile: "replay" | "evaluation";
     includeTranscript: boolean;
     systemPrompt?: string;
+    strategyPrompts?: Partial<Record<PlayerId, MatchPromptSnapshot>>;
     players: Array<{
       playerId: PlayerId;
       model: string;
@@ -1471,6 +1585,6 @@ Control-plane match 默认使用 `evaluation` 且关闭 transcript，因此 CLI 
 
 `includeTranscript` 只在 evaluation 档位生效。关闭时仍保留 tool calls、commands、plans、性能指标和停止原因，但清空 assistant 原文与各模型请求的 messages；开启时才保存完整模型输出和请求消息。前端 transcript 页面直接从 Match Record 的 `aiTurns` 投影，不另写一种 transcript 文件。
 
-`SavedAITurnRecord` 记录一次 agent turn 的输入 tick、工具调用、计划、命令、停止原因与模型请求指标。`metrics.contextWindow` 是当前 `ContextWindowLimiter` 的机械限长报告，包含裁剪前后消息数/字节数；它不是持久 memory，也不声称已经完成语义压缩。当前默认上限为 80 条消息、总计 1 MiB、单条 32 KiB，后续应由真正能生成模型可读摘要的 compactor 替代。
+`SavedAITurnRecord` 记录一次 agent turn 的输入 tick、工具调用、计划、命令、停止原因与模型请求指标。`metrics.contextWindow` 是当前 `ContextWindowLimiter` 的机械限长报告，包含裁剪前后消息数/字节数；它不是持久 memory，也不声称已经完成语义压缩。当前默认上限为 80 条消息、总计 1 MiB、普通单条消息 32 KiB；带 tool declarations 或供应商 replay 数据的 assistant 不做单条截断，超出总预算时连同所在 user 边界段整体移除，以免破坏工具配对或签名。后续应由真正能生成模型可读摘要的 compactor 替代。
 
 Benchmark complete 消息除原有胜负和平均时长外，可返回 `llmWinRateConfidence95 / positionBias / medianDurationTicks / p90DurationTicks`。`BenchmarkRunner` 只负责 benchmark trial 的并发执行和结果聚合；`analyze-record.mjs` 是面向开发者和 agent 的独立离线分析工具。

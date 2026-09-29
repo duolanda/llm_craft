@@ -2,16 +2,21 @@ import { ChangeEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useSta
 import {
   CPUStrategyType,
   CreateLLMPresetRequest,
+  CreateStrategyPromptRequest,
   GameRecord,
   GameState,
   LLMPresetSummary,
   MatchDebugOptions,
+  MatchPromptSelection,
   MatchWarmupState,
   MatchRecordingProfile,
   MatchRegistrySummary,
   PlayerId,
+  PLAYER_IDS,
+  StrategyPrompt,
   TestLLMPresetRequest,
   UpdateLLMPresetRequest,
+  UpdateStrategyPromptRequest,
 } from "@llmcraft/shared";
 import {
   LiveSimulationClock,
@@ -29,9 +34,20 @@ import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { MatchPanel } from "./components/MatchPanel";
+import { PromptPanel } from "./components/PromptPanel";
+import { PromptSelector } from "./components/PromptSelector";
+import { PromptReflectionRow } from "./components/PromptReflectionRow";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
+import {
+  activatePromptVersion,
+  createPrompt,
+  deletePrompt,
+  getPromptProvenance,
+  listPrompts,
+  updatePrompt,
+} from "./lib/promptApi";
 import { readLocalRecordText } from "./lib/readRecordFile";
 import { API_BASE_URL, WS_URL } from "./lib/serverConnection";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
@@ -50,6 +66,8 @@ interface ReplayRecordListEntry {
 type PendingMatchAction = "start" | "pause" | "reset" | null;
 
 const LIVE_PRESET_SELECTION_STORAGE_KEY = "llmcraft.livePresetSelection";
+const LIVE_PROMPT_SELECTION_STORAGE_KEY = "llmcraft.livePromptSelection";
+const loadPromptProvenance = (promptId: string) => getPromptProvenance(API_BASE_URL, promptId);
 const SHOWCASE_MODE = new URLSearchParams(window.location.search).get("showcase");
 const REQUESTED_REPLAY_FILE = new URLSearchParams(window.location.search).get("replay");
 const requestedReplayTick = new URLSearchParams(window.location.search).get("tick");
@@ -68,6 +86,13 @@ const MASS_BATTLE_UNIT_COUNT = Number.isFinite(requestedShowcaseUnits) && reques
 interface LivePresetSelection {
   player1PresetId: string;
   player2PresetId: string;
+}
+
+interface LivePromptSelection {
+  player1PromptId: string;
+  player2PromptId: string;
+  player1ReflectAfterMatch: boolean;
+  player2ReflectAfterMatch: boolean;
 }
 
 function DevQuickNav() {
@@ -181,6 +206,36 @@ function writeStoredLivePresetSelection(selection: LivePresetSelection): void {
   }
 }
 
+function readStoredLivePromptSelection(): LivePromptSelection {
+  const fallback: LivePromptSelection = {
+    player1PromptId: "",
+    player2PromptId: "",
+    player1ReflectAfterMatch: false,
+    player2ReflectAfterMatch: false,
+  };
+  try {
+    const rawSelection = window.localStorage.getItem(LIVE_PROMPT_SELECTION_STORAGE_KEY);
+    if (!rawSelection) return fallback;
+    const parsed = JSON.parse(rawSelection) as Partial<LivePromptSelection>;
+    return {
+      player1PromptId: typeof parsed.player1PromptId === "string" ? parsed.player1PromptId : "",
+      player2PromptId: typeof parsed.player2PromptId === "string" ? parsed.player2PromptId : "",
+      player1ReflectAfterMatch: parsed.player1ReflectAfterMatch === true,
+      player2ReflectAfterMatch: parsed.player2ReflectAfterMatch === true,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredLivePromptSelection(selection: LivePromptSelection): void {
+  try {
+    window.localStorage.setItem(LIVE_PROMPT_SELECTION_STORAGE_KEY, JSON.stringify(selection));
+  } catch {
+    // Local persistence is a convenience; match setup still works without it.
+  }
+}
+
 function findReplayFrameIndex(frames: ReplayFrame[], simulationTimeMs: number, tickIntervalMs: number): number {
   let low = 0;
   let high = frames.length - 1;
@@ -229,8 +284,11 @@ function App() {
     benchmarkRunning,
     warmupStatuses,
     warmupMessage,
+    promptReflectionMessage,
+    promptReflectionRevision,
     setWarmupStatuses,
     setWarmupMessage,
+    clearPromptReflectionMessage,
     send,
     clearServerMessage,
     clearBenchmarkResult,
@@ -270,11 +328,26 @@ function App() {
   const [presetError, setPresetError] = useState<string | null>(null);
   const [player1PresetId, setPlayer1PresetId] = useState(() => readStoredLivePresetSelection().player1PresetId);
   const [player2PresetId, setPlayer2PresetId] = useState(() => readStoredLivePresetSelection().player2PresetId);
+  const [prompts, setPrompts] = useState<StrategyPrompt[]>([]);
+  const [promptsLoaded, setPromptsLoaded] = useState(false);
+  const [promptsLoading, setPromptsLoading] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [player1PromptId, setPlayer1PromptId] = useState(() => readStoredLivePromptSelection().player1PromptId);
+  const [player2PromptId, setPlayer2PromptId] = useState(() => readStoredLivePromptSelection().player2PromptId);
+  const [player1ReflectAfterMatch, setPlayer1ReflectAfterMatch] = useState(
+    () => readStoredLivePromptSelection().player1ReflectAfterMatch,
+  );
+  const [player2ReflectAfterMatch, setPlayer2ReflectAfterMatch] = useState(
+    () => readStoredLivePromptSelection().player2ReflectAfterMatch,
+  );
   const [recordingProfile, setRecordingProfile] = useState<MatchRecordingProfile>("evaluation");
   const [includeTranscript, setIncludeTranscript] = useState(false);
   const [pendingMatchAction, setPendingMatchAction] = useState<PendingMatchAction>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [promptsOpen, setPromptsOpen] = useState(false);
+  const [promptPanelSelection, setPromptPanelSelection] = useState<MatchPromptSelection | undefined>();
+  const [promptsDirty, setPromptsDirty] = useState(false);
   const [matchesOpen, setMatchesOpen] = useState(false);
   const [registeredMatches, setRegisteredMatches] = useState<MatchRegistrySummary[]>([]);
   const [observedMatchId, setObservedMatchId] = useState<string | null>(null);
@@ -402,6 +475,10 @@ function App() {
     if (!setup) return;
     setPlayer1PresetId(setup.player1PresetId);
     setPlayer2PresetId(setup.player2PresetId);
+    setPlayer1PromptId(setup.prompts?.player_1?.promptId ?? "");
+    setPlayer2PromptId(setup.prompts?.player_2?.promptId ?? "");
+    setPlayer1ReflectAfterMatch(Boolean(setup.promptReflection?.player_1));
+    setPlayer2ReflectAfterMatch(Boolean(setup.promptReflection?.player_2));
     setRecordingProfile(setup.recordingProfile);
     setIncludeTranscript(setup.includeTranscript);
   }, [
@@ -409,6 +486,10 @@ function App() {
     observedMatch?.setup?.includeTranscript,
     observedMatch?.setup?.player1PresetId,
     observedMatch?.setup?.player2PresetId,
+    observedMatch?.setup?.promptReflection?.player_1,
+    observedMatch?.setup?.promptReflection?.player_2,
+    observedMatch?.setup?.prompts?.player_1?.promptId,
+    observedMatch?.setup?.prompts?.player_2?.promptId,
     observedMatch?.setup?.recordingProfile,
   ]);
 
@@ -515,13 +596,31 @@ function App() {
     }
   };
 
+  const refreshPrompts = useCallback(async () => {
+    setPromptsLoading(true);
+    setPromptError(null);
+    try {
+      setPrompts(await listPrompts(API_BASE_URL));
+    } catch (error) {
+      setPromptError(`获取策略 Prompt 失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setPromptsLoaded(true);
+      setPromptsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (LOCAL_SHOWCASE) {
       return;
     }
     void fetchRecordEntries();
     void refreshPresets();
+    void refreshPrompts();
   }, []);
+
+  useEffect(() => {
+    if (promptReflectionRevision > 0) void refreshPrompts();
+  }, [promptReflectionRevision, refreshPrompts]);
 
   useEffect(() => {
     if (!presetsLoaded) {
@@ -544,13 +643,45 @@ function App() {
   }, [matchSetupLocked, presets, presetsLoaded]);
 
   useEffect(() => {
+    if (!promptsLoaded || matchSetupLocked) return;
+    const promptIds = new Set(prompts.map((prompt) => prompt.id));
+    setPlayer1PromptId((current) => current && promptIds.has(current) ? current : "");
+    setPlayer2PromptId((current) => current && promptIds.has(current) ? current : "");
+  }, [matchSetupLocked, prompts, promptsLoaded]);
+
+  useEffect(() => {
     writeStoredLivePresetSelection({ player1PresetId, player2PresetId });
   }, [player1PresetId, player2PresetId]);
 
   useEffect(() => {
+    writeStoredLivePromptSelection({
+      player1PromptId,
+      player2PromptId,
+      player1ReflectAfterMatch,
+      player2ReflectAfterMatch,
+    });
+  }, [
+    player1PromptId,
+    player2PromptId,
+    player1ReflectAfterMatch,
+    player2ReflectAfterMatch,
+  ]);
+
+  useEffect(() => {
     setWarmupStatuses({});
     setWarmupMessage(null);
-  }, [player1PresetId, player2PresetId, recordingProfile, includeTranscript, setWarmupMessage, setWarmupStatuses]);
+  }, [
+    player1PresetId,
+    player2PresetId,
+    player1PromptId,
+    player2PromptId,
+    player1ReflectAfterMatch,
+    player2ReflectAfterMatch,
+    recordingProfile,
+    includeTranscript,
+    setWarmupMessage,
+    setWarmupStatuses,
+  ]);
 
   useEffect(() => {
     setWarmupStatuses({});
@@ -676,6 +807,28 @@ function App() {
     }
   };
 
+  const buildSelectedPromptSelections = (): Partial<Record<PlayerId, MatchPromptSelection>> => {
+    const selections: Partial<Record<PlayerId, MatchPromptSelection>> = {};
+    const addSelection = (playerId: PlayerId, promptId: string) => {
+      if (!promptId) return;
+      const prompt = prompts.find((item) => item.id === promptId);
+      const matchSnapshot = observedMatch?.setup?.prompts?.[playerId];
+      const versionId = matchSetupLocked && matchSnapshot?.promptId === promptId
+        ? matchSnapshot.versionId
+        : prompt?.activeVersionId ?? (matchSnapshot?.promptId === promptId ? matchSnapshot.versionId : undefined);
+      if (!versionId) return;
+      selections[playerId] = { promptId, versionId };
+    };
+    addSelection(PLAYER_IDS.PLAYER_1, player1PromptId);
+    addSelection(PLAYER_IDS.PLAYER_2, player2PromptId);
+    return selections;
+  };
+
+  const buildPromptReflectionOptions = (): Partial<Record<PlayerId, boolean>> => ({
+    ...(player1ReflectAfterMatch ? { player_1: true } : {}),
+    ...(player2ReflectAfterMatch ? { player_2: true } : {}),
+  });
+
   const handleRestart = () => {
     if (!player1PresetId || !player2PresetId || observedMatch?.kind !== "live") {
       return;
@@ -689,6 +842,8 @@ function App() {
       matchId: observedMatch.matchId,
       player1PresetId,
       player2PresetId,
+      prompts: buildSelectedPromptSelections(),
+      promptReflection: buildPromptReflectionOptions(),
       debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     })) {
       setPendingMatchAction("reset");
@@ -706,6 +861,8 @@ function App() {
       type: "start",
       player1PresetId,
       player2PresetId,
+      prompts: buildSelectedPromptSelections(),
+      promptReflection: buildPromptReflectionOptions(),
       debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
     })) {
       setPendingMatchAction("start");
@@ -723,6 +880,8 @@ function App() {
       type: "warmup",
       player1PresetId,
       player2PresetId,
+      prompts: buildSelectedPromptSelections(),
+      promptReflection: buildPromptReflectionOptions(),
       debug: buildMatchDebugOptions(recordingProfile, includeTranscript),
       warmup: {
         player_1: playerId === "player_1",
@@ -755,6 +914,22 @@ function App() {
     if (observedMatch?.kind !== "live" || !observedMatch.recordingEnabled) return;
     clearServerMessage();
     send({ type: "save_record", matchId: observedMatch.matchId });
+  };
+
+  const handleReflectPrompt = (playerId: PlayerId) => {
+    if (observedMatch?.kind !== "live") return;
+    clearServerMessage();
+    send({
+      type: "reflect_prompt",
+      matchId: observedMatch.matchId,
+      playerId,
+    });
+  };
+
+  const handleCancelPromptReflection = (playerId: PlayerId) => {
+    if (observedMatch?.kind !== "live") return;
+    clearServerMessage();
+    send({ type: "cancel_prompt_reflection", matchId: observedMatch.matchId, playerId });
   };
 
   const handleObserveMatch = async (match: MatchRegistrySummary) => {
@@ -822,6 +997,39 @@ function App() {
     return await testPreset(API_BASE_URL, input);
   };
 
+  const storePromptInState = (prompt: StrategyPrompt): StrategyPrompt => {
+    setPromptError(null);
+    setPrompts((current) => [prompt, ...current.filter((item) => item.id !== prompt.id)]
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)));
+    return prompt;
+  };
+
+  const handleCreatePrompt = async (input: CreateStrategyPromptRequest): Promise<StrategyPrompt> => {
+    return storePromptInState(await createPrompt(API_BASE_URL, input));
+  };
+
+  const handleUpdatePrompt = async (
+    promptId: string,
+    input: UpdateStrategyPromptRequest,
+  ): Promise<StrategyPrompt> => {
+    return storePromptInState(await updatePrompt(API_BASE_URL, promptId, input));
+  };
+
+  const handleActivatePromptVersion = async (
+    promptId: string,
+    versionId: string,
+  ): Promise<StrategyPrompt> => {
+    return storePromptInState(await activatePromptVersion(API_BASE_URL, promptId, versionId));
+  };
+
+  const handleDeletePrompt = async (promptId: string): Promise<void> => {
+    await deletePrompt(API_BASE_URL, promptId);
+    setPromptError(null);
+    setPrompts((current) => current.filter((prompt) => prompt.id !== promptId));
+    if (player1PromptId === promptId) setPlayer1PromptId("");
+    if (player2PromptId === promptId) setPlayer2PromptId("");
+  };
+
   const handleCloseSettings = useCallback(() => {
     if (settingsDirty && !window.confirm("当前有未保存的修改，确定关闭吗？")) {
       return;
@@ -829,6 +1037,18 @@ function App() {
     setSettingsOpen(false);
     setSettingsDirty(false);
   }, [settingsDirty]);
+
+  const handleClosePrompts = useCallback(() => {
+    if (promptsDirty && !window.confirm("当前有未保存的修改，确定关闭吗？")) return;
+    setPromptsOpen(false);
+    setPromptsDirty(false);
+  }, [promptsDirty]);
+
+  const handleOpenPrompts = (selection?: MatchPromptSelection) => {
+    setPromptPanelSelection(selection);
+    setPromptsDirty(false);
+    setPromptsOpen(true);
+  };
 
   const replayFrame = replayFrames[replayFrameIndex] ?? null;
   const replayTickIntervalMs = activeReplayRecord?.definition.tickIntervalMs ?? 500;
@@ -885,6 +1105,7 @@ function App() {
   const canStartLiveMatch = connected
     && liveEnabled
     && hasSelectedLivePresets
+    && promptsLoaded
     && !benchmarkBusy
     && pendingMatchAction === null
     && matchStatus !== "warming_up";
@@ -929,6 +1150,16 @@ function App() {
     : null;
   const visibleReplayError = mode === "replay" ? replayError : null;
   const visiblePresetError = mode === "live" ? presetError : null;
+  const visiblePromptError = mode === "live" ? promptError : null;
+  const promptReflectionStatuses = observedMatch?.promptReflections;
+  const hasCompletedPromptReflection = Object.values(promptReflectionStatuses ?? {})
+    .some((reflection) => reflection?.status === "completed");
+  const deletionBlockedPromptIds = matchSetupLocked
+    ? [
+        observedMatch?.setup?.prompts?.player_1?.promptId,
+        observedMatch?.setup?.prompts?.player_2?.promptId,
+      ].filter((promptId): promptId is string => Boolean(promptId))
+    : [];
 
   if (LOCAL_SHOWCASE) {
     return (
@@ -974,25 +1205,36 @@ function App() {
             {mode === "live" && (
               <>
                 <div className="match-preset-bar">
-                  <div className="settings-field compact">
-                    <span>红方预设</span>
+                  <div className="settings-field compact match-side-setup">
+                    <span>红方配置</span>
                     <div className="preset-select-row">
-                      <select
-                        className="settings-select live-preset-select red"
-                        value={player1PresetId}
-                        onChange={(event) => setPlayer1PresetId(event.target.value)}
-                        disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
-                      >
-                        <option value="">选择红方预设</option>
-                        {player1PresetId && !presets.some((preset) => preset.id === player1PresetId) && (
-                          <option value={player1PresetId}>当前对局预设</option>
-                        )}
-                        {presets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
-                            {preset.name}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="preset-select-stack">
+                        <select
+                          aria-label="红方模型预设"
+                          className="settings-select live-preset-select red"
+                          value={player1PresetId}
+                          onChange={(event) => setPlayer1PresetId(event.target.value)}
+                          disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
+                        >
+                          <option value="">模型 · 请选择</option>
+                          {player1PresetId && !presets.some((preset) => preset.id === player1PresetId) && (
+                            <option value={player1PresetId}>模型 · 当前对局预设</option>
+                          )}
+                          {presets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
+                          ))}
+                        </select>
+                        <PromptSelector
+                          side="red"
+                          value={player1PromptId}
+                          prompts={prompts}
+                          frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_1 : undefined}
+                          onChange={setPlayer1PromptId}
+                          disabled={promptsLoading || matchSetupLocked}
+                          viewDisabled={benchmarkBusy}
+                          onView={handleOpenPrompts}
+                        />
+                      </div>
                       <button
                         type="button"
                         className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_1)}`}
@@ -1003,25 +1245,36 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  <div className="settings-field compact">
-                    <span>蓝方预设</span>
+                  <div className="settings-field compact match-side-setup">
+                    <span>蓝方配置</span>
                     <div className="preset-select-row">
-                      <select
-                        className="settings-select live-preset-select blue"
-                        value={player2PresetId}
-                        onChange={(event) => setPlayer2PresetId(event.target.value)}
-                        disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
-                      >
-                        <option value="">选择蓝方预设</option>
-                        {player2PresetId && !presets.some((preset) => preset.id === player2PresetId) && (
-                          <option value={player2PresetId}>当前对局预设</option>
-                        )}
-                        {presets.map((preset) => (
-                          <option key={preset.id} value={preset.id}>
-                            {preset.name}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="preset-select-stack">
+                        <select
+                          aria-label="蓝方模型预设"
+                          className="settings-select live-preset-select blue"
+                          value={player2PresetId}
+                          onChange={(event) => setPlayer2PresetId(event.target.value)}
+                          disabled={presetsLoading || presets.length === 0 || matchSetupLocked}
+                        >
+                          <option value="">模型 · 请选择</option>
+                          {player2PresetId && !presets.some((preset) => preset.id === player2PresetId) && (
+                            <option value={player2PresetId}>模型 · 当前对局预设</option>
+                          )}
+                          {presets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>模型 · {preset.name}</option>
+                          ))}
+                        </select>
+                        <PromptSelector
+                          side="blue"
+                          value={player2PromptId}
+                          prompts={prompts}
+                          frozenPrompt={matchSetupLocked ? observedMatch?.setup?.prompts?.player_2 : undefined}
+                          onChange={setPlayer2PromptId}
+                          disabled={promptsLoading || matchSetupLocked}
+                          viewDisabled={benchmarkBusy}
+                          onView={handleOpenPrompts}
+                        />
+                      </div>
                       <button
                         type="button"
                         className={`match-warmup-btn ${getWarmupStatusClass(warmupStatuses.player_2)}`}
@@ -1035,7 +1288,7 @@ function App() {
                 </div>
                 <div className="match-action-bar">
                   <details className="match-options">
-                    <summary className="hud-btn hud-btn-ghost">录制</summary>
+                    <summary className="hud-btn hud-btn-ghost">选项</summary>
                     <div className="match-options-menu">
                       <label className="settings-field compact">
                         <span>记录档位</span>
@@ -1059,6 +1312,28 @@ function App() {
                         />
                         完整 transcript
                       </label>
+                      <div className="match-options-section">
+                        <span className="match-options-section-title">AI 策略沉淀</span>
+                        <label className="benchmark-inline-toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={player1ReflectAfterMatch}
+                            onChange={(event) => setPlayer1ReflectAfterMatch(event.target.checked)}
+                            disabled={matchSetupLocked}
+                          />
+                          红方赛后自动沉淀
+                        </label>
+                        <label className="benchmark-inline-toggle-row">
+                          <input
+                            type="checkbox"
+                            checked={player2ReflectAfterMatch}
+                            onChange={(event) => setPlayer2ReflectAfterMatch(event.target.checked)}
+                            disabled={matchSetupLocked}
+                          />
+                          蓝方赛后自动沉淀
+                        </label>
+                        <small className="settings-help">每方额外调用一次对应模型。未选策略时创建新策略；已选时生成待采用版本。</small>
+                      </div>
                       <button
                         type="button"
                         onClick={handleSaveRecord}
@@ -1076,6 +1351,14 @@ function App() {
                     disabled={!connected}
                   >
                     对局{registeredMatches.length > 0 ? ` ${registeredMatches.length}` : ""}
+                  </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
+                    onClick={() => handleOpenPrompts()}
+                    disabled={benchmarkBusy}
+                  >
+                    策略库
                   </button>
                   <button
                     type="button"
@@ -1138,6 +1421,8 @@ function App() {
           || (mode === "live" && benchmarkStatusVisible)
           || visibleReplayError
           || visiblePresetError
+          || visiblePromptError
+          || (mode === "live" && promptReflectionMessage)
           || (mode === "live" && currentSavedRecord)
         ) && (
           <div className="status-strip">
@@ -1161,6 +1446,13 @@ function App() {
             )}
             {visibleReplayError && <span className="status-error">{visibleReplayError}</span>}
             {visiblePresetError && <span className="status-error">{visiblePresetError}</span>}
+            {visiblePromptError && <span className="status-error">{visiblePromptError}</span>}
+            {mode === "live" && promptReflectionMessage && (
+              <span className="status-message-dismissible">
+                {promptReflectionMessage}
+                <button type="button" onClick={clearPromptReflectionMessage} aria-label="关闭 Prompt 总结提示">×</button>
+              </span>
+            )}
             {mode === "live" && currentSavedRecord && <span>记录已保存：{currentSavedRecord.fileName}</span>}
           </div>
         )}
@@ -1369,6 +1661,27 @@ function App() {
         </SettingsOverlay>
 
         <SettingsOverlay
+          open={mode === "live" && promptsOpen}
+          title="策略库"
+          onClose={handleClosePrompts}
+        >
+          <PromptPanel
+            prompts={prompts}
+            initialSelection={promptPanelSelection}
+            deletionBlockedPromptIds={deletionBlockedPromptIds}
+            loading={promptsLoading}
+            error={promptError}
+            onRefresh={refreshPrompts}
+            onCreate={handleCreatePrompt}
+            onUpdate={handleUpdatePrompt}
+            onActivateVersion={handleActivatePromptVersion}
+            onDelete={handleDeletePrompt}
+            onDirtyChange={setPromptsDirty}
+            onLoadProvenance={loadPromptProvenance}
+          />
+        </SettingsOverlay>
+
+        <SettingsOverlay
           open={mode === "live" && settingsOpen}
           title="设置"
           onClose={handleCloseSettings}
@@ -1425,7 +1738,33 @@ function App() {
                   对局记录已自动保存：{currentSavedRecord.fileName}
                 </div>
               )}
+              <div className="winner-reflection">
+                <div className="winner-reflection-heading">AI 策略沉淀</div>
+                {[PLAYER_IDS.PLAYER_1, PLAYER_IDS.PLAYER_2].map((playerId) => (
+                  <PromptReflectionRow
+                    key={playerId}
+                    playerId={playerId}
+                    reflection={promptReflectionStatuses?.[playerId]}
+                    autoRequested={observedMatch.setup?.promptReflection?.[playerId] === true}
+                    connected={connected}
+                    onGenerate={handleReflectPrompt}
+                    onCancel={handleCancelPromptReflection}
+                  />
+                ))}
+                <div className="winner-reflection-help">沿用本局会话生成策略；连接异常会自动重试，也可取消。</div>
+              </div>
               <div className="winner-actions">
+                {hasCompletedPromptReflection && (
+                  <button
+                    className="hud-btn hud-btn-start"
+                    onClick={() => {
+                      setDismissedWinnerMatchId(observedMatch.matchId);
+                      handleOpenPrompts();
+                    }}
+                  >
+                    查看策略库
+                  </button>
+                )}
                 <button className="hud-btn hud-btn-ghost" onClick={() => setDismissedWinnerMatchId(observedMatch.matchId)}>
                   关闭覆盖层
                 </button>

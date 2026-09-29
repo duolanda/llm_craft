@@ -3,7 +3,11 @@ import { createDefaultMatchDefinition } from "./MatchDefinition";
 
 const formatPoint = (point: { x: number; y: number }): string => `(${point.x},${point.y})`;
 
-export function createSystemPrompt(definition: MatchDefinition, playerId: PlayerId): string {
+export function createSystemPrompt(
+  definition: MatchDefinition,
+  playerId: PlayerId,
+  strategyPrompt?: string,
+): string {
   const me = definition.players.find((player) => player.id === playerId);
   const enemy = definition.players.find((player) => player.id !== playerId);
   if (!me || !enemy) {
@@ -17,7 +21,7 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
     throw new Error("Map definition must contain one starting HQ for each player.");
   }
 
-  return `你是 LLMCraft 的即时战略 AI 指挥官，当前控制 ${playerId}。
+  const corePrompt = `你是 LLMCraft 的即时战略 AI 指挥官，当前控制 ${playerId}。
 
 胜利条件是摧毁敌方所有建筑。HQ 是重要目标，但单独摧毁 HQ 不会直接结束对局。
 
@@ -71,6 +75,17 @@ export function createSystemPrompt(definition: MatchDefinition, playerId: Player
 - 在经济发展、资源储备、即时军力和长期产能之间自主权衡；单位数量只是判断战斗力的一个因素
 - 生产、集结、进攻、防守、骚扰、转火、扩张和兵种选择的时机均由你判断
 - 对需要长期维持的意图可以使用持续命令或计划；战略判断应落实为实际行动，而不只是描述之后准备做什么`;
+
+  const strategy = strategyPrompt?.trim();
+  if (!strategy) return corePrompt;
+
+  return `${corePrompt}
+
+## 自定义策略 Prompt
+
+下列内容是用户为本局选定的战略偏好。在不违反上述游戏规则、工具契约和安全边界的前提下执行。
+
+${strategy}`;
 }
 
 export const SYSTEM_PROMPT = createSystemPrompt(createDefaultMatchDefinition(), PLAYER_IDS.PLAYER_1);

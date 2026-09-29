@@ -6,6 +6,7 @@ import {
 } from "../LLMProvider";
 import { SYSTEM_PROMPT } from "../SystemPrompt";
 import type { ModelCompletionResult } from "../model/ModelTransport";
+import { prepareToolCall, readModelResponse } from "../model/ModelResponse";
 
 const SUB_AGENT_CONSTRAINTS = `
 ## 你是子 Agent（执行 worker）
@@ -33,14 +34,6 @@ type CreateSubAgentCompletion = (
   },
   signal: AbortSignal,
 ) => Promise<ModelCompletionResult>;
-
-function parseToolArgs(raw: string): unknown {
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
 
 function findLeaseViolation(
   args: unknown,
@@ -221,10 +214,7 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
       return formatNotificationXML(taskId, description, "failed", objective, "Sub-agent exceeded maximum model requests.");
     }
 
-    const assistantMessage = response.message;
-    if (!assistantMessage) {
-      return formatNotificationXML(taskId, description, "failed", objective, "Sub-agent received empty response.");
-    }
+    const assistantMessage = readModelResponse(response);
 
     messages.push(assistantMessage);
 
@@ -241,11 +231,14 @@ export async function runSubAgentTask(config: SubAgentRunConfig): Promise<string
     }
 
     for (const toolCall of toolCalls) {
-      const args = parseToolArgs(toolCall.function.arguments);
+      const prepared = prepareToolCall(toolCall, response.finishReason);
+      const args = prepared.args;
       let execution: AgentToolExecutionResult;
       try {
         const violation = findLeaseViolation(args, leasedUnits, leasedBuildings);
-        if (violation) {
+        if (prepared.failure) {
+          execution = { effect: "read", result: prepared.failure };
+        } else if (violation) {
           execution = {
             effect: "read",
             result: {

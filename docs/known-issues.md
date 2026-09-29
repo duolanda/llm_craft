@@ -13,7 +13,7 @@
 
 ### ContextWindowLimiter 不是真正的上下文压缩
 
-- **现状**：当前只按消息数量/字节删除旧 user 边界段，并截断超大消息；`ContextWindowLimiter` 不是持久 memory，也不是语义 compactor。
+- **现状**：当前只按消息数量/字节删除旧 user 边界段，并截断普通超大消息；tool declarations 和供应商 reasoning/replay 数据不做单条截断，超限时按段移除。`ContextWindowLimiter` 不是持久 memory，也不是语义 compactor。
 - **风险**：模型仍会失去较早的战略理由和任务上下文，真正的语义压缩还完全没有做；tool-call/result 结构现在按原子批次保留，但长局表现和 token 成本仍同时受历史硬裁剪影响。
 - **下一步**：先定义模型可读摘要契约与保留事实，再实现真正 compactor；设计时同时控制总输入体积和缓存前缀稳定性，不假定更高的缓存命中率必然意味着更低成本。
 
@@ -80,6 +80,9 @@
 
 - **实战证据**：历史 731-tick Record 中一方 526 requests、29 tools、509 次连续 `Connection error`；修复前新鲜 1023-tick 双 `oc-deepseek-v4-flash` 对局又复现双方各 138/139 次连续 400，供应商明确报告 assistant `tool_calls` 后缺少匹配 tool message。根因是长 turn 中间传输失败前，已完成的工具结果尚未持久化，warmup assistant tool call 因而在下一 turn 成为孤立消息；orchestrator 又在每个 committed tick 立即重试。
 - **处理与验证**：每个完整 tool batch 现在原子持久化 assistant declarations 和匹配 results，并在同 turn 后续请求前限制活动上下文；每方失败独立执行最多 64 tick 的指数退避。回归测试先分别复现缺失 tool result 和 8 tick 内 9 次失败，再验证配对完整、失败调用不超过 4 且另一方 9 次调用/MatchRuntime 8 tick 均不受阻。修复后 608-tick 自然终局与 1017-tick 长局中，每方仅在终局/主动停止时有 1 次 `Request was aborted.`，最长同类错误 streak 均为 1，零输出和 empty-max-token 均为 0。
+- **2026-09-05 的另一条污染路径**：487-tick `94622254` 对局中，蓝方第二个请求以 `length` 用满 2048 output tokens，归一化后没有正文或工具，随后连续 10 次 HTTP 400；赛后复盘明确报告 `messages[5]` 是空 assistant。这与旧的孤立 tool result 问题不同：旧 transport 丢弃 reasoning 字段，session 又把空响应当成功历史。记录不足以确认原始响应是否包含 reasoning，不能把归一化后的空内容等同于模型没有推理。
+- **本次修复验证**：保留 reasoning/replay 字段、在发送边界过滤空 assistant，并在预热、主/子 Agent 和复盘入口拒绝无效响应；截断工具批次全部返回配对错误、不执行。回归测试覆盖字段往返、旧空消息过滤、有效历史续接、非法/截断参数不执行，以及复盘失败提示与同 session 重试。尚未用修复后的真实 LLM 对局复测。
+- **复盘网络失败的容错补齐**：`APIConnectionError → socket hang up / ECONNRESET` 与会话污染不同。SDK 异常存在值为 `undefined` 的 `status` 属性，旧分类转成 `NaN` 后漏判网络异常，且复盘未进入主决策的重试路径。现统一单请求重试，2/4/8 秒退避、最多追加 3 次；配额/账单及非法请求不盲目重发。回归覆盖真实 SDK 异常结构、重试上限、保留原历史/工具结果、取消等待与迟到响应不入库、按方隔离、重连状态及保存阶段去重；前端展示进度并可取消。没有用真实供应商故障注入或付费对局代替这些可重复测试。
 
 ### 已解决：战斗渲染按单位数量切换阴影并硬截断特效
 

@@ -17,6 +17,12 @@ export interface ModelAssistantMessage {
   role?: string;
   content?: unknown;
   tool_calls?: ModelToolCall[];
+  reasoning_content?: string | null;
+  reasoning?: string | null;
+  reasoning_text?: string | null;
+  /** Provider-owned replay data; encrypted entries/signatures must remain opaque. */
+  reasoning_details?: unknown[];
+  refusal?: string | null;
 }
 
 export interface ModelCompletionRequest {

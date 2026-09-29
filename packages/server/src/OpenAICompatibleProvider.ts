@@ -5,6 +5,7 @@ import {
   ContextWindowLimitRecord,
 } from "@llmcraft/shared";
 import {
+  AgentToolDefinition,
   AgentToolExecutionResult,
   LLMConnectionTestResult,
   LLMProvider,
@@ -18,18 +19,21 @@ import {
 import { SYSTEM_PROMPT } from "./SystemPrompt";
 import { getHQUnderAttackAlertFromRuntimeState } from "./HQAlert";
 import { runSubAgentTask } from "./agent/SubAgentRunner";
-import type { ModelTransport } from "./model/ModelTransport";
+import type { ModelCompletionRequest, ModelTransport } from "./model/ModelTransport";
 import { OpenAICompatibleModelTransport } from "./model/OpenAICompatibleModelTransport";
 import { ContextWindowLimiter } from "./agent/ContextWindowLimiter";
+import { retryModelRequest } from "./agent/ModelRequestRetry";
+import { isTruncatedResponse, prepareToolCall, readModelResponse } from "./model/ModelResponse";
+import { createPromptReflectionMessage, normalizeReflectedPrompt, type PromptReflectionInput, type PromptReflectionOptions, type PromptReflectionResult } from "./PromptReflection";
 
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 2048;
 const CONNECTION_TEST_MAX_TOKENS = 8;
+const REFLECTION_MAX_TOKENS = 4_096;
 const MAX_CONSECUTIVE_READ_ONLY_TOOL_CALLS = 10;
 const ABORT_STOP_REASON = "aborted";
 const PROVIDER_SYNC_WARNING_MS = 100;
 const PROVIDER_LARGE_PAYLOAD_WARNING_BYTES = 250_000;
-const MODEL_REQUEST_MAX_ATTEMPTS = 3;
 const REPLACEABLE_READ_TOOL_NAMES = new Set([
   "get_map_state",
   "get_my_state",
@@ -54,6 +58,7 @@ export interface OpenAIAgentSessionOptions {
 export class OpenAIAgentSession implements LLMProvider {
   private history: any[] = [];
   private warmedTurn: WarmedTurn | null = null;
+  private tools: AgentToolDefinition[] = [];
   private readonly seenRuntimeEventSignatures = new Set<string>();
   private readonly systemPrompt: string;
   private readonly contextWindowLimiter: ContextWindowLimiter;
@@ -68,6 +73,7 @@ export class OpenAIAgentSession implements LLMProvider {
   }
 
   async warmupAgent(input: AgentRunInput, options: RunAgentOptions): Promise<WarmupAgentResult> {
+    this.warmedTurn = null;
     if (options.signal?.aborted) {
       return this.createAbortedWarmupResult();
     }
@@ -83,17 +89,7 @@ export class OpenAIAgentSession implements LLMProvider {
 
     try {
       const response = await this.createAgentCompletion(messages, options, modelRequestRecords, "warmup");
-      const assistantMessage = response.message;
-      if (!assistantMessage) {
-        const contextWindow = this.limitContextWindow(persistentHistory);
-        this.warmedTurn = null;
-        return {
-          assistantMessages: [],
-          stopReason: "empty_response",
-          hasPendingToolCalls: false,
-          metrics: { modelRequests: 1, modelRequestRecords, contextWindow },
-        };
-      }
+      const assistantMessage = readModelResponse(response);
 
       messages.push(assistantMessage);
       persistentHistory.push(assistantMessage);
@@ -219,6 +215,7 @@ export class OpenAIAgentSession implements LLMProvider {
         try {
           const completionStartedAt = Date.now();
           response = await this.createAgentCompletion(messages, options, modelRequestRecords, "turn");
+          assistantMessage = readModelResponse(response);
           this.maybeEmitProviderWarning(options, "create_completion", Date.now() - completionStartedAt, {
             details: {
               messages: messages.length,
@@ -231,11 +228,6 @@ export class OpenAIAgentSession implements LLMProvider {
             break;
           }
           throw error;
-        }
-        assistantMessage = response.message;
-        if (!assistantMessage) {
-          stopReason = "empty_response";
-          break;
         }
         finishReason = response.finishReason;
 
@@ -265,7 +257,8 @@ export class OpenAIAgentSession implements LLMProvider {
         const toolStartedAtMs = Date.now();
         const toolStartedAt = new Date(toolStartedAtMs).toISOString();
         const parseArgsStartedAt = Date.now();
-        const args = this.parseToolArgs(toolCall.function.arguments);
+        const prepared = prepareToolCall(toolCall, finishReason);
+        const args = prepared.args;
         this.maybeEmitProviderWarning(options, "parse_tool_args", Date.now() - parseArgsStartedAt, {
           bytes: Buffer.byteLength(String(toolCall.function.arguments ?? ""), "utf8"),
           details: {
@@ -273,7 +266,9 @@ export class OpenAIAgentSession implements LLMProvider {
           },
         });
         let execution: AgentToolExecutionResult;
-        if (toolCall.function.name === "spawn_agent") {
+        if (prepared.failure) {
+          execution = { effect: "read", result: prepared.failure };
+        } else if (toolCall.function.name === "spawn_agent") {
           if (options.spawnSubAgent) {
             const spawnRuntimeStateStartedAt = Date.now();
             const runtimeState = options.getRuntimeState();
@@ -333,7 +328,9 @@ export class OpenAIAgentSession implements LLMProvider {
         if (execution.effect === "read") {
           consecutiveReadOnlyToolCalls++;
           const expireStartedAt = Date.now();
-          this.expireSupersededReadToolResults(messages, toolCall.id, toolCall.function.name, args);
+          if (!prepared.failure) {
+            this.expireSupersededReadToolResults(messages, toolCall.id, toolCall.function.name, args);
+          }
           this.maybeEmitProviderWarning(options, "expire_read_results", Date.now() - expireStartedAt, {
             details: {
               toolName: toolCall.function.name,
@@ -448,6 +445,36 @@ export class OpenAIAgentSession implements LLMProvider {
     };
   }
 
+  async reflectPrompt(input: PromptReflectionInput, options: PromptReflectionOptions = {}): Promise<PromptReflectionResult> {
+    if (this.history.length === 0) throw new Error("PROMPT_REFLECTION_SESSION_UNAVAILABLE");
+    const instruction = { role: "user", content: createPromptReflectionMessage(input) };
+    // Keep the playing system prompt, retained history and tool schemas intact.
+    // No new context trimming or game-tool execution occurs during reflection.
+    const request: Omit<ModelCompletionRequest, "signal"> = {
+      messages: [{ role: "system", content: this.systemPrompt }, ...this.history, instruction],
+      ...(this.tools.length > 0 ? { tools: this.tools, toolChoice: "none" as const } : {}),
+      temperature: DEFAULT_TEMPERATURE,
+      maxTokens: REFLECTION_MAX_TOKENS,
+    };
+    options.signal?.throwIfAborted();
+    await options.onRequest?.(structuredClone(request));
+    const result = await retryModelRequest(() => this.transport.complete({ ...request, signal: options.signal }), options);
+    if (result.message?.tool_calls?.length) throw new Error("PROMPT_REFLECTION_UNEXPECTED_TOOL_CALL");
+    if (isTruncatedResponse(result.finishReason)) {
+      throw new Error("PROMPT_REFLECTION_INCOMPLETE");
+    }
+    try {
+      readModelResponse(result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "MODEL_RESPONSE_EMPTY") throw new Error("PROMPT_REFLECTION_EMPTY");
+      throw error;
+    }
+    const draft = normalizeReflectedPrompt(result.message?.content);
+    // Commit only a successful response, so retries retain the original context.
+    this.history.push(instruction, result.message);
+    return { ...draft, model: result.responseModel?.trim() || this.getModel() };
+  }
+
   async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
     return await runSubAgentTask({
       ...input,
@@ -470,14 +497,6 @@ export class OpenAIAgentSession implements LLMProvider {
 
   getBaseURL(): string | undefined {
     return this.transport.getDescriptor().baseURL;
-  }
-
-  private parseToolArgs(raw: string): unknown {
-    try {
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
   }
 
   private extractResultTick(result: unknown): number | undefined {
@@ -539,9 +558,10 @@ export class OpenAIAgentSession implements LLMProvider {
     records: AgentModelRequestRecord[],
     phase: AgentModelRequestRecord["phase"],
   ) {
+    this.tools = structuredClone(options.tools);
     const messagesSnapshot = structuredClone(messages) as unknown[];
     const firstRequestIndex = records.length + 1;
-    for (let attempt = 1; attempt <= MODEL_REQUEST_MAX_ATTEMPTS; attempt++) {
+    return retryModelRequest(async (attempt) => {
       const startedAtMs = Date.now();
       try {
         const result = await this.transport.complete({
@@ -591,20 +611,9 @@ export class OpenAIAgentSession implements LLMProvider {
         };
         records.push(record);
         options.onModelRequest?.(record);
-        if (this.isAbortError(error, options.signal) || attempt === MODEL_REQUEST_MAX_ATTEMPTS || !this.isRetryableModelError(error)) {
-          throw error;
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 100 * attempt));
+        throw error;
       }
-    }
-    throw new Error("Model request retry loop exhausted unexpectedly.");
-  }
-
-  private isRetryableModelError(error: unknown): boolean {
-    const status = typeof error === "object" && error && "status" in error
-      ? Number((error as { status?: unknown }).status)
-      : undefined;
-    return status === undefined || status === 408 || status === 409 || status === 429 || status >= 500;
+    }, { signal: options.signal });
   }
 
   private maybeEmitProviderWarning(
@@ -755,7 +764,7 @@ export class OpenAIAgentSession implements LLMProvider {
 
         return {
           toolName: String(toolCall.function?.name ?? ""),
-          argsKey: this.normalizeToolArgs(this.parseToolArgs(String(toolCall.function?.arguments ?? ""))),
+          argsKey: this.normalizeToolArgs(prepareToolCall(toolCall, null).args),
         };
       }
     }

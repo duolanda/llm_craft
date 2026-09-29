@@ -115,4 +115,20 @@ describe("ContextWindowLimiter", () => {
     expect(result.record.droppedMessages).toBeGreaterThan(0);
     expect(result.record.truncatedMessages).toBeGreaterThan(0);
   });
+
+  it("preserves provider replay data intact and omits its whole user segment when it cannot fit", () => {
+    const history = [
+      { role: "user", content: "test" },
+      { role: "assistant", content: "answer", reasoning_content: "r".repeat(1200),
+        reasoning_details: [{ type: "reasoning.encrypted", data: "opaque-signature" }] },
+    ];
+    const retained = new ContextWindowLimiter({ maxBytes: 4096, maxMessageBytes: 256 }).limit(history);
+    expect(retained.history).toEqual(history);
+    expect(retained.record.truncatedMessages).toBe(0);
+
+    const omitted = new ContextWindowLimiter({ maxBytes: 1024, maxMessageBytes: 256 }).limit(history);
+    expect(omitted.record.bytesAfter).toBeLessThanOrEqual(1024);
+    expect(omitted.history).toHaveLength(1);
+    expect(omitted.history[0]).toMatchObject({ role: "user" });
+  });
 });

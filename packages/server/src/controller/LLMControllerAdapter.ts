@@ -11,6 +11,7 @@ import {
 } from "../agent/AgentRuntime";
 import type { GameplayController } from "./GameplayController";
 import type { DecisionController, DecisionControllerDescriptor } from "./DecisionController";
+import type { PromptReflectionInput, PromptReflectionOptions, PromptReflectionResult } from "../PromptReflection";
 
 /** Connects the AgentRuntime harness to the tick-scheduled decision interface. */
 export class LLMControllerAdapter implements DecisionController {
@@ -54,5 +55,9 @@ export class LLMControllerAdapter implements DecisionController {
 
   runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
     return this.session.runSubAgentTask(input);
+  }
+
+  reflectPrompt(input: PromptReflectionInput, options?: PromptReflectionOptions): Promise<PromptReflectionResult> {
+    return this.session.reflectPrompt(input, options);
   }
 }

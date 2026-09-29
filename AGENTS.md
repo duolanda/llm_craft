@@ -31,8 +31,9 @@ pnpm dev:client    # 仅前端 (端口 3100)
 
 # 测试
 pnpm test          # 运行服务端所有测试 (vitest)
+pnpm test:client   # 前端展示逻辑与组件静态渲染回归测试
 pnpm typecheck     # 全仓类型检查
-pnpm verify        # 全包 typecheck + server test + server/client/CLI build
+pnpm verify        # 全包 typecheck + server/client test + server/client/CLI build
 
 # 构建
 pnpm build         # 按依赖顺序构建所有包
@@ -143,6 +144,7 @@ flowchart LR
 | `GameOrchestrator` | 调度 | 只为 LLM/CPU harness: 创建双方 DecisionController、订阅 committed tick、启动下一轮决策、记录指标 |
 | `AgentRuntime` | LLM | LLM tool-calling harness：AgentSession 会话 + ModelTransport 请求 |
 | `PresetStore` | 服务端 | 加密存储 Web UI 配置的模型 preset (含 API key)；对局时 `getRuntimeConfig(id)` 解密出 transport 配置 |
+| `PromptStore` | 服务端 | 存储命名策略 Prompt 及不可变版本；对局只解析一个精确版本，不与模型 preset 或模拟状态绑定 |
 
 下面这些是相对稳定的现状说明，改成代码行为常动时再同步:
 
@@ -163,11 +165,18 @@ flowchart LR
 - HQ、兵营和重工可持久保存 rally point；单位生产完成后由 ProductionSystem 生成普通 move order，目标占用时复用寻路层的附近可达格解析
 - 动作通过 MatchRuntime 专属 CommandGateway 提交，禁止异步直接修改 WorldState
 
-**LLM 调用层 (server/src/model + server/src/PresetStore.ts):**
+**LLM 调用层 (server/src/model + server/src/PresetStore.ts + server/src/PromptStore.ts):**
 - GameOrchestrator 只调度 Controller；`LLMControllerAdapter` 持有有状态 AgentSession
 - OpenAI SDK、供应商请求参数、响应归一化和逐请求限流属于无状态 `ModelTransport`
+- Transport 保留供应商返回的 reasoning 字段和不透明 replay 数据；OpenCode Go 的 `reasoning → reasoning_content` 回传适配及空 assistant 过滤只在发送边界进行，不改写 session 历史、不伪造推理
 - 当前 session 实现是 `OpenAIAgentSession`；`OpenAICompatibleProvider` 只保留连接测试和迁移兼容导出
-- AgentSession 历史由 `ContextWindowLimiter` 做临时消息数/字节硬限制；它不是持久 memory 或语义 compactor，并须保持 assistant tool call / tool result 结构完整
+- 预热、对战、子 Agent 和复盘共用 `ModelResponse` 响应校验：空输出、失败/中断响应及被截断的纯文本不进入有效历史；`length` / `max_tokens` 工具批次全部不执行，逐个补齐失败结果供模型重新调用；非法 JSON 参数同样不执行，不能静默替换为 `{}`
+- 预热、主 Agent 决策与复盘通过 `ModelRequestRetry` 重试单次模型请求：网络/超时、408/409/429/5xx 最多追加 3 次，间隔 2/4/8 秒；额度/账单、鉴权、非法参数、取消与无效模型输出不自动重试。SDK 保持 `maxRetries: 0`，工具执行、历史提交和策略落盘不包进重试循环；每次决策请求仍单独记录指标。复盘重试进度和取消由服务端按 match/player 管理，落盘开始后不再接受取消，断开 WebSocket 不取消任务
+- AgentSession 历史由 `ContextWindowLimiter` 做临时消息数/字节硬限制；它不是持久 memory 或语义 compactor，并须保持 assistant tool call / tool result 结构完整。带供应商 replay 数据的 assistant 不逐字段截断，超出总预算时按完整 user 边界段移除
+- 固定 system prompt 管理规则与工具契约；可选的用户策略 Prompt 以 `promptId + versionId` 冻结后附加。赛后 reflection 由 GameOrchestrator 等待最后一轮决策收尾后，经原 Controller 继续该方已有 AgentSession：保留原 system prompt、会话历史、工具定义和 ModelTransport，只追加终局复盘消息，并以 `toolChoice: none` 禁用工具调用。禁止另建无历史的请求或手工截取少量日志代替原会话
+- reflection 不额外裁剪会话；对战中已经过期或裁剪的历史不会恢复，也不代表拥有未公开的内部推理。同一次响应生成中文短标题和正文，并按版本记录实际模型与来源对局；未选策略时以短标题命名首版策略，已有策略时只追加待采用版本，不覆盖原名称。原 session 不可用时明确失败，不回退到独立模型请求
+- 复盘产物是给下一局新会话的简短实战经验交接，可以包含具体兵种搭配和打法；依据实际观察修正旧策略，未验证的判断按想法表达。用中文，credits 称为“资金”，不写逐工具操作说明；不固定正文句数、字数或模板，不在保存时截断正文
+- 调整复盘指令时，先通过 `pnpm --filter @llmcraft/server eval:reflection capture` 在真实终局的原 session 请求边界固化输入，再通过 `eval:reflection run` 重放同一输入。评估只替换最后的复盘指令，固定 system prompt、保留历史、工具定义和模型参数；结果单独保存，不写入策略库。无 transcript 的旧录像不能伪装成原复盘上下文，具体步骤见 `docs/reflection-evaluation.md`
 - 兼容 OpenAI 风格端点的新模型接入优先扩展 transport，不要直接写进 orchestrator 或模拟层
 
 **Agent turn 与工具调用性能判断:**
@@ -200,11 +209,16 @@ flowchart LR
 | `packages/server/src/controller/GameplayController.ts` | LLM/CLI/CPU 共用的玩法控制平面 |
 | `packages/server/src/GameOrchestrator.ts` | LLM/CPU harness，调度 DecisionController |
 | `packages/server/src/agent/AgentRuntime.ts` | LLM tool-call loop harness |
+| `packages/server/src/agent/ModelRequestRetry.ts` | 共用模型异常分类、有限退避及可取消的单请求重试；不管理历史或工具 |
 | `packages/server/src/LLMProvider.ts` | AgentSession、工具循环与迁移兼容接口 |
 | `packages/server/src/OpenAICompatibleProvider.ts` | OpenAI AgentSession 与兼容导出 |
 | `packages/server/src/model/ModelTransport.ts` | 无状态模型传输契约 |
 | `packages/server/src/model/OpenAICompatibleModelTransport.ts` | OpenAI 兼容 SDK 传输实现 |
+| `packages/server/src/model/ModelResponse.ts` | 共用响应有效性、截断状态与工具参数校验 |
 | `packages/server/src/PresetStore.ts` | 加密存储 Web UI 配置的模型 preset |
+| `packages/server/src/PromptStore.ts` | 持久化命名策略 Prompt、版本历史与当前版本 |
+| `packages/server/src/PromptReflection.ts` | 原会话赛后复盘的追加指令、输入输出类型、正文规范化及安全错误提示；不创建模型连接 |
+| `packages/server/src/PromptProvenance.ts` | 按需解析版本的模型和来源录像；编辑版追溯原 AI 复盘，旧版本从 Match Record 补足展示信息，不改写历史 |
 | `packages/server/src/MatchRecorder.ts` | Match Record 档位、投影与终局保存 |
 | `packages/record/src/` | Match Record 校验、旧 JSON 导入与 replay 投影 |
 | `packages/shared/src/types.ts` | 共享 TypeScript 接口 |
@@ -220,6 +234,8 @@ flowchart LR
 - 前端 `SettingsPanel` → `POST /api/settings/presets` → `PresetStore.create`
 - 对局时双方各选一个 preset id；`PresetStore.getRuntimeConfig(id)` 解密出 `OpenAICompatibleRuntimeConfig` 交给 transport
 - API key 不会离开服务端，不会写进 `.env`，也不会进客户端
+
+策略 Prompt 与 preset 独立：前端通过 `/api/prompts` 管理命名策略和历史版本；创建对局时双方各自可选一个精确版本。用户编辑会创建新的 active 版本；AI 策略沉淀既可在开局前启用，也可在正常终局后按方触发。未选策略时从对局生成自动命名的首版策略，已有策略时生成的 reflection 版本必须由用户手动采用；同一 match/player 的运行中或已完成请求须保持幂等。
 
 ## 绝对不能做的事 🚫
 

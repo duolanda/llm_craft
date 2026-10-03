@@ -69,7 +69,7 @@ describe("ControlPlaneMatch", () => {
     const record = await readMatchRecordFile(recordPath);
 
     expect(path.dirname(recordPath)).toBe(recordDir);
-    expect(path.basename(recordPath)).toMatch(/^match-\d{4}-\d{2}-\d{2}T.*-external\.match\.json$/);
+    expect(path.basename(recordPath)).toMatch(/^match-\d{4}-\d{2}-\d{2}T.*-external\.match\.zst$/);
     expect(record).toMatchObject({
       recordFormat: "match-record",
       matchId: "match_external_control",

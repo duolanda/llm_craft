@@ -32,7 +32,7 @@ import { MatchPanel } from "./components/MatchPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
-import { readLocalRecordText } from "./lib/readRecordFile";
+import { importMatchRecord } from "./lib/recordApi";
 import { API_BASE_URL, WS_URL } from "./lib/serverConnection";
 import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
@@ -44,7 +44,7 @@ interface ReplayRecordListEntry {
   fileName: string;
   size: number;
   modifiedAt: string;
-  encoding?: "identity" | "gzip";
+  encoding?: "identity" | "zstd";
 }
 
 type PendingMatchAction = "start" | "pause" | "reset" | null;
@@ -206,7 +206,7 @@ function formatRecordEntryLabel(entry: ReplayRecordListEntry): string {
   const sizeLabel = entry.size >= 1024 * 1024
     ? `${(entry.size / (1024 * 1024)).toFixed(1)} MB`
     : `${Math.max(1, Math.round(entry.size / 1024))} KB`;
-  return `${dateLabel} · ${sizeLabel}${entry.encoding === "gzip" ? " · GZIP" : ""}`;
+  return `${dateLabel} · ${sizeLabel}`;
 }
 
 function App() {
@@ -631,15 +631,19 @@ function App() {
       return;
     }
 
+    const requestId = ++replayLoadRequestRef.current;
+    setRecordLoading(true);
+    setReplayError(null);
     try {
-      const text = await readLocalRecordText(file);
-      const record = projectRecordToMatchRecord(JSON.parse(text) as unknown);
-      replayLoadRequestRef.current++;
+      const record = await importMatchRecord(file);
+      if (requestId !== replayLoadRequestRef.current) return;
       setSelectedRecordFile("");
       loadReplayRecord(record, file.name);
     } catch (error) {
-      setReplayError(`解析本地 JSON 失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (requestId !== replayLoadRequestRef.current) return;
+      setReplayError(`解析本地记录失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      if (requestId === replayLoadRequestRef.current) setRecordLoading(false);
       event.target.value = "";
     }
   };
@@ -1197,7 +1201,7 @@ function App() {
               </div>
 
               <label className="file-pick">
-                <input type="file" accept=".json,.gz,application/json,application/gzip" onChange={handleLocalFileChange} />
+                <input type="file" accept=".zst,.json,application/zstd,application/json" onChange={handleLocalFileChange} disabled={recordLoading} />
                 导入本地记录
               </label>
             </div>

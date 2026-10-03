@@ -131,7 +131,7 @@ function printHelp(): void {
     "  --to <x,y>         Target coordinates",
     "  --target <id>      Target ID",
     "  --resource <x,y>   Resource coordinates",
-    "  --at <x,y>         Build location",
+    "  --at <x,y>         Optional build location; omit for automatic placement",
     "  --building <id>    Building ID",
     "  --buildings <list> Comma-separated production building IDs for rally",
     "  --count <n>        Units to append with train (1-100)",

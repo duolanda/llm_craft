@@ -313,9 +313,9 @@ export async function handleBuild(
   const unitId = flags.get("unit");
   const atRaw = flags.get("at");
 
-  if (unitId && atRaw) {
-    const { x, y } = parseCoord(atRaw);
-    await callAndPrint(client, sessionId, "build_structure", { unitId, buildingType, x, y });
+  if (unitId) {
+    const position = atRaw ? parseCoord(atRaw) : {};
+    await callAndPrint(client, sessionId, "build_structure", { unitId, buildingType, ...position });
     return;
   }
 
@@ -323,7 +323,7 @@ export async function handleBuild(
   if (!stdinInput || stdinInput.kind !== "selection") {
     exit(
       ExitCode.ArgError,
-      `build ${buildingType} requires --unit <workerId> --at x,y or stdin selection (from units) with --at x,y`,
+      `build ${buildingType} requires --unit <workerId> or stdin selection (from units); --at x,y is optional`,
     );
   }
   const data = stdinInput.data as Record<string, unknown>;
@@ -332,18 +332,14 @@ export async function handleBuild(
     exit(ExitCode.ArgError, `build ${buildingType}: stdin selection has no units`);
   }
 
-  if (!atRaw) {
-    exit(ExitCode.ArgError, `build ${buildingType} with stdin requires --at x,y`);
-  }
-  const { x, y } = parseCoord(atRaw);
+  const position = atRaw ? parseCoord(atRaw) : {};
 
   await callBatchAndPrint(client, sessionId, items.map((item) => ({
     tool: "build_structure",
     args: {
       unitId: item.id as string,
       buildingType,
-      x,
-      y,
+      ...position,
     },
   })), flags.get("request-id"));
 }

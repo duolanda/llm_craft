@@ -490,48 +490,10 @@ export class UnitManager {
       const ratio = travelDistance / distanceToStep;
       const nextX = unit.x + (nextStep.x - unit.x) * ratio;
       const nextY = unit.y + (nextStep.y - unit.y) * ratio;
-      const preferredHeading = getHeadingToward(
-        unit.x,
-        unit.y,
-        nextX,
-        nextY,
-        getUnitHeading(unit),
-      );
-
-      // Static topology changes invalidate the global path. Replan once and
-      // yield until the next tick; never retry inside this movement loop.
-      if (isShapeBlockedByGrid(
-        getUnitCollisionShape(unit, nextX, nextY, preferredHeading),
-        tiles,
-        blockedPositions,
-      )) {
-        const startCell = getPathCell(unit.x, unit.y);
-        const newPath = PathFinder.findPath(
-          startCell.x,
-          startCell.y,
-          unit.pathTarget!.x,
-          unit.pathTarget!.y,
-          tiles,
-          blockedPositions,
-          getMovementProfile(unit.type).navigationRadius,
-        );
-
-        if (newPath.length === 0) {
-          // 无法到达，清除路径
-          unit.path = undefined;
-          unit.pathTarget = undefined;
-          this.routeProgress.delete(unit.id);
-          return RESULT_CODES.ERR_POSITION_OCCUPIED;
-        }
-
-        unit.path = newPath;
-        this.markBlocked(unit.id);
-        this.resetRouteProgress(unit);
-        return RESULT_CODES.ERR_POSITION_OCCUPIED;
-      }
-
-      // Per-tick mobile conflicts use bounded local avoidance. Only the
-      // rate-limited no-progress escalation above may rebuild a global route.
+      // A blocked turning pose does not invalidate the route: an OBB may
+      // need to translate along its hull before it can rotate. Static and
+      // mobile conflicts both pass through swept local avoidance; only the
+      // rate-limited no-progress escalation above rebuilds the global route.
       const localMove = this.findLocalMovement(
         unit,
         nextX,
@@ -766,6 +728,20 @@ export class UnitManager {
       }
     }
     return positions;
+  }
+
+  /** Static reachability for choosing an exit before a vehicle is created. */
+  canReachMoveTarget(
+    unitType: UnitType,
+    startX: number,
+    startY: number,
+    targetX: number,
+    targetY: number,
+    tiles: TileType[][],
+    staticBlockedPositions: ReadonlySet<string>,
+  ): boolean {
+    const integration = this.getIntegrationField(unitType, targetX, targetY, tiles, staticBlockedPositions);
+    return integration !== null && PathFinder.getIntegrationDistance(integration, startX, startY) >= 0;
   }
 
   private resolveMoveTarget(

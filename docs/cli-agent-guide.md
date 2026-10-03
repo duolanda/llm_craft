@@ -6,6 +6,8 @@ For an already prepared match joined through the Web UI's copied prompt, read on
 
 The CLI is the stable shell interface for external agents. It handles session creation, server URL resolution, stdin pipelines, JSON formatting, exit codes, and tool routing. Treat it as your action API.
 
+You are commanding an RTS army. Win by destroying **all enemy buildings**; HQ destruction alone does not finish the match. Choose your strategy from live economy, technology, army and enemy state. Keep observing and acting until `winner` or an ended match status is returned. One conversation turn can contain the entire match and many read/action cycles.
+
 This guide uses the agent-facing executable:
 
 ```bash
@@ -191,8 +193,8 @@ $env:LLMCRAFT_SERVER = "http://localhost:3101"
 PowerShell treats commas in unquoted native-command arguments specially. Quote coordinates:
 
 ```powershell
-llmcraft build barracks --at '6,12'
-llmcraft attack-move --to '32,12'
+llmcraft move --unit unit_1 --to '40,48'
+llmcraft attack-move --unit unit_7 --to '115,48'
 ```
 
 Check your current saved session:
@@ -234,7 +236,7 @@ The current CLI does not expose journal recovery or retention commands. A Match 
 
 ## 4. Read Before Acting
 
-Every agent turn should begin with a read. Good reads:
+Read before making a gameplay decision. Good reads:
 
 ```bash
 llmcraft state --compact
@@ -275,7 +277,7 @@ llmcraft buildings --type barracks --ready
 llmcraft enemies --type hq
 
 # Resource tiles near a point
-llmcraft resources --near 10,10 --limit 3
+llmcraft resources --near 31,35 --limit 3
 ```
 
 Common selector flags:
@@ -295,20 +297,22 @@ Common selector flags:
 Actions can take explicit IDs:
 
 ```bash
-llmcraft move --unit unit_1 --to 5,8
+llmcraft move --unit unit_1 --to 40,48
 llmcraft gather --unit unit_1
 llmcraft gather --units unit_1,unit_2,unit_3
-llmcraft build barracks --unit unit_1 --at 6,12
+llmcraft build barracks --unit unit_1
 llmcraft train worker --building building_1
-llmcraft train rifleman --building building_3
-llmcraft rally --building building_3 --to 32,12 --mode attack-move
+llmcraft train rifleman --building building_3 --count 5
+llmcraft rally --building building_3 --to 115,48 --mode attack-move
 llmcraft attack --unit unit_7 --target building_2
-llmcraft attack-move --unit unit_7 --to 32,12
+llmcraft attack-move --unit unit_7 --to 115,48
 llmcraft stop --unit unit_7
 llmcraft hold --unit unit_7
 ```
 
 `stop` 取消当前任务并回到会按视野自动索敌的普通 idle；`hold` 是持久原地坚守，会开火但不会移动追击。
+
+`train --count` appends a finite production order. Read `me` or `buildings` for queue/progress before appending more: production pauses when credits run out and resumes automatically. Initial workers already have harvest loops; an empty `units --idle --type worker` selection does not mean there are no workers. Select a known worker for construction; the build plan moves it to the site and restores its former harvest task after completion.
 
 Actions also accept selector stdin:
 
@@ -331,7 +335,7 @@ llmcraft orchestrate --request-id assault-wave-3 < actions.json
 
 Reusing the same ID with identical actions returns `duplicate: true` without executing again. Reusing it with different actions is an explicit conflict.
 
-Pathfinding has a deliberate fair tick budget. If a large move/gather/attack-move envelope returns `path_budget_exceeded`, no unit in that envelope was changed and nothing was deferred; split the selection into smaller explicit groups and retry with new request IDs. When both players submit path commands in the same tick, each receives a reserved share before unused capacity is lent.
+There is no per-player path-command quota. Inspect each batch action's result: successful actions remain applied when another action fails. A successful move submission confirms acceptance, not arrival; inspect position, intent, plans and events to assess progress.
 
 ## 7. Transformers
 
@@ -367,59 +371,77 @@ Use `attack` when you know the target ID. This is the correct way to destroy HQ 
 llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack
 ```
 
-Use `attack-move` when you only want to move toward coordinates and fight enemy units encountered on the way:
+Use `attack-move` to advance toward coordinates and engage visible enemy units **and buildings** along the way:
 
 ```bash
-llmcraft units --type rifleman | llmcraft attack-move --to 32,12
+llmcraft units --type rifleman | llmcraft attack-move --to 115,48
 ```
 
-Do not use `attack-move` as a substitute for attacking HQ. It is intentionally an area advance command, not a building-demolition command.
+Targets must enter the unit's vision for automatic acquisition. An advance that ends outside a building's vision range can finish without attacking it. Use explicit `attack --target <buildingId>` for a known demolition objective; it persists while the unit approaches and fires.
 
 Production rallies have the same two travel modes. `rally --mode move` is the default; `rally --mode attack-move` is available for barracks and war factories. HQ worker rallies only support `move`.
 
-At long range, `attack` may first appear as movement toward the target. Re-read state/events after the unit arrives; if the target still exists and the unit is idle, issue `attack` again.
+Ordinary `move` preserves the travel order and does not auto-attack or retaliate against passing enemies. Idle combat units without an explicit intent auto-acquire visible enemies; `hold` fires only at visible enemies already in weapon range. A unit's `idle` phase alone does not prove it has no order. Check its intent and progress before replacing an attack or a plan. Repeatedly submitting the same movement goal can disrupt recovery or overwrite a useful objective.
 
 ## 9. Build Positions
 
-Current map starts with:
+Read `state --compact` and `map` for the actual map dimensions and HQ positions. The default map is 144×96 with HQ centers at `(14,48)` and `(129,48)`; commands must use the coordinates returned by the current match.
 
-- `player_1` HQ near `(4,12)`
-- `player_2` HQ near `(32,12)`
-
-Barracks cannot be adjacent to your HQ. Practical first barracks positions:
+Prefer automatic placement by omitting `--at`:
 
 ```bash
-# player_1
-llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 6,12
-
-# player_2
-llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 30,12
+llmcraft units --type worker --unplanned --limit 1 | llmcraft build barracks
 ```
 
-If a build fails, read `events` or the action error `hint`, then choose another empty tile.
+This registers a build plan, chooses a legal reachable footprint, moves the worker, waits for credits and finishes construction. `me` exposes build suggestions when you need a particular location. Explicit `--at` coordinates name the **building center**, not the worker's current tile; account for the whole footprint, HQ spacing and vehicle exits. If a build fails, inspect the returned `hint`, suggested placements, `plans` and `events` before retrying.
 
 ## 10. Minimal Agent Turn
 
-This is the basic turn shape every agent should understand. A turn starts with a read, then issues only the actions justified by the current state:
+This illustrates a read/action cycle. Replace IDs with live output and issue only the actions justified by the current state; do not run every line as a fixed opening:
 
 ```bash
 llmcraft state --compact
-llmcraft units --idle --type worker | llmcraft nearest resource | llmcraft gather
-llmcraft buildings --type hq --ready | llmcraft train worker
-llmcraft units --idle --type worker --limit 1 | llmcraft build barracks --at 5,10
-llmcraft buildings --type barracks --ready | llmcraft train rifleman
+llmcraft me
+llmcraft units --type worker --unplanned --limit 1 | llmcraft build barracks
+llmcraft buildings --type barracks --ready | llmcraft train rifleman --count 5
 llmcraft units --type rifleman | llmcraft target enemy-hq | llmcraft attack
 ```
 
-For `player_2`, use a right-side barracks coordinate such as `15,10`.
-
-The CLI does not require or insert a sleep between turns. If an external harness runs continuously, pacing belongs to that harness. LLM/tool-calling agents can simply make the next read/action decision when control returns to them.
+The CLI does not require a sleep between decisions. When commands return, make the next read/action decision using fresh outputs. Avoid multi-minute sleeps or shell loops that only watch tick counts: threats, stalled attacks and production changes require decisions while the simulation continues. If a brief wait is useful, read again when it ends.
 
 `state --compact` returns a structured summary: `winner`, lobby `status` / `ready` when available, map `width` / `height`, own `credits`, and `self` / `enemy` unit and building counts by type plus headquarters coordinates and HP. It does not return individual units or a symbol map. Use `map` for structured unit, building, and resource coordinates; `map --cells` adds informative terrain cells, and `map --empty-tiles` includes all cells. The former `--ascii` flag has been removed. Full `state` is still the best final read when you need HQ, economy, production, and complete unit/building details.
 
 After a winner exists, read commands (`state`, `map`, `me`, `events`, `plans`) remain available. Selectors, transformers, actions, `plan`, and `orchestrate` return `game_over` with the winner instead of continuing the pipeline.
 
 Plans are asynchronous intentions. `hasActivePlan: true` does not guarantee the unit will immediately leave `idle`; the plan may be waiting for credits, production queue availability, a target condition, or the next plan tick. If a plan appears stuck, read `plans` and `events` before assuming the plan failed.
+
+### Persistent plans
+
+Use `orchestrate` to keep a multi-step intention progressing on server ticks while you make other decisions. `llmcraft plan attack-hq | llmcraft orchestrate` is a convenience for your currently living combat units. `plan` alone only prints a plan; piping it to `orchestrate` registers it. Economy/tech templates select idle workers, so they may select none when all workers are harvesting. A custom plan can explicitly bind a known worker instead.
+
+For example, register a two-stage automatic build plan in PowerShell (replace `unit_worker` with a live worker ID, and pass your own session/base URL):
+
+```powershell
+$plan = @{
+  kind = 'plan'; tick = 0
+  data = @{
+    unitIds = @('unit_worker'); loop = 1
+    steps = @(
+      @{ call = 'build_structure'; scope = 'global'
+         args = @{ unitId = 'unit_worker'; buildingType = 'barracks' }
+         until = @{ condition = 'building_exists'; buildingType = 'barracks' }
+         retry = $true },
+      @{ call = 'build_structure'; scope = 'global'
+         args = @{ unitId = 'unit_worker'; buildingType = 'war_factory' }
+         until = @{ condition = 'building_exists'; buildingType = 'war_factory' }
+         retry = $true }
+    )
+  }
+}
+$plan | ConvertTo-Json -Depth 10 -Compress | llmcraft orchestrate --session $sessionId --base-url $baseUrl
+```
+
+Each build step waits for its own building to finish, not merely for acceptance. Per-unit plans require a fixed top-level `unitIds` list and use `scope: "per_unit"` with `args.unitId: "$unitId"`. Use `until: { condition: "target_destroyed", targetId: "<live target ID>" }` for a sustained explicit attack step. Production is separate: append finite `train --count` orders rather than placing `spawn_unit` in a plan. Review `plans` and `events` when progress stalls; avoid repeatedly replacing an active plan that is waiting normally. Units produced later are not automatically added to an existing plan; give them rallies or new orders.
 
 ## 11. External Scheduler Shape
 
@@ -429,10 +451,10 @@ The CLI process is intentionally one command at a time. A long-running agent, be
 read state/events/plans
 decide whether any action is needed
 issue zero or more CLI actions
-return control to the caller's scheduler
+continue the next read/action cycle while the match is running
 ```
 
-Do not treat the fixed command sequence above as a recommended strategy. It is only a compact example of the command surface.
+An external scheduler may own this loop, or a tool-calling agent may complete it within one conversation turn. Progress is determined by useful state changes and decisions, not conversation turn count.
 
 ## 12. Two-Agent Local Test
 

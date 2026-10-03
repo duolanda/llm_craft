@@ -15,6 +15,8 @@ import {
   type UnitType,
 } from "@llmcraft/shared";
 import { WorldState } from "../WorldState";
+import { getMovementProfile } from "../navigation/MovementProfile";
+import { isDiscBlockedByGrid } from "../navigation/NavigationGrid";
 import { HarvestOrderSystem } from "./HarvestOrderSystem";
 
 export type ProductionEvent =
@@ -202,6 +204,9 @@ export class ProductionSystem {
     const footprint = getBuildingFootprint(building.type);
     const halfWidth = Math.floor(footprint.width / 2);
     const halfHeight = Math.floor(footprint.height / 2);
+    const occupied = world.buildings.getOccupiedPositions();
+    const profile = getMovementProfile(unitType);
+    let fallback: { x: number; y: number } | null = null;
     for (let distance = 1; distance <= 4; distance++) {
       for (let dx = -halfWidth - distance; dx <= halfWidth + distance; dx++) {
         for (let dy = -halfHeight - distance; dy <= halfHeight + distance; dy++) {
@@ -210,20 +215,34 @@ export class ProductionSystem {
           const y = building.y + dy;
           if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
           if (world.tiles[y][x] === TILE_TYPES.OBSTACLE) continue;
+          // A vehicle must be able to turn onto its route, not merely fit
+          // beside the factory in the horizontal pose used by placement.
+          if (profile.collisionShape.kind === "obb" && isDiscBlockedByGrid(
+            x, y, profile.navigationRadius, world.tiles, occupied,
+          )) continue;
           if (
             world.units.canPlaceUnitAt(
               unitType,
               x,
               y,
               world.tiles,
-              world.buildings.getOccupiedPositions(),
+              occupied,
             )
           ) {
+            // Prefer an exit connected to the rally. A legal turning pose can
+            // still lie in a small island enclosed by neighboring buildings.
+            if (profile.collisionShape.kind === "obb" && building.rallyPoint && !world.units.canReachMoveTarget(
+              unitType, x, y, building.rallyPoint.x, building.rallyPoint.y, world.tiles, occupied,
+            )) {
+              fallback ??= { x, y };
+              continue;
+            }
             return { x, y };
           }
         }
       }
     }
-    return null;
+    // An unreachable rally must not prevent otherwise legal production.
+    return fallback;
   }
 }

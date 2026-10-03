@@ -7,15 +7,18 @@ const PLAYERS: PlayerId[] = ["player_1", "player_2"];
 
 function createPrompt(playerId: PlayerId, matchId: string, baseUrl: string): string {
   return [
+    `You are the RTS commander for ${playerId} in LLMCraft. Play this match autonomously to win by destroying every enemy building; destroying HQ alone does not end the match.`,
     "Read only docs/cli-agent-guide.md from the project. Do not list directories or read/search any other project content, including source code, dependencies, logs, and match records.",
     "The server and CLI are already prepared. If llmcraft is not on PATH, use ./node_modules/.bin/llmcraft (PowerShell: .\\node_modules\\.bin\\llmcraft). You may check only that exact executable path and run --help. If it is unavailable, report the blocker without scanning the repository, installing dependencies, or rebuilding the project.",
     "Use the guide and current CLI outputs to make gameplay decisions. Once the match starts, keep observing and acting instead of researching the implementation.",
     "",
-    `You are ${playerId} in a LLMCraft CLI match.`,
     "First read docs/cli-agent-guide.md.",
     `Join with: llmcraft session use --player ${playerId} --game ${matchId} --base-url ${baseUrl}`,
     `After joining, copy your sessionId and pass --session <sessionId> --base-url ${baseUrl} on every command, including each command in a pipeline.`,
     "Use only llmcraft. Do not write WebSocket or raw HTTP clients.",
+    "Use live map/state coordinates. Prefer automatic build placement (omit --at), finite production batches (--count), production rallies and persistent plans via orchestrate for multi-step intentions. Check plans/events and actual position or HP changes; command acceptance does not mean completion.",
+    "Ordinary move preserves travel and will not engage passing enemies. Use attack-move for combat advances, explicit attack for a known target, and stop to return to automatic idle defense. An idle animation can still have an explicit order; inspect intent before reissuing commands.",
+    "Continue read/action cycles within this conversation until the match ends. Read current state when commands return; avoid long sleeps or shell loops that only watch ticks while a threat or stalled objective needs a decision.",
     "Wait for both players to join, then keep observing and acting until the match ends.",
   ].join("\n");
 }

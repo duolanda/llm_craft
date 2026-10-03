@@ -38,6 +38,42 @@ import { buildReplayFrames, formatTickTime, ReplayFrame } from "./replay";
 import { createAnimationLabState, createMassBattleState } from "./dev/createMassBattleState";
 
 type AppMode = "live" | "replay";
+type SpectatorPanel = "intel" | "terminal" | "log";
+const PANEL_STORAGE_KEY = "llmcraft.spectatorPanels";
+
+function readCollapsedPanels(): Record<SpectatorPanel, boolean> {
+  const defaults = { intel: false, terminal: false, log: false };
+  try {
+    const stored: unknown = JSON.parse(window.localStorage.getItem(PANEL_STORAGE_KEY) ?? "null");
+    if (!stored || typeof stored !== "object") return defaults;
+    const values = stored as Partial<Record<SpectatorPanel, unknown>>;
+    return { intel: values.intel === true, terminal: values.terminal === true, log: values.log === true };
+  } catch {
+    return defaults;
+  }
+}
+
+function PanelToggle({ panel, label, collapsed, onToggle }: {
+  panel: SpectatorPanel;
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const arrowPath = panel === "log"
+    ? collapsed ? "m6 14 6-6 6 6" : "m6 10 6 6 6-6"
+    : (panel === "intel") === collapsed ? "m9 6 6 6-6 6" : "m15 6-6 6 6 6";
+  return (
+    <button type="button" className="panel-toggle" aria-expanded={!collapsed}
+      aria-controls={`spectator-${panel}`} aria-label={`${collapsed ? "展开" : "折叠"}${label}`}
+      title={`${collapsed ? "展开" : "折叠"}${label}`} onClick={onToggle}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"
+        aria-hidden="true" focusable="false">
+        <path d={arrowPath} />
+      </svg>
+    </button>
+  );
+}
 type AnimationLabMode = "implemented" | "preview";
 
 interface ReplayRecordListEntry {
@@ -210,6 +246,17 @@ function formatRecordEntryLabel(entry: ReplayRecordListEntry): string {
 }
 
 function App() {
+  const [collapsedPanels, setCollapsedPanels] = useState(readCollapsedPanels);
+  const togglePanel = (panel: SpectatorPanel) => {
+    setCollapsedPanels((current) => ({ ...current, [panel]: !current[panel] }));
+  };
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(collapsedPanels));
+    } catch {
+      // Layout controls remain usable when browser storage is unavailable.
+    }
+  }, [collapsedPanels]);
   const {
     state,
     frameBuffer,
@@ -1288,21 +1335,24 @@ function App() {
           </section>
         )}
 
-        <div className="dashboard">
-          <div className="stats-col">
+        <div className={`dashboard${collapsedPanels.intel ? " intel-collapsed" : ""}${collapsedPanels.terminal ? " terminal-collapsed" : ""}`}>
+          <div className={`stats-col${collapsedPanels.intel ? " panel-collapsed" : ""}`}>
             <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">观战情报</span>
+                <PanelToggle panel="intel" label="观战情报" collapsed={collapsedPanels.intel} onToggle={() => togglePanel("intel")} />
               </div>
-              <StatsPanel
-                state={displayState}
-                tickIntervalMs={displayTickIntervalMs}
-                recordedPlayers={mode === "replay" && activeReplayRecord
-                  ? activeReplayRecord.metadata.players ?? []
-                  : undefined}
-              />
+              <div id="spectator-intel" className="collapsible-panel-content" hidden={collapsedPanels.intel}>
+                <StatsPanel
+                  state={displayState}
+                  tickIntervalMs={displayTickIntervalMs}
+                  recordedPlayers={mode === "replay" && activeReplayRecord
+                    ? activeReplayRecord.metadata.players ?? []
+                    : undefined}
+                />
+              </div>
             </div>
           </div>
 
@@ -1333,25 +1383,31 @@ function App() {
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-amber">战术日志</span>
+                <PanelToggle panel="log" label="战术日志" collapsed={collapsedPanels.log} onToggle={() => togglePanel("log")} />
               </div>
-              <GameLog state={displayState} logs={mode === "replay" ? undefined : liveLogs} />
+              <div id="spectator-log" hidden={collapsedPanels.log}>
+                <GameLog state={displayState} logs={mode === "replay" ? undefined : liveLogs} />
+              </div>
             </div>
           </div>
 
-          <div className="terminal-col">
+          <div className={`terminal-col${collapsedPanels.terminal ? " panel-collapsed" : ""}`}>
             <div className="hud-panel" style={{ flex: 1, minHeight: 0 }}>
               <div className="hud-panel-top-corners" />
               <div className="hud-panel-bottom-corners" />
               <div className="panel-header">
                 <span className="panel-header-accent accent-cyan">AI 指挥终端</span>
+                <PanelToggle panel="terminal" label="AI 指挥终端" collapsed={collapsedPanels.terminal} onToggle={() => togglePanel("terminal")} />
               </div>
-              <AIOutputPanel
-                aiOutputs={displayAIOutputs}
-                events={displayAITerminalEvents}
-                autoScroll={terminalAutoScroll}
-                canLoadEarlier={mode === "live" && terminalHistoryHasMore}
-                onLoadEarlier={loadEarlierTerminalEvents}
-              />
+              <div id="spectator-terminal" className="collapsible-panel-content" hidden={collapsedPanels.terminal}>
+                <AIOutputPanel
+                  aiOutputs={displayAIOutputs}
+                  events={displayAITerminalEvents}
+                  autoScroll={terminalAutoScroll}
+                  canLoadEarlier={mode === "live" && terminalHistoryHasMore}
+                  onLoadEarlier={loadEarlierTerminalEvents}
+                />
+              </div>
             </div>
           </div>
         </div>

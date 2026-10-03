@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { zstdDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,7 +29,7 @@ interface CliReport {
 
 async function runCli(args: string[]) {
   try {
-    const result = await execFileAsync(process.execPath, ["--import", require.resolve("tsx"), script, ...args], {
+    const result = await execFileAsync(process.execPath, ["--import", pathToFileURL(require.resolve("tsx")).href, script, ...args], {
       cwd: serverDirectory,
       timeout: 10_000,
     });
@@ -88,6 +88,9 @@ describe("Match Record batch compression CLI", () => {
     await fs.mkdir(nestedDirectory);
     await fs.writeFile(firstPath, current);
     await fs.writeFile(legacyPath, legacy);
+    const originalModifiedAt = new Date("2026-04-19T06:51:29.833Z");
+    await fs.utimes(firstPath, originalModifiedAt, originalModifiedAt);
+    await fs.utimes(legacyPath, originalModifiedAt, originalModifiedAt);
     await fs.writeFile(path.join(nestedDirectory, "nested.match.json"), current);
     await fs.writeFile(path.join(directory, "ignored.txt"), "not a record");
 
@@ -101,6 +104,7 @@ describe("Match Record batch compression CLI", () => {
       [legacyPath, path.join(directory, "old-record.match.zst"), legacy],
     ] as const) {
       const compressed = await fs.readFile(target);
+      expect(Math.abs((await fs.stat(target)).mtimeMs - originalModifiedAt.getTime())).toBeLessThan(1);
       expect(zstdDecompressSync(compressed).equals(original)).toBe(true);
       expect(compressed[4] & 4).toBe(4);
       expect(compressed.length).toBeLessThan(original.length);

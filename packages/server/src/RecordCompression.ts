@@ -99,6 +99,8 @@ async function convertFile(source: string, deleteOriginals: boolean): Promise<Co
     try {
       await fs.writeFile(temporaryFile, await encodeRecordJson(original), { mode: info.mode & 0o777, flush: true });
       await verifyCompressedFile(temporaryFile, original);
+      // The record list displays and sorts by file mtime, not conversion time.
+      await fs.utimes(temporaryFile, info.atime, info.mtime);
       try {
         // Publish a complete file atomically without overwriting a concurrent conversion.
         await fs.link(temporaryFile, target);

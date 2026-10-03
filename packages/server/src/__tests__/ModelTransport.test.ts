@@ -6,6 +6,7 @@ import type {
 } from "../model/ModelTransport";
 import { OpenAICompatibleModelTransport } from "../model/OpenAICompatibleModelTransport";
 import { RateLimitedModelTransport } from "../model/RateLimitedModelTransport";
+import { OpenAIAgentSession } from "../OpenAICompatibleProvider";
 
 function createResult(content = "ok"): ModelCompletionResult {
   return {
@@ -25,6 +26,61 @@ function createRequest(signal?: AbortSignal): ModelCompletionRequest {
 }
 
 describe("ModelTransport", () => {
+  it.each([
+    ["https://opencode.ai/zen/go/v1", true],
+    ["https://opencode.ai/zen/go/v1/", true],
+    ["https://opencode.ai/zen/v1", false],
+    ["https://example.test/zen/go/v1", false],
+    ["https://opencode.ai.evil.test/zen/go/v1", false],
+  ])("scopes session headers to %s", async (baseURL, expected) => {
+    const transport = new OpenAICompatibleModelTransport({
+      providerType: "openai-compatible", apiKey: "test-key", baseURL, model: "test-model",
+    });
+    const create = vi.fn(async () => ({ choices: [] }));
+    (transport as any).client = { chat: { completions: { create } } };
+    await transport.complete({ ...createRequest(), sessionId: "session-a" });
+    await transport.complete({ ...createRequest(), sessionId: "session-a" });
+    await transport.complete({ ...createRequest(), sessionId: "session-b" });
+    const calls = create.mock.calls as unknown as Array<[unknown, { headers?: Record<string, string> }]>;
+    expect(calls.map((call) => call[1].headers)).toEqual(expected ? [
+      { "x-opencode-session": "session-a", "User-Agent": "llmcraft/0.1.0" },
+      { "x-opencode-session": "session-a", "User-Agent": "llmcraft/0.1.0" },
+      { "x-opencode-session": "session-b", "User-Agent": "llmcraft/0.1.0" },
+    ] : [undefined, undefined, undefined]);
+  });
+
+  it("gives connection probes independent session IDs", async () => {
+    const complete = vi.fn(async (_request: ModelCompletionRequest) => createResult());
+    const session = new OpenAIAgentSession({ providerType: "openai-compatible", apiKey: "test", baseURL: "https://opencode.ai/zen/go/v1", model: "test-model" }, {
+      complete, getDescriptor: () => ({ provider: "fake", model: "fake" }),
+    });
+    await session.testConnection();
+    await session.testConnection();
+    expect(complete.mock.calls[0][0].sessionId).toBeTruthy();
+    expect(complete.mock.calls[0][0].sessionId).not.toEqual(complete.mock.calls[1][0].sessionId);
+  });
+
+  it("reuses the conversation ID across warmup and turns and isolates sessions", async () => {
+    const complete = vi.fn(async (_request: ModelCompletionRequest) => createResult());
+    const transport: ModelTransport = { complete, getDescriptor: () => ({ provider: "fake", model: "fake" }) };
+    const config = { providerType: "openai-compatible" as const, apiKey: "test", baseURL: "https://opencode.ai/zen/go/v1", model: "test" };
+    const first = new OpenAIAgentSession(config, transport);
+    const second = new OpenAIAgentSession(config, transport);
+    const input = { playerId: "player_1" as const, tick: 0, tickIntervalMs: 500, summary: "test" };
+    const options = {
+      tools: [],
+      executeTool: async () => ({ effect: "read" as const, result: {} }),
+      getRuntimeState: () => ({ mapState: null, myState: null, myUnits: null, activePlans: null, recentEvents: null }),
+    };
+    await first.warmupAgent(input, options);
+    await first.runAgent(input, options);
+    await first.runAgent({ ...input, tick: 1 }, options);
+    await second.warmupAgent(input, options);
+    const ids = complete.mock.calls.map(([request]) => request.sessionId);
+    expect(ids[0]).toBeTruthy();
+    expect(ids.slice(0, -1).every((id) => id === ids[0])).toBe(true);
+    expect(ids.at(-1)).not.toEqual(ids[0]);
+  });
   afterEach(() => {
     vi.useRealTimers();
   });

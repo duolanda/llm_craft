@@ -169,6 +169,7 @@ flowchart LR
 - 当前 session 实现是 `OpenAIAgentSession`；`OpenAICompatibleProvider` 只保留连接测试和迁移兼容导出
 - AgentSession 历史由 `ContextWindowLimiter` 做临时消息数/字节硬限制；它不是持久 memory 或语义 compactor，并须保持 assistant tool call / tool result 结构完整
 - 兼容 OpenAI 风格端点的新模型接入优先扩展 transport，不要直接写进 orchestrator 或模拟层
+- OpenCode Go 端点 `https://opencode.ai/zen/go/v1`（兼容末尾 `/`）由 transport 添加 `x-opencode-session` 和 LLMCraft User-Agent；会话 ID 由 AgentSession 生成并随请求传递，同一会话的预热、工具循环和重试复用，连接测试和子代理任务各用独立 ID。
 
 **Agent turn 与工具调用性能判断:**
 - **一个 turn 打完整局是受支持且预期的 harness 设计。** CLI、Claude Code、Codex、Pi 等 harness 都可以在同一个用户/游戏 turn 内持续观察实时状态、连续执行多轮工具调用并完成整场对局；无需为了获得新的 tick 状态而人为切分成多个 turn。

@@ -21,8 +21,10 @@ export class OpenAICompatibleModelTransport implements ModelTransport {
   private readonly descriptor: ModelTransportDescriptor;
   private readonly reasoningEffort?: OpenAIProviderConfig["reasoningEffort"];
   private readonly extraRequestParams?: Record<string, unknown> | null;
+  private readonly isOpenCodeGo: boolean;
 
   constructor(config: OpenAIProviderConfig) {
+    this.isOpenCodeGo = config.baseURL?.replace(/\/$/, "") === "https://opencode.ai/zen/go/v1";
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
@@ -61,7 +63,15 @@ export class OpenAICompatibleModelTransport implements ModelTransport {
         max_tokens: request.maxTokens,
         ...this.buildOptionalRequestParams(),
       } as any,
-      { signal: request.signal },
+      {
+        signal: request.signal,
+        ...(this.isOpenCodeGo ? {
+          headers: {
+            "x-opencode-session": request.sessionId,
+            "User-Agent": "llmcraft/0.1.0",
+          },
+        } : {}),
+      },
     );
     const choice = response.choices[0];
     const usage = response.usage;

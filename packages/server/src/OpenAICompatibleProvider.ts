@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   AgentRunInput,
   AgentModelRequestRecord,
@@ -52,6 +53,7 @@ export interface OpenAIAgentSessionOptions {
 }
 
 export class OpenAIAgentSession implements LLMProvider {
+  private readonly sessionId = randomUUID();
   private history: any[] = [];
   private warmedTurn: WarmedTurn | null = null;
   private readonly seenRuntimeEventSignatures = new Set<string>();
@@ -127,6 +129,7 @@ export class OpenAIAgentSession implements LLMProvider {
 
   async testConnection(signal?: AbortSignal): Promise<LLMConnectionTestResult> {
     const response = await this.transport.complete({
+      sessionId: randomUUID(),
       messages: [{ role: "user", content: "Reply with exactly: OK" }],
       temperature: 0,
       maxTokens: CONNECTION_TEST_MAX_TOKENS,
@@ -449,11 +452,13 @@ export class OpenAIAgentSession implements LLMProvider {
   }
 
   async runSubAgentTask(input: RunSubAgentTaskInput): Promise<string> {
+    const sessionId = randomUUID();
     return await runSubAgentTask({
       ...input,
       systemPrompt: this.systemPrompt,
       createCompletion: async (request, signal) =>
         await this.transport.complete({
+          sessionId,
           messages: request.messages,
           tools: request.tools,
           toolChoice: "auto",
@@ -545,6 +550,7 @@ export class OpenAIAgentSession implements LLMProvider {
       const startedAtMs = Date.now();
       try {
         const result = await this.transport.complete({
+          sessionId: this.sessionId,
           messages,
           tools: options.tools,
           toolChoice: "auto",

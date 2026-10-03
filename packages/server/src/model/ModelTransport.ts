@@ -20,6 +20,7 @@ export interface ModelAssistantMessage {
 }
 
 export interface ModelCompletionRequest {
+  sessionId?: string;
   messages: unknown[];
   tools?: ModelToolDefinition[];
   toolChoice?: "auto" | "none";

@@ -1349,6 +1349,7 @@ interface MatchRegistryListResponse {
 ```
 
 - `POST /api/control/matches/:matchId/observe`：只切换 WebSocket/Web UI 的观察投影，不停止或暂停其他 match。
+- `GET /api/control/matches/:matchId/lobby`：只读指定 control 对局的大厅状态，无需创建玩家 session。返回 `{ matchId, status, ready: { player_1: boolean, player_2: boolean } }`，`status` 为 `waiting_for_players | running | finished | stopped`。`ready` 表示该方已通过创建 control session 加入（CPU 席位自动为 true），不表示 harness 当前在线。读取不改变观察对象，也不会触发加入或开局。不存在的对局返回 404，非 control 对局返回 409。
 - `POST /api/control/matches/:matchId/save-record`：保存已经停止或结束的指定 match；运行中对局应先 stop，服务端不会持续重写大 JSON。
 - `POST /api/control/matches/:matchId/stop`：quiesce、停止并保存指定 match，不影响其他 match；成功响应包含 `filePath`。
 

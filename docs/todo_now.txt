@@ -1,12 +1,2 @@
-文档需要更新，端口已经是 3001 了，readme 的 cli 相关部分还在用旧的
-
-怎么还有 ASCII map 啊。导出 dsh 记录，看看 ASCII map 有没有用。
-
-AI 还没有主动控制坦克开过去把兵压死的意识
-
----
-
-能像 https://bw.swerdlow.dev/ 星际争霸那个一样方便的从网页接入 agent
-
 自己填的话可以提供一些预设，比如 OR，DeepSeek，不然太麻烦了，抄一抄 cherry studio。相当于本来下拉框就是这些预设 url 和模型，不用下拉框就是自己填
 

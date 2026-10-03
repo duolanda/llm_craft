@@ -29,6 +29,7 @@ import { SettingsOverlay } from "./components/SettingsOverlay";
 import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { MatchPanel } from "./components/MatchPanel";
+import { CLIMatchPanel } from "./components/CLIMatchPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
@@ -323,6 +324,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [matchesOpen, setMatchesOpen] = useState(false);
+  const [cliMatchOpen, setCLIMatchOpen] = useState(false);
   const [registeredMatches, setRegisteredMatches] = useState<MatchRegistrySummary[]>([]);
   const [observedMatchId, setObservedMatchId] = useState<string | null>(null);
   const [matchesLoading, setMatchesLoading] = useState(false);
@@ -1131,6 +1133,14 @@ function App() {
                   <button
                     type="button"
                     className="hud-btn hud-btn-ghost"
+                    onClick={() => setCLIMatchOpen(true)}
+                    disabled={!connected}
+                  >
+                    CLI 对战
+                  </button>
+                  <button
+                    type="button"
+                    className="hud-btn hud-btn-ghost"
                     onClick={() => {
                       setSettingsDirty(false);
                       setSettingsOpen(true);
@@ -1411,6 +1421,18 @@ function App() {
             </div>
           </div>
         </div>
+
+        <CLIMatchPanel
+          open={mode === "live" && cliMatchOpen}
+          apiBaseUrl={API_BASE_URL}
+          observedMatch={observedMatch && matchStatus ? { matchId: observedMatch.matchId, status: matchStatus } : null}
+          onClose={() => setCLIMatchOpen(false)}
+          onObserve={(matchId) => {
+            setObservedMatchId(matchId);
+            setPendingMatchAction(null);
+            void refreshRegisteredMatches();
+          }}
+        />
 
         <SettingsOverlay
           open={mode === "live" && matchesOpen}

@@ -66,6 +66,24 @@ export async function handleControlHttpRequest(
     return true;
   }
 
+  const lobbyRoute = url.pathname.match(/^\/api\/control\/matches\/([^/]+)\/lobby$/);
+  if (req.method === "GET" && lobbyRoute) {
+    const matchId = decodeURIComponent(lobbyRoute[1]!);
+    const entry = state.matchRegistry.get(matchId);
+    if (!entry) {
+      sendJson(res, 404, { error: "指定对局不存在。" });
+      return true;
+    }
+    const match = getControlMatch(state, matchId);
+    if (!match) {
+      sendJson(res, 409, { error: "该对局不是 CLI control 对局。" });
+      return true;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    sendJson(res, 200, { matchId, ...match.getLobbyStatus() });
+    return true;
+  }
+
   const matchRoute = url.pathname.match(/^\/api\/control\/matches\/([^/]+)\/(observe|save-record|stop)$/);
   if (req.method === "POST" && matchRoute) {
     const matchId = decodeURIComponent(matchRoute[1]!);

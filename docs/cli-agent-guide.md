@@ -2,6 +2,8 @@
 
 > Rule for agents: use the `llmcraft` CLI. Do not write WebSocket clients or raw HTTP control clients unless this guide explicitly says the CLI cannot do the required operation.
 
+For an already prepared match joined through the Web UI's copied prompt, read only this guide from the project. Do not list directories or read/search source code, dependencies, logs, or match records. You may check the exact `./node_modules/.bin/llmcraft` executable path (PowerShell: `.\node_modules\.bin\llmcraft`) and run its `--help`; if unavailable, report the blocker rather than scanning, installing, or rebuilding. The setup commands below are for preparing an environment, not extra steps for an agent joining an already prepared match. Base gameplay decisions on this guide and live CLI output, and begin acting once the match starts.
+
 The CLI is the stable shell interface for external agents. It handles session creation, server URL resolution, stdin pipelines, JSON formatting, exit codes, and tool routing. Treat it as your action API.
 
 This guide uses the agent-facing executable:
@@ -104,6 +106,8 @@ The game does not start ticking until both players have created a control sessio
 Before both players have joined, read commands are available but selectors, transformers, actions, `plan`, and `orchestrate` return `game_not_started`. This prevents the first agent to join from pre-queuing actions before the other agent is ready.
 
 ### Host A Match Between Two External Agents
+
+The Web UI also provides a **CLI 对战** button. Opening it automatically restores the observed control match, or another active control match if the observed match is not a control match, including after a page reload. Create a match if none exists, then use each player's copy button to send their prompt to the corresponding agent. Prompt contents are not displayed in the panel. While open, the panel refreshes each player's joined/waiting status every second; joined means a control session has been created, not that the harness is currently online. Use **停止对局** to stop the selected match and save its record. The generated join command pins the match with `--game` and uses the current page origin as `--base-url` (including the Vite API proxy during development). Keep that page/server reachable from the agent's machine. Every subsequent command, including each pipeline stage, should pass the returned `--session` and the same `--base-url`. Both agents still need access to the project CLI and this guide. The UI does not create player sessions; both agents join normally and the match starts automatically when both have joined.
 
 Use this flow when a human host wants any two external coding agents to play each other:
 
@@ -411,7 +415,7 @@ For `player_2`, use a right-side barracks coordinate such as `15,10`.
 
 The CLI does not require or insert a sleep between turns. If an external harness runs continuously, pacing belongs to that harness. LLM/tool-calling agents can simply make the next read/action decision when control returns to them.
 
-`state --compact` includes `winner` for end-of-game checks. Full `state` is still the best final read when you need HQ, economy, production, and complete unit/building details.
+`state --compact` returns a structured summary: `winner`, lobby `status` / `ready` when available, map `width` / `height`, own `credits`, and `self` / `enemy` unit and building counts by type plus headquarters coordinates and HP. It does not return individual units or a symbol map. Use `map` for structured unit, building, and resource coordinates; `map --cells` adds informative terrain cells, and `map --empty-tiles` includes all cells. The former `--ascii` flag has been removed. Full `state` is still the best final read when you need HQ, economy, production, and complete unit/building details.
 
 After a winner exists, read commands (`state`, `map`, `me`, `events`, `plans`) remain available. Selectors, transformers, actions, `plan`, and `orchestrate` return `game_over` with the winner instead of continuing the pipeline.
 

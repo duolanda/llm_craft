@@ -89,6 +89,7 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 
 - `POST /api/control/start-game` 创建 control match；已有 active control match 时返回该 `matchId` 和 `reused: true`。
 - control session 固定绑定 `matchId + playerId`，观察对象变化不会迁移 session。
+- 前端「CLI 对战」打开时从 registry 自动恢复当前观察的 control 对局，否则选择已有 active control 对局；刷新页面后无需重新创建。按指定 match 每秒读取 `/api/control/matches/:matchId/lobby`，分别显示双方是否已加入；关闭面板后停止刷新。「查看战场」仅在确认双方都已加入、状态读取正常时可用；已停止或结束但双方均已加入的对局仍可查看。面板提供「停止对局」，调用指定 match 的 `/stop` 完成停止与录像保存。状态复用 `ControlPlaneMatch.getLobbyStatus()`，读取不创建 session、不触发开局。已加入不代表 harness 在线，开局仍由双方创建 control session 自动触发。
 - 单 tool 请求直接进入绑定玩家的 `GameplayController`。
 - `/sessions/:id/actions` 接受带 `clientRequestId` 的 action 数组并提供请求级幂等；每个 action 独立执行和返回。部分失败时保留成功动作并返回 `partialSuccess: true`。
 - CLI 的 move、attack、attack-move、gather、stop 和 hold 支持 `--units`，stdin 选择会合并为 `unitIds` 数组；`train --count` 追加有限生产批次，`production-queue` 查询队列，`cancel-production` 按订单或建筑取消；rally 支持 `move` / `attack-move` 两种模式；`orchestrate` 以正式工具名接收 `{ actions: [...] }`，只为旧脚本保留短别名归一化。

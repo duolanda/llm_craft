@@ -73,6 +73,65 @@ async function request(
 }
 
 describe("control plane HTTP routes", () => {
+  it("reads each player's join state without joining or changing the observed match", async () => {
+    const state = createServerState(createPresetStore());
+    const first = new ControlPlaneMatch({ matchId: "match_lobby_first" });
+    const second = new ControlPlaneMatch({ matchId: "match_lobby_second" });
+    state.matchRegistry.register(first, { kind: "control", observe: true });
+    state.matchRegistry.register(second, { kind: "control" });
+    const readLobby = () => request(state, {
+      method: "GET", url: "/api/control/matches/match_lobby_first/lobby",
+    });
+    const join = (playerId: string) => request(state, {
+      method: "POST", url: "/api/control/sessions",
+      body: JSON.stringify({ playerId, gameId: first.getMatchId() }),
+    });
+    try {
+      const empty = await readLobby();
+      expect(empty.statusCode).toBe(200);
+      expect(empty.json()).toEqual({
+        matchId: first.getMatchId(), status: "waiting_for_players",
+        ready: { player_1: false, player_2: false },
+      });
+      await join(PLAYER_IDS.PLAYER_1);
+      expect((await readLobby()).json()).toMatchObject({
+        status: "waiting_for_players", ready: { player_1: true, player_2: false },
+      });
+      state.matchRegistry.observe(second.getMatchId());
+      await join(PLAYER_IDS.PLAYER_2);
+      expect((await readLobby()).json()).toMatchObject({
+        status: "running", ready: { player_1: true, player_2: true },
+      });
+      expect(state.matchRegistry.getObservedMatchId()).toBe(second.getMatchId());
+      const other = await request(state, {
+        method: "GET", url: "/api/control/matches/match_lobby_second/lobby",
+      });
+      expect(other.json()).toMatchObject({
+        status: "waiting_for_players", ready: { player_1: false, player_2: false },
+      });
+      first.stop();
+      expect((await readLobby()).json()).toMatchObject({ status: "stopped" });
+    } finally {
+      first.stop();
+      second.stop();
+    }
+  });
+
+  it("rejects lobby reads for unknown and non-control matches", async () => {
+    const state = createServerState(createPresetStore());
+    const match = new ControlPlaneMatch({ matchId: "match_not_control" });
+    state.matchRegistry.register(match, { kind: "live" });
+    const unknown = await request(state, {
+      method: "GET", url: "/api/control/matches/missing/lobby",
+    });
+    const nonControl = await request(state, {
+      method: "GET", url: "/api/control/matches/match_not_control/lobby",
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(nonControl.statusCode).toBe(409);
+    match.stop();
+  });
+
   it("returns 400 for malformed JSON when creating a control session", async () => {
     const state = createServerState(createPresetStore());
 

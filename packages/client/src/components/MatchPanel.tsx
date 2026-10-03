@@ -11,9 +11,9 @@ interface MatchPanelProps {
 }
 
 const KIND_LABELS: Record<MatchRegistrySummary["kind"], string> = {
-  live: "LLM LIVE",
-  control: "CONTROL",
-  benchmark: "BENCHMARK",
+  live: "网页",
+  control: "CLI",
+  benchmark: "Benchmark",
 };
 
 const STATUS_LABELS: Record<MatchRegistrySummary["status"], string> = {

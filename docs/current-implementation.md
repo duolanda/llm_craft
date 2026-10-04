@@ -98,6 +98,7 @@ standard 的科技层级由已完成建筑实时推导，没有额外研究队�
 - `/sessions/:id/actions` 接受带 `clientRequestId` 的 action 数组并提供请求级幂等；每个 action 独立执行和返回。部分失败时保留成功动作并返回 `partialSuccess: true`。
 - CLI 的 move、attack、attack-move、gather、stop 和 hold 支持 `--units`，stdin 选择会合并为 `unitIds` 数组；`train --count` 追加有限生产批次，`production-queue` 查询队列，`cancel-production` 按订单或建筑取消；rally 支持 `move` / `attack-move` 两种模式；`orchestrate` 以正式工具名接收 `{ actions: [...] }`，只为旧脚本保留短别名归一化。
 - MatchRegistry HTTP API 支持列表、切换观察、停止和保存指定对局。
+- 结束弹窗覆盖 live/control 的自然胜利及 control 的手动停止，分别显示获胜方或已停止；Web 的暂停和 benchmark 不触发该弹窗。服务端统一执行终局保存，MatchRegistry 按 matchId 保留保存中、完整文件路径和失败原因，作为 observed match 生命周期元数据推送；异步保存完成时不需要新 tick，刷新页面、重连和切换回来仍能显示正确结果。前端不再另发自然终局的自动保存请求。
 
 ## 6. Match Record
 

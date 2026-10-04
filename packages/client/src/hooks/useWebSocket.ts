@@ -130,7 +130,7 @@ export function useWebSocket(url: string, enabled = true) {
   const [terminalHistoryEvents, setTerminalHistoryEvents] = useState<AITerminalEvent[]>([]);
   const [terminalHistoryHasMore, setTerminalHistoryHasMore] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [lastSavedRecord, setLastSavedRecord] = useState<{ matchId: string; fileName: string } | null>(null);
+  const [lastSavedRecord, setLastSavedRecord] = useState<{ matchId: string; fileName: string; filePath: string } | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(false);
   const [observedMatch, setObservedMatch] = useState<ServerStateMessage["observedMatch"]>(null);
   const [matchStatus, setMatchStatus] = useState<
@@ -239,9 +239,16 @@ export function useWebSocket(url: string, enabled = true) {
             setObservedMatch(parsed.observedMatch);
             setMatchStatus(parsed.matchStatus);
             setBenchmarkRunning(parsed.benchmarkRunning);
-            setLastSavedRecord((current) => (
-              current && current.matchId === nextObservedMatchId ? current : null
-            ));
+            setLastSavedRecord((current) => {
+              const recordSave = parsed.observedMatch?.recordSave;
+              if (!nextObservedMatchId || recordSave?.status !== "saved") return null;
+              if (current?.matchId === nextObservedMatchId && current.filePath === recordSave.filePath) return current;
+              return {
+                matchId: nextObservedMatchId,
+                filePath: recordSave.filePath,
+                fileName: recordSave.filePath.split(/[\\/]/).pop() ?? recordSave.filePath,
+              };
+            });
             break;
 
           case "ai_terminal_events":
@@ -271,7 +278,9 @@ export function useWebSocket(url: string, enabled = true) {
             break;
 
           case "record_saved":
-            setLastSavedRecord({ matchId: parsed.matchId, fileName: parsed.fileName });
+            if (parsed.matchId === observedMatchIdRef.current) {
+              setLastSavedRecord({ matchId: parsed.matchId, fileName: parsed.fileName, filePath: parsed.filePath });
+            }
             break;
 
           case "benchmark_progress":

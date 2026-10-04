@@ -19,6 +19,7 @@ import {
   MatchDebugOptions,
   MatchLLMConfig,
   MatchRegistryKind,
+  MatchRecordSaveState,
   MatchWarmupState,
   MatchWarmupOptions,
   OpenAICompatibleRuntimeConfig,
@@ -254,6 +255,7 @@ type StateMessagePayload = {
     matchId: string;
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
+    recordSave: MatchRecordSaveState;
     setup?: LiveMatchSetupSnapshot;
   } | null;
   matchStatus: RegisteredMatchStatus | null;
@@ -328,6 +330,7 @@ export function buildStateMessagePayload(
           matchId: currentMatch.matchId,
           kind: currentMatch.kind,
           recordingEnabled: currentMatch.terminalPolicy !== "none",
+          recordSave: state.matchRegistry.getRecordSaveState(currentMatch.matchId),
           ...(currentMatch.liveSetup ? { setup: currentMatch.liveSetup } : {}),
         }
       : null,
@@ -1088,6 +1091,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
         type: "record_saved",
         matchId: targetMatch.matchId,
         fileName: path.basename(filePath),
+        filePath,
       } satisfies ServerMessage));
       return;
     }
@@ -1208,7 +1212,7 @@ export async function handleClientMessage({ data, ws, state }: ClientMessageCont
   }
 }
 
-function createServer(state: ServerState) {
+export function createServer(state: ServerState) {
   const server = http.createServer((req, res) => {
     void handleHttpRequest(req, res, state);
   });
@@ -1241,6 +1245,7 @@ function createServer(state: ServerState) {
     let lastStateOrchestrator: RegisteredMatchHandle | null = null;
     let lastStateLiveEnabled: boolean | null = null;
     let lastStateMatchStatus: RegisteredMatchStatus | null = null;
+    let lastStateRecordSave: MatchRecordSaveState | null = null;
     let lastStateBenchmarkRunning: boolean | null = null;
     let lastStateBroadcastWarningAtMs = 0;
     let lastAITerminalBroadcastWarningAtMs = 0;
@@ -1294,7 +1299,9 @@ function createServer(state: ServerState) {
       ) {
         return;
       }
-      const currentOrchestrator = state.matchRegistry.getObserved()?.handle ?? null;
+      const observed = state.matchRegistry.getObserved();
+      const currentOrchestrator = observed?.handle ?? null;
+      const currentRecordSave = observed ? state.matchRegistry.getRecordSaveState(observed.matchId) : null;
       const currentTick = currentOrchestrator?.getGame().getTick?.();
       const currentMatchStatus = currentOrchestrator?.getMatchStatus?.() ?? null;
       const currentBenchmarkRunning = state.activeBenchmark?.isRunning() ?? false;
@@ -1304,6 +1311,7 @@ function createServer(state: ServerState) {
         && currentTick === lastStateTick
         && state.liveEnabled === lastStateLiveEnabled
         && currentMatchStatus === lastStateMatchStatus
+        && currentRecordSave === lastStateRecordSave
         && currentBenchmarkRunning === lastStateBenchmarkRunning
       ) {
         return;
@@ -1362,6 +1370,7 @@ function createServer(state: ServerState) {
         lastStateTick = currentTick;
         lastStateLiveEnabled = state.liveEnabled;
         lastStateMatchStatus = currentMatchStatus;
+        lastStateRecordSave = payload.observedMatch?.recordSave ?? null;
         lastStateBenchmarkRunning = currentBenchmarkRunning;
         const sendMs = performance.now() - sendStartedAt;
         const elapsedMs = performance.now() - startedAt;

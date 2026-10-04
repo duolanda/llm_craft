@@ -205,6 +205,12 @@ interface ServerStateMessage {
     matchId: string;
     kind: "live" | "control" | "benchmark";
     recordingEnabled: boolean;
+    recordSave:
+      | { status: "idle" }
+      | { status: "disabled" }
+      | { status: "saving" }
+      | { status: "saved"; filePath: string }
+      | { status: "failed"; error: string };
     setup?: {
       player1PresetId: string;
       player2PresetId: string;
@@ -220,6 +226,8 @@ interface ServerStateMessage {
 `frame` 在首帧、切换 match 和每 20 帧使用 keyframe，其余使用带 `baseFrameSequence` 的 exact delta。metadata 携带 `frameSequence / simulationTick / simulationTimeMs / tickIntervalMs`。`LiveStateProjectionFrame` 只包含当前动态实体、资源、投射物和胜负状态；其中 `LiveBuilding` 会携带观战 UI 所需的 `productionQueue`、`productionProgress` 和精简后的 `constructionProgress`，使实时观战与 Replay 都能展示逐建筑生产态势。历史 `logs`、静态 `tiles`、寻路缓存、rally point 和 AI 输出不进入状态帧。`observedMatch` 标识该投影所属的稳定 match，并告知客户端是否允许保存记录；live match 还会携带不可变的 `setup` 快照，供 UI 在运行和暂停期间显示真实配置。`benchmarkRunning` 是 Benchmark 的服务端真值，重连后仍可恢复正确控件状态。live-only UI 行为不得仅凭 `winner` 或 `matchStatus` 推断。backlog 达 `1 MB` 时暂停可替换投影，排空后直接发送 latest delta，不补发过期中间帧。
 
 生产状态沿用共享类型：`productionQueue` 是有序的 `ProductionOrder[]`，`productionProgress` 包含当前 `orderId / unitType / remainingTicks / totalTicks / paidCredits / totalCost / status` 及可选的 `missingPrerequisites`。生产中的建筑会因此在进度变化时进入 live delta；该数据是当前状态，不是历史生产记录。
+
+`observedMatch.recordSave` 由 MatchRegistry 管理，属于生命周期元数据，不进入模拟帧或 Match Record。终局保存由服务端统一收尾；保存状态变化即使没有新的 tick 也会推送，重连与切换观察后返回指定 match 的当前状态。`saved.filePath` 是服务端实际保存路径，供结束弹窗展示；`failed.error` 显示保存失败原因。live/control 对局的自然胜利共用结束弹窗，停止的 control 对局显示已停止；暂停的 live 对局和 benchmark 不触发该弹窗。前端不因收到 winner 再发自动保存请求。
 
 地图通过一次性的 `map_init` 消息发送，日志通过有界的 `state_events` 增量消息发送，最新 AI 输出通过可替换的 `ai_output` 消息发送。完整 `GameState` 仍只属于服务端模拟、Match Record 和 Replay，不作为 live WebSocket 的 wire type。
 
@@ -344,10 +352,11 @@ interface ServerRecordSavedMessage {
   type: "record_saved";
   matchId: string;
   fileName: string;
+  filePath: string;
 }
 ```
 
-浏览器只接收当前 match 可用的文件名，不暴露服务端绝对路径。
+显式 WebSocket 保存请求成功后返回文件名和服务端完整路径；客户端仅接收仍在观察的同一 `matchId` 的通知。终局自动保存、HTTP/CLI 停止与保存的结果统一通过 `state.observedMatch.recordSave` 恢复。
 
 ### 0.15 WebSocket `start_benchmark`
 

@@ -2369,6 +2369,12 @@ body {
   padding-top: 16px;
 }
 
+.winner-record-path {
+  display: block;
+  margin-top: 8px;
+  user-select: text;
+}
+
 .cli-match-intro,
 .cli-match-footer,
 .cli-player-heading {

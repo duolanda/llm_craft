@@ -1002,6 +1002,14 @@ export interface MatchRegistrySummary {
   observed: boolean;
 }
 
+/** Record persistence for one registered match, independent of simulation ticks. */
+export type MatchRecordSaveState =
+  | { status: "idle" }
+  | { status: "disabled" }
+  | { status: "saving" }
+  | { status: "saved"; filePath: string }
+  | { status: "failed"; error: string };
+
 export interface MatchRegistryListResponse {
   matches: MatchRegistrySummary[];
   observedMatchId: string | null;

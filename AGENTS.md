@@ -193,6 +193,7 @@ flowchart LR
 
 **对局身份与记录:**
 - `MatchRegistry` 管理 live/control/benchmark 多个稳定 `matchId`；WebSocket 只投影 observed match
+- 终局保存由服务端统一收尾；`MatchRegistry` 按 matchId 保留录像保存状态，随 observed match 生命周期元数据推送，保存完成即使没有新 tick 也会通知。前端结束弹窗覆盖 live/control 的自然胜利与 control 停止，排除 Web 暂停和 benchmark；前端不因 winner 再发自动保存请求。
 - live WebSocket 使用独立的 `LiveStateProjectionFrame` 动态投影；逐建筑生产队列/进度作为当前观战状态保留，地图、日志和最新 AI 输出分别通过 `map_init`、有界 `state_events` 和可替换 `ai_output` 消息发送，完整 `GameState` 只用于模拟、Match Record 与 Replay
 - 正式产物统一称为 Match Record，格式身份为 `match-record`；新文件为 `match-<timestamp>-<short-id>.match.zst`，以 zstd 6 无损压缩完整记录并启用校验和，读取端继续兼容历史普通 JSON
 - `MatchRecorder` 支持 `off` / `replay` / `evaluation` 档位；transcript 只是 evaluation record 中的可选内容

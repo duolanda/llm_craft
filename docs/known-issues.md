@@ -114,7 +114,7 @@
 
 ### 已解决：关闭回放的 Benchmark 终局被前端误触发保存
 
-- **根因与处理**：前端在 Benchmark 结果状态清空后仍把最后一轮的 `winner` 当作 live match 终局，发送无 match 身份的 `save_record`；服务端又按当前观察对象直接保存，最终撞上 `MATCH_RECORDING_DISABLED`。`state` 现在显式携带 observed match 的身份、类型和录制能力，自动保存与胜负弹层只对可录制 live match 生效；`save_record` 必须携带稳定 `matchId`，服务端在调用 Recorder 前校验 live 类型与录制策略。保存成功消息也携带 `matchId` 与文件名，前端只在仍观察同一 match 时展示，不再泄露或遗留服务端绝对路径。
+- **根因与处理**：前端在 Benchmark 结果状态清空后仍把最后一轮的 `winner` 当作 live match 终局，发送无 match 身份的 `save_record`；服务端又按当前观察对象直接保存，最终撞上 `MATCH_RECORDING_DISABLED`。`state` 显式携带 observed match 的身份、类型和录制能力；显式 `save_record` 必须携带稳定 `matchId`，服务端在调用 Recorder 前校验 live 类型与录制策略。2026-10-03 统一为服务端终局收尾，前端不再根据 winner 自动发起保存；结束弹窗覆盖 live/control，仍排除 benchmark 与 live 暂停，并按用户要求展示服务端实际保存路径。保存状态按 matchId 推送并在重连时恢复，避免串局或遗留其他 match 的路径。
 
 ### 已解决：无限生产 plan 难以撤销，且不能表达真实生产队列
 

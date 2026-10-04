@@ -6,6 +6,7 @@ import type {
   LiveStateProjectionFrame,
   MatchDebugOptions,
   MatchRegistryKind,
+  MatchRecordSaveState,
   MatchWarmupOptions,
   Tile,
 } from "./types.js";
@@ -105,6 +106,7 @@ export interface ServerStateMessage {
     matchId: string;
     kind: MatchRegistryKind;
     recordingEnabled: boolean;
+    recordSave: MatchRecordSaveState;
     setup?: LiveMatchSetupSnapshot;
   } | null;
   matchStatus:
@@ -168,6 +170,7 @@ export interface ServerRecordSavedMessage {
   type: "record_saved";
   matchId: string;
   fileName: string;
+  filePath: string;
 }
 
 export interface ServerBenchmarkProgressMessage {

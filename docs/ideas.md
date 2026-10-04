@@ -5,7 +5,7 @@
 - [x] 拿人机当 baseline：一种几乎随机决策的电脑（`random`），一种先生产几个农民采集然后无脑爆兵冲基地的电脑（`rush`）。检验标准：LLM 对 `rush` 胜率不到 80% 说明设计有问题，对 `random` 胜率不到 50% 说明问题大了。
 - [x] 更宏观、更持久的战略 + 临场反应分层：多 tick Mission / `orchestrate_plan` 已提供持续计划层，`GameplayController.handleCommittedTick` 在每个 committed tick 推进计划与持续攻击。
 - [x] 让 AI “主动看”：相比每轮灌大量 status，改成模型主动选择查看不同区域的信息。人类玩家的高频切屏本身就是新手老手的分界，AI 也可以走这条路。
-- [ ] worker 修建筑。
+- [ ] worker 修建筑。也可以卖建筑。
 - [x] tank 碾压步兵
 - [ ] `light_tank` 移动射击：执行 attack move 时保持行进，并在射程内按武器冷却开火；普通 move 仍不主动索敌，其他兵种暂不获得该能力。
 - [ ] AI 还没有主动控制坦克开过去把兵压死的意识

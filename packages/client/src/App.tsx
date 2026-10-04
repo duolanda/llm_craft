@@ -30,6 +30,7 @@ import { BenchmarkPanel } from "./components/BenchmarkPanel";
 import { BenchmarkResult } from "./components/BenchmarkResult";
 import { MatchPanel } from "./components/MatchPanel";
 import { CLIMatchPanel } from "./components/CLIMatchPanel";
+import { getMatchEndPresentation, MatchEndOverlay } from "./components/MatchEndOverlay";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { createPreset, deletePreset, listPresets, testPreset, updatePreset } from "./lib/settingsApi";
 import { listRegisteredMatches, observeRegisteredMatch } from "./lib/matchApi";
@@ -339,9 +340,11 @@ function App() {
     concurrency: number;
   } | null>(null);
   const [showcaseTick, setShowcaseTick] = useState(0);
-  const lastAutoSavedMatchIdRef = useRef<string | null>(null);
   const replayLoadRequestRef = useRef(0);
   const isObservedLiveMatch = observedMatch?.kind === "live";
+  const matchEndPresentation = observedMatch
+    ? getMatchEndPresentation(observedMatch.kind, matchStatus, state?.winner ?? null)
+    : null;
   const isLiveRunning = isObservedLiveMatch && matchStatus === "running";
   const isLiveStopped = isObservedLiveMatch && matchStatus === "stopped";
   const matchSetupLocked = isObservedLiveMatch
@@ -388,28 +391,6 @@ function App() {
     }, 1_000);
     return () => window.clearInterval(interval);
   }, [matchesOpen, mode, refreshRegisteredMatches]);
-
-  useEffect(() => {
-    if (
-      mode !== "live"
-      || benchmarkBusy
-      || observedMatch?.kind !== "live"
-      || !observedMatch.recordingEnabled
-    ) {
-      lastAutoSavedMatchIdRef.current = null;
-      return;
-    }
-
-    if (state?.winner) {
-      if (lastAutoSavedMatchIdRef.current !== observedMatch.matchId) {
-        if (send({ type: "save_record", matchId: observedMatch.matchId })) {
-          lastAutoSavedMatchIdRef.current = observedMatch.matchId;
-        }
-      }
-    } else {
-      lastAutoSavedMatchIdRef.current = null;
-    }
-  }, [benchmarkBusy, connected, mode, observedMatch, send, state?.winner]);
 
   useEffect(() => {
     if (
@@ -465,8 +446,8 @@ function App() {
     if (
       mode !== "live"
       || benchmarkBusy
-      || observedMatch?.kind !== "live"
-      || !state?.winner
+      || !observedMatch
+      || !matchEndPresentation
       || dismissedWinnerMatchId === observedMatch.matchId
     ) {
       return;
@@ -482,7 +463,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [benchmarkBusy, dismissedWinnerMatchId, mode, observedMatch, state?.winner]);
+  }, [benchmarkBusy, dismissedWinnerMatchId, mode, observedMatch, matchEndPresentation?.title]);
 
   useEffect(() => {
     if (!benchmarkResult) {
@@ -1495,25 +1476,13 @@ function App() {
           )}
         </SettingsOverlay>
 
-        {mode === "live" && !benchmarkBusy && observedMatch?.kind === "live" && state?.winner && dismissedWinnerMatchId !== observedMatch.matchId && (
-          <div className="winner-overlay" onClick={() => setDismissedWinnerMatchId(observedMatch.matchId)}>
-            <div className="winner-card" onClick={(event) => event.stopPropagation()}>
-              <div className="winner-label">Simulation Complete</div>
-              <div className={`winner-name ${state.winner === "player_1" ? "red" : "cyan"}`}>
-                {state.winner === "player_1" ? "红方获胜" : "蓝方获胜"}
-              </div>
-              {currentSavedRecord && (
-                <div className="winner-save-path">
-                  对局记录已自动保存：{currentSavedRecord.fileName}
-                </div>
-              )}
-              <div className="winner-actions">
-                <button className="hud-btn hud-btn-ghost" onClick={() => setDismissedWinnerMatchId(observedMatch.matchId)}>
-                  关闭覆盖层
-                </button>
-              </div>
-            </div>
-          </div>
+        {mode === "live" && !benchmarkBusy && observedMatch && matchEndPresentation && dismissedWinnerMatchId !== observedMatch.matchId && (
+          <MatchEndOverlay
+            key={observedMatch.matchId}
+            presentation={matchEndPresentation}
+            recordSave={observedMatch.recordSave}
+            onClose={() => setDismissedWinnerMatchId(observedMatch.matchId)}
+          />
         )}
       </div>
     </>

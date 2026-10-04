@@ -94,4 +94,43 @@ describe("MatchRegistry", () => {
     expect(warmed.stop).toHaveBeenCalledTimes(1);
     expect(registry.getObservedMatchId()).toBe("match_fallback");
   });
+
+  it("keeps save progress and failures isolated and allows a save retry", async () => {
+    const registry = new MatchRegistry();
+    const target = createHandle("match_record_progress");
+    const other = createHandle("match_other");
+    registry.register(target.handle, { kind: "control" });
+    registry.register(other.handle, { kind: "live", terminalPolicy: "none" });
+    let rejectSave!: (error: Error) => void;
+    target.saveRecord.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSave = reject; }));
+
+    const pending = registry.save(target.handle.getMatchId());
+    expect(registry.getRecordSaveState(target.handle.getMatchId())).toEqual({ status: "saving" });
+    expect(registry.getRecordSaveState(other.handle.getMatchId())).toEqual({ status: "disabled" });
+    rejectSave(new Error("disk full"));
+    await expect(pending).rejects.toThrow("disk full");
+    expect(registry.getRecordSaveState(target.handle.getMatchId())).toEqual({ status: "failed", error: "disk full" });
+
+    await registry.save(target.handle.getMatchId());
+    expect(registry.getRecordSaveState(target.handle.getMatchId())).toEqual({
+      status: "saved", filePath: "/tmp/match_record_progress.match.json",
+    });
+  });
+
+  it("automatically saves stopped control matches while leaving paused live matches alone", async () => {
+    const registry = new MatchRegistry();
+    const control = createHandle("match_control_stop");
+    const live = createHandle("match_live_pause");
+    control.handle.getMatchStatus = () => "stopped";
+    live.handle.getMatchStatus = () => "stopped";
+    registry.register(control.handle, { kind: "control" });
+    registry.register(live.handle, { kind: "live" });
+
+    await registry.finalizeTerminalMatches();
+    await registry.finalizeTerminalMatches();
+    expect(control.saveRecord).toHaveBeenCalledTimes(1);
+    expect(live.saveRecord).not.toHaveBeenCalled();
+    expect(registry.getRecordSaveState(control.handle.getMatchId()).status).toBe("saved");
+    expect(registry.getRecordSaveState(live.handle.getMatchId()).status).toBe("idle");
+  });
 });

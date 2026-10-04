@@ -8,6 +8,7 @@ import type {
   MatchRegistryKind,
   MatchRegistryStatus,
   MatchRegistrySummary,
+  MatchRecordSaveState,
 } from "@llmcraft/shared";
 
 export type RegisteredMatchKind = MatchRegistryKind;
@@ -75,12 +76,16 @@ export interface MatchFinalizationResult {
   skipped?: boolean;
 }
 
+const IDLE_RECORD_SAVE: MatchRecordSaveState = { status: "idle" };
+const DISABLED_RECORD_SAVE: MatchRecordSaveState = { status: "disabled" };
+
 /** Owns match identity and selection; it never mutates simulation or render state. */
 export class MatchRegistry {
   private readonly entries = new Map<string, RegisteredMatchEntry>();
   private readonly finalizationByMatch = new Map<string, Promise<MatchFinalizationResult>>();
   private readonly finalizedByMatch = new Map<string, MatchFinalizationResult>();
   private readonly quiescedMatches = new Set<string>();
+  private readonly recordSaveByMatch = new Map<string, MatchRecordSaveState>();
   private observedMatchId: string | null = null;
 
   register(handle: RegisteredMatchHandle, registration: MatchRegistration): RegisteredMatchEntry {
@@ -152,13 +157,20 @@ export class MatchRegistry {
 
   async save(matchId: string): Promise<string> {
     const entry = this.require(matchId);
-    const filePath = await entry.handle.saveRecord();
+    const filePath = await this.writeRecord(entry);
     const state = entry.handle.getGame().getState();
     const status = entry.handle.getMatchStatus?.() ?? inferStatus(entry.handle, state);
     if (status === "stopped" || status === "finished" || status === "failed") {
       this.finalizedByMatch.set(matchId, { matchId, ok: true, filePath });
     }
     return filePath;
+  }
+
+  getRecordSaveState(matchId: string): MatchRecordSaveState {
+    const entry = this.require(matchId);
+    return entry.terminalPolicy === "none"
+      ? DISABLED_RECORD_SAVE
+      : this.recordSaveByMatch.get(matchId) ?? IDLE_RECORD_SAVE;
   }
 
   stop(matchId: string): void {
@@ -173,7 +185,8 @@ export class MatchRegistry {
     const terminalEntries = [...this.entries.values()].filter((entry) => {
       const state = entry.handle.getGame().getState();
       const status = entry.handle.getMatchStatus?.() ?? inferStatus(entry.handle, state);
-      return status === "finished" || status === "failed";
+      return status === "finished" || status === "failed"
+        || (entry.kind === "control" && status === "stopped");
     });
     return Promise.all(terminalEntries.map((entry) => (
       entry.terminalPolicy === "none"
@@ -197,6 +210,7 @@ export class MatchRegistry {
     this.entries.delete(matchId);
     this.finalizedByMatch.delete(matchId);
     this.quiescedMatches.delete(matchId);
+    this.recordSaveByMatch.delete(matchId);
     if (this.observedMatchId === matchId) {
       this.observedMatchId = null;
       this.getObserved();
@@ -219,12 +233,18 @@ export class MatchRegistry {
     if (pending) return pending;
     const finalization = (async (): Promise<MatchFinalizationResult> => {
       try {
+        if (entry.terminalPolicy !== "none") {
+          this.recordSaveByMatch.set(entry.matchId, { status: "saving" });
+        }
         if (stopFirst) await this.quiesceEntry(entry);
-        const filePath = await entry.handle.saveRecord();
+        const filePath = await this.writeRecord(entry);
         const result = { matchId: entry.matchId, ok: true, filePath } satisfies MatchFinalizationResult;
         this.finalizedByMatch.set(entry.matchId, result);
         return result;
       } catch (error) {
+        this.recordSaveByMatch.set(entry.matchId, {
+          status: "failed", error: error instanceof Error ? error.message : String(error),
+        });
         return {
           matchId: entry.matchId,
           ok: false,
@@ -239,6 +259,20 @@ export class MatchRegistry {
       }
     });
     return finalization;
+  }
+
+  private async writeRecord(entry: RegisteredMatchEntry): Promise<string> {
+    this.recordSaveByMatch.set(entry.matchId, { status: "saving" });
+    try {
+      const filePath = await entry.handle.saveRecord();
+      this.recordSaveByMatch.set(entry.matchId, { status: "saved", filePath });
+      return filePath;
+    } catch (error) {
+      this.recordSaveByMatch.set(entry.matchId, {
+        status: "failed", error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   private async skipTerminalEntry(entry: RegisteredMatchEntry): Promise<MatchFinalizationResult> {

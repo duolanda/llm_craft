@@ -898,6 +898,7 @@ describe("server settings", () => {
       matchId: "match_payload",
       kind: "live",
       recordingEnabled: true,
+      recordSave: { status: "idle" },
     });
     expect(payload.matchStatus).toBeNull();
     expect(payload.benchmarkRunning).toBe(false);
@@ -944,6 +945,7 @@ describe("server settings", () => {
       type: "record_saved",
       matchId: "match_live",
       fileName: "live.match.zst",
+      filePath: "logs/records/live.match.zst",
     }));
   });
 
